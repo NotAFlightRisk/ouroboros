@@ -3472,7 +3472,12 @@ def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
     return _schema_local_refs_resolve(schema)
 
 
-def _declares_object_root(schema: Mapping[str, Any], node: Any, depth: int) -> bool:
+def _declares_object_root(
+    schema: Mapping[str, Any],
+    node: Any,
+    depth: int,
+    seen: frozenset[str] = frozenset(),
+) -> bool:
     """Whether the effective root necessarily describes an OBJECT.
 
     Covers every object form the public lane schema accepts (bot-review
@@ -3480,7 +3485,12 @@ def _declares_object_root(schema: Mapping[str, Any], node: Any, depth: int) -> b
     one, an ``allOf`` conjunction ANY branch of which declares one (a
     conjunct forces object instances), and a ``oneOf``/``anyOf`` disjunction
     ALL of whose branches declare one (a disjunction forces objects only
-    when every alternative does). Bounded recursion keeps this cycle-safe.
+    when every alternative does). Refs are followed ONE hop at a time so
+    every intermediate node's conjunctive $ref siblings are consulted
+    (round-36 probe: an intermediate ``{"type": "object", "$ref": ...}``
+    forces objects even when the final target does not). Cycle safety comes
+    from the visited ref set — the combinator depth cap never bounds chain
+    length (round-35).
     """
     if depth > 32:
         return False
@@ -3501,7 +3511,7 @@ def _declares_object_root(schema: Mapping[str, Any], node: Any, depth: int) -> b
             return True
     all_of = node.get("allOf")
     if isinstance(all_of, list) and any(
-        _declares_object_root(schema, branch, depth + 1) for branch in all_of
+        _declares_object_root(schema, branch, depth + 1, seen) for branch in all_of
     ):
         return True
     for disjunction_key in ("oneOf", "anyOf"):
@@ -3509,13 +3519,13 @@ def _declares_object_root(schema: Mapping[str, Any], node: Any, depth: int) -> b
         if (
             isinstance(branches, list)
             and branches
-            and all(_declares_object_root(schema, branch, depth + 1) for branch in branches)
+            and all(_declares_object_root(schema, branch, depth + 1, seen) for branch in branches)
         ):
             return True
     ref = node.get("$ref")
-    if isinstance(ref, str):
-        target = _resolve_local_root_from(schema, {"$ref": ref})
-        if target is not None and _declares_object_root(schema, target, depth + 1):
+    if isinstance(ref, str) and ref not in seen:
+        target = _resolve_local_pointer(schema, ref)
+        if target is not None and _declares_object_root(schema, target, depth, seen | {ref}):
             return True
     return False
 
@@ -3542,19 +3552,34 @@ def _resolve_local_root_from(schema: Mapping[str, Any], start: Any) -> Any:
         if not isinstance(node, Mapping) or "$ref" not in node:
             return node
         ref = node.get("$ref")
-        if not isinstance(ref, str) or not ref.startswith("#/") or ref in seen:
+        if not isinstance(ref, str) or ref in seen:
             return None
         seen.add(ref)
-        target: Any = schema
-        for raw_part in ref[2:].split("/"):
-            part = raw_part.replace("~1", "/").replace("~0", "~")
-            if isinstance(target, Mapping) and part in target:
-                target = target[part]
-            elif isinstance(target, list) and part.isdigit() and int(part) < len(target):
-                target = target[int(part)]
-            else:
-                return None
+        target = _resolve_local_pointer(schema, ref)
+        if target is None:
+            return None
         node = target
+
+
+def _resolve_local_pointer(schema: Mapping[str, Any], ref: str) -> Any:
+    """Resolve ONE local ``#/``-pointer hop, without following further refs.
+
+    Returns the direct target node (which may itself carry a ``$ref`` and
+    sibling constraints — the caller decides how to combine them), or
+    ``None`` when the pointer is non-local or does not resolve.
+    """
+    if not ref.startswith("#/"):
+        return None
+    target: Any = schema
+    for raw_part in ref[2:].split("/"):
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if isinstance(target, Mapping) and part in target:
+            target = target[part]
+        elif isinstance(target, list) and part.isdigit() and int(part) < len(target):
+            target = target[int(part)]
+        else:
+            return None
+    return target
 
 
 # Schema traversal is WHITELIST-based (bot-review rounds 26-28): only
@@ -3904,9 +3929,14 @@ _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     # "status=failed code=502", "status: failed; code: 502",
     # "success=false; status_code=503; retries exhausted").
     r"|\bstatus\s*[:=]\s*(failed|error)\b|\b(status_)?code\s*[:=]\s*[45]\d{2}\b"
-    # ``success=no`` is the same envelope in word form (round-35 probe:
-    # "success=no; rows=0"); "success rate 92%" has no [:=] and stays valid.
-    r"|\bsuccess\s*[:=]\s*(false|no)\b|\bretr(y|ies)\s+exhausted\b"
+    # Boolean STATUS assignments close as a class, both polarities (rounds
+    # 35-36 probes: "success=no", "failure=true" — word-form variants of
+    # success=false): a success-word assigned a negative, or a failure-word
+    # assigned an affirmative, is a failure envelope. Metric prose keeps no
+    # assignment ("success rate 92%", "failure rate 0.2%") and stays valid.
+    r"|\b(success|succeeded)\s*[:=]\s*(false|no)\b"
+    r"|\b(fail|failed|failure)\s*[:=]\s*(true|yes|1(?!\d))\b"
+    r"|\bretr(y|ies)\s+exhausted\b"
     # Assignment-form error envelopes (round-28: value="error=503"); plural
     # metric forms ("errors: 12", "error rate 0.2%") stay valid.
     r"|\berror\s*[:=]\s*\S"
@@ -4237,6 +4267,19 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                 r"(email|phone|address|ssn"
                 r"|first_name|last_name|full_name|user_id|account_id|customer_id)"
             )
+            # VALUE-RETURNING aggregates over an identity/PII column return
+            # the raw value itself (round-36 probe: "SELECT max(email) FROM
+            # users" — an aggregate wrapper around a raw email). Numeric
+            # aggregates (count/sum/avg) reduce to numbers and stay valid,
+            # e.g. count(email). Scanned on the un-blanked main statement
+            # because the column name lives INSIDE the parens.
+            value_extracting_pii = re.search(
+                r"\b(?:min|max|any_value|first_value|last_value|mode"
+                r"|string_agg|group_concat|array_agg|listagg)"
+                r"\s*\(\s*(?:distinct\s+)?(?:\w+\.)?" + identity_columns + r"\b",
+                main_statement,
+                re.IGNORECASE,
+            )
             distinct_pii = re.search(
                 r"\bdistinct\b[^,]*\b" + identity_columns + r"\b",
                 scannable,
@@ -4249,7 +4292,14 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                 scannable,
                 re.IGNORECASE,
             )
-            if grouped_identity:
+            if value_extracting_pii:
+                errors.append(
+                    f"proposed_queries[{index}].query: a value-returning "
+                    "aggregate (min/max/string_agg/...) over an identity/PII "
+                    "column returns the raw value; aggregate by count "
+                    "instead"
+                )
+            elif grouped_identity:
                 errors.append(
                     f"proposed_queries[{index}].query: GROUP BY an "
                     "identity/PII column keys results per identity — "
@@ -4294,9 +4344,9 @@ _DATA_EVIDENCE_CONTRACT_ID = "data_evidence_answer.v1"
 _SAFE_IDENTIFIER_SYNTAX = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 
 # Standalone secrets that ARE syntactically identifiers (round-31):
-# unambiguous vendor prefixes, or a credential word whose suffix tokens are
-# all hex/digit gibberish. token_usage_v2 keeps its exemption — "usage" is
-# a word, not entropy.
+# unambiguous vendor prefixes, or a credential word whose suffix is not
+# made of recognizable words/tags (fail-closed since round-36).
+# token_usage_v2 keeps its exemption — "usage" is a word, not entropy.
 _VENDOR_SECRET_PREFIX = re.compile(
     r"^(ghp_|gho_|github_pat_|xox[a-z][-_]|sk[-_]|pk[-_]|AKIA|ASIA|ABIA|ACCA)",
 )
@@ -4309,25 +4359,30 @@ def _identifier_looks_secret(value: str) -> bool:
     match = _CREDENTIAL_WORD_PREFIX.match(value)
     if not match:
         return False
-    # ANY gibberish segment marks the credential (round-32:
-    # api_key_prod_123abc — the word "prod" must not launder "123abc").
-    # Short version tags (v2, v12) stay words, so token_usage_v2 keeps its
-    # exemption.
+    # Credential-prefixed identifiers are secrets UNLESS every suffix token
+    # is recognizably word-like — the fail-closed inversion of the earlier
+    # "any gibberish segment marks it" rule (round-36 probe:
+    # api_key_staging_XYZ12345, whose non-hex opaque tail evaded the
+    # gibberish list; rounds 32-33: 123abc, live/supersecret markers).
+    # Word-like means a plain alphabetic non-marker word, a version tag
+    # (v2, v12), or a short window tag (7d, 30d) — so token_usage_v2 and
+    # key_metrics_30d keep naming read-only tools while any opaque tail
+    # fails closed.
     suffix_tokens = [tok for tok in re.split(r"[-_.]", value[match.end() :]) if tok]
 
-    def _gibberish(tok: str) -> bool:
-        if re.fullmatch(r"\d{4,}", tok):
-            return True
-        return bool(re.fullmatch(r"[0-9a-fA-F]{4,}", tok) and re.search(r"\d", tok))
-
-    # Secret-marker words in the suffix mark alphabetic credentials too
-    # (round-33: api_key_live_supersecret) — live/test-key conventions and
-    # the word secret itself never name read-only data tools.
+    # Secret-marker words mark alphabetic credentials too (round-33:
+    # api_key_live_supersecret) — live/test-key conventions and the word
+    # secret itself never name read-only data tools.
     def _secret_marker(tok: str) -> bool:
         lowered = tok.lower()
         return lowered in ("live", "prod", "priv", "private") or "secret" in lowered
 
-    return any(_gibberish(tok) or _secret_marker(tok) for tok in suffix_tokens)
+    def _word_like(tok: str) -> bool:
+        if re.fullmatch(r"[A-Za-z]+", tok):
+            return not _secret_marker(tok)
+        return bool(re.fullmatch(r"v?\d{1,3}|\d{1,3}[dhwmy]", tok, re.IGNORECASE))
+
+    return bool(suffix_tokens) and not all(_word_like(tok) for tok in suffix_tokens)
 
 
 # Lane ids (and correlation values generally) are short identifiers; an
@@ -4808,13 +4863,16 @@ def _submit_fanout_results_locked(
         # and is reported under malformed_keys. The public tool contract
         # accepts content as object OR text, so any other JSON type
         # (round-35 probe: False, []) is malformed too — accepting it would
-        # persist and synthesize values no contract can ever validate.
+        # persist and synthesize values no contract can ever validate. An
+        # EMPTY object is the object-form blank string (round-36 probe: {}
+        # terminalized both required lanes): no fields means no finding.
         raw_content = result.get("content")
         if (
             "content" not in result
             or raw_content is None
             or (isinstance(raw_content, str) and not raw_content.strip())
             or not isinstance(raw_content, (str, Mapping))
+            or (isinstance(raw_content, Mapping) and not raw_content)
         ):
             if resolved_key not in malformed_keys:
                 malformed_keys.append(resolved_key)

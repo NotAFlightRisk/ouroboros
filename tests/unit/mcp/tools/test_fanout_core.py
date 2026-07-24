@@ -5064,3 +5064,135 @@ def test_root_ref_chain_of_64_hops_stays_enforceable() -> None:
         "response_model_schema": {"$ref": "#/$defs/d0", "$defs": defs},
     }
     assert _enforceable_lane_contract(chain_contract)
+
+
+def test_empty_object_content_is_malformed(tmp_path: Any) -> None:
+    """An empty object is the object-form blank string (round-36 probe).
+
+    ``{}`` for both default required lanes previously returned ``complete``,
+    persisted them, and produced an empty aggregation.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-empty-object",
+        payloads=_mixed_advisory_payloads(),
+    )
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-empty-object",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "ambiguity_contrarian", "content": {}},
+            {"key": "answer_simplifier", "content": {}},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert out["malformed_keys"] == ["ambiguity_contrarian", "answer_simplifier"]
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.received_results == {}
+
+
+def test_credential_prefixed_opaque_identifier_is_rejected() -> None:
+    """Credential-prefixed identifiers fail closed (round-36 probe).
+
+    ``api_key_staging_XYZ12345`` was classified safe because its opaque
+    suffix is non-hex; the rule is now inverted — every suffix token must be
+    a recognizable word or tag for the identifier to stay exempt.
+    """
+    from ouroboros.mcp.tools.subagent import (
+        _data_evidence_boundary_violations,
+        _identifier_looks_secret,
+    )
+
+    assert _identifier_looks_secret("api_key_staging_XYZ12345")
+    assert _identifier_looks_secret("api_key_prod_123abc")
+    assert _identifier_looks_secret("api_key_live_supersecret")
+    # Word/tag-suffixed identifiers keep naming read-only data tools.
+    assert not _identifier_looks_secret("token_usage_v2")
+    assert not _identifier_looks_secret("key_metrics_30d")
+
+    leaked = _minimal_data_output("42 active keys")
+    leaked["evidence"][0]["source"] = "api_key_staging_XYZ12345"
+    assert any("credential" in error for error in _data_evidence_boundary_violations(leaked))
+
+
+def test_failure_status_assignment_is_rejected() -> None:
+    """``failure=true`` closes the status-word class, both polarities
+    (round-36 probe; round-35: ``success=no``)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    failed = _minimal_data_output("failure=true; rows=0")
+    assert any("error-shaped" in error for error in _data_evidence_boundary_violations(failed))
+    metric = _minimal_data_output("failure rate 0.2% across 12,400 calls")
+    assert _data_evidence_boundary_violations(metric) == []
+
+
+def test_value_extracting_aggregate_over_pii_is_rejected() -> None:
+    """``SELECT max(email)`` returns a raw email, not an aggregate
+    (round-36 probe)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    def _proposal(query: str) -> dict[str, Any]:
+        return {
+            "lane_id": "data_context",
+            "data_needed": True,
+            "finding": "Needs a query.",
+            "confidence": "inferred",
+            "evidence": [],
+            "proposed_queries": [
+                {
+                    "tool_name": "warehouse",
+                    "query": query,
+                    "expected_decision": "n/a",
+                    "source_class": "external",
+                }
+            ],
+            "requires_user_confirmation": True,
+        }
+
+    for query in (
+        "SELECT max(email) FROM users",
+        "SELECT min(phone) FROM users",
+        "SELECT string_agg(email, ',') FROM users",
+    ):
+        assert any(
+            "raw value" in error for error in _data_evidence_boundary_violations(_proposal(query))
+        ), query
+
+    # Numeric aggregates reduce to numbers and stay valid — including OVER
+    # an identity column (count(email) counts non-null emails).
+    for query in (
+        "SELECT count(email) FROM users",
+        "SELECT max(created_at) FROM users",
+    ):
+        assert _data_evidence_boundary_violations(_proposal(query)) == [], query
+
+
+def test_ref_sibling_object_intermediate_stays_enforceable() -> None:
+    """Intermediate ``$ref`` siblings combine conjunctively (round-36 probe).
+
+    A chain node declaring ``type: object`` ALONGSIDE its ``$ref`` forces
+    object instances even when the final target declares no type; dropping
+    it silently stored no lane contract and let ``{}`` terminalize the
+    required lane.
+    """
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    sibling_contract = {
+        "contract_id": "sibling_chain.v1",
+        "response_model_schema": {
+            "$ref": "#/$defs/mid",
+            "$defs": {
+                "mid": {
+                    "type": "object",
+                    "$ref": "#/$defs/leaf",
+                    "required": ["finding"],
+                },
+                "leaf": {"properties": {"finding": {"type": "string"}}},
+            },
+        },
+    }
+    assert _enforceable_lane_contract(sibling_contract)
