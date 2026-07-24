@@ -4907,3 +4907,160 @@ def test_known_data_tools_env_reaches_the_data_lane(monkeypatch: Any) -> None:
     )
     lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
     assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query", "metabase_card"]
+
+
+def test_non_object_non_text_content_is_malformed(tmp_path: Any) -> None:
+    """Content outside the public object-or-text contract never accumulates.
+
+    Bot-review round-35 probe: submitting ``False`` and ``[]`` for the two
+    required lanes returned ``complete``, persisted both values, and
+    produced them as synthesized outputs.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-nonobject",
+        payloads=_mixed_advisory_payloads(),
+    )
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-nonobject",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "ambiguity_contrarian", "content": False},
+            {"key": "answer_simplifier", "content": []},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert out["missing_required_keys"] == ["ambiguity_contrarian", "answer_simplifier"]
+    assert out["malformed_keys"] == ["ambiguity_contrarian", "answer_simplifier"]
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.received_results == {}
+
+    # Contract-conforming shapes still complete: text AND object forms.
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-nonobject",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "ambiguity_contrarian", "content": "a plain string finding"},
+            {"key": "answer_simplifier", "content": {"summary": "an object finding"}},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+
+
+def test_comment_obfuscated_mutations_are_rejected() -> None:
+    """SQL comments cannot hide the statement form (round-35 probe).
+
+    ``DROP/**/TABLE users``, ``DELETE/**/FROM users``, and
+    ``UPDATE users/**/SET admin=true`` previously produced no violation and
+    a full re-entry persisted the DROP query.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for operation in (
+        "DROP/**/TABLE users",
+        "DELETE/**/FROM users",
+        "UPDATE users/**/SET admin=true",
+        "DROP--\nTABLE users",
+    ):
+        proposal = {
+            "lane_id": "data_context",
+            "data_needed": True,
+            "finding": "Needs a query.",
+            "confidence": "inferred",
+            "evidence": [],
+            "proposed_queries": [
+                {
+                    "tool_name": "warehouse",
+                    "query": operation,
+                    "expected_decision": "n/a",
+                    "source_class": "external",
+                }
+            ],
+            "requires_user_confirmation": True,
+        }
+        assert any(
+            "read-only" in error for error in _data_evidence_boundary_violations(proposal)
+        ), operation
+
+    # A read-only query CARRYING a comment stays valid — the normalization
+    # strips comments, it does not treat their presence as a violation.
+    commented_readonly = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Needs a query.",
+        "confidence": "inferred",
+        "evidence": [],
+        "proposed_queries": [
+            {
+                "tool_name": "warehouse",
+                "query": "SELECT COUNT(*) FROM users /* nightly rollup */",
+                "expected_decision": "Whether user growth justifies the tier.",
+                "source_class": "external",
+            }
+        ],
+        "requires_user_confirmation": True,
+    }
+    assert _data_evidence_boundary_violations(commented_readonly) == []
+
+
+def test_alphabetic_bearer_assignment_is_rejected() -> None:
+    """A bearer ASSIGNMENT is a secret regardless of alphabet (round-35)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    leaked = _minimal_data_output("access via bearer=abcdefghijklmno for 3 accounts")
+    assert any("secret" in error for error in _data_evidence_boundary_violations(leaked))
+    # Prose ABOUT bearer tokens (no assignment) stays valid.
+    prose = _minimal_data_output("active bearer sessions: 42 across 12 tenants")
+    assert _data_evidence_boundary_violations(prose) == []
+
+
+def test_worded_failure_envelope_is_rejected() -> None:
+    """``success=no`` is the word form of ``success=false`` (round-35)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    failed = _minimal_data_output("success=no; rows=0")
+    assert any("error-shaped" in error for error in _data_evidence_boundary_violations(failed))
+    # Metric prose about success stays valid — no assignment form.
+    metric = _minimal_data_output("success rate 92% across 12,400 calls")
+    assert _data_evidence_boundary_violations(metric) == []
+
+
+def test_pipe_delimited_table_is_rejected() -> None:
+    """A headered pipe-delimited table is serialized rows (round-35)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    table = _minimal_data_output("id|plan|mrr 101|premium|49 102|free|0")
+    assert any("row-shaped" in error for error in _data_evidence_boundary_violations(table))
+    # A single pipe as prose punctuation never reaches two multi-pipe cells.
+    prose = _minimal_data_output("premium|free split: 34% vs 12%")
+    assert _data_evidence_boundary_violations(prose) == []
+
+
+def test_root_ref_chain_of_64_hops_stays_enforceable() -> None:
+    """The root-ref grammar has no length limit (round-35 probe).
+
+    A valid Draft 2020-12 contract whose root is a 64-hop local
+    root-reference chain passed ``check_schema`` but lost enforcement to a
+    numeric hop cap, silently storing no lane contract.
+    """
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    defs: dict[str, Any] = {}
+    for i in range(64):
+        defs[f"d{i}"] = {"$ref": f"#/$defs/d{i + 1}"}
+    defs["d64"] = {
+        "type": "object",
+        "required": ["finding"],
+        "properties": {"finding": {"type": "string"}},
+    }
+    chain_contract = {
+        "contract_id": "root_chain.v1",
+        "response_model_schema": {"$ref": "#/$defs/d0", "$defs": defs},
+    }
+    assert _enforceable_lane_contract(chain_contract)

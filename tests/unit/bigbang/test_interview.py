@@ -1483,3 +1483,28 @@ def test_prefix_glossary_survives_header_truncation() -> None:
     # never a mid-entry tear like "- [from-d".
     assert "[from-data]=point-in-time data description" in prompt
     assert "- [from-d" not in prompt
+
+
+def test_prefix_glossary_survives_hard_cut() -> None:
+    """The compact glossary is RESERVED even under the hard cut (round-35).
+
+    With a long initial context and a 1,200-char budget the header was
+    hard-truncated before the glossary, so [from-data] answers in history
+    lost their point-in-time meaning. The hard cut now trims the context
+    tail instead and re-appends the compact glossary.
+    """
+    from ouroboros.bigbang.interview import InterviewEngine, InterviewState
+
+    engine = InterviewEngine.__new__(InterviewEngine)
+    engine.suppress_tool_use_prompt_cues = False
+    state = InterviewState(
+        interview_id="glossary-hard-cut",
+        initial_context="x" * 3500,
+    )
+    prompt = engine._build_system_prompt(state, initial_context="x" * 3500, max_chars=1200)
+    assert len(prompt) <= 1200
+    # Instructions keep first priority, the context keeps its (trimmed)
+    # slot, and every prefix keeps its semantics.
+    assert prompt.startswith("You are an expert requirements engineer")
+    assert "Initial context: x" in prompt
+    assert "[from-data]=point-in-time data description" in prompt

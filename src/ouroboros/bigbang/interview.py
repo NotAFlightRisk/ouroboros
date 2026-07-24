@@ -1242,7 +1242,21 @@ class InterviewEngine:
                 dynamic_header = dynamic_header.replace(full_hints, compact_hints, 1)
                 available_after_header = max_prompt_chars - len(dynamic_header) - _OVERHEAD
         if available_after_header <= 0:
-            dynamic_header = dynamic_header[: max_prompt_chars - _OVERHEAD]
+            # Even the hard cut RESERVES the compact glossary (round-35: a
+            # 1,200-char budget under a long initial context truncated the
+            # header before the glossary, so [from-data] answers in history
+            # lost their point-in-time meaning). Instructions and the front
+            # of the retained context keep priority; the glossary is
+            # re-appended after the cut so every prefix keeps its semantics.
+            header_budget = max_prompt_chars - _OVERHEAD
+            compact_hints = getattr(self, "_answer_prefix_hints_compact", None)
+            if compact_hints and len(compact_hints) + 2 < header_budget:
+                head = dynamic_header.replace(compact_hints, "", 1)[
+                    : header_budget - len(compact_hints) - 2
+                ]
+                dynamic_header = f"{head}\n\n{compact_hints}"
+            else:
+                dynamic_header = dynamic_header[:header_budget]
             perspective_panel = ""
             base_budget = 0
         elif len(perspective_panel) > available_after_header:

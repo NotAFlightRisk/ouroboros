@@ -3533,10 +3533,12 @@ def _resolve_local_root_from(schema: Mapping[str, Any], start: Any) -> Any:
     """
     node: Any = start
     seen: set[str] = set()
-    # Visited-based, not hop-bounded (round-34: a valid eight-hop chain was
-    # silently dropped): ref cycles are already rejected by the graph
-    # check, so termination is guaranteed by the visited set.
-    for _hop in range(64):
+    # Visited-based with NO hop bound (rounds 34-35: an eight-hop, then a
+    # 64-hop, valid chain was silently dropped by numeric caps): each
+    # iteration either returns or consumes a distinct ref string, so the
+    # visited set alone guarantees termination — the advertised "chain of
+    # local root refs" grammar has no length limit and neither does this.
+    while True:
         if not isinstance(node, Mapping) or "$ref" not in node:
             return node
         ref = node.get("$ref")
@@ -3553,7 +3555,6 @@ def _resolve_local_root_from(schema: Mapping[str, Any], start: Any) -> Any:
             else:
                 return None
         node = target
-    return None
 
 
 # Schema traversal is WHITELIST-based (bot-review rounds 26-28): only
@@ -3796,6 +3797,15 @@ def _is_row_shaped_value(value: str) -> bool:
     # separated by one newline are raw data (bot-review round-5 probe).
     if "\n" in stripped or "\r" in stripped:
         return True
+    # Pipe-delimited TABLES flattened onto one line (round-35 probe: a
+    # headered "id|plan|mrr 101|premium|49 102|free|0" user table): two or
+    # more whitespace-separated cells each carrying 2+ pipes are serialized
+    # table rows. A single pipe used as prose punctuation ("premium|free
+    # split: 34% vs 12%") never reaches two multi-pipe cells and stays
+    # valid.
+    piped_cells = sum(1 for token in stripped.split() if token.count("|") >= 2)
+    if piped_cells >= 2:
+        return True
     # Single-line CSV rows (bot-review round-6 probe: "Alice Kim,premium;
     # Bob Lee,free"): two or more letter,letter joints are field boundaries —
     # prose puts a space after a comma, and thousands separators are
@@ -3894,7 +3904,9 @@ _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     # "status=failed code=502", "status: failed; code: 502",
     # "success=false; status_code=503; retries exhausted").
     r"|\bstatus\s*[:=]\s*(failed|error)\b|\b(status_)?code\s*[:=]\s*[45]\d{2}\b"
-    r"|\bsuccess\s*[:=]\s*false\b|\bretr(y|ies)\s+exhausted\b"
+    # ``success=no`` is the same envelope in word form (round-35 probe:
+    # "success=no; rows=0"); "success rate 92%" has no [:=] and stays valid.
+    r"|\bsuccess\s*[:=]\s*(false|no)\b|\bretr(y|ies)\s+exhausted\b"
     # Assignment-form error envelopes (round-28: value="error=503"); plural
     # metric forms ("errors: 12", "error rate 0.2%") stay valid.
     r"|\berror\s*[:=]\s*\S"
@@ -4142,7 +4154,10 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
         if not isinstance(item, Mapping):
             continue
         query = item.get("query")
-        if isinstance(query, str) and (match := forbidden.search(query)):
+        # A query is SQL context, so comments are stripped before the
+        # operation matcher (round-35 probe: "DROP/**/TABLE users") — the
+        # same normalization the aggregate lint already applies below.
+        if isinstance(query, str) and (match := forbidden.search(_strip_sql_comments(query))):
             # User confirmation gates *execution* of read-only proposals; it
             # must never make an explicitly mutating operation permissible.
             errors.append(
@@ -4790,12 +4805,16 @@ def _submit_fanout_results_locked(
         # A keyed result without usable content is NOT a submission
         # (bot-review round-14): counting it toward completion would
         # terminalize a fan-out around None outputs. The lane stays missing
-        # and is reported under malformed_keys.
+        # and is reported under malformed_keys. The public tool contract
+        # accepts content as object OR text, so any other JSON type
+        # (round-35 probe: False, []) is malformed too — accepting it would
+        # persist and synthesize values no contract can ever validate.
         raw_content = result.get("content")
         if (
             "content" not in result
             or raw_content is None
             or (isinstance(raw_content, str) and not raw_content.strip())
+            or not isinstance(raw_content, (str, Mapping))
         ):
             if resolved_key not in malformed_keys:
                 malformed_keys.append(resolved_key)
