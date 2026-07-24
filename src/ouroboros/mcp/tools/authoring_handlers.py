@@ -62,6 +62,7 @@ from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
     SubagentDispatchMode,
+    _identifier_looks_secret,
     _mutating_tool_verb,
     build_generate_seed_subagent,
     build_interview_question_advisory_subagents,
@@ -753,12 +754,17 @@ def _advisory_lanes_with_known_data_tools(advisory: Mapping[str, Any]) -> list[d
     # rejected BEFORE dispatch (bot-review round-10): the plugin bridge
     # grants the child broad permissions, and post-execution validation
     # cannot undo a mutation the hint steered it into.
+    # Credential-shaped names are filtered with the SAME classifier the
+    # re-entry boundary applies (round-37): a hint that survives
+    # configuration must never be rejected when a child later reports it as
+    # a source — the two identifier contracts stay aligned.
     known_tools = [
         item.strip()
         for item in os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS", "").split(",")
         if item.strip()
         and _KNOWN_DATA_TOOL_NAME.match(item.strip())
         and _mutating_tool_verb(item.strip()) is None
+        and not _identifier_looks_secret(item.strip())
     ][:_MAX_KNOWN_DATA_TOOLS]
     if known_tools:
         for lane in lanes:

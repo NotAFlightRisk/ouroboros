@@ -5196,3 +5196,112 @@ def test_ref_sibling_object_intermediate_stays_enforceable() -> None:
         },
     }
     assert _enforceable_lane_contract(sibling_contract)
+
+
+def test_destructive_tool_hints_are_filtered(monkeypatch: Any) -> None:
+    """Destructive-verb synonyms never become preferred tools (round-37).
+
+    ``destroy_database,remove_user,rename_database`` were all advertised as
+    known data tools, steering a broadly permitted child toward destructive
+    operations before any post-execution validation could matter.
+    """
+    monkeypatch.setenv(
+        "OUROBOROS_KNOWN_DATA_TOOLS",
+        "destroy_database, remove_user, rename_database, clickhouse_query",
+    )
+    meta: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id="sess-destructive-hints",
+        question="Which plan tier do most active users hit?",
+        phase="answer",
+        score=None,
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+    )
+    lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
+    assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query"]
+
+
+def test_rename_table_is_a_forbidden_operation() -> None:
+    """``RENAME TABLE`` is DDL (round-37 probe)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    proposal = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Needs a query.",
+        "confidence": "inferred",
+        "evidence": [],
+        "proposed_queries": [
+            {
+                "tool_name": "warehouse",
+                "query": "RENAME TABLE accounts TO accounts_old",
+                "expected_decision": "n/a",
+                "source_class": "external",
+            }
+        ],
+        "requires_user_confirmation": True,
+    }
+    assert any("read-only" in error for error in _data_evidence_boundary_violations(proposal))
+
+
+def test_long_alphabetic_credential_suffixes_fail_closed(monkeypatch: Any) -> None:
+    """A 13+-char alphabetic run after a credential prefix is opaque
+    (round-37 probes: api_key_abcdefghijklmnop, bearer_abcdefghijklmnop)."""
+    from ouroboros.mcp.tools.subagent import _identifier_looks_secret
+
+    assert _identifier_looks_secret("api_key_abcdefghijklmnop")
+    assert _identifier_looks_secret("bearer_abcdefghijklmnop")
+    # Real tool vocabulary stays exempt — words, version and window tags.
+    assert not _identifier_looks_secret("token_usage_v2")
+    assert not _identifier_looks_secret("key_metrics_30d")
+    assert not _identifier_looks_secret("token_aggregation_warehouse")
+
+    # Config-side alignment: a credential-shaped hint is dropped at
+    # configuration with the SAME classifier, so a surviving hint can never
+    # be delivered and then rejected at re-entry.
+    monkeypatch.setenv("OUROBOROS_KNOWN_DATA_TOOLS", "api_key_abcdefghijklmnop, metabase_card")
+    meta: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id="sess-secret-hints",
+        question="Which plan tier do most active users hit?",
+        phase="answer",
+        score=None,
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+    )
+    lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
+    assert lanes["data_context"]["known_data_tools"] == ["metabase_card"]
+
+
+def test_combinator_depth_never_binds_before_the_size_budget() -> None:
+    """The DECLARED budget, not an undocumented cap, bounds nesting
+    (round-37 probe: 33 nested allOf nodes).
+
+    The depth cap sits at 128 while a MINIMAL 33-deep allOf chain already
+    renders 9,892 canonical chars — over the 8,000-char deliverable-whole
+    budget — so the only reachable rejection is the declared one. The
+    deepest sub-budget chains stay enforceable.
+    """
+    from ouroboros.mcp.tools.subagent import (
+        _canonical_contract_json,
+        _enforceable_lane_contract,
+    )
+
+    def _chain(depth: int) -> dict[str, Any]:
+        node: dict[str, Any] = {"type": "object"}
+        for _ in range(depth):
+            node = {"allOf": [node]}
+        return {"contract_id": "deep_allof.v1", "response_model_schema": node}
+
+    # Sub-budget deep nesting is enforceable — the old cap of 32 is gone
+    # as a reachable boundary.
+    assert _enforceable_lane_contract(_chain(25))
+    # 33-deep CANNOT be sub-budget in the canonical serialization: its
+    # minimal form already exceeds the declared budget, so it is rejected
+    # by contract (deliverable-whole), not by an undocumented cap.
+    rendered = _canonical_contract_json(_chain(33))
+    assert rendered is not None and len(rendered) > 8_000
+    assert not _enforceable_lane_contract(_chain(33))

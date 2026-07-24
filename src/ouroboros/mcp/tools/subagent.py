@@ -3377,7 +3377,9 @@ def _data_forbidden_operation_pattern() -> re.Pattern[str]:
         r"\b(?:insert|upsert|replace|merge)\s+into\b",
         r"\bdelete\s+from\b",
         r"\bupdate\s+\S+\s+set\b",
-        r"\b(?:drop|truncate|alter|create)\s+"
+        # rename joins the DDL verbs (round-37 probe: "RENAME TABLE accounts
+        # TO accounts_old" completed as a valid read-only proposal).
+        r"\b(?:drop|truncate|alter|create|rename)\s+"
         r"(?:table|database|schema|index|view|user|role|procedure|function|column)\b",
         r"\bgrant\s+(?:all|select|insert|update|delete|usage|create|execute)\b",
         r"\bcall\s+\w+\s*\(",
@@ -3490,9 +3492,12 @@ def _declares_object_root(
     (round-36 probe: an intermediate ``{"type": "object", "$ref": ...}``
     forces objects even when the final target does not). Cycle safety comes
     from the visited ref set — the combinator depth cap never bounds chain
-    length (round-35).
+    length (round-35). The combinator nesting bound below is DECLARED in
+    the public ENFORCEABLE ROOT GRAMMAR (round-37: an undocumented cap of
+    32 silently dropped a valid 33-deep allOf contract) — deeper nesting is
+    rejected by contract, not omission.
     """
-    if depth > 32:
+    if depth > 128:
         return False
     if not isinstance(node, Mapping):
         return False
@@ -4378,7 +4383,11 @@ def _identifier_looks_secret(value: str) -> bool:
         return lowered in ("live", "prod", "priv", "private") or "secret" in lowered
 
     def _word_like(tok: str) -> bool:
-        if re.fullmatch(r"[A-Za-z]+", tok):
+        # Real identifier words are short; a 13+-char alphabetic run after a
+        # credential prefix is an opaque value, not vocabulary (round-37
+        # probe: api_key_abcdefghijklmnop). "clickhouse", "warehouse",
+        # "aggregation" all fit; nothing named like a data tool does not.
+        if re.fullmatch(r"[A-Za-z]{1,12}", tok):
             return not _secret_marker(tok)
         return bool(re.fullmatch(r"v?\d{1,3}|\d{1,3}[dhwmy]", tok, re.IGNORECASE))
 

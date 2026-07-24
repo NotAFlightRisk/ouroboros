@@ -764,6 +764,19 @@ def _data_context_lane_policy() -> dict[str, Any]:
             "call",
             "exec",
             "execute",
+            # Destructive-verb synonyms (bot-review round-37 probe:
+            # destroy_database / remove_user / rename_database advertised as
+            # preferred tools): the identifier filter matches these as whole
+            # tokens, so read-only vocabulary ("removed duplicates in the
+            # rollup") is unaffected — prose is scanned by operation SHAPES,
+            # not this list.
+            "destroy",
+            "remove",
+            "rename",
+            "purge",
+            "wipe",
+            "erase",
+            "revoke",
         ],
         "evidence_policy": {
             "max_evidence_items": 5,
@@ -971,7 +984,9 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                                 "['object']; a chain of LOCAL root $refs to one; an "
                                 "allOf with any such branch; a oneOf/anyOf whose "
                                 "branches ALL qualify; a const mapping or all-mapping "
-                                "enum. Every $ref/$dynamicRef must resolve inside the "
+                                "enum. Combinator nesting is enforceable to depth 128 "
+                                "(ref-chain length is unbounded). Every $ref/$dynamicRef "
+                                "must resolve inside the "
                                 "document as a plain JSON pointer; $id rebasing is "
                                 "not supported. Any other form is NOT advertised and the "
                                 "lane falls back to the generic output shape — by "
