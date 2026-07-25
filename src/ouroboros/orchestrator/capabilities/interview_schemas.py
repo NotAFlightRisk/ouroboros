@@ -48,6 +48,11 @@ DATA_EVIDENCE_CREDENTIAL_ASSIGNMENT_PATTERN = (
     r"\s*[:=]\s*[A-Za-z0-9_\-/+]{6,}"
 )
 DATA_EVIDENCE_AWS_KEY_PATTERN = r"\b(AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b"
+# RFC 3986 userinfo: a ``scheme://user:password@host`` connection string
+# carries the password in the URI itself (round-41 probe:
+# "endpoint=https://alice:swordfish@localhost:8443"), which no credential
+# WORD appears in. The shape is unambiguous, so it is matched structurally.
+DATA_EVIDENCE_URI_USERINFO_PATTERN = r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@"
 # US Social Security Number shape (round-7 probe): the phone pattern's group
 # widths deliberately do not cover the 3-2-4 split.
 DATA_EVIDENCE_SSN_PATTERN = r"\b\d{3}-\d{2}-\d{4}\b"

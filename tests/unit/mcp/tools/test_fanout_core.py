@@ -5750,3 +5750,85 @@ def test_credential_identifier_exemption_is_position_scoped() -> None:
     leaked = _minimal_data_output("42 active accounts")
     leaked["evidence"][0]["source"] = "password_swordfish"
     assert any("credential" in error for error in _data_evidence_boundary_violations(leaked))
+
+
+def test_uri_userinfo_credentials_are_rejected() -> None:
+    """A ``scheme://user:password@host`` URI carries the secret structurally.
+
+    Round-41 probe: ``endpoint=https://alice:swordfish@localhost:8443``
+    contains no credential WORD, so every word-anchored pattern missed it.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for value in (
+        "count=1; endpoint=https://alice:swordfish@localhost:8443",
+        "42 users via postgres://admin:hunter2@db.internal:5432/analytics",
+    ):
+        assert _data_evidence_boundary_violations(_minimal_data_output(value)) != [], value
+
+    # Ordinary endpoint URLs (no userinfo) stay valid.
+    for value in (
+        "42 active users from https://metabase.internal/api/card/12",
+        "p95 240 ms across https://warehouse.example.com:8443/query",
+    ):
+        assert _data_evidence_boundary_violations(_minimal_data_output(value)) == [], value
+
+
+def test_execution_status_envelopes_are_not_evidence() -> None:
+    """The status VALUE class is execution vocabulary (round-41 probe).
+
+    ``status=timeout; attempts=3`` is a failed call reported as evidence.
+    Outcome words never name a data category, so the assignment is a failure
+    envelope — while domain statuses (churned, active) stay untouched.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for value in (
+        "status=timeout; attempts=3",
+        "status: timeout, retries 2",
+        "state=unauthorized; code 401 seen 3 times",
+        "outcome=throttled after 5 calls",
+        # Rounds 19/35/36 pins keep holding.
+        "status=failed code=502",
+    ):
+        assert any(
+            "error-shaped" in error
+            for error in _data_evidence_boundary_violations(_minimal_data_output(value))
+        ), value
+
+    for value in (
+        "3,201 accounts with status=churned",
+        "1,204 subscriptions status=active",
+        "failure rate 0.2% across 12,400 calls",
+    ):
+        assert _data_evidence_boundary_violations(_minimal_data_output(value)) == [], value
+
+
+def test_mutating_function_calls_inside_reads_are_rejected() -> None:
+    """A read-only HEAD does not make the statement read-only (round-41).
+
+    ``SELECT count(delete_user(user_id)) FROM users`` passes head
+    classification while invoking a mutator, and hosts execute confirmed
+    proposals verbatim. Called names are judged by the compound-identifier
+    rule tool names already use, so standard scalar functions stay valid.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for query in (
+        "SELECT count(delete_user(user_id)) FROM users",
+        "SELECT count(*) FROM users WHERE dropTable(x)",
+        "SELECT max(admin.purge_rows(id)) FROM t",
+    ):
+        assert any(
+            "invokes a mutating function" in error
+            for error in _data_evidence_boundary_violations(_data_proposal(query))
+        ), query
+
+    for query in (
+        "SELECT count(*) FROM users",
+        "SELECT count(replace(plan, 'x', 'y')) FROM accounts",
+        "SELECT count(distinct date_trunc('day', created_at)) FROM events",
+        "SELECT approx_count_distinct(user_id) FROM events",
+        "SELECT count(coalesce(plan, 'none')) FROM accounts",
+    ):
+        assert _data_evidence_boundary_violations(_data_proposal(query)) == [], query

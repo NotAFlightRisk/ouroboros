@@ -3338,6 +3338,7 @@ def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...
         DATA_EVIDENCE_PHONE_PATTERN,
         DATA_EVIDENCE_SECRET_PATTERN,
         DATA_EVIDENCE_SSN_PATTERN,
+        DATA_EVIDENCE_URI_USERINFO_PATTERN,
     )
 
     return (
@@ -3358,6 +3359,10 @@ def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...
         # AWS access-key ids are uppercase by definition; case-insensitive
         # matching would false-positive on ordinary prose.
         ("aws-access-key-shaped (secret)", re.compile(DATA_EVIDENCE_AWS_KEY_PATTERN)),
+        (
+            "uri-userinfo-shaped (secret)",
+            re.compile(DATA_EVIDENCE_URI_USERINFO_PATTERN),
+        ),
         ("phone-shaped (PII)", re.compile(DATA_EVIDENCE_PHONE_PATTERN)),
         ("ssn-shaped (PII)", re.compile(DATA_EVIDENCE_SSN_PATTERN)),
     )
@@ -4030,6 +4035,25 @@ def _mutating_source_identifier_verb(source: str) -> str | None:
     return None
 
 
+def _mutating_called_function(query: str) -> tuple[str, str] | None:
+    """A mutating function INVOKED by the query, if any.
+
+    A read-only statement head does not make the statement read-only: the
+    projection can call a mutator (round-41 probe: ``SELECT
+    count(delete_user(user_id)) FROM users``), and hosts execute confirmed
+    proposals. Called names are judged by the SAME compound-identifier rule
+    tool names are (round-11): ``delete_user(`` and ``dropTable(`` are tool
+    identifiers, while bare standard SQL functions like ``replace(`` are
+    ordinary vocabulary, not mutators.
+    """
+    for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_.]*)\s*\(", _strip_sql_comments(query)):
+        name = match.group(1)
+        is_compound = bool(re.search(r"[_.]", name) or re.search(r"(?<=[a-z0-9])[A-Z]", name))
+        if is_compound and (verb := _mutating_tool_verb(name)):
+            return name, verb
+    return None
+
+
 def _is_row_shaped_value(value: str) -> bool:
     """True when an evidence value looks like serialized rows, not an aggregate.
 
@@ -4151,7 +4175,16 @@ _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     # Assignment-style failure envelopes, = and : forms (rounds 19-26:
     # "status=failed code=502", "status: failed; code: 502",
     # "success=false; status_code=503; retries exhausted").
-    r"|\bstatus\s*[:=]\s*(failed|error)\b|\b(status_)?code\s*[:=]\s*[45]\d{2}\b"
+    # The VALUE class is execution-outcome vocabulary, not just failed/error
+    # (round-41 probe: "status=timeout; attempts=3"). These words describe a
+    # call's outcome and never name a data category, so the assignment is a
+    # failure envelope wherever it appears; domain statuses (status=churned,
+    # status=active) are untouched.
+    r"|\b(status|state|outcome|result)\s*[:=]\s*"
+    r"(failed|failure|error|errored|timeout|timed_out|denied|unauthorized"
+    r"|forbidden|refused|rejected|throttled|rate_limited|unavailable"
+    r"|unreachable|aborted|exception)\b"
+    r"|\b(status_)?code\s*[:=]\s*[45]\d{2}\b"
     # Boolean STATUS assignments close as a class, both polarities (rounds
     # 35-36 probes: "success=no", "failure=true" — word-form variants of
     # success=false): a success-word assigned a negative, or a failure-word
@@ -4442,6 +4475,16 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                 f"proposed_queries[{index}].query: {head.upper()} is not a "
                 "read-only statement; the data lane may only propose "
                 "SELECT/WITH/SHOW/DESCRIBE/EXPLAIN reads"
+            )
+        # A read-only HEAD does not make the statement read-only — the
+        # projection can invoke a mutator (round-41 probe: "SELECT
+        # count(delete_user(user_id)) FROM users"), and the host executes
+        # confirmed proposals verbatim.
+        if isinstance(query, str) and (called := _mutating_called_function(query)):
+            errors.append(
+                f"proposed_queries[{index}].query: invokes a mutating "
+                f"function ({called[0]!r}, verb {called[1]!r}); the data lane "
+                "is read-only"
             )
         tool_name = item.get("tool_name")
         if isinstance(tool_name, str) and (verb := _mutating_tool_verb(tool_name)):
