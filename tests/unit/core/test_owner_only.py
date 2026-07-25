@@ -293,3 +293,145 @@ def test_no_descriptor_leaks_when_the_file_object_cannot_be_created(
         os.fstat(opened[0])
     assert not target.exists()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_auto_pipeline_state_is_owner_only(tmp_path: Path) -> None:
+    """Auto state holds the confirmed interview answers, including [from-data].
+
+    Reached through Auto rather than through the interview engine, this
+    writer was one of two still landing at the umask default (round-68).
+    """
+    from ouroboros.auto.state import AutoPipelineState, AutoStore
+
+    store = AutoStore(tmp_path / "data")
+    state = AutoPipelineState(goal="ship the thing", cwd=str(tmp_path))
+
+    path = store.save(state)
+
+    assert _mode(path) == 0o600
+    # Round-trips: narrowing the mode must not cost readability to its owner.
+    assert store.load(state.auto_session_id).auto_session_id == state.auto_session_id
+
+
+def test_auto_pipeline_state_narrows_an_inherited_open_file(tmp_path: Path) -> None:
+    """A state file left at 0644 by an earlier version is narrowed on save."""
+    from ouroboros.auto.state import AutoPipelineState, AutoStore
+
+    store = AutoStore(tmp_path / "data")
+    state = AutoPipelineState(goal="ship the thing", cwd=str(tmp_path))
+    path = store.save(state)
+    os.chmod(path, 0o644)
+    assert _mode(path) == 0o644
+
+    store.save(state)
+
+    assert _mode(path) == 0o600
+
+
+def test_auto_state_directory_is_not_re_permissioned(tmp_path: Path) -> None:
+    """`root` may be a directory the caller owns — narrowing it is not ours."""
+    from ouroboros.auto.state import AutoPipelineState, AutoStore
+
+    root = tmp_path / "caller-owned"
+    root.mkdir(mode=0o755)
+    os.chmod(root, 0o755)
+
+    AutoStore(root).save(AutoPipelineState(goal="ship the thing", cwd=str(tmp_path)))
+
+    assert _mode(root) == 0o755
+
+
+def _minimal_seed() -> Any:
+    from ouroboros.core.seed import (
+        EvaluationPrinciple,
+        ExitCondition,
+        OntologyField,
+        OntologySchema,
+        Seed,
+        SeedMetadata,
+    )
+
+    return Seed(
+        goal="Build a local CLI",
+        constraints=("Use existing project patterns",),
+        acceptance_criteria=("The CLI exits non-zero on bad input",),
+        ontology_schema=OntologySchema(
+            name="CliTask",
+            description="CLI task ontology",
+            fields=(OntologyField(name="command", field_type="string", description="Command"),),
+        ),
+        evaluation_principles=(
+            EvaluationPrinciple(name="testability", description="Observable behavior"),
+        ),
+        exit_conditions=(
+            ExitCondition(
+                name="verified",
+                description="Checks pass",
+                evaluation_criteria="All acceptance criteria pass",
+            ),
+        ),
+        metadata=SeedMetadata(ambiguity_score=0.12),
+    )
+
+
+def test_auto_generated_seed_is_owner_only(tmp_path: Path) -> None:
+    """The Auto Seed writer was the one Seed path still at the umask default.
+
+    An auto-generated Seed carries the same requirement content as one written
+    through the interview path, including answers confirmed from a data
+    lookup (round-68).
+    """
+    from ouroboros.auto.adapters import save_seed
+
+    written = Path(save_seed(_minimal_seed(), seeds_dir=tmp_path / "seeds"))
+
+    assert _mode(written) == 0o600
+    assert written.read_text(encoding="utf-8")
+
+
+def test_auto_generated_seed_narrows_an_inherited_open_file(tmp_path: Path) -> None:
+    from ouroboros.auto.adapters import save_seed
+
+    seeds_dir = tmp_path / "seeds"
+    # The SAME Seed, so the rewrite lands on the same path — a fresh Seed
+    # would get a fresh seed_id and write a different file.
+    seed = _minimal_seed()
+    written = Path(save_seed(seed, seeds_dir=seeds_dir))
+    os.chmod(written, 0o644)
+    assert _mode(written) == 0o644
+
+    assert Path(save_seed(seed, seeds_dir=seeds_dir)) == written
+
+    assert _mode(written) == 0o600
+
+
+def test_auto_seed_directory_keeps_its_own_permissions(tmp_path: Path) -> None:
+    """`seeds_dir` may be a shared project directory the caller chose."""
+    from ouroboros.auto.adapters import save_seed
+
+    seeds_dir = tmp_path / "project-seeds"
+    seeds_dir.mkdir(mode=0o755)
+    os.chmod(seeds_dir, 0o755)
+
+    save_seed(_minimal_seed(), seeds_dir=seeds_dir)
+
+    assert _mode(seeds_dir) == 0o755
+
+
+def test_owner_only_write_survives_a_target_at_the_filename_limit(tmp_path: Path) -> None:
+    """A caller that bounded its filename must not be broken by the temporary.
+
+    The temporary used to embed the whole target name, adding a fixed 38
+    characters, so a name sized to the 255-byte limit — which the Auto Seed
+    writer produces deliberately — failed with ENAMETOOLONG before anything
+    was written (round-68).
+    """
+    name = "s" * (255 - len(".yaml")) + ".yaml"
+    target = tmp_path / name
+
+    assert write_owner_only(target, "goal: ship\n") is True
+
+    assert _mode(target) == 0o600
+    assert target.read_text(encoding="utf-8") == "goal: ship\n"
+    # And nothing was left behind.
+    assert [path.name for path in tmp_path.iterdir()] == [name]

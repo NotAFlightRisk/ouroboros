@@ -26,6 +26,9 @@ from uuid import uuid4
 OWNER_ONLY_FILE = 0o600
 #: Directories: additionally traversable by the owner only.
 OWNER_ONLY_DIR = 0o700
+#: How much of the target name a temporary may borrow. Bounds the temporary
+#: at 70 characters however long the target is.
+_TMP_NAME_PREFIX_CHARS = 32
 
 
 def fsync_parent_directory(file_path: Path) -> bool:
@@ -94,7 +97,14 @@ def write_owner_only(path: Path, text: str, *, encoding: str = "utf-8") -> bool:
     for directories this package creates and owns.
     """
     target = Path(path)
-    tmp_path = target.with_name(f".{target.name}.tmp-{uuid4().hex}")
+    # The temporary must not be longer than the filesystem allows just because
+    # the target is near the limit (round-68). Embedding the WHOLE target name
+    # added a fixed 38 characters, so a caller that had carefully bounded its
+    # filename to the 255-byte limit — the Auto Seed writer does exactly that —
+    # got ENAMETOOLONG from the temporary instead. Only a bounded prefix is
+    # kept, for debuggability; uniqueness comes from the uuid, and the
+    # `.NAME.tmp-` shape is what leftover sweeps match on.
+    tmp_path = target.with_name(f".{target.name[:_TMP_NAME_PREFIX_CHARS]}.tmp-{uuid4().hex}")
     # Held only until a file object takes ownership of it. If wrapping the
     # descriptor fails, nothing else will ever close it, so the cleanup path
     # has to.

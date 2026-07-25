@@ -15,6 +15,7 @@ from uuid import uuid4
 import yaml
 
 from ouroboros.auto.interview_driver import InterviewBackend, InterviewTurn
+from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.requirement_candidate import RequirementDistillation
 from ouroboros.core.seed import Seed, ac_texts
 from ouroboros.mcp.errors import MCPServerError
@@ -1108,15 +1109,26 @@ def load_seed(path: str | Path) -> Seed:
 
 
 def save_seed(seed: Seed, *, seeds_dir: Path | None = None) -> str:
-    """Persist an auto-generated Seed in the standard seed directory."""
+    """Persist an auto-generated Seed in the standard seed directory.
+
+    An auto-generated Seed carries the same requirement content as one written
+    by the interview path — including answers confirmed from a data lookup —
+    so it takes the same owner-only primitive (round-68). Reached through Auto
+    rather than through ``ouroboros.bigbang``, this writer was the one Seed
+    path still landing at the umask default, typically ``0644``.
+
+    The directory keeps its own permissions: ``seeds_dir`` may be a shared
+    project directory the caller chose, and narrowing it is not this package's
+    to do (round-60).
+    """
     directory = seeds_dir or (Path.home() / ".ouroboros" / "seeds")
     directory.mkdir(parents=True, exist_ok=True)
     seed_id = _safe_seed_id_for_filename(seed.metadata.seed_id)
     path = directory / f"{seed_id}{_SEED_FILENAME_SUFFIX}"
     _require_path_inside_directory(path, directory)
-    path.write_text(
+    write_owner_only(
+        path,
         yaml.dump(seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
     )
     return str(path)
 
