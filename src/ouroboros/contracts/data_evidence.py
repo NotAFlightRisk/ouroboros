@@ -316,8 +316,8 @@ def _data_context_answer_contract() -> dict[str, Any]:
                 ]
             },
             "aggregate": {
-                # An aggregate IS a number with a unit — that is what makes it
-                # an aggregate rather than a record. Typing it this way makes
+                # An aggregate IS a count of rows — that is what makes it an
+                # aggregate rather than a record. Typing it this way makes
                 # raw rows, PII, credentials, and error narratives
                 # UNREPRESENTABLE in the durable evidence path instead of
                 # something a text classifier must recognize and reject.
@@ -490,47 +490,33 @@ def _data_context_answer_contract() -> dict[str, Any]:
 
 
 def data_evidence_retained_schema() -> dict[str, Any]:
-    """Schema of the DURABLE record — a server-owned lifecycle state.
+    """Schema of the DURABLE record — a server-owned summary, not an answer.
 
-    Callers submit against the published contract, which requires the advisory
-    prose and forbids these markers (round-49: a fresh caller could otherwise
-    declare itself "retained" and skip the finding it exists to provide). This
-    form is derived from that contract and never advertised as a submission
-    target: prose is absent because the server removed it, not because a
-    client chose to omit it.
+    Callers submit against the published contract; this form is what the
+    server keeps afterwards. It carries no field whose contents a child chose
+    (round-55), so the privacy guarantee is a property of the shape rather
+    than of a classifier that has to keep up.
     """
-    schema = json.loads(json.dumps(_data_context_answer_contract()["response_model_schema"]))
-    schema["required"] = [key for key in schema["required"] if key != "finding"]
-    schema["properties"]["prose_retained"] = {"const": False}
-    schema["properties"]["proposed_queries"]["items"]["properties"]["decision_retained"] = {
-        "const": False
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "lane_id",
+            "requires_user_confirmation",
+            "prose_retained",
+            "content_retained",
+        ],
+        "properties": {
+            "lane_id": {"const": "data_context"},
+            "data_needed": {"type": "boolean"},
+            "confidence": {"enum": ["reported_by_tool", "inferred", "no_evidence"]},
+            "evidence_count": {"type": "integer", "minimum": 0},
+            "proposed_query_count": {"type": "integer", "minimum": 0},
+            "requires_user_confirmation": {"const": True},
+            "prose_retained": {"const": False},
+            "content_retained": {"const": False},
+        },
     }
-    schema["properties"]["proposed_queries"]["items"]["required"] = [
-        key
-        for key in schema["properties"]["proposed_queries"]["items"]["required"]
-        if key != "expected_decision"
-    ]
-    key_only = {"type": "string", "maxLength": 24, "pattern": "^[a-z][a-z0-9_]{0,23}$"}
-    defs = schema["$defs"]
-    for def_name in ("read_request",):
-        defs[def_name]["required"] = [key for key in defs[def_name]["required"] if key != "metric"]
-    evidence_items = schema["properties"]["evidence"]["items"]
-    evidence_items["required"] = [key for key in evidence_items["required"] if key != "source"]
-    proposal_items = schema["properties"]["proposed_queries"]["items"]
-    proposal_items["required"] = [key for key in proposal_items["required"] if key != "tool_name"]
-    defs["aggregate"]["properties"]["dimension"] = key_only
-    defs["read_request"]["properties"]["filters"] = {
-        "type": "array",
-        "maxItems": 5,
-        "items": key_only,
-    }
-    schema["required"] = [*schema["required"], "prose_retained"]
-    schema["allOf"] = [
-        clause
-        for clause in schema.get("allOf", [])
-        if "caveats" not in json.dumps(clause.get("then", {}))
-    ]
-    return schema
 
 
 def data_evidence_structural_schema() -> dict[str, Any]:
@@ -616,37 +602,6 @@ def _data_context_lane_policy() -> dict[str, Any]:
             # phone digits as the number, "phone" as the unit). Hosts that
             # need another unit extend this list; the engine enforces
             # whatever the snapshot declares.
-            "allowed_units": [
-                "accounts",
-                "users",
-                "sessions",
-                "events",
-                "requests",
-                "calls",
-                "queries",
-                "rows",
-                "records",
-                "items",
-                "orders",
-                "messages",
-                "errors",
-                "ms",
-                "s",
-                "minutes",
-                "hours",
-                "days",
-                "weeks",
-                "months",
-                "bytes",
-                "kb",
-                "mb",
-                "gb",
-                "%",
-                "ratio",
-                "count",
-                "krw",
-                "usd",
-            ],
         },
     }
 
@@ -879,87 +834,36 @@ DATA_EVIDENCE_IDENTIFIER_FIELDS = ("source", "tool_name", "metric")
 
 
 def redact_prose_for_persistence(output: Any) -> Any:
-    """Return a data-lane output with its human-facing prose removed.
+    """Return the DURABLE form of a data-lane output: its shape, not its content.
 
-    The host receives the prose in the response it submitted; the durable
-    record keeps only the typed facts. The registry exists for correlation,
-    completion, and replay of what was MEASURED — it is not the host's memory
-    of advisory sentences, and a durable copy of unconfirmed prose is exactly
-    the thing the policy claims to scrub and cannot.
+    Rounds 46-55 removed, one at a time, every field whose contents a child
+    chooses: the advisory prose, the category values, the tool and metric
+    names, the unit, the scope keys, and finally the number itself — a count
+    of 4111111111111111 is a card number wearing a cardinality, and no typing
+    of an integer says otherwise.
+
+    The end of that line is this: the record keeps what the SERVER derived —
+    that the lane answered, how many findings it carried, and that consent was
+    required — and keeps nothing the child wrote. The content is delivered in
+    the response, where the confirming human reads it; the record exists to
+    correlate and complete a fan-out, which needs the shape and not the
+    substance.
     """
     if not isinstance(output, Mapping):
         return output
-    redacted = {
-        key: value for key, value in output.items() if key not in DATA_EVIDENCE_PROSE_FIELDS
+    evidence = output.get("evidence")
+    proposals = output.get("proposed_queries")
+    return {
+        "lane_id": output.get("lane_id"),
+        "data_needed": output.get("data_needed"),
+        "confidence": output.get("confidence"),
+        # Server-derived counts of what arrived, not the items themselves.
+        "evidence_count": len(evidence) if isinstance(evidence, list) else 0,
+        "proposed_query_count": len(proposals) if isinstance(proposals, list) else 0,
+        "requires_user_confirmation": output.get("requires_user_confirmation"),
+        "prose_retained": False,
+        "content_retained": False,
     }
-    proposals = redacted.get("proposed_queries")
-    if isinstance(proposals, list):
-        redacted["proposed_queries"] = [
-            {
-                **{
-                    key: value
-                    for key, value in item.items()
-                    if key not in DATA_EVIDENCE_PROPOSAL_PROSE_FIELDS
-                },
-                "decision_retained": False,
-            }
-            if isinstance(item, Mapping)
-            else item
-            for item in proposals
-        ]
-    # A category VALUE is free-form and can be an address or a name however it
-    # is cased (round-50: street=123_main_st). The keys say what the
-    # measurement was scoped by, which is what the durable record needs; the
-    # values were shown to the user in the response and are not retained.
-    evidence = redacted.get("evidence")
-    if isinstance(evidence, list):
-        redacted["evidence"] = [_scope_keys_only(item) for item in evidence]
-    proposals = redacted.get("proposed_queries")
-    if isinstance(proposals, list):
-        redacted["proposed_queries"] = [_scope_keys_only(item) for item in proposals]
-    redacted["prose_retained"] = False
-    return redacted
-
-
-def _predicate_key(text: str) -> str:
-    match = _FILTER_OPERATOR.search(text)
-    return text[: match.start()] if match else text
-
-
-def _scope_keys_only(item: Any) -> Any:
-    """Reduce a retained evidence item or proposal to its provable parts.
-
-    Category values, the tool name, and the metric are all written by the
-    child, so none of them can be shown to be free of a person's name
-    (round-54: source="alice.smith", metric="alice_smith"). They are delivered
-    in the response — where the confirming human reads them — and are not
-    retained. What stays is what the server can vouch for: the operation, the
-    aggregation, the scope KEYS, the count, and the timestamps.
-    """
-    if not isinstance(item, Mapping):
-        return item
-    reduced = {
-        key: value for key, value in item.items() if key not in DATA_EVIDENCE_IDENTIFIER_FIELDS
-    }
-    request = reduced.get("request")
-    if isinstance(request, Mapping):
-        request = {
-            key: value
-            for key, value in request.items()
-            if key not in DATA_EVIDENCE_IDENTIFIER_FIELDS
-        }
-        filters = request.get("filters")
-        if isinstance(filters, list):
-            request["filters"] = [
-                _predicate_key(text) if isinstance(text, str) else text for text in filters
-            ]
-        reduced["request"] = request
-    value = reduced.get("value")
-    if isinstance(value, Mapping) and isinstance(value.get("dimension"), str):
-        value = dict(value)
-        value["dimension"] = _predicate_key(value["dimension"])
-        reduced["value"] = value
-    return reduced
 
 
 def _data_evidence_boundary_violations(
@@ -971,7 +875,7 @@ def _data_evidence_boundary_violations(
     """Check a data-lane output against the data policy at re-entry.
 
     ``data_evidence_answer.v1`` carries evidence and proposals as TYPED
-    structures — an aggregate is a number with a unit, a proposal is a
+    structures — an aggregate is a count of rows, a proposal is a
     structured read request — so raw rows, PII values, credentials, error
     envelopes, and mutating statements have no field to live in. This function
     therefore checks INVARIANTS, not vocabulary:
@@ -991,6 +895,15 @@ def _data_evidence_boundary_violations(
         serialized = json.dumps(output, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         return ["data evidence output is not JSON-serializable"]
+
+    if retained:
+        # A retained result is the server's own summary: it has no items to
+        # scan, and the only thing that could be wrong with it is that it is
+        # not one (round-55).
+        problems = [
+            f"retained data result: {problem}" for problem in _retained_summary_problems(output)
+        ]
+        return problems
 
     # Identifier FIELDS (evidence source, proposal tool_name) are exempt
     # from the credential-shape scan ONLY when they actually look like
@@ -1236,6 +1149,19 @@ def _data_evidence_boundary_violations(
                 "is a no-evidence finding, not evidence with a caveat"
             )
     return errors
+
+
+def _retained_summary_problems(output: Mapping[str, Any]) -> list[str]:
+    """Whether a carried-forward result is the server-derived summary."""
+    problems: list[str] = []
+    if output.get("content_retained") is not False:
+        problems.append("must declare content_retained: false")
+    if output.get("requires_user_confirmation") is not True:
+        problems.append("must still require user confirmation")
+    for field in ("evidence", "proposed_queries", "finding", "caveats"):
+        if field in output:
+            problems.append(f"carries {field}, which is not retained")
+    return problems
 
 
 def _aggregate_shape_problems(value: Any, *, retained: bool = False) -> list[str]:

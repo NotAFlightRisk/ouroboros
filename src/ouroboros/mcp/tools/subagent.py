@@ -1216,7 +1216,7 @@ def _plugin_advisory_contract_section(
                     "OMITTED (oversized or invalid). The PUBLISHED "
                     "data_evidence_answer.v1 contract is enforced at re-entry "
                     "in its place, and the data_policy above binds: return one "
-                    "JSON object with typed evidence (a number with a unit), "
+                    "JSON object with typed evidence (a count of rows), "
                     "typed proposed_queries, and "
                     "requires_user_confirmation: true."
                 )
@@ -1518,7 +1518,7 @@ def build_interview_question_advisory_subagents(
                 "item and each proposal carries a read_request naming what to "
                 "measure (operation 'read', metric, aggregation, optional "
                 "filters/grouping), and evidence adds the resulting aggregate "
-                "as a number with a unit. There is no free-text value or query "
+                "as a count of rows. There is no free-text value or query "
                 "field, so anything you cannot express as an aggregate — a row "
                 "list, a name, an identifier, an error message — is a "
                 "no-evidence finding, not evidence. "

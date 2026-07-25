@@ -2396,10 +2396,8 @@ def test_rejected_duplicate_does_not_suppress_accumulated_result(tmp_path: Any) 
     }
     # Round-47 B1: partial state may not retain prose, so a lane accumulated
     # in an earlier call comes back in its durable form.
-    assert aggregated["data_context"] == {
-        **{k: v for k, v in valid_data.items() if k not in ("finding", "caveats")},
-        "prose_retained": False,
-    }
+    assert aggregated["data_context"]["content_retained"] is False
+    assert "evidence" not in aggregated["data_context"]
 
 
 def test_finalize_accumulation_is_advisory_only(tmp_path: Any) -> None:
@@ -5470,8 +5468,10 @@ def test_round46_prose_is_not_durable_and_scope_binds_to_filters(tmp_path: Any) 
     on_disk = record_path.read_text()
     assert "Alice Smith" not in on_disk
     assert "Oak Ave" not in on_disk
-    # The typed facts — what the guarantee can actually cover — are retained.
-    assert '"number": 42' in on_disk
+    # Round-55: not even the count is retained — a cardinality can be a card
+    # number. What the record keeps is the server-derived shape.
+    assert '"content_retained": false' in on_disk
+    assert '"evidence_count": 1' in on_disk
     # Replay serves the durable form, so the prose cannot re-enter later.
     replay = submit_fanout_results(
         registry,
@@ -5793,9 +5793,12 @@ def test_round50_lifecycle_is_provenance_and_scopes_are_keys(tmp_path: Any) -> N
         "caveats": ["Point-in-time."],
     }
     retained = redact_prose_for_persistence(submitted)
-    assert retained["evidence"][0]["request"]["filters"] == ["street"]
-    assert retained["evidence"][0]["value"]["dimension"] == "street"
+    # Round-55: scope KEYS are child-authored too, so the record keeps the
+    # shape and none of the substance.
+    assert "evidence" not in retained
+    assert retained["evidence_count"] == 1
     assert "123_main_st" not in json_module.dumps(retained)
+    assert "street" not in json_module.dumps(retained)
 
     # Warning — the percentile discriminator is two-way.
     assert _read_request_shape_problems(
@@ -6146,11 +6149,11 @@ def test_round54_durable_record_holds_only_provable_parts(tmp_path: Any) -> None
     # B1 — nothing a child wrote as an identifier survives into the record.
     retained = redact_prose_for_persistence(submitted)
     assert "alice" not in json_module.dumps(retained)
-    assert "source" not in retained["evidence"][0]
-    assert "metric" not in retained["evidence"][0]["request"]
-    # What the server can vouch for stays.
-    assert retained["evidence"][0]["value"]["number"] == 42
-    assert retained["evidence"][0]["request"]["filters"] == ["plan"]
+    # Round-55: no child-authored field survives, including the scope keys and
+    # the number; what stays is the server-derived shape.
+    assert "evidence" not in retained
+    assert retained["evidence_count"] == 1
+    assert retained["content_retained"] is False
 
     # B3 — a lane-id-shaped key that is credential- or payload-shaped is not
     # echoed back into a response.
@@ -6196,3 +6199,44 @@ def test_round54_durable_record_holds_only_provable_parts(tmp_path: Any) -> None
     assert out["contract_violations"] == []
     assert "alice" in json_module.dumps(out)
     assert "alice" not in (tmp_path / f"{fanout_id}.json").read_text()
+
+
+def test_rendered_instructions_agree_with_the_shipped_schema() -> None:
+    """A child following the prompt must produce output re-entry accepts.
+
+    Round-55: after the unit left the aggregate, the prompt still asked for
+    "a number with a unit", so a compliant child was rejected — the worst
+    failure shape, since nothing the child does is wrong. This test binds the
+    rendered instruction to the schema so the two cannot drift again.
+    """
+    from ouroboros.contracts.data_evidence import (
+        _data_context_answer_contract,
+        _data_context_lane_policy,
+    )
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    payloads = build_interview_question_advisory_subagents(
+        {
+            "session_id": "sess-prompt",
+            "question_identity": "interview-question:0123456789abcdef",
+            "question": "Which plan tier do most active users hit?",
+            "lanes": [dict(lane) for lane in advisory["lanes"]],
+        }
+    )
+    data_prompt = next(
+        payload.prompt for payload in payloads if payload.context["lane_id"] == "data_context"
+    )
+    aggregate = _data_context_answer_contract()["response_model_schema"]["$defs"]["aggregate"]
+    policy = _data_context_lane_policy()
+
+    # Fields the instructions may name are the fields the schema declares.
+    assert "unit" not in aggregate["properties"]
+    for stale in ("number with a unit", "aggregates and summaries", "allowed_units"):
+        assert stale not in data_prompt, stale
+    assert "allowed_units" not in policy["evidence_policy"]
+    # And the instruction names what the schema actually requires.
+    assert "count of rows" in data_prompt
+    assert "execution_status" in data_prompt
