@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
+import hashlib
+import json
 import logging
 from pathlib import Path
 import sqlite3
@@ -16,8 +18,8 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 from uuid import uuid4
 
-from sqlalchemy import and_, event, func, or_, select, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import and_, case, event, func, or_, select, text
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.workflow_lifecycle import WorkflowLifecycleEvent
@@ -26,7 +28,13 @@ from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
-from ouroboros.persistence.schema import events_table, metadata
+from ouroboros.persistence.schema import (
+    ac_acceptance_guards_table,
+    events_table,
+    metadata,
+    session_start_guards_table,
+    session_terminal_guards_table,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +65,345 @@ _RAW_SUBSCRIBED_EVENT_SIGNAL_KEYS = frozenset(
         "tool_name",
     }
 )
+_SESSION_TERMINAL_EVENT_TYPES = frozenset(
+    {
+        "orchestrator.session.completed",
+        "orchestrator.session.failed",
+        "orchestrator.session.cancelled",
+    }
+)
+
+_AC_ACCEPTANCE_FINALIZED_EVENT_TYPE = "execution.ac.acceptance_finalized"
+_ACCEPTANCE_ROOT_INDICES_KEY = "acceptance_root_indices"
+_AC_ACCEPTANCE_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+_AC_ACCEPTANCE_OUTCOMES = frozenset(
+    {"succeeded", "satisfied_externally", "failed", "blocked", "invalid", "cancelled"}
+)
+_AC_ACCEPTANCE_DISPOSITIONS = frozenset(
+    {
+        "accepted",
+        "rejected",
+        "cancelled",
+        "failed",
+        "blocked",
+        "invalid",
+    }
+)
+
+
+def acceptance_generation_id_for_session(session_id: str, execution_id: str) -> str:
+    """Return a durable B generation independent of A's live correlation."""
+    if (
+        not isinstance(session_id, str)
+        or not session_id.strip()
+        or not isinstance(execution_id, str)
+        or not execution_id.strip()
+    ):
+        raise PersistenceError(
+            "Acceptance generation requires non-empty session and execution IDs.",
+            operation="acceptance_generation_id_for_session",
+        )
+    digest = hashlib.sha256(f"{session_id.strip()}\x00{execution_id.strip()}".encode()).hexdigest()
+    return f"foundation-b/v1:{digest}"
+
+
+def _is_session_terminal_event(event: object) -> bool:
+    """Return whether one event must use the durable terminal transition CAS."""
+    return (
+        isinstance(event, BaseEvent)
+        and event.aggregate_type == "session"
+        and event.type in _SESSION_TERMINAL_EVENT_TYPES
+    )
+
+
+def _is_session_start_event(event: object) -> bool:
+    """Return whether one event publishes immutable session identity."""
+    return (
+        isinstance(event, BaseEvent)
+        and event.aggregate_type == "session"
+        and event.type == "orchestrator.session.started"
+    )
+
+
+def _is_ac_acceptance_finalized_event(event: object) -> bool:
+    """Return whether ``event`` requires the Foundation B acceptance CAS."""
+    return (
+        isinstance(event, BaseEvent)
+        and event.aggregate_type == "execution"
+        and event.type == _AC_ACCEPTANCE_FINALIZED_EVENT_TYPE
+    )
+
+
+def _is_ac_acceptance_finalized_type(event: object) -> bool:
+    """Return whether a value uses the reserved final-acceptance event type."""
+    return isinstance(event, BaseEvent) and event.type == _AC_ACCEPTANCE_FINALIZED_EVENT_TYPE
+
+
+def _acceptance_payload_digest(event: BaseEvent) -> str:
+    """Hash the complete canonical payload for idempotent replay.
+
+    The authority/root guard is only idempotent for an equivalent final event.
+    Hashing a hand-picked subset silently treats a payload with additional
+    semantics as a duplicate, which is unsafe for fail-closed replay.
+    """
+    payload = {
+        "event_version": event.event_version,
+        "data": event.data,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _acceptance_key_fields(event: BaseEvent) -> tuple[str, int]:
+    """Validate and return the durable Foundation B acceptance key."""
+    data = event.data
+    generation = data.get("acceptance_generation_id")
+    root_index = data.get("root_ac_index")
+    if isinstance(root_index, bool) or not isinstance(root_index, int) or root_index < 0:
+        raise PersistenceError(
+            "Final acceptance requires a non-negative root AC index.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    required_strings = (
+        "execution_id",
+        "session_id",
+        "disposition",
+        "outcome",
+        "terminal_status",
+    )
+    for key in required_strings:
+        value = data.get(key)
+        if not isinstance(value, str) or not value.strip() or value != value.strip():
+            raise PersistenceError(
+                f"Final acceptance requires a non-empty {key}.",
+                operation="append_ac_acceptance_finalized_if_absent",
+                details={"event_type": event.type, "event_id": event.id, "field": key},
+            )
+    execution_id = data["execution_id"]
+    if event.aggregate_id != execution_id:
+        raise PersistenceError(
+            "Final acceptance aggregate_id must match payload execution_id.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={
+                "event_type": event.type,
+                "event_id": event.id,
+                "aggregate_id": event.aggregate_id,
+                "execution_id": execution_id,
+            },
+        )
+    expected_generation = acceptance_generation_id_for_session(
+        data["session_id"],
+        execution_id,
+    )
+    if not isinstance(generation, str) or not generation.strip():
+        raise PersistenceError(
+            "Final acceptance requires a non-empty acceptance generation ID.",
+            operation="validate_acceptance_finalization",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if generation != expected_generation:
+        raise PersistenceError(
+            "Final acceptance generation does not match the session/execution identity.",
+            operation="validate_acceptance_finalization",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    accepted = data.get("accepted")
+    if not isinstance(accepted, bool):
+        raise PersistenceError(
+            "Final acceptance requires a boolean accepted field.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    disposition = data.get("disposition")
+    outcome = data.get("outcome")
+    terminal_status = data.get("terminal_status")
+    if terminal_status not in _AC_ACCEPTANCE_TERMINAL_STATUSES:
+        raise PersistenceError(
+            "Final acceptance requires a canonical terminal status.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if disposition not in _AC_ACCEPTANCE_DISPOSITIONS:
+        raise PersistenceError(
+            "Final acceptance requires a canonical disposition.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if outcome not in _AC_ACCEPTANCE_OUTCOMES:
+        raise PersistenceError(
+            "Final acceptance requires a canonical outcome.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if accepted and (disposition != "accepted" or terminal_status != "completed"):
+        raise PersistenceError(
+            "Accepted final acceptance requires accepted disposition and completed terminal status.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if accepted and outcome not in {"succeeded", "satisfied_externally"}:
+        raise PersistenceError(
+            "Accepted final acceptance requires a successful outcome.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if terminal_status == "completed" and not accepted:
+        raise PersistenceError(
+            "Completed final acceptance must be accepted.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    expected_disposition = (
+        "accepted"
+        if accepted
+        else (
+            "cancelled"
+            if terminal_status == "cancelled"
+            else ("rejected" if outcome in {"succeeded", "satisfied_externally"} else outcome)
+        )
+    )
+    if disposition != expected_disposition:
+        raise PersistenceError(
+            "Final acceptance disposition is inconsistent with its outcome and terminal status.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if terminal_status == "failed" and accepted:
+        raise PersistenceError(
+            "Failed final acceptance cannot be accepted.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    retry_attempt = data.get("final_retry_attempt")
+    if isinstance(retry_attempt, bool) or not isinstance(retry_attempt, int) or retry_attempt < 0:
+        raise PersistenceError(
+            "Final acceptance requires a non-negative final retry attempt.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    return generation, root_index
+
+
+def validate_acceptance_finalization_payload(
+    data: Mapping[str, Any],
+    *,
+    aggregate_id: str | None = None,
+) -> tuple[str, int]:
+    """Validate a finalization payload with the same rules used at write time."""
+    execution_id = data.get("execution_id")
+    event = BaseEvent(
+        type=_AC_ACCEPTANCE_FINALIZED_EVENT_TYPE,
+        aggregate_type="execution",
+        aggregate_id=(
+            aggregate_id
+            if isinstance(aggregate_id, str)
+            else (execution_id if isinstance(execution_id, str) else "")
+        ),
+        data=dict(data),
+    )
+    return _acceptance_key_fields(event)
+
+
+def _acceptance_event_from_terminal_payload(payload: object) -> BaseEvent:
+    """Reconstruct one acceptance event carried by a terminalization plan."""
+    if not isinstance(payload, Mapping):
+        raise PersistenceError(
+            "Terminal acceptance plan entries must be mappings.",
+            operation="append_session_terminal_if_active",
+            details={"acceptance_plan_invalid": True},
+        )
+    data = dict(payload)
+    execution_id = data.get("execution_id")
+    if not isinstance(execution_id, str) or not execution_id.strip():
+        raise PersistenceError(
+            "Terminal acceptance plan requires an execution_id.",
+            operation="append_session_terminal_if_active",
+            details={"acceptance_plan_invalid": True},
+        )
+    return BaseEvent(
+        type=_AC_ACCEPTANCE_FINALIZED_EVENT_TYPE,
+        aggregate_type="execution",
+        aggregate_id=execution_id,
+        data=data,
+    )
+
+
+def _validated_terminal_acceptance_events(event: BaseEvent) -> tuple[BaseEvent, ...]:
+    """Validate a terminal envelope before acquiring either durable CAS guard."""
+    acceptance_plan = event.data.get("acceptance_finalizations", ())
+    if acceptance_plan is None:
+        acceptance_plan = ()
+    if not isinstance(acceptance_plan, (list, tuple)):
+        raise PersistenceError(
+            "Terminal acceptance plan must be a list.",
+            operation="append_session_terminal_if_active",
+            details={"acceptance_plan_invalid": True},
+        )
+    expected_terminal_status = {
+        "orchestrator.session.completed": "completed",
+        "orchestrator.session.failed": "failed",
+        "orchestrator.session.cancelled": "cancelled",
+    }[event.type]
+    validated: list[BaseEvent] = []
+    for payload in acceptance_plan:
+        if not isinstance(payload, Mapping):
+            raise PersistenceError(
+                "Terminal acceptance plan entries must be mappings.",
+                operation="append_session_terminal_if_active",
+                details={"acceptance_plan_invalid": True},
+            )
+        if payload.get("session_id") != event.aggregate_id:
+            raise PersistenceError(
+                "Terminal acceptance plan session_id must match the terminal session.",
+                operation="append_session_terminal_if_active",
+                details={"acceptance_plan_invalid": True},
+            )
+        if payload.get("terminal_status") != expected_terminal_status:
+            raise PersistenceError(
+                "Terminal acceptance plan status must match the terminal session event.",
+                operation="append_session_terminal_if_active",
+                details={"acceptance_plan_invalid": True},
+            )
+        acceptance_event = _acceptance_event_from_terminal_payload(payload)
+        _acceptance_key_fields(acceptance_event)
+        validated.append(acceptance_event)
+    return tuple(validated)
+
+
+def _normalize_durable_acceptance_root_indices(
+    value: object,
+    *,
+    session_id: str,
+    operation: str,
+) -> frozenset[int]:
+    """Validate the immutable root set stored by a current-format session."""
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, (list, tuple)):
+        raise PersistenceError(
+            "Durable acceptance root set must be a list of non-negative integers.",
+            operation=operation,
+            details={"session_id": session_id, "acceptance_root_set_invalid": True},
+        )
+    normalized: set[int] = set()
+    for raw_root in value:
+        if isinstance(raw_root, bool) or not isinstance(raw_root, int) or raw_root < 0:
+            raise PersistenceError(
+                "Durable acceptance root set contains an invalid root index.",
+                operation=operation,
+                details={
+                    "session_id": session_id,
+                    "root_ac_index": raw_root,
+                    "acceptance_root_set_invalid": True,
+                },
+            )
+        normalized.add(raw_root)
+    if len(normalized) != len(value):
+        raise PersistenceError(
+            "Durable acceptance root set contains duplicate root indices.",
+            operation=operation,
+            details={"session_id": session_id, "acceptance_root_set_invalid": True},
+        )
+    return frozenset(normalized)
 
 
 def _normalized_mapping_keys(value: Mapping[object, object]) -> set[str]:
@@ -381,11 +728,16 @@ class EventStore:
         event: BaseEvent,
         *,
         _skip_workflow_ir_guard: bool = False,
-    ) -> None:
+    ) -> bool | None:
         """Append an event to the store.
 
         The operation is wrapped in a transaction for atomicity.
         If the insert fails, the transaction is rolled back.
+
+        Returns:
+            ``True`` when a terminal session event wins its conditional
+            transition, ``False`` when an existing terminal event already won,
+            and ``None`` for ordinary append-only events.
 
         Args:
             event: The event to append.
@@ -393,7 +745,489 @@ class EventStore:
         Raises:
             PersistenceError: If the append operation fails.
         """
+        if _is_session_start_event(event):
+            await self.append_session_start_if_absent(event)
+            return None
+        # Terminal session lifecycle is a one-winner transition, not a generic
+        # append-only observation.  Keep this guard at the public EventStore
+        # boundary so event factories and older SessionRepository callers
+        # cannot accidentally bypass the conditional terminal CAS.
+        if _is_session_terminal_event(event):
+            return await self.append_session_terminal_if_active(event)
+        if _is_ac_acceptance_finalized_type(event):
+            raise PersistenceError(
+                "Final acceptance events must be carried by a terminal session plan; "
+                "use append_session_terminal_if_active().",
+                operation="append",
+                details={"event_type": event.type, "aggregate_id": event.aggregate_id},
+            )
         await self.append_with_rowid(event, _skip_workflow_ir_guard=_skip_workflow_ir_guard)
+        return None
+
+    async def append_session_start_if_absent(self, event: BaseEvent) -> None:
+        """Publish exactly one immutable start identity for a session ID."""
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="append_session_start_if_absent",
+            )
+        if not _is_session_start_event(event):
+            raise PersistenceError(
+                "Conditional session start append requires an explicit started event.",
+                operation="append_session_start_if_absent",
+                table="events",
+                details={
+                    "aggregate_type": getattr(event, "aggregate_type", None),
+                    "event_type": getattr(event, "type", None),
+                },
+            )
+        raw_execution_id = event.data.get("execution_id")
+        execution_id = raw_execution_id.strip() if isinstance(raw_execution_id, str) else ""
+
+        for attempt in range(3):
+            try:
+                async with self._engine.connect() as conn:
+                    sqlite = conn.dialect.name == "sqlite"
+                    if sqlite:
+                        await conn.exec_driver_sql("BEGIN IMMEDIATE")
+                        transaction = None
+                    else:
+                        transaction = await conn.begin()
+                    try:
+                        existing_lifecycle = await conn.execute(
+                            select(events_table.c.id, events_table.c.event_type)
+                            .where(
+                                events_table.c.aggregate_type == "session",
+                                events_table.c.aggregate_id == event.aggregate_id,
+                            )
+                            .limit(1)
+                        )
+                        existing_row = existing_lifecycle.first()
+                        if existing_row is not None:
+                            if conn.in_transaction():
+                                await conn.rollback()
+                            raise PersistenceError(
+                                "Session ID already has durable lifecycle history.",
+                                operation="append_session_start_if_absent",
+                                table="events",
+                                details={
+                                    "session_id": event.aggregate_id,
+                                    "execution_id": execution_id,
+                                    "existing_event_id": existing_row.id,
+                                    "existing_event_type": existing_row.event_type,
+                                    "session_start_conflict": True,
+                                },
+                            )
+                        try:
+                            async with conn.begin_nested():
+                                await conn.execute(
+                                    session_start_guards_table.insert().values(
+                                        session_id=event.aggregate_id,
+                                        start_event_id=event.id,
+                                        execution_id=execution_id,
+                                    )
+                                )
+                        except IntegrityError as exc:
+                            if conn.in_transaction():
+                                await conn.rollback()
+                            raise PersistenceError(
+                                "Session ID already has an immutable start identity.",
+                                operation="append_session_start_if_absent",
+                                table="events",
+                                details={
+                                    "session_id": event.aggregate_id,
+                                    "execution_id": execution_id,
+                                    "session_start_conflict": True,
+                                },
+                            ) from exc
+                        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                        if sqlite:
+                            await conn.commit()
+                        elif transaction is not None:
+                            await transaction.commit()
+                        return
+                    except BaseException:
+                        if conn.in_transaction():
+                            await conn.rollback()
+                        raise
+            except PersistenceError:
+                raise
+            except Exception as exc:
+                if "database is locked" in str(exc) and attempt < 2:
+                    logger.warning(
+                        "event_store.append_session_start_if_absent.retry",
+                        extra={"attempt": attempt + 1, "event_id": event.id},
+                    )
+                    await asyncio.sleep(0.1 * (2**attempt))
+                    continue
+                raise PersistenceError(
+                    f"Failed to conditionally append session start event: {exc}",
+                    operation="append_session_start_if_absent",
+                    table="events",
+                    details={"event_id": event.id, "event_type": event.type},
+                ) from exc
+        raise PersistenceError(
+            "Failed to conditionally append session start event after retries.",
+            operation="append_session_start_if_absent",
+            table="events",
+            details={"event_id": event.id, "event_type": event.type},
+        )
+
+    async def append_session_terminal_if_active(self, event: BaseEvent) -> bool:
+        """Append one terminal session event only while no terminal event exists.
+
+        Returns ``True`` when ``event`` was inserted and ``False`` when another
+        terminal session event already won.  The check and append share one
+        transaction so a stale in-memory ``PAUSED`` tracker cannot overwrite a
+        concurrent durable cancellation with a later ``FAILED`` event.
+
+        This intentionally protects only the explicit session lifecycle event
+        family.  Callers that need a terminal transition must use a matching
+        ``orchestrator.session.*`` event; ordinary progress events remain
+        append-only observations.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="append_session_terminal_if_active",
+            )
+        if not isinstance(event, BaseEvent):
+            self._raise_invalid_append_input(
+                event,
+                operation="append_session_terminal_if_active",
+            )
+        if event.aggregate_type != "session" or event.type not in _SESSION_TERMINAL_EVENT_TYPES:
+            raise PersistenceError(
+                "Conditional session terminal append requires an explicit terminal session event.",
+                operation="append_session_terminal_if_active",
+                table="events",
+                details={
+                    "aggregate_type": event.aggregate_type,
+                    "event_type": event.type,
+                },
+            )
+
+        # Validate the complete plan before taking the terminal guard.  A
+        # malformed envelope must not even transiently acquire a terminal or
+        # acceptance winner that a caller could mistake for a committed CAS.
+        acceptance_events = _validated_terminal_acceptance_events(event)
+        durable_root_indices = await self._resolve_acceptance_root_indices_for_session(
+            event.aggregate_id
+        )
+        if durable_root_indices is not None:
+            if (
+                "acceptance_finalizations" not in event.data
+                or event.data.get("acceptance_finalizations") is None
+            ):
+                raise PersistenceError(
+                    "Current-format terminal sessions require an explicit acceptance plan.",
+                    operation="append_session_terminal_if_active",
+                    details={
+                        "session_id": event.aggregate_id,
+                        "acceptance_plan_missing": True,
+                    },
+                )
+            plan_root_indices = {
+                int(acceptance_event.data["root_ac_index"])
+                for acceptance_event in acceptance_events
+            }
+            if plan_root_indices != durable_root_indices:
+                raise PersistenceError(
+                    "Terminal acceptance plan must exactly match the durable session root set.",
+                    operation="append_session_terminal_if_active",
+                    details={
+                        "session_id": event.aggregate_id,
+                        "durable_root_indices": sorted(durable_root_indices),
+                        "plan_root_indices": sorted(plan_root_indices),
+                        "acceptance_root_set_conflict": True,
+                    },
+                )
+        if acceptance_events:
+            # The payload's self-consistent session/execution pair is not
+            # sufficient: bind it to the immutable durable session-start
+            # identity before either CAS can win.  Without this check a caller
+            # could finalize ``exec_other`` under a session that started
+            # ``exec_real`` and permanently consume the wrong root guard.
+            started_execution_id = await self._resolve_execution_id_for_session(event.aggregate_id)
+            if started_execution_id is None:
+                raise PersistenceError(
+                    "Final acceptance requires a durable session-start execution identity.",
+                    operation="append_session_terminal_if_active",
+                    details={
+                        "session_id": event.aggregate_id,
+                        "acceptance_identity_missing": True,
+                    },
+                )
+            mismatched = next(
+                (
+                    acceptance_event.data.get("execution_id")
+                    for acceptance_event in acceptance_events
+                    if acceptance_event.data.get("execution_id") != started_execution_id
+                ),
+                None,
+            )
+            if mismatched is not None:
+                raise PersistenceError(
+                    "Final acceptance execution_id does not match the durable session start.",
+                    operation="append_session_terminal_if_active",
+                    details={
+                        "session_id": event.aggregate_id,
+                        "started_execution_id": started_execution_id,
+                        "acceptance_execution_id": mismatched,
+                        "acceptance_identity_conflict": True,
+                    },
+                )
+
+        for attempt in range(3):
+            try:
+                async with self._engine.connect() as conn:
+                    # SQLite needs an immediate write transaction here. A
+                    # deferred SELECT followed by INSERT leaves a gap in which
+                    # another connection can commit the competing terminal
+                    # event. The unique guard below closes the same absent-row
+                    # race on every supported database backend.
+                    sqlite = conn.dialect.name == "sqlite"
+                    if sqlite:
+                        await conn.exec_driver_sql("BEGIN IMMEDIATE")
+                        transaction = None
+                    else:
+                        transaction = await conn.begin()
+
+                    try:
+                        terminal_query = (
+                            select(events_table.c.id)
+                            .where(
+                                events_table.c.aggregate_type == "session",
+                                events_table.c.aggregate_id == event.aggregate_id,
+                                events_table.c.event_type.in_(_SESSION_TERMINAL_EVENT_TYPES),
+                            )
+                            .limit(1)
+                        )
+                        existing_terminal = await conn.scalar(terminal_query)
+                        if existing_terminal is not None:
+                            if sqlite:
+                                await conn.rollback()
+                            elif transaction is not None:
+                                await transaction.rollback()
+                            return False
+
+                        try:
+                            async with conn.begin_nested():
+                                await conn.execute(
+                                    session_terminal_guards_table.insert().values(
+                                        session_id=event.aggregate_id,
+                                        terminal_event_id=event.id,
+                                        terminal_event_type=event.type,
+                                    )
+                                )
+                        except IntegrityError:
+                            # A concurrent conditional terminal transition won
+                            # the per-session unique guard. Roll back this
+                            # outer transaction before returning the successful
+                            # no-op result; the winner's event remains durable.
+                            if conn.in_transaction():
+                                await conn.rollback()
+                            return False
+
+                        for acceptance_event in acceptance_events:
+                            await self._append_ac_acceptance_in_transaction(conn, acceptance_event)
+
+                        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                        if sqlite:
+                            await conn.commit()
+                        elif transaction is not None:
+                            await transaction.commit()
+                        return True
+                    except BaseException:
+                        if conn.in_transaction():
+                            await conn.rollback()
+                        raise
+            except Exception as e:
+                if "database is locked" in str(e) and attempt < 2:
+                    logger.warning(
+                        "event_store.append_session_terminal_if_active.retry",
+                        extra={"attempt": attempt + 1, "event_id": event.id},
+                    )
+                    await asyncio.sleep(0.1 * (2**attempt))
+                    continue
+                raise PersistenceError(
+                    f"Failed to conditionally append terminal session event: {e}",
+                    operation="append_session_terminal_if_active",
+                    table="events",
+                    details={"event_id": event.id, "event_type": event.type},
+                ) from e
+        raise PersistenceError(
+            "Failed to conditionally append terminal session event after retries.",
+            operation="append_session_terminal_if_active",
+            table="events",
+            details={"event_id": event.id, "event_type": event.type},
+        )
+
+    async def _append_ac_acceptance_in_transaction(
+        self,
+        conn: Any,
+        event: BaseEvent,
+    ) -> bool:
+        """Append one acceptance event using an already-open transaction."""
+        acceptance_generation_id, root_ac_index = _acceptance_key_fields(event)
+        payload_digest = _acceptance_payload_digest(event)
+        existing = await conn.execute(
+            select(ac_acceptance_guards_table.c.payload_digest).where(
+                ac_acceptance_guards_table.c.acceptance_generation_id == acceptance_generation_id,
+                ac_acceptance_guards_table.c.root_ac_index == root_ac_index,
+            )
+        )
+        existing_digest = existing.scalar_one_or_none()
+        if existing_digest is not None:
+            if existing_digest != payload_digest:
+                raise PersistenceError(
+                    "Conflicting final acceptance already exists for authority/root.",
+                    operation="append_ac_acceptance_finalized_if_absent",
+                    table="ac_acceptance_guards",
+                    details={
+                        "acceptance_generation_id": acceptance_generation_id,
+                        "root_ac_index": root_ac_index,
+                        "acceptance_conflict": True,
+                    },
+                )
+            return False
+
+        try:
+            async with conn.begin_nested():
+                await conn.execute(
+                    ac_acceptance_guards_table.insert().values(
+                        acceptance_generation_id=acceptance_generation_id,
+                        root_ac_index=root_ac_index,
+                        final_event_id=event.id,
+                        payload_digest=payload_digest,
+                    )
+                )
+        except IntegrityError:
+            existing = await conn.execute(
+                select(ac_acceptance_guards_table.c.payload_digest).where(
+                    ac_acceptance_guards_table.c.acceptance_generation_id
+                    == acceptance_generation_id,
+                    ac_acceptance_guards_table.c.root_ac_index == root_ac_index,
+                )
+            )
+            existing_digest = existing.scalar_one_or_none()
+            if existing_digest == payload_digest:
+                return False
+            raise PersistenceError(
+                "Conflicting concurrent final acceptance exists for authority/root.",
+                operation="append_ac_acceptance_finalized_if_absent",
+                table="ac_acceptance_guards",
+                details={
+                    "acceptance_generation_id": acceptance_generation_id,
+                    "root_ac_index": root_ac_index,
+                    "acceptance_conflict": True,
+                },
+            )
+
+        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+        return True
+
+    async def append_session_pause_if_active(self, event: BaseEvent) -> bool:
+        """Append PAUSED only while no explicit terminal session event exists.
+
+        Returns ``True`` when the pause event was inserted and ``False`` when
+        a completed, failed, or cancelled event already won.  The terminal
+        check and pause append share one write transaction so a runner cannot
+        preserve live resumable authority beside an already-terminal session.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="append_session_pause_if_active",
+            )
+        if not isinstance(event, BaseEvent):
+            self._raise_invalid_append_input(
+                event,
+                operation="append_session_pause_if_active",
+            )
+        if event.aggregate_type != "session" or event.type != "orchestrator.session.paused":
+            raise PersistenceError(
+                "Conditional session pause append requires an explicit paused session event.",
+                operation="append_session_pause_if_active",
+                table="events",
+                details={
+                    "aggregate_type": event.aggregate_type,
+                    "event_type": event.type,
+                },
+            )
+
+        for attempt in range(3):
+            try:
+                async with self._engine.connect() as conn:
+                    sqlite = conn.dialect.name == "sqlite"
+                    if sqlite:
+                        await conn.exec_driver_sql("BEGIN IMMEDIATE")
+                        transaction = None
+                    else:
+                        transaction = await conn.begin()
+
+                    try:
+                        terminal_query = (
+                            select(events_table.c.id)
+                            .where(
+                                events_table.c.aggregate_type == "session",
+                                events_table.c.aggregate_id == event.aggregate_id,
+                                events_table.c.event_type.in_(_SESSION_TERMINAL_EVENT_TYPES),
+                            )
+                            .limit(1)
+                        )
+                        if await conn.scalar(terminal_query) is not None:
+                            if sqlite:
+                                await conn.rollback()
+                            elif transaction is not None:
+                                await transaction.rollback()
+                            return False
+
+                        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                        if sqlite:
+                            await conn.commit()
+                        elif transaction is not None:
+                            await transaction.commit()
+                        return True
+                    except BaseException:
+                        if conn.in_transaction():
+                            await conn.rollback()
+                        raise
+            except Exception as e:
+                if "database is locked" in str(e) and attempt < 2:
+                    logger.warning(
+                        "event_store.append_session_pause_if_active.retry",
+                        extra={"attempt": attempt + 1, "event_id": event.id},
+                    )
+                    await asyncio.sleep(0.1 * (2**attempt))
+                    continue
+                raise PersistenceError(
+                    f"Failed to conditionally append paused session event: {e}",
+                    operation="append_session_pause_if_active",
+                    table="events",
+                    details={"event_id": event.id, "event_type": event.type},
+                ) from e
+        raise PersistenceError(
+            "Failed to conditionally append paused session event after retries.",
+            operation="append_session_pause_if_active",
+            table="events",
+            details={"event_id": event.id, "event_type": event.type},
+        )
+
+    @staticmethod
+    def is_session_terminal_event(event: object) -> bool:
+        """Return whether ``event`` requires the terminal one-winner append."""
+        return _is_session_terminal_event(event)
+
+    @staticmethod
+    def is_session_start_event(event: object) -> bool:
+        """Return whether ``event`` publishes immutable session identity."""
+        return _is_session_start_event(event)
+
+    @staticmethod
+    def is_ac_acceptance_finalized_event(event: object) -> bool:
+        """Return whether ``event`` requires the Foundation B final gate CAS."""
+        return _is_ac_acceptance_finalized_event(event)
 
     async def append_with_rowid(
         self,
@@ -409,6 +1243,27 @@ class EventStore:
             )
         if not isinstance(event, BaseEvent):
             self._raise_invalid_append_input(event, operation="append_with_rowid")
+        if _is_session_terminal_event(event):
+            raise PersistenceError(
+                "Terminal session lifecycle events must be persisted via append() "
+                "or append_session_terminal_if_active() to preserve the one-winner guard.",
+                operation="append_with_rowid",
+                details={"event_type": event.type, "aggregate_id": event.aggregate_id},
+            )
+        if _is_session_start_event(event):
+            raise PersistenceError(
+                "Session start lifecycle events must be persisted via append() "
+                "or append_session_start_if_absent() to preserve immutable identity.",
+                operation="append_with_rowid",
+                details={"event_type": event.type, "aggregate_id": event.aggregate_id},
+            )
+        if _is_ac_acceptance_finalized_type(event):
+            raise PersistenceError(
+                "Final acceptance events must be carried by a terminal session plan "
+                "to preserve the one-winner guard.",
+                operation="append_with_rowid",
+                details={"event_type": event.type, "aggregate_id": event.aggregate_id},
+            )
 
         # Guard the workflow IR lifecycle family from direct raw appends:
         # ``WorkflowLifecycleEvent`` enforces the replay-unsafe key blocklist
@@ -503,6 +1358,17 @@ class EventStore:
                 index=invalid_index,
             )
 
+        session_start_events = [event for event in events if _is_session_start_event(event)]
+        if session_start_events:
+            raise PersistenceError(
+                "Session start lifecycle events cannot use append_batch; persist each "
+                "through append() to preserve immutable session identity.",
+                operation="append_batch",
+                details={
+                    "session_ids": sorted({event.aggregate_id for event in session_start_events})
+                },
+            )
+
         # Mirror the ``append()`` workflow_ir guard so callers cannot bypass
         # the ``WorkflowLifecycleEvent`` redaction blocklist by batching raw
         # ``BaseEvent`` instances. Lifecycle persistence must go through
@@ -523,6 +1389,24 @@ class EventStore:
                 "append_workflow_lifecycle_event() and cannot be batched.",
                 operation="append_batch",
                 details={"count": len(workflow_ir_events)},
+            )
+
+        terminal_session_events = [event for event in events if _is_session_terminal_event(event)]
+        if terminal_session_events:
+            raise PersistenceError(
+                "Terminal session lifecycle events cannot be appended in a batch; "
+                "use append() so each session transition takes the one-winner guard.",
+                operation="append_batch",
+                details={"count": len(terminal_session_events)},
+            )
+
+        acceptance_events = [event for event in events if _is_ac_acceptance_finalized_type(event)]
+        if acceptance_events:
+            raise PersistenceError(
+                "Final acceptance events cannot be appended in a batch; carry them "
+                "inside a terminal session plan.",
+                operation="append_batch",
+                details={"count": len(acceptance_events)},
             )
 
         for attempt in range(3):
@@ -925,7 +1809,21 @@ class EventStore:
                 func.row_number()
                 .over(
                     partition_by=events_table.c.aggregate_id,
-                    order_by=(events_table.c.timestamp.desc(), events_table.c.id.desc()),
+                    order_by=(
+                        # Explicit terminal lifecycle is absorbing. A delayed
+                        # progress checkpoint may be newer in wall-clock order,
+                        # but it cannot revive a completed/failed/cancelled
+                        # session in the snapshot path used for orphan cleanup.
+                        case(
+                            (
+                                events_table.c.event_type.in_(_SESSION_TERMINAL_EVENT_TYPES),
+                                0,
+                            ),
+                            else_=1,
+                        ),
+                        events_table.c.timestamp.desc(),
+                        events_table.c.id.desc(),
+                    ),
                 )
                 .label("rn"),
             )
@@ -1425,6 +2323,53 @@ class EventStore:
                 if isinstance(execution_id, str) and execution_id:
                     return execution_id
             return None
+
+    async def _resolve_acceptance_root_indices_for_session(
+        self,
+        session_id: str,
+    ) -> set[int] | None:
+        """Return the immutable root set for current-format sessions.
+
+        A missing field is deliberately returned as ``None`` for historical
+        sessions.  Current sessions persist the field at publication time,
+        including an explicit empty set for a zero-AC execution; terminal CAS
+        then requires an exact plan match before it can win.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="resolve_acceptance_root_indices_for_session",
+            )
+
+        async with self._engine.begin() as conn:
+            query = (
+                select(events_table.c.payload)
+                .where(events_table.c.aggregate_type == "session")
+                .where(events_table.c.aggregate_id == session_id)
+                .where(events_table.c.event_type == "orchestrator.session.started")
+                .order_by(events_table.c.timestamp.asc())
+                .limit(1)
+            )
+            result = await conn.execute(query)
+            row = result.first()
+            if row is None:
+                return None
+            payload = row[0]
+            if not isinstance(payload, Mapping):
+                raise PersistenceError(
+                    "Durable session-start payload is malformed.",
+                    operation="resolve_acceptance_root_indices_for_session",
+                    details={"session_id": session_id},
+                )
+            if "acceptance_root_indices" not in payload:
+                return None
+            return set(
+                _normalize_durable_acceptance_root_indices(
+                    payload["acceptance_root_indices"],
+                    session_id=session_id,
+                    operation="resolve_acceptance_root_indices_for_session",
+                )
+            )
 
     async def _resolve_session_started_at(self, session_id: str) -> Any | None:
         """Return the persisted start timestamp for a session, if available."""

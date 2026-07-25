@@ -18,6 +18,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Index,
+    Integer,
     MetaData,
     String,
     Table,
@@ -59,6 +60,63 @@ events_table = Table(
     Index("ix_events_event_type", "event_type"),
     Index("ix_events_timestamp", "timestamp"),
     Index("ix_events_agg_type_id_timestamp", "aggregate_type", "aggregate_id", "timestamp"),
+)
+
+# One durable compare-and-set guard for explicit terminal session lifecycle
+# events. The event stream remains append-only; this table only prevents two
+# concurrent terminal writers from both claiming the same session transition.
+session_terminal_guards_table = Table(
+    "session_terminal_guards",
+    metadata,
+    Column("session_id", String(128), primary_key=True),
+    Column("terminal_event_id", String(36), nullable=False),
+    Column("terminal_event_type", String(200), nullable=False),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
+)
+
+# One immutable start identity per session aggregate. The append-only event
+# stream cannot express a uniqueness constraint over a conditional event type,
+# so this guard closes the absent-row race for caller-supplied session IDs on
+# every supported database backend.
+session_start_guards_table = Table(
+    "session_start_guards",
+    metadata,
+    Column("session_id", String(128), primary_key=True),
+    Column("start_event_id", String(36), nullable=False),
+    Column("execution_id", String(128), nullable=False),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
+)
+
+# One durable compare-and-set guard for the Foundation B final acceptance
+# decision.  Attempt judgments remain append-only telemetry; this table makes
+# the Final Gate decision one-winner per process-local authority generation and
+# root AC without changing the event stream's append-only shape.
+ac_acceptance_guards_table = Table(
+    "ac_acceptance_guards",
+    metadata,
+    Column("acceptance_generation_id", String(128), primary_key=True),
+    Column("root_ac_index", Integer, primary_key=True),
+    Column("final_event_id", String(36), nullable=False),
+    Column("payload_digest", String(64), nullable=False),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
 )
 
 # Brownfield repos table - registered repositories/worktrees from brownfield scan.

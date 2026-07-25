@@ -28,16 +28,21 @@ Example:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 import contextlib
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import wraps
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import re
-from typing import TYPE_CHECKING, Any, Literal
+import time
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from uuid import uuid4
+from weakref import ref
 
 import anyio
 from rich.console import Console
@@ -75,6 +80,11 @@ from ouroboros.harness.deliver_gate import (
 from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
 from ouroboros.harness.traceguard_validator import validate_evidence_claims
 from ouroboros.observability.logging import get_logger
+from ouroboros.orchestrator.ac_execution_capsule import (
+    bind_capsule_to_runtime_handle,
+    build_ac_dispatch_authority_scope,
+    compile_ac_execution_capsule,
+)
 from ouroboros.orchestrator.ac_runtime_handle_manager import ACRuntimeHandleManager
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
@@ -254,6 +264,11 @@ from ouroboros.orchestrator.evidence_schema import (
     extract_evidence,
     validate_evidence,
 )
+from ouroboros.orchestrator.execution_authority import (
+    ExecutionAuthorityContract,
+    ExecutionAuthorityLiveBinding,
+    canonical_workspace_authority,
+)
 from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
 from ouroboros.orchestrator.execution_runtime_scope import (
     ACRuntimeIdentity,
@@ -266,13 +281,16 @@ from ouroboros.orchestrator.leaf_dispatcher import (
 )
 from ouroboros.orchestrator.level_context import (
     LevelContext,
+    build_context_prompt,
     deserialize_level_contexts,
     extract_level_context,
     serialize_level_contexts,
 )
+from ouroboros.orchestrator.mcp_tools import serialize_tool_catalog
 from ouroboros.orchestrator.model_routing import (
     decide_model,
     resolve_execute_model,
+    serialize_model_router,
     tier_from_profile_hint,
 )
 from ouroboros.orchestrator.parallel_executor_models import (
@@ -286,6 +304,7 @@ from ouroboros.orchestrator.profile_loader import ExecutionProfile, SuggestedMod
 from ouroboros.orchestrator.rate_limit import (
     RateLimitBackoff,
     RateLimitGate,
+    SharedRateLimitBucket,
     build_rate_limit_gate,
     estimate_runtime_request_tokens,
 )
@@ -318,6 +337,583 @@ if TYPE_CHECKING:
     from ouroboros.persistence.event_store import EventStore
 
 log = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _FoundationAClosedRoots:
+    """Original direct roots held by the executor constructor default."""
+
+    leaf_dispatcher_type: type[LeafDispatcher]
+    leaf_dispatcher_stream_root: Callable[..., Awaitable[None]]
+    leaf_dispatcher_stream_code: object
+    level_coordinator_type: type[LevelCoordinator]
+    level_coordinator_review_root: object
+    level_coordinator_review_code: object
+    rate_gate_factory: Callable[..., RateLimitGate]
+    rate_gate_type: type[RateLimitGate]
+    rate_gate_acquire_root: Callable[..., Awaitable[None]]
+    rate_gate_acquire_code: object
+    rate_gate_sleep: object
+    rate_gate_sleep_code: object | None
+    rate_gate_bucket_type: type[SharedRateLimitBucket]
+    rate_gate_bucket_time: object
+    rate_gate_bucket_enabled_root: object
+    rate_gate_bucket_enabled_code: object | None
+    rate_gate_bucket_acquire_root: object
+    rate_gate_bucket_acquire_code: object | None
+    rate_gate_bucket_force_reserve_root: object
+    rate_gate_bucket_force_reserve_code: object | None
+    rate_gate_bucket_helper_roots: tuple[tuple[str, object | None, object | None], ...]
+    transcript_verifier: Callable[..., VerifierVerdict]
+    transcript_verifier_code: object
+
+
+class _FoundationAInternalEntryRoots(NamedTuple):
+    """Closed entry functions used by the executor's own orchestration path."""
+
+    executor_type: type[object]
+    execute_single_ac_root: Callable[..., Any]
+    execute_single_ac_code: object
+    execute_atomic_ac_root: Callable[..., Any]
+    execute_atomic_ac_code: object
+    await_dispatch_rate_budget_root: Callable[..., Any]
+    await_dispatch_rate_budget_code: object
+    dispatch_decomposition_prompt_root: Callable[..., Any]
+    dispatch_decomposition_prompt_code: object
+    run_atomic_verifier_pass_root: Callable[..., Any]
+    run_atomic_verifier_pass_code: object
+    run_ac_verify_gate_root: Callable[..., Any]
+    run_ac_verify_gate_code: object
+
+
+# These names document the closed components. ``ParallelACExecutor.__init__``
+# receives a value-based default built from them below, so changing a mutable
+# module global after import cannot replace the roots it binds.
+_FOUNDATION_A_LEAF_DISPATCHER_TYPE = LeafDispatcher
+_FOUNDATION_A_LEAF_DISPATCHER_STREAM_ROOT = LeafDispatcher.stream
+_FOUNDATION_A_LEAF_DISPATCHER_STREAM_CODE = LeafDispatcher.stream.__code__
+_FOUNDATION_A_LEVEL_COORDINATOR_TYPE = LevelCoordinator
+_FOUNDATION_A_LEVEL_COORDINATOR_REVIEW_ROOT = LevelCoordinator.run_review
+_FOUNDATION_A_LEVEL_COORDINATOR_REVIEW_CODE = LevelCoordinator.run_review.__code__
+_FOUNDATION_A_RATE_GATE_FACTORY = build_rate_limit_gate
+_FOUNDATION_A_RATE_GATE_TYPE = RateLimitGate
+_FOUNDATION_A_RATE_GATE_ACQUIRE_ROOT = RateLimitGate.acquire
+_FOUNDATION_A_RATE_GATE_ACQUIRE_CODE = RateLimitGate.acquire.__code__
+_FOUNDATION_A_RATE_GATE_SLEEP = asyncio.sleep
+_FOUNDATION_A_RATE_GATE_SLEEP_CODE = asyncio.sleep.__code__
+_FOUNDATION_A_RATE_GATE_BUCKET_TYPE = SharedRateLimitBucket
+_FOUNDATION_A_RATE_GATE_BUCKET_TIME = time.monotonic
+_FOUNDATION_A_RATE_GATE_BUCKET_ENABLED_ROOT = SharedRateLimitBucket.enabled.fget
+_FOUNDATION_A_RATE_GATE_BUCKET_ENABLED_CODE = (
+    _FOUNDATION_A_RATE_GATE_BUCKET_ENABLED_ROOT.__code__
+    if _FOUNDATION_A_RATE_GATE_BUCKET_ENABLED_ROOT is not None
+    else None
+)
+_FOUNDATION_A_RATE_GATE_BUCKET_ACQUIRE_ROOT = SharedRateLimitBucket.acquire
+_FOUNDATION_A_RATE_GATE_BUCKET_ACQUIRE_CODE = SharedRateLimitBucket.acquire.__code__
+_FOUNDATION_A_RATE_GATE_BUCKET_FORCE_RESERVE_ROOT = SharedRateLimitBucket.force_reserve
+_FOUNDATION_A_RATE_GATE_BUCKET_FORCE_RESERVE_CODE = SharedRateLimitBucket.force_reserve.__code__
+_FOUNDATION_A_RATE_GATE_BUCKET_HELPER_ROOTS = (
+    ("_prune", SharedRateLimitBucket._prune, SharedRateLimitBucket._prune.__code__),
+    (
+        "_tokens_in_window",
+        SharedRateLimitBucket._tokens_in_window,
+        SharedRateLimitBucket._tokens_in_window.__code__,
+    ),
+    ("_snapshot", SharedRateLimitBucket._snapshot, SharedRateLimitBucket._snapshot.__code__),
+    (
+        "_request_wait_seconds",
+        SharedRateLimitBucket._request_wait_seconds,
+        SharedRateLimitBucket._request_wait_seconds.__code__,
+    ),
+    (
+        "_token_wait_seconds",
+        SharedRateLimitBucket._token_wait_seconds,
+        SharedRateLimitBucket._token_wait_seconds.__code__,
+    ),
+)
+_FOUNDATION_A_TRANSCRIPT_VERIFIER = _verify_atomic_evidence_against_runtime_messages
+_FOUNDATION_A_TRANSCRIPT_VERIFIER_CODE = _verify_atomic_evidence_against_runtime_messages.__code__
+_FOUNDATION_A_CLOSED_ROOTS = _FoundationAClosedRoots(
+    leaf_dispatcher_type=_FOUNDATION_A_LEAF_DISPATCHER_TYPE,
+    leaf_dispatcher_stream_root=_FOUNDATION_A_LEAF_DISPATCHER_STREAM_ROOT,
+    leaf_dispatcher_stream_code=_FOUNDATION_A_LEAF_DISPATCHER_STREAM_CODE,
+    level_coordinator_type=_FOUNDATION_A_LEVEL_COORDINATOR_TYPE,
+    level_coordinator_review_root=_FOUNDATION_A_LEVEL_COORDINATOR_REVIEW_ROOT,
+    level_coordinator_review_code=_FOUNDATION_A_LEVEL_COORDINATOR_REVIEW_CODE,
+    rate_gate_factory=_FOUNDATION_A_RATE_GATE_FACTORY,
+    rate_gate_type=_FOUNDATION_A_RATE_GATE_TYPE,
+    rate_gate_acquire_root=_FOUNDATION_A_RATE_GATE_ACQUIRE_ROOT,
+    rate_gate_acquire_code=_FOUNDATION_A_RATE_GATE_ACQUIRE_CODE,
+    rate_gate_sleep=_FOUNDATION_A_RATE_GATE_SLEEP,
+    rate_gate_sleep_code=_FOUNDATION_A_RATE_GATE_SLEEP_CODE,
+    rate_gate_bucket_type=_FOUNDATION_A_RATE_GATE_BUCKET_TYPE,
+    rate_gate_bucket_time=_FOUNDATION_A_RATE_GATE_BUCKET_TIME,
+    rate_gate_bucket_enabled_root=_FOUNDATION_A_RATE_GATE_BUCKET_ENABLED_ROOT,
+    rate_gate_bucket_enabled_code=_FOUNDATION_A_RATE_GATE_BUCKET_ENABLED_CODE,
+    rate_gate_bucket_acquire_root=_FOUNDATION_A_RATE_GATE_BUCKET_ACQUIRE_ROOT,
+    rate_gate_bucket_acquire_code=_FOUNDATION_A_RATE_GATE_BUCKET_ACQUIRE_CODE,
+    rate_gate_bucket_force_reserve_root=_FOUNDATION_A_RATE_GATE_BUCKET_FORCE_RESERVE_ROOT,
+    rate_gate_bucket_force_reserve_code=_FOUNDATION_A_RATE_GATE_BUCKET_FORCE_RESERVE_CODE,
+    rate_gate_bucket_helper_roots=_FOUNDATION_A_RATE_GATE_BUCKET_HELPER_ROOTS,
+    transcript_verifier=_FOUNDATION_A_TRANSCRIPT_VERIFIER,
+    transcript_verifier_code=_FOUNDATION_A_TRANSCRIPT_VERIFIER_CODE,
+)
+
+
+def _bind_foundation_a_roots(
+    roots: _FoundationAClosedRoots,
+) -> Callable[[Callable[..., None]], Callable[..., None]]:
+    """Bind closed roots in a closure instead of a caller-controlled kwarg."""
+
+    # Extract every root while this decorator is applied at module import. Do
+    # not retain the dataclass bundle itself: ``frozen=True`` is not a Python
+    # memory-integrity boundary and ``object.__setattr__`` could otherwise
+    # poison the bundle before a later executor is constructed.
+    leaf_dispatcher_type = roots.leaf_dispatcher_type
+    leaf_dispatcher_stream_root = roots.leaf_dispatcher_stream_root
+    leaf_dispatcher_stream_code = roots.leaf_dispatcher_stream_code
+    level_coordinator_type = roots.level_coordinator_type
+    level_coordinator_review_root = roots.level_coordinator_review_root
+    level_coordinator_review_code = roots.level_coordinator_review_code
+    rate_gate_factory = roots.rate_gate_factory
+    rate_gate_type = roots.rate_gate_type
+    rate_gate_acquire_root = roots.rate_gate_acquire_root
+    rate_gate_acquire_code = roots.rate_gate_acquire_code
+    rate_gate_sleep = roots.rate_gate_sleep
+    rate_gate_sleep_code = roots.rate_gate_sleep_code
+    rate_gate_bucket_type = roots.rate_gate_bucket_type
+    rate_gate_bucket_time = roots.rate_gate_bucket_time
+    rate_gate_bucket_enabled_root = roots.rate_gate_bucket_enabled_root
+    rate_gate_bucket_enabled_code = roots.rate_gate_bucket_enabled_code
+    rate_gate_bucket_acquire_root = roots.rate_gate_bucket_acquire_root
+    rate_gate_bucket_acquire_code = roots.rate_gate_bucket_acquire_code
+    rate_gate_bucket_force_reserve_root = roots.rate_gate_bucket_force_reserve_root
+    rate_gate_bucket_force_reserve_code = roots.rate_gate_bucket_force_reserve_code
+    rate_gate_bucket_helper_roots = roots.rate_gate_bucket_helper_roots
+    transcript_verifier = roots.transcript_verifier
+    transcript_verifier_code = roots.transcript_verifier_code
+
+    def decorate(initializer: Callable[..., None]) -> Callable[..., None]:
+        @wraps(initializer)
+        def bound(self: object, *args: object, **kwargs: object) -> None:
+            initializer(
+                self,
+                *args,
+                **kwargs,
+                _foundation_a_roots=_FoundationAClosedRoots(
+                    leaf_dispatcher_type=leaf_dispatcher_type,
+                    leaf_dispatcher_stream_root=leaf_dispatcher_stream_root,
+                    leaf_dispatcher_stream_code=leaf_dispatcher_stream_code,
+                    level_coordinator_type=level_coordinator_type,
+                    level_coordinator_review_root=level_coordinator_review_root,
+                    level_coordinator_review_code=level_coordinator_review_code,
+                    rate_gate_factory=rate_gate_factory,
+                    rate_gate_type=rate_gate_type,
+                    rate_gate_acquire_root=rate_gate_acquire_root,
+                    rate_gate_acquire_code=rate_gate_acquire_code,
+                    rate_gate_sleep=rate_gate_sleep,
+                    rate_gate_sleep_code=rate_gate_sleep_code,
+                    rate_gate_bucket_type=rate_gate_bucket_type,
+                    rate_gate_bucket_time=rate_gate_bucket_time,
+                    rate_gate_bucket_enabled_root=rate_gate_bucket_enabled_root,
+                    rate_gate_bucket_enabled_code=rate_gate_bucket_enabled_code,
+                    rate_gate_bucket_acquire_root=rate_gate_bucket_acquire_root,
+                    rate_gate_bucket_acquire_code=rate_gate_bucket_acquire_code,
+                    rate_gate_bucket_force_reserve_root=rate_gate_bucket_force_reserve_root,
+                    rate_gate_bucket_force_reserve_code=rate_gate_bucket_force_reserve_code,
+                    rate_gate_bucket_helper_roots=rate_gate_bucket_helper_roots,
+                    transcript_verifier=transcript_verifier,
+                    transcript_verifier_code=transcript_verifier_code,
+                ),
+            )
+
+        return bound
+
+    return decorate
+
+
+_FOUNDATION_A_ENTRY_EXECUTE_SINGLE_AC = 0
+_FOUNDATION_A_ENTRY_EXECUTE_ATOMIC_AC = 1
+_FOUNDATION_A_ENTRY_AWAIT_DISPATCH_RATE_BUDGET = 2
+_FOUNDATION_A_ENTRY_DISPATCH_DECOMPOSITION_PROMPT = 3
+_FOUNDATION_A_ENTRY_RUN_ATOMIC_VERIFIER_PASS = 4
+_FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE = 5
+
+
+def _foundation_a_internal_entry_root_specs(
+    roots: _FoundationAInternalEntryRoots,
+) -> tuple[tuple[str, Callable[..., Any], object], ...]:
+    """Return the small, versioned set of internal effect-entry roots."""
+
+    return (
+        ("_execute_single_ac", roots.execute_single_ac_root, roots.execute_single_ac_code),
+        ("_execute_atomic_ac", roots.execute_atomic_ac_root, roots.execute_atomic_ac_code),
+        (
+            "_await_dispatch_rate_budget",
+            roots.await_dispatch_rate_budget_root,
+            roots.await_dispatch_rate_budget_code,
+        ),
+        (
+            "_dispatch_decomposition_prompt",
+            roots.dispatch_decomposition_prompt_root,
+            roots.dispatch_decomposition_prompt_code,
+        ),
+        (
+            "_run_atomic_verifier_pass",
+            roots.run_atomic_verifier_pass_root,
+            roots.run_atomic_verifier_pass_code,
+        ),
+        (
+            "_run_ac_verify_gate",
+            roots.run_ac_verify_gate_root,
+            roots.run_ac_verify_gate_code,
+        ),
+    )
+
+
+def _capture_foundation_a_internal_entry_roots(
+    executor_type: type[object],
+) -> _FoundationAInternalEntryRoots:
+    """Capture finite direct entry functions from one concrete executor type."""
+
+    try:
+        execute_single_ac_root = type.__getattribute__(executor_type, "_execute_single_ac")
+        execute_atomic_ac_root = type.__getattribute__(executor_type, "_execute_atomic_ac")
+        await_dispatch_rate_budget_root = type.__getattribute__(
+            executor_type,
+            "_await_dispatch_rate_budget",
+        )
+        dispatch_decomposition_prompt_root = type.__getattribute__(
+            executor_type,
+            "_dispatch_decomposition_prompt",
+        )
+        run_atomic_verifier_pass_root = type.__getattribute__(
+            executor_type,
+            "_run_atomic_verifier_pass",
+        )
+        run_ac_verify_gate_root = type.__getattribute__(executor_type, "_run_ac_verify_gate")
+        return _FoundationAInternalEntryRoots(
+            executor_type=executor_type,
+            execute_single_ac_root=execute_single_ac_root,
+            execute_single_ac_code=object.__getattribute__(execute_single_ac_root, "__code__"),
+            execute_atomic_ac_root=execute_atomic_ac_root,
+            execute_atomic_ac_code=object.__getattribute__(execute_atomic_ac_root, "__code__"),
+            await_dispatch_rate_budget_root=await_dispatch_rate_budget_root,
+            await_dispatch_rate_budget_code=object.__getattribute__(
+                await_dispatch_rate_budget_root,
+                "__code__",
+            ),
+            dispatch_decomposition_prompt_root=dispatch_decomposition_prompt_root,
+            dispatch_decomposition_prompt_code=object.__getattribute__(
+                dispatch_decomposition_prompt_root,
+                "__code__",
+            ),
+            run_atomic_verifier_pass_root=run_atomic_verifier_pass_root,
+            run_atomic_verifier_pass_code=object.__getattribute__(
+                run_atomic_verifier_pass_root,
+                "__code__",
+            ),
+            run_ac_verify_gate_root=run_ac_verify_gate_root,
+            run_ac_verify_gate_code=object.__getattribute__(run_ac_verify_gate_root, "__code__"),
+        )
+    except (AttributeError, TypeError) as exc:
+        raise ValueError("execution authority internal entry roots are not bindable") from exc
+
+
+def _foundation_a_internal_entry_roots_are_closed(
+    roots: _FoundationAInternalEntryRoots,
+    expected_roots: _FoundationAInternalEntryRoots,
+) -> bool:
+    """Return whether construction found the import-time executor entry set."""
+
+    return roots.executor_type is expected_roots.executor_type and all(
+        root is expected_root and code is expected_code
+        for (_, root, code), (_, expected_root, expected_code) in zip(
+            _foundation_a_internal_entry_root_specs(roots),
+            _foundation_a_internal_entry_root_specs(expected_roots),
+            strict=True,
+        )
+    )
+
+
+def _foundation_a_internal_entry_roots_are_current(
+    executor: object,
+    roots: _FoundationAInternalEntryRoots,
+) -> bool:
+    """Check only direct implementation roots, never arbitrary callable state."""
+
+    try:
+        if type(executor) is not roots.executor_type:
+            return False
+        instance_values = object.__getattribute__(executor, "__dict__")
+        executor_type = type(executor)
+        for name, expected_root, expected_code in _foundation_a_internal_entry_root_specs(roots):
+            if name in instance_values:
+                return False
+            current_root = type.__getattribute__(executor_type, name)
+            if current_root is not expected_root:
+                return False
+            if object.__getattribute__(current_root, "__code__") is not expected_code:
+                return False
+    except (AttributeError, KeyError, TypeError):
+        return False
+    return True
+
+
+def _make_foundation_a_internal_entry_invokers(
+    executor: object,
+    roots: _FoundationAInternalEntryRoots,
+) -> tuple[Callable[..., Any], ...]:
+    """Close direct function calls over the constructor's finite root snapshot."""
+
+    executor_ref = ref(executor)
+    execute_single_ac_root = roots.execute_single_ac_root
+    execute_atomic_ac_root = roots.execute_atomic_ac_root
+    await_dispatch_rate_budget_root = roots.await_dispatch_rate_budget_root
+    dispatch_decomposition_prompt_root = roots.dispatch_decomposition_prompt_root
+    run_atomic_verifier_pass_root = roots.run_atomic_verifier_pass_root
+    run_ac_verify_gate_root = roots.run_ac_verify_gate_root
+
+    def _require_captured_executor(current_executor: object) -> None:
+        if executor_ref() is not current_executor:
+            raise ValueError("execution authority entry root is unavailable")
+
+    def execute_single_ac(current_executor: object, **kwargs: object) -> Any:
+        _require_captured_executor(current_executor)
+        return execute_single_ac_root(current_executor, **kwargs)
+
+    def execute_atomic_ac(current_executor: object, **kwargs: object) -> Any:
+        _require_captured_executor(current_executor)
+        return execute_atomic_ac_root(current_executor, **kwargs)
+
+    def await_dispatch_rate_budget(current_executor: object, **kwargs: object) -> Any:
+        _require_captured_executor(current_executor)
+        return await_dispatch_rate_budget_root(current_executor, **kwargs)
+
+    def dispatch_decomposition_prompt(current_executor: object, **kwargs: object) -> Any:
+        _require_captured_executor(current_executor)
+        return dispatch_decomposition_prompt_root(current_executor, **kwargs)
+
+    def run_atomic_verifier_pass(current_executor: object, **kwargs: object) -> Any:
+        _require_captured_executor(current_executor)
+        return run_atomic_verifier_pass_root(current_executor, **kwargs)
+
+    def run_ac_verify_gate(current_executor: object, **kwargs: object) -> Any:
+        _require_captured_executor(current_executor)
+        return run_ac_verify_gate_root(current_executor, **kwargs)
+
+    return (
+        execute_single_ac,
+        execute_atomic_ac,
+        await_dispatch_rate_budget,
+        dispatch_decomposition_prompt,
+        run_atomic_verifier_pass,
+        run_ac_verify_gate,
+    )
+
+
+def _bind_foundation_a_internal_entry_roots(executor_type: type[Any]) -> type[Any]:
+    """Capture original internal entry functions after the class body is complete."""
+
+    expected_roots = _capture_foundation_a_internal_entry_roots(executor_type)
+    initializer = executor_type.__init__
+
+    @wraps(initializer)
+    def bound(self: object, *args: object, **kwargs: object) -> None:
+        if (
+            "_foundation_a_internal_entry_roots" in kwargs
+            or "_foundation_a_internal_entry_roots_are_closed" in kwargs
+        ):
+            raise TypeError("_foundation_a_internal_entry_roots is constructor-bound")
+        roots = _capture_foundation_a_internal_entry_roots(type(self))
+        initializer(
+            self,
+            *args,
+            **kwargs,
+            _foundation_a_internal_entry_roots=roots,
+            _foundation_a_internal_entry_roots_are_closed=(
+                _foundation_a_internal_entry_roots_are_closed(roots, expected_roots)
+            ),
+        )
+
+    executor_type.__init__ = bound
+    return executor_type
+
+
+def _make_execution_authority_guard(
+    executor: object,
+    *,
+    binding: ExecutionAuthorityLiveBinding,
+    workspace_builder: Callable[[], str | None],
+    policy_builder: Callable[[], dict[str, object]],
+    internal_entry_roots: _FoundationAInternalEntryRoots,
+) -> Callable[[object], None]:
+    """Capture Foundation A roots outside mutable executor instance fields."""
+
+    executor_ref = ref(executor)
+    binding_ref = ref(binding)
+    binding_is_intact = ExecutionAuthorityLiveBinding.is_intact
+    binding_is_intact_code = binding_is_intact.__code__
+    workspace_builder_root = workspace_builder.__func__
+    workspace_builder_code = workspace_builder_root.__code__
+    policy_builder_root = policy_builder.__func__
+    policy_builder_code = policy_builder_root.__code__
+    internal_entry_roots_are_current = _foundation_a_internal_entry_roots_are_current
+    internal_entry_roots_are_current_code = internal_entry_roots_are_current.__code__
+
+    def guard(current_executor: object) -> None:
+        captured_executor = executor_ref()
+        captured_binding = binding_ref()
+        if captured_executor is not current_executor or captured_binding is None:
+            raise ValueError("execution authority guard is unavailable")
+        authority_verifier = captured_binding.verifier
+        adapter = captured_binding.adapter
+        dispatcher_type = captured_binding.dispatcher_type
+        dispatcher = captured_binding.dispatcher
+        transcript_verifier = captured_binding.transcript_verifier
+        rate_gate = captured_binding.rate_gate
+        dispatcher_stream_callable = captured_binding.dispatcher_stream_callable
+        rate_gate_acquire_callable = captured_binding.rate_gate_acquire_callable
+        coordinator = captured_binding.coordinator
+        coordinator_review_callable = captured_binding.coordinator_review_callable
+        session_signal_hub = captured_binding.session_signal_hub
+        get_attribute = object.__getattribute__
+        if (
+            get_attribute(current_executor, "_execution_authority_live_binding")
+            is not captured_binding
+            or get_attribute(current_executor, "_authority_verifier") is not authority_verifier
+            or get_attribute(current_executor, "_atomic_verifier") is not authority_verifier
+            or get_attribute(current_executor, "_adapter") is not adapter
+            or get_attribute(current_executor, "_authority_leaf_dispatcher_type")
+            is not dispatcher_type
+            or get_attribute(current_executor, "_authority_leaf_dispatcher") is not dispatcher
+            or get_attribute(current_executor, "_authority_transcript_verifier")
+            is not transcript_verifier
+            or get_attribute(current_executor, "_dispatch_rate_gate") is not rate_gate
+            or get_attribute(current_executor, "_authority_leaf_dispatcher_stream")
+            is not dispatcher_stream_callable
+            or get_attribute(current_executor, "_authority_rate_gate_acquire_root")
+            is not rate_gate_acquire_callable
+            or get_attribute(current_executor, "_coordinator") is not coordinator
+            or get_attribute(current_executor, "_authority_coordinator_review")
+            is not coordinator_review_callable
+            or get_attribute(current_executor, "_session_signal_hub") is not session_signal_hub
+        ):
+            raise ValueError("execution authority drifted before effect")
+        if (
+            binding_is_intact.__code__ is not binding_is_intact_code
+            or workspace_builder_root.__code__ is not workspace_builder_code
+            or policy_builder_root.__code__ is not policy_builder_code
+            or internal_entry_roots_are_current.__code__
+            is not internal_entry_roots_are_current_code
+        ):
+            raise ValueError("execution authority drifted before effect")
+        if not internal_entry_roots_are_current(current_executor, internal_entry_roots):
+            raise ValueError("execution authority drifted before effect")
+        if not binding_is_intact(
+            captured_binding,
+            executor=current_executor,
+            adapter=adapter,
+            verifier=authority_verifier,
+            dispatcher_type=dispatcher_type,
+            dispatcher=dispatcher,
+            dispatcher_executor=current_executor,
+            transcript_verifier=transcript_verifier,
+            rate_gate=rate_gate,
+            workspace=workspace_builder_root(current_executor),
+            execution_policy=policy_builder_root(current_executor),
+            session_signal_hub=session_signal_hub,
+            dispatcher_stream_callable=dispatcher_stream_callable,
+            rate_gate_acquire_callable=rate_gate_acquire_callable,
+            coordinator=coordinator,
+            coordinator_review_callable=coordinator_review_callable,
+        ):
+            raise ValueError("execution authority drifted before effect")
+
+    return guard
+
+
+def _make_execution_authority_registry() -> tuple[
+    Callable[[object, Callable[[object], None], tuple[Callable[..., Any], ...]], None],
+    Callable[[object], None],
+    Callable[..., Any],
+]:
+    """Keep guards and direct invokers in closure-only process state.
+
+    This is an integrity boundary for normal collaborators, not a Python
+    sandbox against code that deliberately introspects and mutates private
+    module closures in its own process.
+    """
+
+    # ``WeakKeyDictionary`` delegates identity to user-defined ``__hash__`` and
+    # ``__eq__``. Foundation A deliberately supports process-local executor
+    # subclasses, including unhashable and equality-overriding ones, so keep a
+    # private identity-keyed table instead. Every lookup verifies the weak
+    # referent before use, which also makes delayed cleanup and ``id`` reuse
+    # safe. Values retain only the guard/invokers; those retain weak executor
+    # references and therefore cannot keep an executor alive.
+    states: dict[
+        int,
+        tuple[
+            ref[object],
+            Callable[[object], None],
+            tuple[Callable[..., Any], ...],
+        ],
+    ] = {}
+
+    def _lookup(
+        executor: object,
+    ) -> tuple[Callable[[object], None], tuple[Callable[..., Any], ...]]:
+        executor_id = id(executor)
+        state = states.get(executor_id)
+        if state is None:
+            raise ValueError("execution authority guard is unavailable")
+        executor_ref, guard, invokers = state
+        if executor_ref() is not executor:
+            # The stale entry may await a weakref callback, or its integer key
+            # may have been reused. Never dispatch through either case.
+            if executor_ref() is None:
+                states.pop(executor_id, None)
+            raise ValueError("execution authority guard is unavailable")
+        return guard, invokers
+
+    def register(
+        executor: object,
+        guard: Callable[[object], None],
+        invokers: tuple[Callable[..., Any], ...],
+    ) -> None:
+        executor_id = id(executor)
+
+        def cleanup(executor_ref: ref[object]) -> None:
+            state = states.get(executor_id)
+            if state is not None and state[0] is executor_ref:
+                states.pop(executor_id, None)
+
+        executor_ref = ref(executor, cleanup)
+        states[executor_id] = (executor_ref, guard, invokers)
+
+    def invoke_guard(executor: object) -> None:
+        guard, _ = _lookup(executor)
+        guard(executor)
+
+    def invoke_entry(executor: object, entry_index: int, **kwargs: object) -> Any:
+        try:
+            guard, invokers = _lookup(executor)
+            invoker = invokers[entry_index]
+        except IndexError as exc:
+            raise ValueError("execution authority entry root is unavailable") from exc
+        guard(executor)
+        return invoker(executor, **kwargs)
+
+    return register, invoke_guard, invoke_entry
+
+
+(
+    _register_execution_authority_state,
+    _invoke_execution_authority_guard,
+    _invoke_execution_authority_entry,
+) = _make_execution_authority_registry()
 
 
 def _is_session_signal_application_acknowledgement(message: AgentMessage) -> bool:
@@ -691,6 +1287,79 @@ class _VerifyGateOutcome:
     reason: str | None
     output_tail: str
     missing_artifacts: tuple[str, ...] = ()
+    workspace_mutated: bool = False
+    workspace_digest: str | None = None
+
+
+def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
+    """Encode verify evidence into the JSON-safe checkpoint state."""
+    if not isinstance(outcome, _VerifyGateOutcome):
+        return None
+    return {
+        "passed": outcome.passed,
+        "reason": outcome.reason,
+        "output_tail": outcome.output_tail,
+        "missing_artifacts": list(outcome.missing_artifacts),
+        "workspace_mutated": outcome.workspace_mutated,
+        "workspace_digest": outcome.workspace_digest,
+    }
+
+
+def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None:
+    """Decode checkpointed verify evidence, rejecting malformed payloads."""
+    if not isinstance(value, Mapping):
+        return None
+    passed = value.get("passed")
+    reason = value.get("reason")
+    output_tail = value.get("output_tail")
+    raw_missing = value.get("missing_artifacts", ())
+    workspace_mutated = value.get("workspace_mutated", False)
+    workspace_digest = value.get("workspace_digest")
+    if not isinstance(passed, bool) or not isinstance(output_tail, str):
+        return None
+    if reason is not None and not isinstance(reason, str):
+        return None
+    if not isinstance(raw_missing, (list, tuple)) or not all(
+        isinstance(item, str) for item in raw_missing
+    ):
+        return None
+    if not isinstance(workspace_mutated, bool):
+        return None
+    if workspace_digest is not None and not isinstance(workspace_digest, str):
+        return None
+    return _VerifyGateOutcome(
+        passed=passed,
+        reason=reason,
+        output_tail=output_tail,
+        missing_artifacts=tuple(raw_missing),
+        workspace_mutated=workspace_mutated,
+        workspace_digest=workspace_digest,
+    )
+
+
+def _checkpoint_result_retry_attempts(
+    results: list[ACExecutionResult],
+) -> dict[str, int]:
+    """Persist each result's actual attempt identity, not scheduler counters."""
+    return {
+        str(result.ac_index): result.retry_attempt
+        for result in results
+        if isinstance(result.retry_attempt, int)
+        and not isinstance(result.retry_attempt, bool)
+        and result.retry_attempt >= 0
+    }
+
+
+def _checkpoint_verify_gate_outcomes(
+    results: list[ACExecutionResult],
+) -> dict[str, dict[str, object]]:
+    """Persist all available per-result verify evidence for crash replay."""
+    serialized: dict[str, dict[str, object]] = {}
+    for result in results:
+        outcome = _serialize_verify_gate_outcome(result.verify_gate_outcome)
+        if outcome is not None:
+            serialized[str(result.ac_index)] = outcome
+    return serialized
 
 
 def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[str, ...]:
@@ -737,6 +1406,8 @@ def _revalidate_cached_verify_gate_outcome(
         reason="expected_artifacts missing: " + ", ".join(missing_artifacts),
         output_tail=outcome.output_tail,
         missing_artifacts=missing_artifacts,
+        workspace_mutated=outcome.workspace_mutated,
+        workspace_digest=outcome.workspace_digest,
     )
 
 
@@ -874,9 +1545,11 @@ def render_parallel_completion_message(
 # =============================================================================
 
 
+@_bind_foundation_a_internal_entry_roots
 class ParallelACExecutor:
     """Executes ACs in parallel based on dependency graph."""
 
+    @_bind_foundation_a_roots(_FOUNDATION_A_CLOSED_ROOTS)
     def __init__(
         self,
         adapter: AgentRuntime,
@@ -900,6 +1573,9 @@ class ParallelACExecutor:
         cross_harness_redispatch: bool | None = None,
         shadow_replay_enabled: bool = False,
         session_signal_hub: SessionSignalHub | None = None,
+        _foundation_a_roots: _FoundationAClosedRoots = _FOUNDATION_A_CLOSED_ROOTS,
+        _foundation_a_internal_entry_roots: _FoundationAInternalEntryRoots | None = None,
+        _foundation_a_internal_entry_roots_are_closed: bool = False,
     ):
         """Initialize executor.
 
@@ -935,6 +1611,10 @@ class ParallelACExecutor:
                 today's single-dispatch behavior; real run paths (CLI `ooo run`
                 via the runner) pass the config value (default 2).
         """
+        if _foundation_a_internal_entry_roots is None:
+            raise ValueError("execution authority internal entry roots are unavailable")
+        internal_entry_roots = _foundation_a_internal_entry_roots
+
         self._adapter = adapter
         self._event_store = event_store
         self._console = console or Console()
@@ -946,6 +1626,7 @@ class ParallelACExecutor:
         )
         self._enable_decomposition = self._decomposition_mode != "off"
         self._max_decomposition_depth = max(0, max_decomposition_depth)
+        self._max_concurrent = max_concurrent
         approval_mode = getattr(adapter, "permission_mode", None)
         self._inherited_runtime_handle = (
             replace(inherited_runtime_handle, approval_mode=approval_mode.strip())
@@ -978,16 +1659,33 @@ class ParallelACExecutor:
         self._shadow_replay_enabled = shadow_replay_enabled
         self._session_signal_hub = session_signal_hub
         self._atomic_verifier = atomic_verifier
-        self._coordinator = LevelCoordinator(
+        # These exact objects are the finite effect-owner roots Foundation A
+        # can bind at runtime. Callable internals remain explicitly volatile;
+        # custom verifiers never become portable through graph inspection.
+        self._authority_verifier = atomic_verifier
+        self._authority_leaf_dispatcher_type = _foundation_a_roots.leaf_dispatcher_type
+        # Construct the leaf once through closed primitive roots, then call the
+        # captured stream implementation directly. A later class ``__init__``
+        # or instance ``stream`` hook cannot replace the immediate dispatcher
+        # effect after the authority check.
+        self._authority_leaf_dispatcher = object.__new__(self._authority_leaf_dispatcher_type)
+        object.__setattr__(self._authority_leaf_dispatcher, "_executor", self)
+        self._authority_leaf_dispatcher_stream = _foundation_a_roots.leaf_dispatcher_stream_root
+        self._authority_transcript_verifier = _foundation_a_roots.transcript_verifier
+        self._coordinator = _foundation_a_roots.level_coordinator_type(
             adapter,
             inherited_runtime_handle=self._inherited_runtime_handle,
             task_cwd=task_cwd,
         )
+        self._authority_coordinator = self._coordinator
+        self._authority_coordinator_review = self._coordinator.run_review
         self._semaphore = anyio.Semaphore(max_concurrent)
+        self._process_local_resume_nonce = uuid4().hex
         self._ac_runtime_handle_manager = ACRuntimeHandleManager(
             adapter,
             event_store,
             task_cwd=task_cwd,
+            process_local_resume_nonce=self._process_local_resume_nonce,
         )
         self._ac_runtime_handles = self._ac_runtime_handle_manager.runtime_handles
         self._event_emitter = ExecutionEventEmitter(
@@ -997,7 +1695,11 @@ class ParallelACExecutor:
         self._checkpoint_store = checkpoint_store
         self._decomposition_decisions: dict[str, DecompositionDecisionRecord] = {}
         self._execution_counters_lock = asyncio.Lock()
-        self._dispatch_rate_gate = self._build_dispatch_rate_gate(adapter)
+        self._dispatch_rate_gate = self._build_dispatch_rate_gate(
+            adapter,
+            rate_gate_factory=_foundation_a_roots.rate_gate_factory,
+        )
+        self._authority_rate_gate_acquire_root = _foundation_a_roots.rate_gate_acquire_root
         # Param degradations already surfaced this run, keyed by (param, support),
         # so the operator is told once rather than on every dispatch.
         self._announced_param_degradations: set[tuple[str, str]] = set()
@@ -1015,9 +1717,161 @@ class ParallelACExecutor:
         self._alt_harness_redispatched_acs: set[str] = set()
         self._alt_harness_status_by_root: dict[int, str] = {}
         self._recovery_exhausted_emitted: set[tuple[str, int]] = set()
+        workspace_builder = object.__getattribute__(
+            self,
+            "_execution_authority_workspace",
+        )
+        policy_builder = object.__getattribute__(
+            self,
+            "_execution_authority_policy",
+        )
+        binding = ExecutionAuthorityLiveBinding.capture(
+            executor=self,
+            adapter=adapter,
+            verifier=atomic_verifier,
+            dispatcher_type=self._authority_leaf_dispatcher_type,
+            dispatcher=self._authority_leaf_dispatcher,
+            dispatcher_executor=self,
+            transcript_verifier=self._authority_transcript_verifier,
+            rate_gate=self._dispatch_rate_gate,
+            workspace=workspace_builder(),
+            execution_policy=policy_builder(),
+            session_signal_hub=self._session_signal_hub,
+            dispatcher_stream_callable=self._authority_leaf_dispatcher_stream,
+            rate_gate_acquire_callable=self._authority_rate_gate_acquire_root,
+            coordinator=self._authority_coordinator,
+            coordinator_review_callable=self._authority_coordinator_review,
+            expected_dispatcher_type=_foundation_a_roots.leaf_dispatcher_type,
+            expected_dispatcher_stream_root=_foundation_a_roots.leaf_dispatcher_stream_root,
+            expected_dispatcher_stream_code=_foundation_a_roots.leaf_dispatcher_stream_code,
+            expected_transcript_verifier=_foundation_a_roots.transcript_verifier,
+            expected_transcript_verifier_code=_foundation_a_roots.transcript_verifier_code,
+            expected_rate_gate_acquire_root=_foundation_a_roots.rate_gate_acquire_root,
+            expected_rate_gate_acquire_code=_foundation_a_roots.rate_gate_acquire_code,
+            expected_rate_gate_type=_foundation_a_roots.rate_gate_type,
+            expected_rate_gate_sleep=_foundation_a_roots.rate_gate_sleep,
+            expected_rate_gate_sleep_code=_foundation_a_roots.rate_gate_sleep_code,
+            expected_rate_gate_bucket_type=_foundation_a_roots.rate_gate_bucket_type,
+            expected_rate_gate_bucket_time=_foundation_a_roots.rate_gate_bucket_time,
+            expected_rate_gate_bucket_enabled_root=(
+                _foundation_a_roots.rate_gate_bucket_enabled_root
+            ),
+            expected_rate_gate_bucket_enabled_code=(
+                _foundation_a_roots.rate_gate_bucket_enabled_code
+            ),
+            expected_rate_gate_bucket_acquire_root=(
+                _foundation_a_roots.rate_gate_bucket_acquire_root
+            ),
+            expected_rate_gate_bucket_acquire_code=(
+                _foundation_a_roots.rate_gate_bucket_acquire_code
+            ),
+            expected_rate_gate_bucket_force_reserve_root=(
+                _foundation_a_roots.rate_gate_bucket_force_reserve_root
+            ),
+            expected_rate_gate_bucket_force_reserve_code=(
+                _foundation_a_roots.rate_gate_bucket_force_reserve_code
+            ),
+            expected_rate_gate_bucket_helper_roots=(
+                _foundation_a_roots.rate_gate_bucket_helper_roots
+            ),
+            expected_coordinator_type=_foundation_a_roots.level_coordinator_type,
+            expected_coordinator_review_root=_foundation_a_roots.level_coordinator_review_root,
+            expected_coordinator_review_code=_foundation_a_roots.level_coordinator_review_code,
+            force_runtime_process_local=(
+                not _foundation_a_internal_entry_roots_are_closed
+                or self._session_signal_hub is not None
+            ),
+        )
+        self._execution_authority_live_binding = binding
+        self._execution_authority = binding.contract
+        internal_entry_invokers = _make_foundation_a_internal_entry_invokers(
+            self,
+            internal_entry_roots,
+        )
+        _register_execution_authority_state(
+            self,
+            _make_execution_authority_guard(
+                self,
+                binding=binding,
+                workspace_builder=workspace_builder,
+                policy_builder=policy_builder,
+                internal_entry_roots=internal_entry_roots,
+            ),
+            internal_entry_invokers,
+        )
+
+    @property
+    def execution_authority(self) -> ExecutionAuthorityContract:
+        """Return the immutable authority snapshot used by this executor."""
+        return self._execution_authority
+
+    def _execution_authority_workspace(self) -> str | None:
+        """Return the finite effect-workspace root for Foundation A."""
+        get_attribute = object.__getattribute__
+        task_cwd = get_attribute(self, "_task_cwd")
+        adapter = get_attribute(self, "_adapter")
+        workspace = task_cwd or getattr(adapter, "working_directory", None)
+        return workspace if isinstance(workspace, str) else None
+
+    def _execution_authority_policy(self) -> dict[str, object]:
+        """Return only static executor policy; attempt inputs stay excluded."""
+        get_attribute = object.__getattribute__
+        adapter = get_attribute(self, "_adapter")
+        coordinator = get_attribute(self, "_coordinator")
+        backend = getattr(adapter, "runtime_backend", None)
+        limits = resolve_backend_limits(backend if isinstance(backend, str) else None)
+        coordinator_effort = getattr(coordinator, "_reasoning_effort", None)
+        return {
+            "version": 1,
+            "decomposition_mode": get_attribute(self, "_decomposition_mode"),
+            "max_decomposition_depth": get_attribute(self, "_max_decomposition_depth"),
+            "max_concurrent": get_attribute(self, "_max_concurrent"),
+            "execution_profile": (
+                get_attribute(self, "_execution_profile").model_dump(mode="json")
+                if get_attribute(self, "_execution_profile") is not None
+                else None
+            ),
+            "fat_harness_mode": get_attribute(self, "_fat_harness_mode"),
+            "run_verify_commands": get_attribute(self, "_run_verify_commands"),
+            "verify_command_timeout_seconds": get_attribute(
+                self,
+                "_verify_command_timeout_seconds",
+            ),
+            "ac_retry_attempts": get_attribute(self, "_ac_retry_attempts"),
+            "reasoning_effort": get_attribute(self, "_reasoning_effort"),
+            "coordinator_reasoning_effort": coordinator_effort,
+            "model_routing": serialize_model_router(get_attribute(self, "_model_router")),
+            "cross_harness_redispatch": get_attribute(
+                self,
+                "_cross_harness_redispatch_enabled",
+            ),
+            "shadow_replay_enabled": get_attribute(self, "_shadow_replay_enabled"),
+            "session_signal_hub_enabled": get_attribute(self, "_session_signal_hub") is not None,
+            "dispatch_rate": {
+                "algorithm": "rate-limit-gate/v1",
+                "backend": backend if isinstance(backend, str) else None,
+                "self_governs_rate_limit": getattr(
+                    adapter,
+                    "self_governs_rate_limit",
+                    False,
+                ),
+                "requests_per_minute": limits.requests_per_minute,
+                "tokens_per_minute": limits.tokens_per_minute,
+            },
+        }
+
+    def _require_execution_authority_intact(self) -> None:
+        """Fail closed when an enumerated live effect-owner root drifts."""
+        _invoke_execution_authority_guard(self)
 
     @staticmethod
-    def _build_dispatch_rate_gate(adapter: AgentRuntime) -> RateLimitGate:
+    def _build_dispatch_rate_gate(
+        adapter: AgentRuntime,
+        *,
+        rate_gate_factory: Callable[
+            ..., RateLimitGate
+        ] = _FOUNDATION_A_CLOSED_ROOTS.rate_gate_factory,
+    ) -> RateLimitGate:
         """Build the shared dispatch rate gate for non-self-governing backends.
 
         Ouroboros — not the runtime — paces delivery within the backend's
@@ -1032,10 +1886,14 @@ class ParallelACExecutor:
         backend = backend_attr if isinstance(backend_attr, str) and backend_attr else "unknown"
 
         if getattr(adapter, "self_governs_rate_limit", False):
-            return build_rate_limit_gate(backend, request_limit=None, token_limit=None)
+            return rate_gate_factory(
+                backend,
+                request_limit=None,
+                token_limit=None,
+            )
 
         limits = resolve_backend_limits(backend)
-        return build_rate_limit_gate(
+        return rate_gate_factory(
             backend,
             request_limit=limits.requests_per_minute,
             token_limit=limits.tokens_per_minute,
@@ -1054,9 +1912,7 @@ class ParallelACExecutor:
         workers (they share this executor's single gate instance) and logs each
         backoff for observability.
         """
-        if not self._dispatch_rate_gate.enabled:
-            return
-
+        _invoke_execution_authority_guard(self)
         estimated_tokens = estimate_runtime_request_tokens(prompt, system_prompt=system_prompt)
 
         def _log_backoff(backoff: RateLimitBackoff) -> None:
@@ -1072,7 +1928,14 @@ class ParallelACExecutor:
                 token_limit=backoff.snapshot.token_limit,
             )
 
-        await self._dispatch_rate_gate.acquire(estimated_tokens, on_backoff=_log_backoff)
+        await self._authority_rate_gate_acquire_root(
+            self._dispatch_rate_gate,
+            estimated_tokens,
+            on_backoff=_log_backoff,
+        )
+        # Rate admission can suspend. Revalidate before returning to a caller
+        # that will dispatch to the runtime immediately afterwards.
+        _invoke_execution_authority_guard(self)
 
     def _announce_param_degradations(
         self,
@@ -1277,6 +2140,8 @@ class ParallelACExecutor:
         sub_ac_index: int | None = None,
         node_identity: ExecutionNodeIdentity | None = None,
         retry_attempt: int = 0,
+        expected_capsule_fingerprint: str | None = None,
+        expected_process_local_resume_nonce: str | None = None,
     ) -> RuntimeHandle | None:
         return await self._ac_runtime_handle_manager._load_persisted_ac_runtime_handle(
             ac_index,
@@ -1286,6 +2151,8 @@ class ParallelACExecutor:
             sub_ac_index=sub_ac_index,
             node_identity=node_identity,
             retry_attempt=retry_attempt,
+            expected_capsule_fingerprint=expected_capsule_fingerprint,
+            expected_process_local_resume_nonce=expected_process_local_resume_nonce,
         )
 
     def _remember_ac_runtime_handle(
@@ -1466,6 +2333,7 @@ class ParallelACExecutor:
         runtime_handle: RuntimeHandle | None,
         execution_id: str | None = None,
         session_id: str | None = None,
+        orchestrator_session_id: str | None = None,
         result_summary: str | None = None,
         success: bool | None = None,
         error: str | None = None,
@@ -1477,6 +2345,7 @@ class ParallelACExecutor:
             runtime_handle=runtime_handle,
             execution_id=execution_id,
             session_id=session_id,
+            orchestrator_session_id=orchestrator_session_id,
             result_summary=result_summary,
             success=success,
             error=error,
@@ -1564,7 +2433,9 @@ class ParallelACExecutor:
             async with self._semaphore:
                 try:
                     ac_criterion = seed.acceptance_criteria[ac_idx]
-                    batch_results[idx] = await self._execute_single_ac(
+                    batch_results[idx] = await _invoke_execution_authority_entry(
+                        self,
+                        _FOUNDATION_A_ENTRY_EXECUTE_SINGLE_AC,
                         ac_index=ac_idx,
                         ac_content=ac_text(ac_criterion),
                         session_id=session_id,
@@ -1657,6 +2528,13 @@ class ParallelACExecutor:
         blocked_indices: set[int] = set()
         stage_results: list[ParallelExecutionStageResult] = []
         level_contexts = list(reconciled_level_contexts or [])
+        # A coordinator is an effectful writer.  Acceptance evidence collected
+        # before that writer runs is not authoritative until the settled
+        # workspace has been checked again at the final boundary.
+        coordinator_mutated_workspace = False
+        post_coordinator_revalidation_required = False
+        post_coordinator_revalidated = False
+        post_coordinator_revalidation_workspace_digest: str | None = None
 
         total_levels = execution_plan.total_stages
         total_acs = len(seed.acceptance_criteria)
@@ -1679,12 +2557,71 @@ class ParallelACExecutor:
                 load_result = self._checkpoint_store.load(seed_id)
                 if hasattr(load_result, "is_ok") and load_result.is_ok and load_result.value:
                     cp = load_result.value
-                    if cp.phase == "parallel_execution":
+                    checkpoint_state = cp.state if isinstance(cp.state, Mapping) else {}
+                    current_workspace_identity = canonical_workspace_authority(
+                        self._task_cwd
+                        or getattr(self._adapter, "working_directory", None)
+                        or os.getcwd()
+                    )
+                    checkpoint_matches_invocation = (
+                        cp.seed_id == seed_id
+                        and cp.phase == "parallel_execution"
+                        and checkpoint_state.get("session_id") == session_id
+                        and checkpoint_state.get("execution_id") == execution_id
+                        and checkpoint_state.get("workspace_identity") == current_workspace_identity
+                    )
+                    if checkpoint_matches_invocation:
+                        coordinator_mutated_workspace = bool(
+                            checkpoint_state.get("coordinator_mutated_workspace", False)
+                        )
+                        post_coordinator_revalidation_required = bool(
+                            checkpoint_state.get("post_coordinator_revalidation_required", False)
+                        )
+                        post_coordinator_revalidated = bool(
+                            checkpoint_state.get("post_coordinator_revalidated", False)
+                        )
+                        raw_final_digest = checkpoint_state.get(
+                            "final_workspace_digest",
+                            checkpoint_state.get("post_coordinator_revalidation_workspace_digest"),
+                        )
+                        if isinstance(raw_final_digest, str) and raw_final_digest:
+                            post_coordinator_revalidation_workspace_digest = raw_final_digest
+                        # A checkpoint may have been written before the final
+                        # revalidation.  Never let its provisional successes be
+                        # accepted on recovery without replaying that boundary.
+                        if post_coordinator_revalidation_required:
+                            current_digest = self._workspace_content_digest(
+                                self._task_cwd
+                                or getattr(self._adapter, "working_directory", None)
+                                or os.getcwd()
+                            )
+                            if (
+                                not post_coordinator_revalidated
+                                or current_digest is None
+                                or current_digest != post_coordinator_revalidation_workspace_digest
+                            ):
+                                coordinator_mutated_workspace = True
+                                post_coordinator_revalidated = False
                         resume_from_level = cp.state.get("completed_levels", 0)
                         for idx, status in cp.state.get("ac_statuses", {}).items():
                             ac_statuses[int(idx)] = status
+                        for idx, retry_attempt in checkpoint_state.get(
+                            "ac_retry_attempts", {}
+                        ).items():
+                            if (
+                                isinstance(retry_attempt, int)
+                                and not isinstance(retry_attempt, bool)
+                                and retry_attempt >= 0
+                            ):
+                                ac_retry_attempts[int(idx)] = retry_attempt
+                        raw_result_retry_attempts = checkpoint_state.get(
+                            "result_retry_attempts", {}
+                        )
+                        raw_verify_gate_outcomes = checkpoint_state.get("verify_gate_outcomes", {})
                         for idx in cp.state.get("failed_indices", []):
                             failed_indices.add(int(idx))
+                        for idx in checkpoint_state.get("blocked_indices", []):
+                            blocked_indices.add(int(idx))
                         completed_count = cp.state.get("completed_count", 0)
                         # Restore level contexts so subsequent levels
                         # have access to completed levels' output
@@ -1706,13 +2643,58 @@ class ParallelACExecutor:
                             restored_contexts=len(level_contexts),
                         )
                         # Reconstruct all_results for completed/failed/skipped ACs.
+                        restored_outcomes = checkpoint_state.get(
+                            "revalidated_ac_outcomes",
+                            checkpoint_state.get("ac_outcomes", {}),
+                        )
                         for prev_stage in execution_plan.stages[:resume_from_level]:
                             for ac_idx in self._get_stage_ac_indices(prev_stage):
                                 if ac_idx >= total_acs:
                                     continue
                                 status = ac_statuses.get(ac_idx, "pending")
-                                is_completed = status == "completed"
+                                raw_outcome = (
+                                    restored_outcomes.get(str(ac_idx))
+                                    if isinstance(restored_outcomes, Mapping)
+                                    else None
+                                )
+                                outcome = (
+                                    raw_outcome
+                                    if isinstance(raw_outcome, str)
+                                    and raw_outcome
+                                    in {
+                                        "succeeded",
+                                        "satisfied_externally",
+                                        "failed",
+                                        "blocked",
+                                        "invalid",
+                                    }
+                                    else (
+                                        "succeeded"
+                                        if status == "completed"
+                                        else "blocked"
+                                        if status == "skipped"
+                                        else "failed"
+                                    )
+                                )
+                                is_completed = outcome in {"succeeded", "satisfied_externally"}
                                 is_skipped = status == "skipped"
+                                raw_result_retry_attempt = (
+                                    raw_result_retry_attempts.get(str(ac_idx))
+                                    if isinstance(raw_result_retry_attempts, Mapping)
+                                    else None
+                                )
+                                restored_retry_attempt = (
+                                    raw_result_retry_attempt
+                                    if isinstance(raw_result_retry_attempt, int)
+                                    and not isinstance(raw_result_retry_attempt, bool)
+                                    and raw_result_retry_attempt >= 0
+                                    else ac_retry_attempts.get(ac_idx, 0)
+                                )
+                                raw_verify_gate = (
+                                    raw_verify_gate_outcomes.get(str(ac_idx))
+                                    if isinstance(raw_verify_gate_outcomes, Mapping)
+                                    else None
+                                )
                                 all_results.append(
                                     ACExecutionResult(
                                         ac_index=ac_idx,
@@ -1723,18 +2705,29 @@ class ParallelACExecutor:
                                         ),
                                         error=(
                                             "Skipped: dependency failed"
-                                            if is_skipped
+                                            if outcome == "blocked" or is_skipped
                                             else None
                                             if is_completed
                                             else "Failed (restored from checkpoint)"
                                         ),
-                                        retry_attempt=ac_retry_attempts.get(ac_idx, 0),
+                                        retry_attempt=restored_retry_attempt,
+                                        outcome=ACExecutionOutcome(outcome),
+                                        verify_gate_outcome=_deserialize_verify_gate_outcome(
+                                            raw_verify_gate
+                                        ),
                                     )
                                 )
                         self._console.print(
                             f"[cyan]Resuming from level {resume_from_level + 1} "
                             f"(checkpoint recovered, "
                             f"{len(level_contexts)} level context(s) restored)[/cyan]"
+                        )
+                    elif cp.phase == "parallel_execution":
+                        log.info(
+                            "parallel_executor.recovery.checkpoint_identity_mismatch",
+                            seed_id=seed_id,
+                            session_id=session_id,
+                            execution_id=execution_id,
                         )
             except Exception as e:
                 log.warning(
@@ -1887,13 +2880,19 @@ class ParallelACExecutor:
                     # failure, execute the AC normally instead.
                     spec = seed.acceptance_criteria[ac_idx]
                     verification_status = "assumed"
+                    gate: _VerifyGateOutcome | None = None
                     if (
                         self._run_verify_commands
                         and isinstance(spec, AcceptanceCriterionSpec)
                         and (spec.verify_command or spec.expected_artifacts)
                     ):
                         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
-                        gate = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+                        gate = await _invoke_execution_authority_entry(
+                            self,
+                            _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
+                            spec=spec,
+                            cwd=cwd,
+                        )
                         if not gate.passed:
                             executable.append(ac_idx)
                             log.info(
@@ -1921,9 +2920,16 @@ class ParallelACExecutor:
                         final_message="\n".join(notes),
                         retry_attempt=ac_retry_attempts[ac_idx],
                         outcome=ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                        verify_gate_outcome=gate,
                     )
                     all_results.append(satisfied_result)
                     stage_ac_results.append(satisfied_result)
+                    await self._emit_ac_attempt_judged(
+                        result=satisfied_result,
+                        root_ac_index=ac_idx,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
                     ac_statuses[ac_idx] = "completed"
                     completed_count += 1
                     level_success += 1
@@ -1947,6 +2953,12 @@ class ParallelACExecutor:
                     )
                     all_results.append(blocked_result)
                     stage_ac_results.append(blocked_result)
+                    await self._emit_ac_attempt_judged(
+                        result=blocked_result,
+                        root_ac_index=ac_idx,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
                     blocked_indices.add(ac_idx)
                     ac_statuses[ac_idx] = "skipped"
                     log.info(
@@ -2055,6 +3067,12 @@ class ParallelACExecutor:
                             failed_indices.add(ac_idx)
                             level_failed += 1
                             ac_statuses[ac_idx] = "failed"
+                            await self._emit_ac_attempt_judged(
+                                result=ac_result,
+                                root_ac_index=ac_idx,
+                                session_id=session_id,
+                                execution_id=execution_id,
+                            )
 
                             log.error(
                                 "parallel_executor.ac.exception",
@@ -2090,6 +3108,12 @@ class ParallelACExecutor:
                             failed_indices.add(ac_idx)
                             level_failed += 1
                             ac_statuses[ac_idx] = "failed"
+                            await self._emit_ac_attempt_judged(
+                                result=ac_result,
+                                root_ac_index=ac_idx,
+                                session_id=session_id,
+                                execution_id=execution_id,
+                            )
                             log.error(
                                 "parallel_executor.ac.stall_abandoned",
                                 session_id=session_id,
@@ -2211,12 +3235,32 @@ class ParallelACExecutor:
                             level=level_num,
                             conflicts=conflicts,
                         )
-                        review = await self._coordinator.run_review(
+                        _invoke_execution_authority_guard(self)
+                        workspace_root = (
+                            self._task_cwd or self._adapter.working_directory or os.getcwd()
+                        )
+                        workspace_before = self._workspace_content_digest(workspace_root)
+                        review = await self._authority_coordinator_review(
                             execution_id=execution_id,
                             conflicts=conflicts,
                             level_context=level_ctx,
                             level_number=level_num,
                         )
+                        workspace_after = self._workspace_content_digest(workspace_root)
+                        workspace_changed = (
+                            workspace_before is None
+                            or workspace_after is None
+                            or workspace_before != workspace_after
+                        )
+                        coordinator_mutated_workspace = (
+                            coordinator_mutated_workspace
+                            or workspace_changed
+                            or self._coordinator_review_may_mutate_workspace(review)
+                        )
+                        if coordinator_mutated_workspace:
+                            post_coordinator_revalidation_required = True
+                            post_coordinator_revalidated = False
+                            post_coordinator_revalidation_workspace_digest = None
                         await self._emit_coordinator_runtime_events(
                             execution_id=execution_id,
                             session_id=session_id,
@@ -2255,9 +3299,43 @@ class ParallelACExecutor:
                             state={
                                 "session_id": session_id,
                                 "execution_id": execution_id,
+                                "workspace_identity": canonical_workspace_authority(
+                                    self._task_cwd
+                                    or getattr(self._adapter, "working_directory", None)
+                                    or os.getcwd()
+                                ),
+                                "coordinator_mutated_workspace": coordinator_mutated_workspace,
+                                "post_coordinator_revalidation_required": (
+                                    post_coordinator_revalidation_required
+                                ),
+                                "post_coordinator_revalidated": post_coordinator_revalidated,
+                                "post_coordinator_revalidation_workspace_digest": (
+                                    post_coordinator_revalidation_workspace_digest
+                                ),
+                                "final_workspace_digest": (
+                                    post_coordinator_revalidation_workspace_digest
+                                ),
                                 "completed_levels": level_idx + 1,
                                 "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
+                                "ac_retry_attempts": {
+                                    str(k): v for k, v in ac_retry_attempts.items()
+                                },
+                                "result_retry_attempts": _checkpoint_result_retry_attempts(
+                                    all_results
+                                ),
+                                "verify_gate_outcomes": _checkpoint_verify_gate_outcomes(
+                                    all_results
+                                ),
+                                "ac_outcomes": {
+                                    str(result.ac_index): (
+                                        result.outcome.value
+                                        if result.outcome is not None
+                                        else ("succeeded" if result.success else "failed")
+                                    )
+                                    for result in all_results
+                                },
                                 "failed_indices": sorted(failed_indices),
+                                "blocked_indices": sorted(blocked_indices),
                                 "completed_count": completed_count,
                                 "level_contexts": serialize_level_contexts(level_contexts),
                                 "decomposition_decisions": {
@@ -2299,6 +3377,153 @@ class ParallelACExecutor:
             # All levels done — cancel the background progress emitter
             outer_tg.cancel_scope.cancel()
 
+        needs_post_coordinator_revalidation = (
+            coordinator_mutated_workspace and not post_coordinator_revalidated
+        ) or (post_coordinator_revalidation_required and not post_coordinator_revalidated)
+        if needs_post_coordinator_revalidation:
+            # The coordinator may have edited files after a worker's verify
+            # gate passed.  Reconcile every success contract against the
+            # settled workspace; arbitrary verify_command contracts are not
+            # replayed because no deterministic external-effect boundary exists.
+            all_results = await self._revalidate_results_after_coordinator(
+                seed=seed,
+                results=all_results,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            post_coordinator_revalidation_required = True
+            post_coordinator_revalidated = True
+            post_coordinator_revalidation_workspace_digest = self._workspace_content_digest(
+                self._task_cwd or self._adapter.working_directory or os.getcwd()
+            )
+            if post_coordinator_revalidation_workspace_digest is None:
+                # The final evidence must be bound to a readable workspace. A
+                # successful command without a final digest is not durable
+                # acceptance evidence.
+                final_digest_error = (
+                    "Final workspace digest unavailable after coordinator revalidation."
+                )
+                all_results = [
+                    replace(
+                        result,
+                        success=False,
+                        error=final_digest_error,
+                        final_message=final_digest_error,
+                        outcome=ACExecutionOutcome.FAILED,
+                    )
+                    if result.success
+                    and result.outcome
+                    in {
+                        ACExecutionOutcome.SUCCEEDED,
+                        ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                    }
+                    else result
+                    for result in all_results
+                ]
+            by_index = {result.ac_index: result for result in all_results}
+            stage_results = [
+                replace(
+                    stage,
+                    results=tuple(
+                        by_index.get(result.ac_index, result) for result in stage.results
+                    ),
+                )
+                for stage in stage_results
+            ]
+
+            # Persist the post-coordinator verdict after, not before, the
+            # revalidation.  A crash after the old checkpoint write therefore
+            # resumes through this same boundary instead of reviving stale ACs.
+            if self._checkpoint_store:
+                try:
+                    from ouroboros.persistence.checkpoint import CheckpointData
+
+                    seed_id = getattr(seed, "id", session_id)
+                    checkpoint = CheckpointData.create(
+                        seed_id=seed_id,
+                        phase="parallel_execution",
+                        state={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "workspace_identity": canonical_workspace_authority(
+                                self._task_cwd
+                                or getattr(self._adapter, "working_directory", None)
+                                or os.getcwd()
+                            ),
+                            "coordinator_mutated_workspace": coordinator_mutated_workspace,
+                            "post_coordinator_revalidation_required": (
+                                post_coordinator_revalidation_required
+                            ),
+                            "post_coordinator_revalidated": post_coordinator_revalidated,
+                            "post_coordinator_revalidation_workspace_digest": (
+                                post_coordinator_revalidation_workspace_digest
+                            ),
+                            "final_workspace_digest": post_coordinator_revalidation_workspace_digest,
+                            "completed_levels": total_levels,
+                            "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
+                            "ac_retry_attempts": {str(k): v for k, v in ac_retry_attempts.items()},
+                            "result_retry_attempts": _checkpoint_result_retry_attempts(all_results),
+                            "verify_gate_outcomes": _checkpoint_verify_gate_outcomes(all_results),
+                            "ac_outcomes": {
+                                str(result.ac_index): (
+                                    result.outcome.value
+                                    if result.outcome is not None
+                                    else ("succeeded" if result.success else "failed")
+                                )
+                                for result in all_results
+                            },
+                            "revalidated_ac_outcomes": {
+                                str(result.ac_index): (
+                                    result.outcome.value
+                                    if result.outcome is not None
+                                    else ("succeeded" if result.success else "failed")
+                                )
+                                for result in all_results
+                            },
+                            "failed_indices": sorted(failed_indices),
+                            "blocked_indices": sorted(blocked_indices),
+                            "completed_count": completed_count,
+                            "level_contexts": serialize_level_contexts(level_contexts),
+                            "decomposition_decisions": {
+                                node_id: record.to_dict()
+                                for node_id, record in self._decomposition_decisions.items()
+                            },
+                        },
+                    )
+                    save_result = self._checkpoint_store.save(checkpoint)
+                    if not getattr(save_result, "is_ok", False):
+                        log.warning(
+                            "parallel_executor.final_revalidation_checkpoint_save_failed",
+                            seed_id=seed_id,
+                            error=str(getattr(save_result, "error", "unknown error")),
+                        )
+                except Exception as exc:
+                    log.warning(
+                        "parallel_executor.final_revalidation_checkpoint_save_failed",
+                        error=str(exc),
+                    )
+
+        # All ACs have now finished (including any coordinator reconciliation).
+        # Reconcile verify evidence against the settled shared workspace before
+        # the runner constructs the terminal acceptance plan.
+        all_results = await self._settle_verify_gate_results(
+            seed=seed,
+            results=all_results,
+            session_id=session_id,
+            execution_id=execution_id,
+            coordinator_revalidated=post_coordinator_revalidated,
+        )
+        settled_by_index = {result.ac_index: result for result in all_results}
+        stage_results = [
+            replace(
+                stage,
+                results=tuple(
+                    settled_by_index.get(result.ac_index, result) for result in stage.results
+                ),
+            )
+            for stage in stage_results
+        ]
+
         # Aggregate results - sort by AC index for consistent ordering
         sorted_results = sorted(all_results, key=lambda r: r.ac_index)
         total_duration = (datetime.now(UTC) - start_time).total_seconds()
@@ -2338,6 +3563,421 @@ class ParallelACExecutor:
             total_messages=total_messages,
             total_duration_seconds=total_duration,
         )
+
+    @staticmethod
+    def _coordinator_review_may_mutate_workspace(review: Any) -> bool:
+        """Return whether a coordinator review could have changed the workspace.
+
+        Coordinator sessions are allowed to use ``Edit`` and ``Bash``.  The
+        structured review summary is not treated as proof of a mutation: a
+        model can report a proposed fix without applying one.  The caller also
+        compares workspace digests around the review, so direct writes remain
+        observable even when a runtime omits tool messages.
+        """
+        if review is None:
+            return False
+        for message in getattr(review, "messages", ()) or ():
+            if getattr(message, "tool_name", None) in {"Write", "Edit", "Bash"}:
+                return True
+        return False
+
+    @staticmethod
+    def _workspace_content_digest(cwd: str) -> str | None:
+        """Hash the observable workspace tree for coordinator mutation checks.
+
+        The digest intentionally excludes runtime/cache directories that are
+        not part of the task workspace contract.  Read failures return
+        ``None`` so the caller fails closed instead of trusting pre-coordinator
+        evidence it could not compare.
+        """
+        ignored_directories = {
+            ".git",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".venv",
+            "node_modules",
+        }
+        try:
+            root = Path(cwd).expanduser().resolve(strict=False)
+            if not root.is_dir():
+                return hashlib.sha256(
+                    f"missing-workspace\0{root}".encode("utf-8", "surrogateescape")
+                ).hexdigest()
+            digest = hashlib.sha256()
+            paths = sorted(root.rglob("*"), key=lambda path: path.as_posix())
+            for path in paths:
+                relative = path.relative_to(root)
+                if any(part in ignored_directories for part in relative.parts):
+                    continue
+                try:
+                    stat = path.lstat()
+                    if path.is_symlink():
+                        digest.update(b"L\0")
+                        digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
+                        digest.update(b"\0")
+                        digest.update(os.readlink(path).encode("utf-8", "surrogateescape"))
+                    elif path.is_dir():
+                        # Empty-directory creation/removal is observable workspace
+                        # state.  Hash a directory marker as well as its mode so a
+                        # coordinator cannot evade revalidation by only changing
+                        # the tree shape.
+                        digest.update(b"D\0")
+                        digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
+                        digest.update(b"\0")
+                        digest.update(str(stat.st_mode).encode("ascii"))
+                    elif path.is_file():
+                        digest.update(b"F\0")
+                        digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
+                        digest.update(b"\0")
+                        digest.update(str(stat.st_mode).encode("ascii"))
+                        digest.update(b"\0")
+                        with path.open("rb") as handle:
+                            while chunk := handle.read(1024 * 1024):
+                                digest.update(chunk)
+                except (OSError, ValueError):
+                    return None
+            return digest.hexdigest()
+        except (OSError, ValueError):
+            return None
+
+    async def _revalidate_results_after_coordinator(
+        self,
+        *,
+        seed: Seed,
+        results: list[ACExecutionResult],
+        session_id: str,
+        execution_id: str,
+    ) -> list[ACExecutionResult]:
+        """Bind successful ACs to the workspace settled by the coordinator.
+
+        A cached command result is intentionally not replayed here.  The
+        coordinator is an effectful writer and can invalidate a previously
+        passing command after the worker-level gate, while an unrestricted
+        shell replay could duplicate external effects.  Command-bearing ACs
+        therefore fail closed; artifact-only contracts are checked against the
+        settled workspace and description-only ACs fail closed because no
+        independent post-mutation contract exists.
+        """
+        from ouroboros.events.base import BaseEvent
+
+        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+        revalidated: list[ACExecutionResult] = []
+        for result in results:
+            if not result.success or result.outcome not in {
+                ACExecutionOutcome.SUCCEEDED,
+                ACExecutionOutcome.SATISFIED_EXTERNALLY,
+            }:
+                revalidated.append(result)
+                continue
+
+            spec = (
+                seed.acceptance_criteria[result.ac_index]
+                if 0 <= result.ac_index < len(seed.acceptance_criteria)
+                else None
+            )
+            has_contract = isinstance(spec, AcceptanceCriterionSpec) and bool(
+                spec.verify_command or spec.expected_artifacts
+            )
+            if not self._run_verify_commands or not has_contract:
+                reason = (
+                    "Final workspace changed during coordinator reconciliation; "
+                    "the AC has no deterministic post-coordinator success contract."
+                )
+                await self._safe_emit_event(
+                    BaseEvent(
+                        type="execution.verify.failed",
+                        aggregate_type="execution",
+                        aggregate_id=execution_id or session_id,
+                        data={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "ac_index": result.ac_index,
+                            "reason": reason,
+                            "failure_class": "evidence_missing",
+                            "final_workspace_revalidation": True,
+                        },
+                    )
+                )
+                revalidated.append(
+                    replace(
+                        result,
+                        success=False,
+                        error=reason,
+                        final_message=reason,
+                        outcome=ACExecutionOutcome.FAILED,
+                    )
+                )
+                continue
+
+            if spec.verify_command:
+                # A verify command is an arbitrary shell contract and may have
+                # external effects that the workspace digest cannot observe.
+                # Never replay it after a coordinator mutation; fail closed at
+                # this boundary instead of executing an effectful command twice.
+                reason = (
+                    "Final acceptance rejected because the coordinator changed the "
+                    "workspace and replaying verify_command is not permitted."
+                )
+                await self._safe_emit_event(
+                    BaseEvent(
+                        type="execution.verify.failed",
+                        aggregate_type="execution",
+                        aggregate_id=execution_id or session_id,
+                        data={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "ac_index": result.ac_index,
+                            "verify_command": spec.verify_command,
+                            "expected_artifacts": list(spec.expected_artifacts),
+                            "reason": reason,
+                            "failure_class": "evidence_missing",
+                            "final_workspace_revalidation": True,
+                            "verify_replay_blocked": True,
+                        },
+                    )
+                )
+                revalidated.append(
+                    replace(
+                        result,
+                        success=False,
+                        error=reason,
+                        final_message=reason,
+                        outcome=ACExecutionOutcome.FAILED,
+                    )
+                )
+                continue
+
+            missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
+            if missing_artifacts:
+                reason = "Final expected_artifacts missing: " + ", ".join(missing_artifacts)
+                revalidated.append(
+                    replace(
+                        result,
+                        success=False,
+                        error=reason,
+                        final_message=reason,
+                        outcome=ACExecutionOutcome.FAILED,
+                    )
+                )
+                continue
+
+            revalidated.append(
+                replace(
+                    result,
+                    verify_gate_outcome=_VerifyGateOutcome(
+                        passed=True,
+                        reason=None,
+                        output_tail="",
+                        workspace_digest=self._workspace_content_digest(cwd),
+                    ),
+                )
+            )
+
+        return revalidated
+
+    async def _settle_verify_gate_results(
+        self,
+        *,
+        seed: Seed,
+        results: list[ACExecutionResult],
+        session_id: str,
+        execution_id: str,
+        coordinator_revalidated: bool = False,
+    ) -> list[ACExecutionResult]:
+        """Fail closed when final shared-workspace evidence is no longer valid.
+
+        Verify gates run as each AC completes, while later ACs can still touch
+        the same workspace.  Before terminal acceptance, re-check every
+        successful contract's artifact leg and cached workspace identity. A
+        stale command result is rejected rather than replayed because an
+        unrestricted shell command may have effects outside the workspace.
+        Invalidate the complete success set when any verify command was
+        observed mutating the workspace.
+        """
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+
+        if not self._run_verify_commands:
+            return results
+
+        successful_contracts: dict[int, AcceptanceCriterionSpec] = {}
+        verify_mutated_workspace = False
+        for result in results:
+            outcome = result.verify_gate_outcome
+            verify_mutated_workspace = verify_mutated_workspace or bool(
+                isinstance(outcome, _VerifyGateOutcome) and outcome.workspace_mutated
+            )
+            if not result.success or not (0 <= result.ac_index < len(seed.acceptance_criteria)):
+                continue
+            spec = seed.acceptance_criteria[result.ac_index]
+            if isinstance(spec, AcceptanceCriterionSpec) and (
+                spec.verify_command or spec.expected_artifacts
+            ):
+                successful_contracts[result.ac_index] = spec
+
+        if not successful_contracts and not verify_mutated_workspace:
+            return results
+
+        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+        final_digest = self._workspace_content_digest(cwd)
+        settled: list[ACExecutionResult] = []
+        individual_failures: dict[int, tuple[str, _VerifyGateOutcome | None]] = {}
+
+        for result in results:
+            if not result.success:
+                settled.append(result)
+                continue
+
+            spec = successful_contracts.get(result.ac_index)
+            if spec is None:
+                # A mutating final verifier invalidates all successes, including
+                # description-only ACs.  Defer the replacement until every
+                # final verifier has been inspected.
+                settled.append(result)
+                continue
+
+            if verify_mutated_workspace:
+                # Once one final verifier has changed (or made unreadable) the
+                # workspace, do not execute any additional arbitrary commands.
+                # The complete success set will be invalidated below.
+                settled.append(result)
+                continue
+
+            outcome = result.verify_gate_outcome
+            if not isinstance(outcome, _VerifyGateOutcome):
+                individual_failures[result.ac_index] = (
+                    "Final verify gate evidence is unavailable for acceptance.",
+                    None,
+                )
+                settled.append(result)
+                continue
+
+            if not outcome.passed:
+                individual_failures[result.ac_index] = (
+                    f"Final workspace verify gate failed: {outcome.reason}",
+                    outcome,
+                )
+                settled.append(result)
+                continue
+
+            missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
+            if final_digest is None:
+                individual_failures[result.ac_index] = (
+                    "Final workspace digest unavailable for acceptance evidence.",
+                    outcome,
+                )
+                settled.append(result)
+                continue
+            if missing_artifacts:
+                individual_failures[result.ac_index] = (
+                    "Final expected_artifacts missing: " + ", ".join(missing_artifacts),
+                    outcome,
+                )
+                settled.append(result)
+                continue
+
+            if spec.verify_command:
+                if coordinator_revalidated:
+                    # Coordinator revalidation deliberately refuses to replay
+                    # arbitrary shell contracts.  A command-bearing success
+                    # that survived that boundary is therefore not admissible.
+                    individual_failures[result.ac_index] = (
+                        "Final acceptance rejected because coordinator revalidation "
+                        "did not replay verify_command.",
+                        outcome,
+                    )
+                    settled.append(result)
+                    continue
+
+                cached_digest = outcome.workspace_digest
+                if cached_digest is None:
+                    individual_failures[result.ac_index] = (
+                        "Final verify gate workspace digest unavailable for acceptance.",
+                        outcome,
+                    )
+                    settled.append(result)
+                    continue
+
+                if cached_digest != final_digest:
+                    # A later worker changed the workspace after this command
+                    # passed.  Do not replay an unrestricted shell contract:
+                    # effects outside the workspace (DB/API/deployment writes)
+                    # cannot be detected by the digest.  The stale evidence is
+                    # therefore rejected at the final boundary.
+                    individual_failures[result.ac_index] = (
+                        "Final acceptance rejected because the workspace changed "
+                        "after verify_command completed; replaying verify_command "
+                        "is not permitted.",
+                        outcome,
+                    )
+                    settled.append(result)
+                    continue
+
+            settled.append(result)
+
+        if verify_mutated_workspace:
+            # A verifier is an observation boundary, not another writer.  If
+            # any final verifier changed the shared workspace (or its digest
+            # became unreadable), every success observed before or after that
+            # command is stale.  Fail closed for the complete finalization set.
+            mutation_reason = (
+                "Final acceptance rejected because a verify_command mutated the "
+                "workspace or its digest could not be revalidated."
+            )
+            individual_failures = {
+                result.ac_index: (mutation_reason, result.verify_gate_outcome)
+                for result in settled
+                if result.success
+            }
+
+        finalized: list[ACExecutionResult] = []
+        for result in settled:
+            failure = individual_failures.get(result.ac_index)
+            if failure is None:
+                finalized.append(result)
+                continue
+            reason, outcome = failure
+            spec = successful_contracts.get(result.ac_index)
+            missing_artifacts = (
+                list(outcome.missing_artifacts) if isinstance(outcome, _VerifyGateOutcome) else []
+            )
+            await self._safe_emit_event(
+                BaseEvent(
+                    type="execution.verify.failed",
+                    aggregate_type="execution",
+                    aggregate_id=execution_id or session_id,
+                    data={
+                        "session_id": session_id,
+                        "execution_id": execution_id,
+                        "ac_index": result.ac_index,
+                        "ac_content": result.ac_content,
+                        "verify_command": spec.verify_command if spec is not None else None,
+                        "expected_artifacts": (
+                            list(spec.expected_artifacts) if spec is not None else []
+                        ),
+                        "missing_artifacts": missing_artifacts,
+                        "reason": reason,
+                        "failure_class": FailureClass.EVIDENCE_MISSING.value,
+                        "final_workspace_revalidation": True,
+                    },
+                )
+            )
+            finalized.append(
+                replace(
+                    result,
+                    success=False,
+                    error=reason,
+                    final_message=reason,
+                    outcome=ACExecutionOutcome.FAILED,
+                    atomic_verifier_verdict=VerifierVerdict(
+                        passed=False,
+                        reasons=(reason,),
+                        failure_class=FailureClass.EVIDENCE_MISSING.value,
+                    ),
+                )
+            )
+        return finalized
 
     def _coerce_decomposition_decision(
         self,
@@ -2488,7 +4128,9 @@ class ParallelACExecutor:
                     status="executing",
                     node_identity=child_node_identity,
                 )
-                sub_results[idx] = await self._execute_single_ac(
+                sub_results[idx] = await _invoke_execution_authority_entry(
+                    self,
+                    _FOUNDATION_A_ENTRY_EXECUTE_SINGLE_AC,
                     ac_index=ac_index * 100 + idx,
                     ac_content=sub_ac,
                     session_id=session_id,
@@ -2651,7 +4293,17 @@ class ParallelACExecutor:
         parent executor inherited a resumable handle.
         """
         self._announce_param_degradations(system_prompt=system_prompt, tools=[])
-        await self._await_dispatch_rate_budget(prompt=prompt, system_prompt=system_prompt)
+        _invoke_execution_authority_guard(self)
+        await _invoke_execution_authority_entry(
+            self,
+            _FOUNDATION_A_ENTRY_AWAIT_DISPATCH_RATE_BUDGET,
+            prompt=prompt,
+            system_prompt=system_prompt,
+        )
+        # Acquiring rate budget can suspend, so validate once more at the
+        # immediate effect boundary rather than assuming the pre-wait snapshot
+        # still applies.
+        _invoke_execution_authority_guard(self)
         response_text = ""
         async with asyncio.timeout(DECOMPOSITION_TIMEOUT_SECONDS):
             async for message in self._adapter.execute_task(
@@ -2689,7 +4341,9 @@ class ParallelACExecutor:
             f"## Bounded Attempt Trace\n{trace.summary}"
         )
         try:
-            response = await self._dispatch_decomposition_prompt(
+            response = await _invoke_execution_authority_entry(
+                self,
+                _FOUNDATION_A_ENTRY_DISPATCH_DECOMPOSITION_PROMPT,
                 prompt=prompt,
                 system_prompt="You are a conservative execution-recovery classifier.",
             )
@@ -3115,7 +4769,9 @@ class ParallelACExecutor:
             "semantic_ac_key": semantic_ac_key,
         }
         while True:
-            atomic_result = await self._execute_atomic_ac(
+            atomic_result = await _invoke_execution_authority_entry(
+                self,
+                _FOUNDATION_A_ENTRY_EXECUTE_ATOMIC_AC,
                 ac_index=ac_index,
                 ac_content=ac_content,
                 session_id=session_id,
@@ -3469,7 +5125,7 @@ class ParallelACExecutor:
             task_cwd=self._task_cwd,
             execution_profile=self._execution_profile,
             fat_harness_mode=self._fat_harness_mode,
-            atomic_verifier=self._atomic_verifier,
+            atomic_verifier=self._authority_verifier,
             reasoning_effort=self._reasoning_effort,
             # The router's backend-mismatch guard makes it inert on a different
             # backend, so passing it to the alt-harness executor is safe.
@@ -3481,7 +5137,12 @@ class ParallelACExecutor:
             shadow_replay_enabled=self._shadow_replay_enabled,
             session_signal_hub=self._session_signal_hub,
         )
-        return await alt_executor._execute_single_ac(**rerun_kwargs, retry_attempt=retry_attempt)
+        return await _invoke_execution_authority_entry(
+            alt_executor,
+            _FOUNDATION_A_ENTRY_EXECUTE_SINGLE_AC,
+            **rerun_kwargs,
+            retry_attempt=retry_attempt,
+        )
 
     @staticmethod
     def _parse_legacy_decomposition(
@@ -3568,7 +5229,9 @@ class ParallelACExecutor:
             f"{json.dumps(proposal.to_dict(), sort_keys=True)}"
         )
         try:
-            response = await self._dispatch_decomposition_prompt(
+            response = await _invoke_execution_authority_entry(
+                self,
+                _FOUNDATION_A_ENTRY_DISPATCH_DECOMPOSITION_PROMPT,
                 prompt=prompt,
                 system_prompt=system_prompt,
                 independent_session=True,
@@ -3747,7 +5410,9 @@ Respond with either ATOMIC or the structured JSON object only.
             decompose_prompt += f"\n\n## Bounded Attempt Trace\n{bounded_trace}"
 
         try:
-            response_text = await self._dispatch_decomposition_prompt(
+            response_text = await _invoke_execution_authority_entry(
+                self,
+                _FOUNDATION_A_ENTRY_DISPATCH_DECOMPOSITION_PROMPT,
                 prompt=decompose_prompt,
                 system_prompt=decomposition_system_prompt,
             )
@@ -3805,7 +5470,9 @@ Respond with either ATOMIC or the structured JSON object only.
                     min_sub_acs=min_sub_acs,
                     max_sub_acs=max_sub_acs,
                 )
-                repaired_text = await self._dispatch_decomposition_prompt(
+                repaired_text = await _invoke_execution_authority_entry(
+                    self,
+                    _FOUNDATION_A_ENTRY_DISPATCH_DECOMPOSITION_PROMPT,
                     prompt=repair_prompt,
                     system_prompt=decomposition_system_prompt,
                 )
@@ -4209,6 +5876,84 @@ Respond with either ATOMIC or the structured JSON object only.
         """
         ac_session_id: str | None = None
         semantic_ac_key = semantic_ac_key or derive_semantic_ac_key(ac_spec or ac_content)
+        execution_context_id = execution_id or session_id
+        runtime_identity = build_ac_runtime_identity(
+            ac_index,
+            execution_context_id=execution_context_id,
+            is_sub_ac=is_sub_ac,
+            parent_ac_index=parent_ac_index,
+            sub_ac_index=sub_ac_index,
+            node_identity=node_identity,
+            retry_attempt=retry_attempt,
+        )
+        capsule = compile_ac_execution_capsule(
+            runtime_identity=runtime_identity,
+            execution_id=execution_context_id,
+            semantic_ac_key=semantic_ac_key,
+            workspace=(
+                self._task_cwd or getattr(self._adapter, "working_directory", None) or os.getcwd()
+            ),
+            authority_scope=(
+                build_ac_dispatch_authority_scope(
+                    base_scope=self.execution_authority.fingerprint,
+                    dispatch_contract={
+                        "backend": getattr(self._adapter, "runtime_backend", None),
+                        "tools": list(tools),
+                        # The allow-list is only a projection of the provider
+                        # contract.  Fingerprint the complete canonical catalog
+                        # too, so schema/source changes cannot reuse a dispatch
+                        # authority that merely has the same tool names.
+                        # Preserve presence separately from entries: ``None``
+                        # means the provider received no catalog authority,
+                        # while an explicit empty tuple means an intentionally
+                        # empty capability/control-plane contract.
+                        "tool_catalog": {
+                            "present": tool_catalog is not None,
+                            "entries": serialize_tool_catalog(tool_catalog or ()),
+                        },
+                        "system_prompt": system_prompt,
+                        "ac_content": ac_content,
+                        "seed_goal": seed_goal,
+                        "retry_prompt_extra": retry_prompt_extra,
+                        # These values are projected into the provider prompt
+                        # and therefore are part of the dispatch authority even
+                        # though they are not provider/session continuity.
+                        "sibling_acs": [
+                            {"ac_index": sibling_index, "content": sibling_content}
+                            for sibling_index, sibling_content in (sibling_acs or [])
+                        ],
+                        "level_context_prompt": build_context_prompt(level_contexts or []),
+                    },
+                    execution_policy={
+                        "retry_attempt": retry_attempt,
+                        "is_sub_ac": is_sub_ac,
+                        "decomposition_trustworthy": decomposition_trustworthy,
+                        "base_reasoning_effort": self._reasoning_effort,
+                        "model_routing": serialize_model_router(self._model_router),
+                        "execution_profile": (
+                            self._execution_profile.model_dump(mode="json")
+                            if self._execution_profile is not None
+                            else None
+                        ),
+                        "fat_harness_mode": self._fat_harness_mode,
+                        # Investment metadata is authority-bearing: the effort
+                        # router can lower or raise the dispatched tier from it.
+                        # Keep the canonical Seed representation in the capsule
+                        # scope so materially different investment decisions can
+                        # never reuse one durable dispatch identity.
+                        "investment_spec": (
+                            investment_spec.model_dump(mode="json")
+                            if investment_spec is not None
+                            else None
+                        ),
+                    },
+                )
+            ),
+            seed_goal=seed_goal,
+            ac_content=ac_content,
+            ac_spec=ac_spec,
+            level_contexts=tuple(level_contexts or ()),
+        )
 
         # Build prompt (label/indent, governed task section, success contract,
         # retry/parallel-awareness sections, cwd scan, completion contract).
@@ -4225,6 +5970,7 @@ Respond with either ATOMIC or the structured JSON object only.
             retry_attempt=retry_attempt,
             retry_prompt_extra=retry_prompt_extra,
             ac_spec=ac_spec,
+            capsule=capsule,
         )
         prompt = prompt_bundle.prompt
         label = prompt_bundle.label
@@ -4235,7 +5981,6 @@ Respond with either ATOMIC or the structured JSON object only.
         final_message = ""
         success = False
         clear_cached_runtime_handle = False
-        execution_context_id = execution_id or session_id
         persisted_runtime_handle = await self._load_persisted_ac_runtime_handle(
             ac_index,
             execution_context_id=execution_context_id,
@@ -4244,6 +5989,8 @@ Respond with either ATOMIC or the structured JSON object only.
             sub_ac_index=sub_ac_index,
             node_identity=node_identity,
             retry_attempt=retry_attempt,
+            expected_capsule_fingerprint=capsule.fingerprint,
+            expected_process_local_resume_nonce=self._process_local_resume_nonce,
         )
         if persisted_runtime_handle is not None:
             self._remember_ac_runtime_handle(
@@ -4266,14 +6013,27 @@ Respond with either ATOMIC or the structured JSON object only.
             retry_attempt=retry_attempt,
             tool_catalog=tool_catalog,
         )
-        runtime_identity = build_ac_runtime_identity(
-            ac_index,
-            execution_context_id=execution_context_id,
-            is_sub_ac=is_sub_ac,
-            parent_ac_index=parent_ac_index,
-            sub_ac_index=sub_ac_index,
-            node_identity=node_identity,
-            retry_attempt=retry_attempt,
+        runtime_handle = bind_capsule_to_runtime_handle(
+            capsule,
+            runtime_handle,
+            restored_same_attempt=(
+                persisted_runtime_handle is not None
+                or self._is_resumable_runtime_handle(runtime_handle)
+            ),
+            expected_backend=getattr(self._adapter, "runtime_backend", None),
+            expected_approval_mode=getattr(self._adapter, "permission_mode", None),
+        )
+        session_origin = (
+            "restored_same_attempt"
+            if persisted_runtime_handle is not None
+            or self._is_resumable_runtime_handle(runtime_handle)
+            else "fresh"
+        )
+        await self._event_emitter.emit_ac_capsule_compiled(
+            runtime_identity=runtime_identity,
+            session_id=session_id,
+            capsule=capsule,
+            session_origin=session_origin,
         )
         await self._emit_atomic_context_governed_event(
             runtime_identity=runtime_identity,
@@ -4286,7 +6046,12 @@ Respond with either ATOMIC or the structured JSON object only.
         self._announce_param_degradations(system_prompt=system_prompt, tools=tools)
         # Pace delivery within the backend's shared rate budget (dormant unless
         # an RPM/TPM is configured for this backend) before the stall-scoped run.
-        await self._await_dispatch_rate_budget(prompt=prompt, system_prompt=system_prompt)
+        await _invoke_execution_authority_entry(
+            self,
+            _FOUNDATION_A_ENTRY_AWAIT_DISPATCH_RATE_BUDGET,
+            prompt=prompt,
+            system_prompt=system_prompt,
+        )
 
         investment_assessment = assess_investment(investment_spec)
         await self._event_emitter.emit_investment_assessed(
@@ -4459,7 +6224,65 @@ Respond with either ATOMIC or the structured JSON object only.
                 with contextlib.suppress(Exception):
                     shadow_snapshot_stack.close()
                 shadow_snapshot_stack = contextlib.ExitStack()
+        dispatch_id = uuid4().hex
+        previous_dispatch_id = None
+        if runtime_handle is not None:
+            previous_value = runtime_handle.metadata.get("ac_dispatch_id")
+            if isinstance(previous_value, str) and previous_value:
+                previous_dispatch_id = previous_value
+            runtime_metadata = dict(runtime_handle.metadata)
+            runtime_metadata["ac_dispatch_id"] = dispatch_id
+            runtime_metadata["ac_capsule_fingerprint"] = capsule.fingerprint
+            runtime_metadata["ac_session_origin"] = session_origin
+            runtime_handle = replace(runtime_handle, metadata=runtime_metadata)
+        await self._event_emitter.emit_ac_attempt_dispatched(
+            runtime_identity=runtime_identity,
+            dispatch_id=dispatch_id,
+            previous_dispatch_id=previous_dispatch_id,
+            execution_id=execution_context_id,
+            session_id=session_id,
+            capsule_fingerprint=capsule.fingerprint,
+            session_origin=session_origin,
+            runtime_handle=runtime_handle,
+        )
+        if runtime_handle is not None:
+            # Cache only after the dispatch transition is durable.  This still
+            # occurs before provider entry, so a runtime that returns a fresh
+            # handle can inherit the capsule bindings, while an append failure
+            # cannot leave an undurable dispatch ID as the next predecessor.
+            runtime_handle = self._remember_ac_runtime_handle(
+                ac_index,
+                runtime_handle,
+                execution_context_id=execution_context_id,
+                is_sub_ac=is_sub_ac,
+                parent_ac_index=parent_ac_index,
+                sub_ac_index=sub_ac_index,
+                node_identity=node_identity,
+                retry_attempt=retry_attempt,
+            )
         dispatch_state = LeafDispatchState(messages=messages, runtime_handle=runtime_handle)
+        active_dispatch_id = dispatch_id
+        sealed_dispatch_ids: set[str] = set()
+
+        async def _seal_dispatch(dispatch_id_to_seal: str, *, reason: str) -> None:
+            """Seal one provider boundary at most once."""
+            if dispatch_id_to_seal in sealed_dispatch_ids:
+                return
+            # Poison the local recovery cache before the durable append.  If
+            # the event store rejects the seal, a same-executor retry must not
+            # treat the already-entered provider boundary as replayable merely
+            # because the in-memory handle is still present.
+            self._ac_runtime_handle_manager.mark_dispatch_non_replayable(dispatch_id_to_seal)
+            await self._event_emitter.emit_ac_dispatch_sealed(
+                runtime_identity=runtime_identity,
+                dispatch_id=dispatch_id_to_seal,
+                execution_id=execution_context_id,
+                session_id=session_id,
+                capsule_fingerprint=capsule.fingerprint,
+                reason=reason,
+            )
+            sealed_dispatch_ids.add(dispatch_id_to_seal)
+
         signal_target: SessionSignalTarget | None = None
         signal_target_registered = False
         try:
@@ -4484,7 +6307,9 @@ Respond with either ATOMIC or the structured JSON object only.
                 await self._session_signal_hub.register_replaying(signal_target)
                 signal_target_registered = True
 
-            await LeafDispatcher(self).stream(
+            _invoke_execution_authority_guard(self)
+            await self._authority_leaf_dispatcher_stream(
+                self._authority_leaf_dispatcher,
                 state=dispatch_state,
                 prompt=prompt,
                 tools=tools,
@@ -4521,6 +6346,10 @@ Respond with either ATOMIC or the structured JSON object only.
                     message_count=dispatch_state.message_count,
                 )
                 clear_cached_runtime_handle = True
+                await _seal_dispatch(
+                    active_dispatch_id,
+                    reason="provider stall crossed an uncertain external-effect boundary",
+                )
                 return ACExecutionResult(
                     ac_index=ac_index,
                     ac_content=ac_content,
@@ -4573,6 +6402,94 @@ Respond with either ATOMIC or the structured JSON object only.
                         )
                         continue
 
+                    follow_up_prompt = (
+                        render_inform_signal_prompt(queued_signal.signal)
+                        if queued_signal.effective_mode is SessionSignalMode.INFORM
+                        else render_after_turn_signal_prompt(queued_signal.signal)
+                    )
+                    follow_up_runtime_handle = dispatch_state.runtime_handle
+                    if (
+                        follow_up_runtime_handle is None
+                        or not self._is_resumable_runtime_handle(follow_up_runtime_handle)
+                        or follow_up_runtime_handle.metadata.get("ac_capsule_fingerprint")
+                        != capsule.fingerprint
+                        or follow_up_runtime_handle.metadata.get("ac_dispatch_id")
+                        != active_dispatch_id
+                    ):
+                        await _seal_dispatch(
+                            active_dispatch_id,
+                            reason=(
+                                "completed provider turn cannot accept a SessionSignal "
+                                "without a capsule-bound resumable runtime handle"
+                            ),
+                        )
+                        await self._event_store.append(
+                            create_session_signal_rejected_event(
+                                queued_signal.signal,
+                                rejection_code="resumable_runtime_handle_unavailable",
+                                detail=(
+                                    "The active provider did not expose a capsule-bound "
+                                    "resumable runtime handle for this follow-up."
+                                ),
+                                effective_mode=queued_signal.effective_mode,
+                                runtime_backend=signal_target.runtime_backend,
+                                orchestrator_session_id=session_id,
+                            )
+                        )
+                        continue
+
+                    await _seal_dispatch(
+                        active_dispatch_id,
+                        reason="completed provider turn superseded by a SessionSignal follow-up",
+                    )
+                    follow_up_dispatch_id = uuid4().hex
+                    follow_up_metadata = dict(follow_up_runtime_handle.metadata)
+                    follow_up_metadata["ac_dispatch_id"] = follow_up_dispatch_id
+                    candidate_follow_up_runtime_handle = replace(
+                        follow_up_runtime_handle,
+                        metadata=follow_up_metadata,
+                    )
+                    await self._event_emitter.emit_ac_attempt_dispatched(
+                        runtime_identity=runtime_identity,
+                        dispatch_id=follow_up_dispatch_id,
+                        previous_dispatch_id=active_dispatch_id,
+                        execution_id=execution_context_id,
+                        session_id=session_id,
+                        capsule_fingerprint=capsule.fingerprint,
+                        session_origin="restored_same_attempt",
+                        runtime_handle=candidate_follow_up_runtime_handle,
+                        dispatch_kind="session_signal_followup",
+                        signal_id=queued_signal.signal.signal_id,
+                        signal_mode=queued_signal.effective_mode.value,
+                        follow_up_input_digest=(
+                            "sha256:" + hashlib.sha256(follow_up_prompt.encode("utf-8")).hexdigest()
+                        ),
+                    )
+                    # Do not expose the candidate handle to the outer failure
+                    # path until its dispatch append is durable.  If the
+                    # append fails, terminalization must retain the last
+                    # durable predecessor (the sealed primary), never the
+                    # nonexistent follow-up ID.
+                    active_dispatch_id = follow_up_dispatch_id
+                    # Keep the same durable-before-cache invariant as the
+                    # primary dispatch.  The follow-up handle is still cached
+                    # before provider entry, but a failed append cannot leave
+                    # its undurable dispatch ID as a phantom predecessor.
+                    remembered_follow_up_runtime_handle = self._remember_ac_runtime_handle(
+                        ac_index,
+                        candidate_follow_up_runtime_handle,
+                        execution_context_id=execution_context_id,
+                        is_sub_ac=is_sub_ac,
+                        parent_ac_index=parent_ac_index,
+                        sub_ac_index=sub_ac_index,
+                        node_identity=node_identity,
+                        retry_attempt=retry_attempt,
+                    )
+                    if remembered_follow_up_runtime_handle is None:
+                        raise RuntimeError(
+                            "SessionSignal follow-up lost its capsule-bound runtime handle"
+                        )
+                    dispatch_state.runtime_handle = remembered_follow_up_runtime_handle
                     message_count_before_signal = dispatch_state.message_count
                     primary_final_message = dispatch_state.final_message
                     primary_success = dispatch_state.success
@@ -4586,13 +6503,11 @@ Respond with either ATOMIC or the structured JSON object only.
                     )
                     inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
                     try:
-                        await LeafDispatcher(self).stream(
+                        _invoke_execution_authority_guard(self)
+                        await self._authority_leaf_dispatcher_stream(
+                            self._authority_leaf_dispatcher,
                             state=dispatch_state,
-                            prompt=(
-                                render_inform_signal_prompt(queued_signal.signal)
-                                if inform_mode
-                                else render_after_turn_signal_prompt(queued_signal.signal)
-                            ),
+                            prompt=(follow_up_prompt),
                             tools=[] if inform_mode else tools,
                             system_prompt=system_prompt,
                             execute_effort_kwargs=execute_effort_kwargs,
@@ -4624,6 +6539,10 @@ Respond with either ATOMIC or the structured JSON object only.
                                 orchestrator_session_id=session_id,
                             )
                         )
+                        await _seal_dispatch(
+                            follow_up_dispatch_id,
+                            reason="SessionSignal follow-up crossed an uncertain delivery boundary",
+                        )
                         if inform_mode:
                             dispatch_state.success = primary_success
                             dispatch_state.final_message = primary_final_message
@@ -4653,6 +6572,10 @@ Respond with either ATOMIC or the structured JSON object only.
                                 runtime_backend=signal_target.runtime_backend,
                                 orchestrator_session_id=session_id,
                             )
+                        )
+                        await _seal_dispatch(
+                            follow_up_dispatch_id,
+                            reason="SessionSignal follow-up acknowledgement was uncertain",
                         )
                         if inform_mode:
                             dispatch_state.success = primary_success
@@ -4745,7 +6668,12 @@ Respond with either ATOMIC or the structured JSON object only.
             verify_gate_outcome: _VerifyGateOutcome | None = None
             if success and verify_gate_active and has_success_contract:
                 cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
-                verify_gate_outcome = await self._run_ac_verify_gate(spec=ac_spec, cwd=cwd)
+                verify_gate_outcome = await _invoke_execution_authority_entry(
+                    self,
+                    _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
+                    spec=ac_spec,
+                    cwd=cwd,
+                )
 
             typed_evidence, typed_validation, typed_error = self._observe_atomic_typed_evidence(
                 ac_content=ac_content,
@@ -4755,7 +6683,9 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
             )
-            verifier_verdict = self._run_atomic_verifier_pass(
+            verifier_verdict = _invoke_execution_authority_entry(
+                self,
+                _FOUNDATION_A_ENTRY_RUN_ATOMIC_VERIFIER_PASS,
                 ac_content=ac_content,
                 final_message=final_message,
                 success=success,
@@ -4888,6 +6818,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 runtime_handle=runtime_handle,
                 execution_id=execution_context_id,
                 session_id=ac_session_id,
+                orchestrator_session_id=session_id,
                 result_summary=result_final_message or None,
                 success=success,
                 error=(
@@ -4936,8 +6867,42 @@ Respond with either ATOMIC or the structured JSON object only.
                 error=fat_harness_error,
             )
 
+        except anyio.get_cancelled_exc_class():
+            # Cancellation after the durable dispatch event is an uncertain
+            # provider-effect boundary.  Shield the seal write so cancellation
+            # cannot leave a replayable handle that may resend work.
+            try:
+                with anyio.CancelScope(shield=True):
+                    await _seal_dispatch(
+                        active_dispatch_id,
+                        reason="provider attempt cancelled after dispatch boundary",
+                    )
+            except Exception as seal_error:
+                # A cancellation seal is the last durable protection against
+                # replay.  Hiding its failure would leave an entered provider
+                # boundary looking resumable, so surface a fail-closed error.
+                raise RuntimeError(
+                    "AC dispatch cancellation seal failed; refusing replayable recovery"
+                ) from seal_error
+            self._remember_ac_runtime_handle(
+                ac_index,
+                dispatch_state.runtime_handle,
+                execution_context_id=execution_context_id,
+                is_sub_ac=is_sub_ac,
+                parent_ac_index=parent_ac_index,
+                sub_ac_index=sub_ac_index,
+                node_identity=node_identity,
+                retry_attempt=retry_attempt,
+            )
+            raise
+
         except Exception as e:
             duration = (datetime.now(UTC) - start_time).total_seconds()
+
+            await _seal_dispatch(
+                active_dispatch_id,
+                reason="provider attempt raised before authoritative terminalization",
+            )
 
             self._remember_ac_runtime_handle(
                 ac_index,
@@ -4956,6 +6921,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 runtime_handle=dispatch_state.runtime_handle,
                 execution_id=execution_context_id,
                 session_id=dispatch_state.ac_session_id,
+                orchestrator_session_id=session_id,
                 success=False,
                 error=str(e),
             )
@@ -5250,11 +7216,38 @@ Respond with either ATOMIC or the structured JSON object only.
                 reason="expected_artifacts missing: " + ", ".join(missing_artifacts),
                 output_tail="",
                 missing_artifacts=missing_artifacts,
+                workspace_digest=self._workspace_content_digest(cwd),
             )
 
         command = spec.verify_command
         if not command:
-            return _VerifyGateOutcome(passed=True, reason=None, output_tail="")
+            return _VerifyGateOutcome(
+                passed=True,
+                reason=None,
+                output_tail="",
+                workspace_digest=self._workspace_content_digest(cwd),
+            )
+        workspace_before = self._workspace_content_digest(cwd)
+
+        def workspace_mutation_outcome(output_tail: str) -> _VerifyGateOutcome | None:
+            workspace_after = self._workspace_content_digest(cwd)
+            if (
+                workspace_before is None
+                or workspace_after is None
+                or workspace_before != workspace_after
+            ):
+                return _VerifyGateOutcome(
+                    passed=False,
+                    reason=(
+                        "verify_command mutated the workspace or its digest could not be "
+                        "revalidated"
+                    ),
+                    output_tail=output_tail,
+                    workspace_mutated=True,
+                    workspace_digest=workspace_after,
+                )
+            return None
+
         subprocess_kwargs: dict[str, Any] = {}
         if os.name != "nt":
             subprocess_kwargs["start_new_session"] = True
@@ -5288,20 +7281,28 @@ Respond with either ATOMIC or the structured JSON object only.
                     proc.kill()
             with contextlib.suppress(Exception):
                 await proc.wait()
+            mutated = workspace_mutation_outcome("")
+            if mutated is not None:
+                return mutated
             return _VerifyGateOutcome(
                 passed=False,
                 reason=(f"verify_command timed out after {self._verify_command_timeout_seconds}s"),
                 output_tail="",
+                workspace_digest=self._workspace_content_digest(cwd),
             )
 
         combined = (stdout_bytes or b"").decode("utf-8", errors="replace")
         tail = combined[-_VERIFY_OUTPUT_TAIL_CHARS:]
+        mutated = workspace_mutation_outcome(tail)
+        if mutated is not None:
+            return mutated
         returncode = proc.returncode
         if returncode != 0:
             return _VerifyGateOutcome(
                 passed=False,
                 reason=f"verify_command exited with status {returncode}",
                 output_tail=tail,
+                workspace_digest=self._workspace_content_digest(cwd),
             )
         if spec.output_assertion and spec.output_assertion not in combined:
             return _VerifyGateOutcome(
@@ -5310,8 +7311,14 @@ Respond with either ATOMIC or the structured JSON object only.
                     f"output_assertion {spec.output_assertion!r} not found in verify_command output"
                 ),
                 output_tail=tail,
+                workspace_digest=self._workspace_content_digest(cwd),
             )
-        return _VerifyGateOutcome(passed=True, reason=None, output_tail=tail)
+        return _VerifyGateOutcome(
+            passed=True,
+            reason=None,
+            output_tail=tail,
+            workspace_digest=self._workspace_content_digest(cwd),
+        )
 
     async def _apply_verify_gate(
         self,
@@ -5350,7 +7357,12 @@ Respond with either ATOMIC or the structured JSON object only.
                 outcome=cached_outcome,
             )
         else:
-            outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+            outcome = await _invoke_execution_authority_entry(
+                self,
+                _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
+                spec=spec,
+                cwd=cwd,
+            )
         if outcome.passed:
             if not result.success and not result.is_blocked and not result.is_invalid:
                 from ouroboros.events.base import BaseEvent
@@ -5390,7 +7402,9 @@ Respond with either ATOMIC or the structured JSON object only.
                     outcome=ACExecutionOutcome.SUCCEEDED,
                     verify_gate_outcome=outcome,
                 )
-            return result
+            if cached_outcome is outcome:
+                return result
+            return replace(result, verify_gate_outcome=outcome)
         if not result.success:
             return result
 
@@ -5441,7 +7455,7 @@ Respond with either ATOMIC or the structured JSON object only.
             verify_gate_outcome=outcome,
         )
 
-    async def _emit_ac_outcome_finalized(
+    async def _emit_ac_attempt_judged(
         self,
         *,
         result: ACExecutionResult,
@@ -5449,19 +7463,19 @@ Respond with either ATOMIC or the structured JSON object only.
         session_id: str,
         execution_id: str,
     ) -> None:
-        """Persist the outer verify/retry layer's authoritative AC outcome.
+        """Persist one provisional outer verify/retry attempt judgment.
 
         Leaf-level deliver and shadow events are provisional because they are
-        emitted before the seed-level success contract runs.  The deterministic
-        frugality proof requires this marker and admits only roots whose latest
-        retry was finally accepted.  Event persistence remains observe-only: if
-        the marker is dropped, the proof fails closed by excluding the rows.
+        emitted before the seed-level success contract runs.  This marker is
+        deliberately telemetry only: it never grants acceptance or dispatch
+        authority.  ``execution.ac.outcome_finalized`` remains readable as a
+        historical alias, but new producers use ``attempt_judged``.
         """
         from ouroboros.events.base import BaseEvent
 
         await self._safe_emit_event(
             BaseEvent(
-                type="execution.ac.outcome_finalized",
+                type="execution.ac.attempt_judged",
                 aggregate_type="execution",
                 aggregate_id=execution_id or session_id,
                 data={
@@ -5470,9 +7484,11 @@ Respond with either ATOMIC or the structured JSON object only.
                     "root_ac_index": root_ac_index,
                     "ac_index": root_ac_index,
                     "retry_attempt": result.retry_attempt,
+                    "attempt_number": result.attempt_number,
                     "success": result.success,
-                    "outcome": result.outcome.value if result.outcome is not None else None,
+                    "outcome": result.outcome.value if result.outcome is not None else "failed",
                     "is_decomposed": result.is_decomposed,
+                    "is_decomposed_child": result.is_decomposed,
                 },
             )
         )
@@ -5564,7 +7580,12 @@ Respond with either ATOMIC or the structured JSON object only.
                     outcome=cached_outcome,
                 )
             else:
-                outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+                outcome = await _invoke_execution_authority_entry(
+                    self,
+                    _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
+                    spec=spec,
+                    cwd=cwd,
+                )
             if not outcome.passed:
                 gated_out.add(ac_idx)
         return frozenset(gated_out)
@@ -5674,7 +7695,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     execution_id=execution_id,
                 )
                 results[position] = gated
-                await self._emit_ac_outcome_finalized(
+                await self._emit_ac_attempt_judged(
                     result=gated,
                     root_ac_index=ac_idx,
                     session_id=session_id,
@@ -5765,7 +7786,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     )
                 results[position_by_idx[ac_idx]] = gated
                 if isinstance(gated, ACExecutionResult):
-                    await self._emit_ac_outcome_finalized(
+                    await self._emit_ac_attempt_judged(
                         result=gated,
                         root_ac_index=ac_idx,
                         session_id=session_id,
@@ -5889,7 +7910,7 @@ Respond with either ATOMIC or the structured JSON object only.
                                 execution_id=execution_id,
                             )
                             results[position_by_idx[ac_idx]] = finalized_alt
-                            await self._emit_ac_outcome_finalized(
+                            await self._emit_ac_attempt_judged(
                                 result=finalized_alt,
                                 root_ac_index=ac_idx,
                                 session_id=session_id,
@@ -6050,7 +8071,8 @@ Respond with either ATOMIC or the structured JSON object only.
         ):
             return None
 
-        verifier = self._atomic_verifier
+        _invoke_execution_authority_guard(self)
+        verifier = self._authority_verifier
         try:
             effective_schema = _effective_evidence_schema_for_ac(
                 self._execution_profile,
@@ -6078,14 +8100,21 @@ Respond with either ATOMIC or the structured JSON object only.
                     record=scoped_evidence,
                 )
                 if verifier is not None and not force_runtime_transcript
-                else self._verify_atomic_evidence_against_runtime_messages(
+                # Do not route acceptance through the mutable executor wrapper.
+                # Foundation A captured this closed transcript verifier at
+                # construction and has just checked that binding above.
+                else self._authority_transcript_verifier(
                     messages=messages,
                     typed_evidence=scoped_evidence,
                     ac_content=ac_content,
+                    execution_profile=self._execution_profile,
+                    task_cwd=task_cwd_override or self._task_cwd,
+                    adapter_working_directory=(
+                        task_cwd_override or self._adapter.working_directory
+                    ),
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
-                    task_cwd_override=task_cwd_override,
                 )
             )
         except VerifierContractError:
@@ -6108,7 +8137,7 @@ Respond with either ATOMIC or the structured JSON object only.
         verify_gate_active: bool = False,
         task_cwd_override: str | None = None,
     ) -> VerifierVerdict:
-        return _verify_atomic_evidence_against_runtime_messages(
+        return self._authority_transcript_verifier(
             messages=messages,
             typed_evidence=typed_evidence,
             ac_content=ac_content,

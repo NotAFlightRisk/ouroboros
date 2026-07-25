@@ -16,6 +16,7 @@ the content never exists at the umask default even briefly.
 from __future__ import annotations
 
 from contextlib import suppress
+import errno
 import os
 from pathlib import Path
 import stat
@@ -27,8 +28,41 @@ OWNER_ONLY_FILE = 0o600
 OWNER_ONLY_DIR = 0o700
 
 
-def write_owner_only(path: Path, text: str, *, encoding: str = "utf-8") -> None:
-    """Write ``text`` to ``path`` as an owner-only file.
+def _fsync_parent_directory(file_path: Path) -> bool:
+    """Flush the directory entry so the rename itself survives a crash.
+
+    Returns whether durability could be confirmed. A filesystem that cannot
+    fsync a directory (``EINVAL``/``ENOTSUP``) is reported as confirmed: it
+    never owed the guarantee, so treating it as a failure would make every
+    write on that filesystem look suspect.
+    """
+    if os.name != "posix":
+        return True
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    try:
+        directory_fd = os.open(file_path.parent, flags)
+    except OSError as error:
+        return error.errno in (errno.EINVAL, errno.ENOTSUP)
+    durability_confirmed = True
+    try:
+        try:
+            os.fsync(directory_fd)
+        except OSError as error:
+            if error.errno not in (errno.EINVAL, errno.ENOTSUP):
+                durability_confirmed = False
+    finally:
+        try:
+            os.close(directory_fd)
+        except OSError:
+            durability_confirmed = False
+    return durability_confirmed
+
+
+def write_owner_only(path: Path, text: str, *, encoding: str = "utf-8") -> bool:
+    """Write ``text`` to ``path`` as a durable owner-only file.
 
     The content is written to a NEW file created at ``0600`` and then renamed
     over the target, so the mode is established at creation and never depends
@@ -41,7 +75,14 @@ def write_owner_only(path: Path, text: str, *, encoding: str = "utf-8") -> None:
 
     The replacement is atomic, so a reader never observes a partial file, and
     the temporary lives beside the target so the rename stays within one
-    filesystem.
+    filesystem. Contents and directory entry are both fsync'd, and the return
+    value reports whether that durability could be confirmed — callers that
+    persist state a user would notice losing should log when it could not.
+
+    Establishing the mode at creation is also what keeps an *existing*
+    world-readable file from staying that way. Preserving the previous mode,
+    the usual behaviour for an atomic-write helper, would carry a `0644` file
+    written by an older version forward forever.
 
     Directories are not touched: a caller may write into a directory that is
     not this package's to re-permission. Call :func:`secure_directory` only
@@ -49,19 +90,31 @@ def write_owner_only(path: Path, text: str, *, encoding: str = "utf-8") -> None:
     """
     target = Path(path)
     tmp_path = target.with_name(f".{target.name}.tmp-{uuid4().hex}")
+    # Held only until a file object takes ownership of it. If wrapping the
+    # descriptor fails, nothing else will ever close it, so the cleanup path
+    # has to.
+    raw_fd: int | None = None
     try:
-        descriptor = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_ONLY_FILE)
-        with os.fdopen(descriptor, "w", encoding=encoding) as handle:
+        raw_fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_ONLY_FILE)
+        handle = os.fdopen(raw_fd, "w", encoding=encoding)
+        raw_fd = None
+        with handle:
             handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
         if stat.S_IMODE(os.stat(tmp_path).st_mode) != OWNER_ONLY_FILE:
             # A filesystem that cannot represent the mode must not receive the
             # content at all.
             raise OSError(f"cannot create {target} with owner-only permissions on this filesystem")
         os.replace(tmp_path, target)
     except BaseException:
+        if raw_fd is not None:
+            with suppress(OSError):
+                os.close(raw_fd)
         with suppress(OSError):
             os.unlink(tmp_path)
         raise
+    return _fsync_parent_directory(target)
 
 
 def secure_directory(path: Path) -> None:

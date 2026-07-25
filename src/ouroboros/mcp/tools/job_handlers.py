@@ -39,7 +39,15 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
-from ouroboros.orchestrator.session import SessionRepository, SessionStatus
+from ouroboros.orchestrator.execution_authority import (
+    ProcessLocalCancellationDisposition,
+    request_process_local_cancellation,
+)
+from ouroboros.orchestrator.session import (
+    ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY,
+    SessionRepository,
+    SessionStatus,
+)
 from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
@@ -768,18 +776,136 @@ class CancelExecutionHandler:
                     )
                 )
 
-            # Perform cancellation
+            process_local = await request_process_local_cancellation(
+                tracker,
+                self._session_repo,
+                reason=reason,
+                cancelled_by="mcp_tool",
+            )
+            if process_local is not None:
+                if (
+                    process_local.disposition
+                    == ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
+                ):
+                    # Do not write a terminal record underneath a live worker.
+                    # It owns effects and will persist cancellation during its
+                    # orderly cancellation path.
+                    status_text = (
+                        f"Execution {execution_id} cancellation has been requested.\n"
+                        f"Previous status: {tracker.status.value}\n"
+                        f"Reason: {reason}\n"
+                    )
+                    return Result.ok(
+                        MCPToolResult(
+                            content=(MCPContentItem(type=ContentType.TEXT, text=status_text),),
+                            is_error=False,
+                            meta={
+                                "execution_id": execution_id,
+                                "previous_status": tracker.status.value,
+                                "new_status": "cancellation_requested",
+                                "reason": reason,
+                                "cancelled_by": "mcp_tool",
+                                "in_flight": True,
+                            },
+                        )
+                    )
+                if process_local.disposition == ProcessLocalCancellationDisposition.HELD_ELSEWHERE:
+                    return Result.err(
+                        MCPToolError(
+                            "This process-local execution is held by another live owner; "
+                            "cancel it through that owner.",
+                            tool_name="ouroboros_cancel_execution",
+                            is_retriable=True,
+                            details={
+                                "session_id": tracker.session_id,
+                                "execution_id": tracker.execution_id,
+                                "resume_blocked": "process_local_authority_held_elsewhere",
+                            },
+                        )
+                    )
+                if (
+                    process_local.disposition
+                    == ProcessLocalCancellationDisposition.PERSISTENCE_PENDING
+                ):
+                    return Result.err(
+                        MCPToolError(
+                            f"Failed to persist cancellation for execution {execution_id}; retry it "
+                            "through the retained process-local owner.",
+                            tool_name="ouroboros_cancel_execution",
+                            is_retriable=True,
+                            details={
+                                "session_id": tracker.session_id,
+                                "execution_id": tracker.execution_id,
+                                "resume_blocked": "cancellation_persistence_pending",
+                                "cause": str(process_local.error),
+                            },
+                        )
+                    )
+                if (
+                    process_local.disposition
+                    == ProcessLocalCancellationDisposition.ALREADY_TERMINAL
+                ):
+                    return Result.err(
+                        MCPToolError(
+                            f"Execution {execution_id} became terminal before cancellation completed.",
+                            tool_name="ouroboros_cancel_execution",
+                        )
+                    )
+
+                # The helper has persisted one terminal winner and drained the
+                # exact local owner/finalizers before this public success reply.
+                status_text = (
+                    f"Execution {execution_id} has been cancelled.\n"
+                    f"Previous status: {tracker.status.value}\n"
+                    f"Reason: {reason}\n"
+                )
+                return Result.ok(
+                    MCPToolResult(
+                        content=(MCPContentItem(type=ContentType.TEXT, text=status_text),),
+                        is_error=False,
+                        meta={
+                            "execution_id": execution_id,
+                            "previous_status": tracker.status.value,
+                            "new_status": SessionStatus.CANCELLED.value,
+                            "reason": reason,
+                            "cancelled_by": "mcp_tool",
+                        },
+                    )
+                )
+
+            # Historical/non-Foundation-A sessions have no live capability to
+            # protect, so retain their established direct cancellation path.
+            from ouroboros.orchestrator.execution_authority import (
+                collect_cancellation_acceptance_plan,
+            )
+
+            raw_root_indices = tracker.progress.get(ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY)
+            expected_root_indices = (
+                tuple(raw_root_indices) if isinstance(raw_root_indices, (list, tuple)) else None
+            )
+            acceptance_finalizations = await collect_cancellation_acceptance_plan(
+                session_id=tracker.session_id,
+                execution_id=execution_id,
+                event_store=self._event_store,
+                expected_root_indices=expected_root_indices,
+            )
             cancel_result = await self._session_repo.mark_cancelled(
                 session_id=tracker.session_id,
                 reason=reason,
                 cancelled_by="mcp_tool",
+                acceptance_finalizations=acceptance_finalizations,
             )
-
             if cancel_result.is_err:
-                cancel_error = cancel_result.error
                 return Result.err(
                     MCPToolError(
-                        f"Failed to cancel execution: {cancel_error.message}",
+                        f"Failed to cancel execution: {cancel_result.error.message}",
+                        tool_name="ouroboros_cancel_execution",
+                    )
+                )
+            if cancel_result.value is False:
+                return Result.err(
+                    MCPToolError(
+                        f"Execution {execution_id} became terminal before cancellation completed.",
                         tool_name="ouroboros_cancel_execution",
                     )
                 )
@@ -1665,6 +1791,7 @@ class JobWaitHandler:
                 history_events,
                 new_event_ids=new_event_ids,
                 job_id=snapshot.job_id,
+                session_id=snapshot.links.session_id,
                 available_tools=self.available_conductor_tools,
             )
             if snapshot.is_terminal:
@@ -2004,6 +2131,7 @@ class JobResultHandler:
                 for relay in classify_relay_events(
                     history_events,
                     job_id=snapshot.job_id,
+                    session_id=snapshot.links.session_id,
                     available_tools=self.available_conductor_tools,
                 )
                 if relay.get("kind") == "attention_required"

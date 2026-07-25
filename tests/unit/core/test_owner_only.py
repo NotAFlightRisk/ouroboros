@@ -14,6 +14,8 @@ from pathlib import Path
 import stat
 from typing import Any
 
+import pytest
+
 from ouroboros.core.owner_only import secure_directory, write_owner_only
 
 
@@ -191,3 +193,103 @@ def test_every_transport_that_persists_a_transcript_is_owner_only(tmp_path: Path
     saved = Path(result.value)
     assert _mode(saved) == 0o600
     assert _mode(saved.parent) == 0o700
+
+
+def test_owner_only_write_reports_durability(tmp_path: Path) -> None:
+    """The owner-only write is also the durable write.
+
+    Round-64 merged two independently-added guarantees: main gained an atomic
+    write that fsyncs and reports durability, this branch gained owner-only
+    creation. Resolving the conflict either way would have dropped one of
+    them silently, so the write returns the durability signal it replaced.
+    """
+    target = tmp_path / "state.json"
+    assert write_owner_only(target, "{}") is True
+    assert _mode(target) == 0o600
+
+
+def test_owner_only_write_does_not_inherit_an_existing_open_mode(tmp_path: Path) -> None:
+    """The mode is established at creation, never carried over from the target.
+
+    An atomic-write helper conventionally preserves the previous mode. That is
+    exactly what would keep a 0644 transcript written by an older version
+    world-readable forever.
+    """
+    target = tmp_path / "legacy.json"
+    target.write_text("{}", encoding="utf-8")
+    os.chmod(target, 0o644)
+    assert _mode(target) == 0o644
+
+    write_owner_only(target, '{"round": 64}')
+
+    assert _mode(target) == 0o600
+    assert target.read_text(encoding="utf-8") == '{"round": 64}'
+
+
+def test_durability_is_reported_not_swallowed(tmp_path: Path, monkeypatch: Any) -> None:
+    """A directory fsync that genuinely fails is surfaced, not suppressed.
+
+    The caller logs on an unconfirmed write; if the failure were swallowed the
+    log would claim a durability the filesystem never gave.
+    """
+    import errno as _errno
+
+    from ouroboros.core import owner_only
+
+    real_fsync = os.fsync
+    target = tmp_path / "state.json"
+
+    def _fail_directory_fsync(fd: int) -> None:
+        if os.path.isdir(f"/dev/fd/{fd}") or stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(_errno.EIO, "directory fsync failed")
+        real_fsync(fd)
+
+    monkeypatch.setattr(owner_only.os, "fsync", _fail_directory_fsync)
+
+    assert write_owner_only(target, "{}") is False
+    # The content is still written and still owner-only — only the durability
+    # claim is withheld.
+    assert _mode(target) == 0o600
+    assert target.read_text(encoding="utf-8") == "{}"
+
+
+def test_no_descriptor_leaks_when_the_file_object_cannot_be_created(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """The raw descriptor is closed when nothing takes ownership of it.
+
+    Between ``os.open`` and ``os.fdopen`` the descriptor belongs to no file
+    object, so a failure there leaks it — a long-lived server would exhaust
+    its descriptors one failed transcript write at a time.
+    """
+    from ouroboros.core import owner_only
+
+    opened: list[int] = []
+    real_open = os.open
+
+    def _recording_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        fd = real_open(path, flags, *args, **kwargs)
+        if flags & os.O_EXCL:
+            opened.append(fd)
+        return fd
+
+    def _failing_fdopen(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("fdopen failed")
+
+    monkeypatch.setattr(owner_only.os, "open", _recording_open)
+    monkeypatch.setattr(owner_only.os, "fdopen", _failing_fdopen)
+
+    target = tmp_path / "state.json"
+    try:
+        write_owner_only(target, "{}")
+    except RuntimeError:
+        pass
+    else:  # pragma: no cover - the write must not succeed here
+        raise AssertionError("expected the fdopen failure to propagate")
+
+    assert opened, "the temporary was never created"
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []

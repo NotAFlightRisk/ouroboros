@@ -9,6 +9,11 @@ See: https://github.com/Q00/ouroboros/issues/284
 
 from __future__ import annotations
 
+import errno
+import os
+from pathlib import Path
+import stat
+from typing import IO
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,6 +25,27 @@ from ouroboros.bigbang.interview import (
     InterviewStatus,
 )
 from ouroboros.providers.base import CompletionResponse, UsageInfo
+
+
+class _PartialWriteHandle:
+    def __init__(self, handle: IO[str]) -> None:
+        self._handle = handle
+
+    def __enter__(self) -> _PartialWriteHandle:
+        return self
+
+    def __exit__(self, *args) -> None:
+        self._handle.close()
+
+    def write(self, content: str) -> int:
+        _ = self._handle.write(content[:1])
+        raise RuntimeError("interrupted write")
+
+    def flush(self) -> None:
+        self._handle.flush()
+
+    def fileno(self) -> int:
+        return self._handle.fileno()
 
 
 def _make_engine(tmp_path) -> InterviewEngine:
@@ -74,6 +100,147 @@ class TestSaveStateUsesThread:
         # The saved file should exist on disk
         saved_path = result.value
         assert saved_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_save_state_preserves_existing_file_on_replace_failure(self, tmp_path) -> None:
+        engine = _make_engine(tmp_path)
+        state = _make_state()
+        saved_path = engine._state_file_path(state.interview_id)
+        saved_path.write_text("original\n", encoding="utf-8")
+
+        with (
+            patch("os.open", wraps=os.open) as mock_open,
+            patch("os.fsync") as mock_fsync,
+            patch("os.replace", side_effect=OSError("boom")),
+        ):
+            result = await engine.save_state(state)
+
+        assert result.is_err
+        assert saved_path.read_text(encoding="utf-8") == "original\n"
+        temp_creations = [
+            call for call in mock_open.call_args_list if call.args[1] & os.O_EXCL
+        ]
+        assert len(temp_creations) == 1
+        assert Path(temp_creations[0].args[0]).parent == saved_path.parent
+        mock_fsync.assert_called_once()
+        assert {path.name for path in saved_path.parent.iterdir()} == {
+            saved_path.name,
+            f"{saved_path.name}.lock",
+        }
+
+    @pytest.mark.asyncio
+    async def test_save_state_closes_raw_fd_when_fdopen_fails(self, tmp_path) -> None:
+        engine = _make_engine(tmp_path)
+        state = _make_state()
+        created_fds: list[int] = []
+        created_paths: list[Path] = []
+        real_open = os.open
+
+        def _recording_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if flags & os.O_EXCL:
+                created_fds.append(fd)
+                created_paths.append(Path(path))
+            return fd
+
+        with (
+            patch("os.open", side_effect=_recording_open),
+            patch("os.fdopen", side_effect=RuntimeError("fdopen failed")),
+            pytest.raises(RuntimeError, match="fdopen failed"),
+        ):
+            await engine.save_state(state)
+
+        with pytest.raises(OSError):
+            os.fstat(created_fds[0])
+        assert not created_paths[0].exists()
+
+    @pytest.mark.asyncio
+    async def test_save_state_removes_partial_temp_on_non_oserror_write(self, tmp_path) -> None:
+        engine = _make_engine(tmp_path)
+        state = _make_state()
+        saved_path = engine._state_file_path(state.interview_id)
+        saved_path.write_text("original\n", encoding="utf-8")
+        real_fdopen = os.fdopen
+
+        def _interrupting_fdopen(fd, *args, **kwargs):
+            return _PartialWriteHandle(real_fdopen(fd, *args, **kwargs))
+
+        with (
+            patch("os.fdopen", side_effect=_interrupting_fdopen),
+            pytest.raises(RuntimeError, match="interrupted write"),
+        ):
+            await engine.save_state(state)
+
+        assert saved_path.read_text(encoding="utf-8") == "original\n"
+        assert {path.name for path in saved_path.parent.iterdir()} == {
+            saved_path.name,
+            f"{saved_path.name}.lock",
+        }
+
+    @pytest.mark.asyncio
+    async def test_save_state_narrows_an_existing_readable_mode(self, tmp_path) -> None:
+        """A transcript left readable by an older version is narrowed, not kept.
+
+        The mode is deliberately NOT preserved here. Preserving it is the usual
+        contract for an atomic write, and it is exactly what would carry a
+        group- or world-readable transcript forward forever. The transcript
+        holds confirmed data answers and lives indefinitely.
+        """
+        engine = _make_engine(tmp_path)
+        state = _make_state()
+        saved_path = engine._state_file_path(state.interview_id)
+        saved_path.write_text("original\n", encoding="utf-8")
+        saved_path.chmod(0o640)
+
+        result = await engine.save_state(state)
+
+        assert result.is_ok
+        assert stat.S_IMODE(saved_path.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name != "posix", reason="directory fsync is POSIX-only")
+    @pytest.mark.asyncio
+    async def test_save_state_fsyncs_file_and_parent_directory(self, tmp_path) -> None:
+        engine = _make_engine(tmp_path)
+        state = _make_state()
+
+        with patch("os.fsync", wraps=os.fsync) as mock_fsync:
+            result = await engine.save_state(state)
+
+        assert result.is_ok
+        assert mock_fsync.call_count == 2
+
+    @pytest.mark.skipif(os.name != "posix", reason="directory fsync is POSIX-only")
+    @pytest.mark.asyncio
+    async def test_save_state_allows_unsupported_directory_fsync(self, tmp_path) -> None:
+        engine = _make_engine(tmp_path)
+        state = _make_state()
+
+        with patch(
+            "os.fsync",
+            side_effect=(None, OSError(errno.EINVAL, "directory fsync unsupported")),
+        ) as mock_fsync:
+            result = await engine.save_state(state)
+
+        assert result.is_ok
+        assert mock_fsync.call_count == 2
+
+    @pytest.mark.skipif(os.name != "posix", reason="directory fsync is POSIX-only")
+    @pytest.mark.asyncio
+    async def test_save_state_reports_success_when_post_replace_fsync_fails(self, tmp_path) -> None:
+        engine = _make_engine(tmp_path)
+        state = _make_state()
+
+        with patch(
+            "os.fsync",
+            side_effect=(None, OSError(errno.EIO, "directory fsync failed")),
+        ) as mock_fsync:
+            result = await engine.save_state(state)
+
+        assert result.is_ok
+        assert mock_fsync.call_count == 2
+        load_result = await engine.load_state(state.interview_id)
+        assert load_result.is_ok
+        assert load_result.value.interview_id == state.interview_id
 
     @pytest.mark.asyncio
     async def test_save_state_roundtrip(self, tmp_path) -> None:

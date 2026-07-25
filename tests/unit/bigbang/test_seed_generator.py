@@ -21,6 +21,7 @@ from ouroboros.bigbang.interview import (
 )
 from ouroboros.bigbang.seed_generator import (
     SeedGenerator,
+    _parse_string_array_values,
     load_seed,
     save_seed_sync,
 )
@@ -55,7 +56,7 @@ def create_mock_completion_response(
 
 def create_valid_extraction_response(
     goal: str = "Build a CLI task manager with project grouping",
-    constraints: str = "Python 3.14+ | No external database | Single-file storage",
+    constraints: str = '["Python 3.14+", "No external database", "Single-file storage"]',
     acceptance_criteria: str = "Tasks can be created | Tasks can be listed | Tasks can be deleted",
     ontology_name: str = "TaskManager",
     ontology_description: str = "Task management domain model",
@@ -457,7 +458,7 @@ class TestSeedGeneratorExtraction:
         low_ambiguity = create_low_ambiguity_score()
 
         extraction_response = create_valid_extraction_response(
-            constraints="Python 3.14+ | No external database | Must be cross-platform"
+            constraints='["Python 3.14+", "No external database", "Must be cross-platform"]'
         )
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(create_mock_completion_response(extraction_response))
@@ -475,6 +476,165 @@ class TestSeedGeneratorExtraction:
             assert len(result.value.constraints) == 3
             assert "Python 3.14+" in result.value.constraints
             assert "No external database" in result.value.constraints
+
+    @pytest.mark.asyncio
+    async def test_generate_preserves_literal_pipe_in_json_array_constraints(self) -> None:
+        """JSON-array CONSTRAINTS keep literal pipes inside one constraint (#1696)."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        extraction_response = create_valid_extraction_response(
+            constraints='["--lang ko|en", "keep exact flag"]'
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            assert result.value.constraints == ("--lang ko|en", "keep exact flag")
+
+    @pytest.mark.asyncio
+    async def test_generate_retries_bracket_prose_and_accepts_reformatted_json(self) -> None:
+        """At extraction time bracket prose triggers retry; the reformatted array wins."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        prose_response = create_valid_extraction_response(
+            constraints="[P0] Must work offline | [P1] Fast startup"
+        )
+        reformatted_response = create_valid_extraction_response(
+            constraints='["[P0] Must work offline", "[P1] Fast startup"]'
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(prose_response)),
+                Result.ok(create_mock_completion_response(reformatted_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            assert result.value.constraints == (
+                "[P0] Must work offline",
+                "[P1] Fast startup",
+            )
+            assert mock_adapter.complete.await_count == 2
+
+    def test_strict_rejects_any_bracket_led_value_that_is_not_a_json_string_array(self) -> None:
+        """Strict (extraction-time) mode: [-led values must be JSON string arrays."""
+        malformed_cases = (
+            '["--lang ko|en",]',  # trailing comma
+            '["--lang ko|en"',  # truncated, quote-led
+            "[--lang ko|en",  # truncated, unquoted
+            '["--lang ko|en"] stray text',  # valid array + trailing garbage
+            '[null, "x"] stray text',  # JSON-parseable group + trailing garbage
+            "[--lang ko|en, keep exact flag] trailing note",  # unquoted array shape
+            "[ko] preserve ko|en flag",  # word-tag shape from malformed array output
+            "[P0] Must work offline | [P1] Fast startup",  # prose retries at extraction
+            "--lang ko|en | keep exact flag",  # plain pipe list, no brackets
+            "Must work offline",  # plain prose, not an array
+            '"just a JSON string"',  # valid JSON but not an array
+        )
+        for malformed in malformed_cases:
+            with pytest.raises(ValueError, match="JSON array"):
+                _parse_string_array_values(malformed, field_label="CONSTRAINTS", strict=True)
+
+    def test_strict_rejects_non_string_json_entries(self) -> None:
+        """Strict mode: JSON arrays must contain only strings."""
+        for malformed in ("[null]", '[1, "x"]'):
+            with pytest.raises(ValueError, match="only strings"):
+                _parse_string_array_values(malformed, field_label="CONSTRAINTS", strict=True)
+
+    def test_lenient_keeps_legacy_bracket_prose_split(self) -> None:
+        """Lenient (stored-data) mode: bracket prose keeps the historical split."""
+        assert _parse_string_array_values(
+            "[P0] Must work offline | [P1] Fast startup", field_label="CONSTRAINTS"
+        ) == (
+            "[P0] Must work offline",
+            "[P1] Fast startup",
+        )
+        assert _parse_string_array_values(
+            "[v2.1-rc] Must ship | [2026-01] Later", field_label="CONSTRAINTS"
+        ) == (
+            "[v2.1-rc] Must ship",
+            "[2026-01] Later",
+        )
+
+    def test_lenient_never_raises_on_malformed_json(self) -> None:
+        """Lenient mode: stored data has no retry path, so it pipe-splits instead."""
+        assert _parse_string_array_values('["--lang ko|en",]', field_label="CONSTRAINTS") == (
+            '["--lang ko',
+            'en",]',
+        )
+        assert _parse_string_array_values("[null]", field_label="CONSTRAINTS") == ("None",)
+        assert _parse_string_array_values(
+            "Python 3.14+ | No external database", field_label="CONSTRAINTS"
+        ) == (
+            "Python 3.14+",
+            "No external database",
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "malformed_constraints",
+        (
+            '["--lang ko|en", "keep exact flag",]',
+            "[--lang ko|en | keep exact flag",
+            '["--lang ko|en"] stray text',
+            "[null]",
+            '[null, "x"] stray text',
+            "[--lang ko|en, keep exact flag] trailing note",
+            "[ko] preserve ko|en flag",
+            "--lang ko|en | keep exact flag",
+        ),
+    )
+    async def test_generate_retries_on_malformed_json_constraints(
+        self, malformed_constraints: str
+    ) -> None:
+        """Malformed JSON-intent CONSTRAINTS trigger the extraction retry path."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        malformed_response = create_valid_extraction_response(constraints=malformed_constraints)
+        valid_response = create_valid_extraction_response(
+            constraints='["--lang ko|en", "keep exact flag"]'
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(malformed_response)),
+                Result.ok(create_mock_completion_response(valid_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            assert result.value.constraints == ("--lang ko|en", "keep exact flag")
+            assert mock_adapter.complete.await_count == 2
 
     @pytest.mark.asyncio
     async def test_generate_extracts_acceptance_criteria(self) -> None:

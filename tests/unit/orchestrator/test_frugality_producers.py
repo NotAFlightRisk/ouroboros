@@ -44,7 +44,8 @@ from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord
 from ouroboros.orchestrator.execution_runtime_scope import build_ac_runtime_identity
 from ouroboros.orchestrator.frugality_proof import (
-    EVENT_AC_OUTCOME_FINALIZED,
+    EVENT_AC_ACCEPTANCE_FINALIZED,
+    EVENT_AC_ATTEMPT_JUDGED,
     EVENT_DELIVER_VERDICT,
     EVENT_EFFORT_ROUTED,
     EVENT_MODEL_ROUTED,
@@ -63,6 +64,7 @@ from ouroboros.orchestrator.parallel_executor import (
 from ouroboros.orchestrator.runner import OrchestratorRunner
 from ouroboros.orchestrator.session import SessionTracker
 from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.persistence.event_store import acceptance_generation_id_for_session
 
 
 # -- Shared doubles -----------------------------------------------------------
@@ -717,13 +719,32 @@ class TestDeliverVerdict:
                 },
             },
             {
-                "type": EVENT_AC_OUTCOME_FINALIZED,
+                "type": EVENT_AC_ATTEMPT_JUDGED,
                 "data": {
                     "execution_id": "exec_frugal",
+                    "session_id": "sess_frugal",
                     "root_ac_index": 0,
                     "retry_attempt": 0,
+                    "attempt_number": 1,
                     "success": True,
+                    "outcome": "succeeded",
                     "is_decomposed": True,
+                },
+            },
+            {
+                "type": EVENT_AC_ACCEPTANCE_FINALIZED,
+                "data": {
+                    "execution_id": "exec_frugal",
+                    "session_id": "sess_frugal",
+                    "acceptance_generation_id": acceptance_generation_id_for_session(
+                        "sess_frugal", "exec_frugal"
+                    ),
+                    "root_ac_index": 0,
+                    "final_retry_attempt": 0,
+                    "accepted": True,
+                    "disposition": "accepted",
+                    "outcome": "succeeded",
+                    "terminal_status": "completed",
                 },
             },
         ]
@@ -1094,13 +1115,32 @@ def _triad_events(run_id: str, ac_id: str, *, spend: float, baseline: float) -> 
             },
         },
         {
-            "type": EVENT_AC_OUTCOME_FINALIZED,
+            "type": EVENT_AC_ATTEMPT_JUDGED,
             "data": {
                 "execution_id": run_id,
+                "session_id": f"session-{run_id}",
                 "root_ac_index": root_ac_index,
                 "retry_attempt": 0,
+                "attempt_number": 1,
                 "success": True,
+                "outcome": "succeeded",
                 "is_decomposed": True,
+            },
+        },
+        {
+            "type": EVENT_AC_ACCEPTANCE_FINALIZED,
+            "data": {
+                "execution_id": run_id,
+                "session_id": f"session-{run_id}",
+                "acceptance_generation_id": acceptance_generation_id_for_session(
+                    f"session-{run_id}", run_id
+                ),
+                "root_ac_index": root_ac_index,
+                "final_retry_attempt": 0,
+                "accepted": True,
+                "disposition": "accepted",
+                "outcome": "succeeded",
+                "terminal_status": "completed",
             },
         },
     ]
@@ -1129,7 +1169,7 @@ def _consumer_runner(fabricated: list) -> tuple[OrchestratorRunner, list, MagicM
 
 class TestFrugalityProofConsumer:
     @pytest.mark.asyncio
-    async def test_same_seed_recent_runs_form_cohort_without_mixing_other_seed(self) -> None:
+    async def test_process_local_authority_never_pools_runs_into_a_proof_cohort(self) -> None:
         runner, appended, _console = _consumer_runner([])
         store = runner._event_store
         cohort_seed = Seed(
@@ -1254,8 +1294,9 @@ class TestFrugalityProofConsumer:
                     baseline=100,
                 )
             ]
-        # If this different seed leaked into the cohort it would change both the
-        # row count and aggregate reduction.
+        # A process-local Foundation A contract must not become a cross-run proof
+        # key, even when another run has the same Seed and identical visible
+        # durable fields.
         events_by_execution["run-other"] = [
             event
             for ac in range(20)
@@ -1278,23 +1319,14 @@ class TestFrugalityProofConsumer:
         emitted = [e for e in appended if e.type == "execution.frugality_proof.evaluated"]
         assert len(emitted) == 1
         data = emitted[0].data
-        assert data["seed_id"] == "seed-proof"
-        assert data["cohort_execution_ids"] == ["run-2", "run-1", "run-0"]
-        assert data["status"] == ProofStatus.PASS.value
-        assert data["counted_rows"] == 21
-        assert data["runs"] == 3
-        assert data["token_reduction_pct"] == pytest.approx(50.0)
-        assert all(
-            call.args[0]
-            not in {
-                "run-other",
-                "run-other-project",
-                "run-other-routing",
-                "run-edited-seed",
-                "run-legacy",
-            }
-            for call in store.query_execution_related_events.await_args_list
-        )
+        assert data["seed_id"] is None
+        assert data["cohort_execution_ids"] == ["run-2"]
+        assert data["status"] == ProofStatus.INSUFFICIENT_SAMPLE.value
+        assert data["counted_rows"] == 7
+        assert data["runs"] == 1
+        assert [call.args[0] for call in store.query_execution_related_events.await_args_list] == [
+            "run-2"
+        ]
 
     @pytest.mark.asyncio
     async def test_missing_current_proof_identity_is_current_only(self) -> None:
@@ -1417,11 +1449,31 @@ class TestProducedEventsMatchProofContract:
             baseline_tier="standard",
             decomposition_trustworthy=True,
         )
-        await executor._emit_ac_outcome_finalized(
+        await executor._emit_ac_attempt_judged(
             result=replace(result, is_decomposed=True),
             root_ac_index=0,
             session_id="sess_frugal",
             execution_id="exec_frugal",
+        )
+        events.append(
+            BaseEvent(
+                type=EVENT_AC_ACCEPTANCE_FINALIZED,
+                aggregate_type="execution",
+                aggregate_id="exec_frugal",
+                data={
+                    "execution_id": "exec_frugal",
+                    "session_id": "sess_frugal",
+                    "acceptance_generation_id": acceptance_generation_id_for_session(
+                        "sess_frugal", "exec_frugal"
+                    ),
+                    "root_ac_index": 0,
+                    "final_retry_attempt": 0,
+                    "accepted": True,
+                    "disposition": "accepted",
+                    "outcome": "succeeded",
+                    "terminal_status": "completed",
+                },
+            )
         )
 
         assert result.success is True

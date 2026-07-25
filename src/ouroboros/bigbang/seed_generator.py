@@ -12,6 +12,7 @@ The SeedGenerator:
 """
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import re
 from typing import Any
@@ -56,6 +57,65 @@ EXTRACTION_TEMPERATURE = 0.2
 _MAX_EXTRACTION_RETRIES = 1
 _AC_CONTRACT_FIELD_RE = re.compile(r"\s\|\s*(verify|artifacts|expect)\s*:", re.IGNORECASE)
 _UNSUPPORTED_VERIFY_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?[A-Za-z_][\w-]*['\"]?")
+
+
+def _parse_string_array_values(
+    raw_value: object, *, field_label: str, strict: bool = False
+) -> tuple[str, ...]:
+    """Parse a list-valued extraction field from a JSON array, a sequence, or a legacy pipe list.
+
+    The extraction format requests a single-line JSON array so literal pipe
+    characters inside one constraint survive as data (#1696).
+
+    In strict mode (extraction time) the value must be a valid JSON array of
+    strings regardless of shape — plain pipe lists, bracket prose, and any
+    other non-array text raise so the extraction retry path can ask the LLM
+    to reformat into the JSON array the extraction prompt already demands.
+    The strict boundary therefore has no fallback surface at all. In lenient
+    mode (stored legacy requirements consumed at seed-build time) invalid
+    JSON falls back to the historical pipe split, including bracket-prefixed
+    prose such as ``[P0] Must work offline``, and never raises: stored data
+    has no retry path.
+
+    Raises:
+        ValueError: Only in strict mode, when the value is not a valid JSON
+            array of strings.
+    """
+    if isinstance(raw_value, list | tuple):
+        return tuple(item for item in (str(entry).strip() for entry in raw_value) if item)
+    if not isinstance(raw_value, str):
+        return ()
+    text = raw_value.strip()
+    if not text:
+        return ()
+    if strict:
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"{field_label} must be a single-line JSON array of strings: {e}. Value: {text[:200]}"
+            ) from e
+        if not isinstance(decoded, list):
+            raise ValueError(
+                f"{field_label} must be a JSON array of strings, got "
+                f"{type(decoded).__name__}. Value: {text[:200]}"
+            )
+        non_strings = tuple(type(entry).__name__ for entry in decoded if not isinstance(entry, str))
+        if non_strings:
+            raise ValueError(
+                f"{field_label} JSON array must contain only strings; got "
+                f"{', '.join(non_strings)}. Value: {text[:200]}"
+            )
+        return tuple(item for item in (entry.strip() for entry in decoded) if item)
+    if text.startswith("["):
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if isinstance(decoded, list):
+                return tuple(item for item in (str(entry).strip() for entry in decoded) if item)
+    return tuple(item.strip() for item in text.split("|") if item.strip())
 
 
 def _parse_acceptance_criteria_contracts(
@@ -575,8 +635,10 @@ ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one indepe
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
+CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
+
 GOAL: <clear goal statement>
-CONSTRAINTS: <constraint 1> | <constraint 2> | ...
+CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
 ACCEPTANCE_CRITERIA:
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
@@ -601,8 +663,14 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
         return (
             "PROJECT_TYPE: brownfield\n"
             "CONTEXT_REFERENCES: <path>:<role primary|reference>:<summary> | ...\n"
-            "EXISTING_PATTERNS: <pattern 1> | <pattern 2> | ...\n"
-            "EXISTING_DEPENDENCIES: <dependency 1> | <dependency 2> | ..."
+            'EXISTING_PATTERNS: ["<pattern 1>", "<pattern 2>", ...]\n'
+            'EXISTING_DEPENDENCIES: ["<dependency 1>", "<dependency 2>", ...]\n'
+            "EXISTING_PATTERNS rule: respond with one single-line JSON array of strings. "
+            "Pattern values may contain any characters, including literal | pipes; "
+            "never use a bare pipe as the list separator.\n"
+            "EXISTING_DEPENDENCIES rule: respond with one single-line JSON array of strings. "
+            "Dependency values may contain any characters, including literal | pipes; "
+            "never use a bare pipe as the list separator."
         )
 
     def _build_interview_context(self, state: InterviewState) -> str:
@@ -674,8 +742,10 @@ ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one indepe
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
+CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
+
 GOAL: <clear goal statement>
-CONSTRAINTS: <constraint 1> | <constraint 2> | ...
+CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
 ACCEPTANCE_CRITERIA:
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
@@ -789,6 +859,19 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                     f"Response preview: {response[:200]}"
                 )
 
+        # Validate list-valued fields at parse time so malformed JSON-intent
+        # output triggers the extraction retry path instead of being silently
+        # pipe-split downstream (#1696, #1729).
+        for field_name, field_label in (
+            ("constraints", "CONSTRAINTS"),
+            ("existing_patterns", "EXISTING_PATTERNS"),
+            ("existing_dependencies", "EXISTING_DEPENDENCIES"),
+        ):
+            if field_name in requirements:
+                requirements[field_name] = _parse_string_array_values(
+                    requirements[field_name], field_label=field_label, strict=True
+                )
+
         return requirements
 
     def _build_seed(self, requirements: dict[str, Any], metadata: SeedMetadata) -> Seed:
@@ -801,12 +884,10 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
         Returns:
             Constructed Seed instance.
         """
-        # Parse constraints
-        constraints: tuple[str, ...] = ()
-        if "constraints" in requirements and requirements["constraints"]:
-            constraints = tuple(
-                c.strip() for c in requirements["constraints"].split("|") if c.strip()
-            )
+        # Parse constraints (JSON array preferred; legacy pipe list supported)
+        constraints = _parse_string_array_values(
+            requirements.get("constraints"), field_label="CONSTRAINTS"
+        )
 
         # Parse acceptance criteria
         acceptance_criteria: tuple[AcceptanceCriterionSpec | str, ...] = ()
@@ -900,19 +981,15 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                             )
                         )
 
-            # Parse existing patterns
-            existing_patterns: tuple[str, ...] = ()
-            if "existing_patterns" in requirements and requirements["existing_patterns"]:
-                existing_patterns = tuple(
-                    p.strip() for p in requirements["existing_patterns"].split("|") if p.strip()
-                )
+            # Parse existing patterns (lenient: stored data has no retry path)
+            existing_patterns = _parse_string_array_values(
+                requirements.get("existing_patterns"), field_label="EXISTING_PATTERNS"
+            )
 
-            # Parse existing dependencies
-            existing_deps: tuple[str, ...] = ()
-            if "existing_dependencies" in requirements and requirements["existing_dependencies"]:
-                existing_deps = tuple(
-                    d.strip() for d in requirements["existing_dependencies"].split("|") if d.strip()
-                )
+            # Parse existing dependencies (lenient: stored data has no retry path)
+            existing_deps = _parse_string_array_values(
+                requirements.get("existing_dependencies"), field_label="EXISTING_DEPENDENCIES"
+            )
 
             brownfield_context = BrownfieldContext(
                 project_type="brownfield",

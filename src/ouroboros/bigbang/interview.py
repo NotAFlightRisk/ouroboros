@@ -1038,7 +1038,7 @@ class InterviewEngine:
             # Serialize while still on the event-loop (CPU-bound, not I/O)
             content = state.model_dump_json(indent=2)
 
-            def _sync_write() -> None:
+            def _sync_write() -> bool:
                 # Secure the directory at every write, not only at
                 # construction: a state directory created by an older version
                 # keeps its permissions otherwise.
@@ -1046,10 +1046,18 @@ class InterviewEngine:
                 with _file_lock(file_path, exclusive=True):
                     # Owner-only: the transcript holds confirmed data answers
                     # and lives indefinitely, so it must not inherit the
-                    # umask default the way it did before.
-                    write_owner_only(file_path, content)
+                    # umask default the way it did before. The write is still
+                    # atomic and fsync'd, so the durability signal is kept.
+                    return write_owner_only(file_path, content)
 
-            await asyncio.to_thread(_sync_write)
+            durability_confirmed = await asyncio.to_thread(_sync_write)
+
+            if not durability_confirmed:
+                log.warning(
+                    "interview.state_save_durability_uncertain",
+                    interview_id=state.interview_id,
+                    file_path=str(file_path),
+                )
 
             log.info(
                 "interview.state_saved",

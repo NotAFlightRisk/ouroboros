@@ -37,7 +37,8 @@ from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
 from ouroboros.orchestrator.execution_runtime_scope import build_ac_runtime_identity
 from ouroboros.orchestrator.frugality_proof import (
-    EVENT_AC_OUTCOME_FINALIZED,
+    EVENT_AC_ACCEPTANCE_FINALIZED,
+    EVENT_AC_ATTEMPT_JUDGED,
     EVENT_SHADOW_REPLAY,
     ProofStatus,
     assemble_triads,
@@ -53,6 +54,7 @@ from ouroboros.orchestrator.shadow_replay import (
     run_shadow_replay,
     shadow_replay_enabled_from_env,
 )
+from ouroboros.persistence.event_store import acceptance_generation_id_for_session
 
 
 # -- Shared doubles -----------------------------------------------------------
@@ -350,19 +352,42 @@ class _EmitterHarness:
         root_key = (run_id, 0)
         if root_key not in self._finalized_roots:
             self._finalized_roots.add(root_key)
-            self.events.append(
-                BaseEvent(
-                    type=EVENT_AC_OUTCOME_FINALIZED,
-                    aggregate_type="execution",
-                    aggregate_id=run_id,
-                    data={
-                        "execution_id": run_id,
-                        "root_ac_index": 0,
-                        "retry_attempt": 0,
-                        "success": True,
-                        "is_decomposed": True,
-                    },
-                )
+            self.events.extend(
+                [
+                    BaseEvent(
+                        type=EVENT_AC_ATTEMPT_JUDGED,
+                        aggregate_type="execution",
+                        aggregate_id=run_id,
+                        data={
+                            "execution_id": run_id,
+                            "session_id": session_id,
+                            "root_ac_index": 0,
+                            "retry_attempt": 0,
+                            "attempt_number": 1,
+                            "success": True,
+                            "outcome": "succeeded",
+                            "is_decomposed": True,
+                        },
+                    ),
+                    BaseEvent(
+                        type=EVENT_AC_ACCEPTANCE_FINALIZED,
+                        aggregate_type="execution",
+                        aggregate_id=run_id,
+                        data={
+                            "execution_id": run_id,
+                            "session_id": session_id,
+                            "acceptance_generation_id": acceptance_generation_id_for_session(
+                                session_id, run_id
+                            ),
+                            "root_ac_index": 0,
+                            "final_retry_attempt": 0,
+                            "accepted": True,
+                            "disposition": "accepted",
+                            "outcome": "succeeded",
+                            "terminal_status": "completed",
+                        },
+                    ),
+                ]
             )
 
 
@@ -525,6 +550,48 @@ class TestShadowReplayHarness:
         assert data["baseline_tier"] == "standard"
         assert data["decomposition_trustworthy"] is True
         assert data["is_decomposed_child"] is True
+
+    @pytest.mark.asyncio
+    async def test_verifier_entry_drift_stops_shadow_replay_before_baseline_effect(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        factory = MagicMock()
+        monkeypatch.setattr("ouroboros.orchestrator.runtime_factory.create_agent_runtime", factory)
+        store, events = _capturing_event_store()
+        executor = _executor_with_router(task_cwd=str(tmp_path), store=store)
+        injected = False
+
+        def injected_verifier(**_: object) -> object:
+            nonlocal injected
+            injected = True
+            return object()
+
+        monkeypatch.setattr(
+            ParallelACExecutor,
+            "_run_atomic_verifier_pass",
+            injected_verifier,
+        )
+
+        with isolated_workspace(str(tmp_path)) as isolated_cwd:
+            assert isolated_cwd is not None
+            await run_shadow_replay(
+                executor,
+                runtime_identity=_identity(),
+                execution_id="exec_frugal",
+                session_id="sess",
+                ac_index=1,
+                is_sub_ac=True,
+                prompt="do the thing",
+                system_prompt="system",
+                tools=["Read"],
+                decomposition_trustworthy=True,
+                ac_content="Implement a thing",
+                isolated_cwd=isolated_cwd,
+            )
+
+        factory.assert_not_called()
+        assert injected is False
+        assert _shadow_events(events) == []
 
     @pytest.mark.asyncio
     async def test_runtime_without_strict_isolation_contract_is_never_executed(

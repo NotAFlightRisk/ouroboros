@@ -9,7 +9,8 @@ import pytest
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.execution_runtime_scope import normalize_execution_scope_id
-from ouroboros.persistence.event_store import EventStore
+from ouroboros.orchestrator.session import SessionRepository
+from ouroboros.persistence.event_store import EventStore, acceptance_generation_id_for_session
 
 
 @pytest.fixture
@@ -135,6 +136,30 @@ class TestEventStoreInitialization:
 class TestEventStoreAppend:
     """Test EventStore.append() method."""
 
+    @staticmethod
+    async def _seed_session_start(
+        event_store: EventStore,
+        *,
+        session_id: str,
+        execution_id: str,
+        acceptance_root_indices: list[int] | None = None,
+    ) -> None:
+        data = {
+            "execution_id": execution_id,
+            "seed_id": "seed-acceptance",
+            "start_time": datetime.now(UTC).isoformat(),
+        }
+        if acceptance_root_indices is not None:
+            data["acceptance_root_indices"] = acceptance_root_indices
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id=session_id,
+                data=data,
+            )
+        )
+
     async def test_append_stores_event(
         self, event_store: EventStore, sample_event: BaseEvent
     ) -> None:
@@ -162,6 +187,466 @@ class TestEventStoreAppend:
 
         replayed = await event_store.replay("ontology", "ont-123")
         assert len(replayed) == 5
+
+    async def test_append_preserves_the_first_terminal_session_event(
+        self, event_store: EventStore
+    ) -> None:
+        """Generic append callers cannot overwrite an earlier terminal winner."""
+        cancelled = BaseEvent(
+            type="orchestrator.session.cancelled",
+            aggregate_type="session",
+            aggregate_id="sess-terminal-winner",
+            data={"reason": "user cancelled"},
+        )
+        completed = BaseEvent(
+            type="orchestrator.session.completed",
+            aggregate_type="session",
+            aggregate_id="sess-terminal-winner",
+            data={"summary": {"would_have_overwritten": True}},
+        )
+
+        await event_store.append(cancelled)
+        await event_store.append(completed)
+
+        terminal_events = await event_store.replay("session", "sess-terminal-winner")
+        assert [event.type for event in terminal_events] == ["orchestrator.session.cancelled"]
+
+    async def test_session_terminal_marker_reports_when_another_transition_won(
+        self, event_store: EventStore
+    ) -> None:
+        """Legacy markers must not report a losing terminal transition as success."""
+        repository = SessionRepository(event_store)
+        await repository.create_session(
+            execution_id="exec-terminal-marker-race",
+            seed_id="seed-terminal-marker-race",
+            session_id="sess-terminal-marker-race",
+        )
+
+        completed = await repository.mark_completed("sess-terminal-marker-race")
+        cancelled = await repository.mark_cancelled(
+            "sess-terminal-marker-race",
+            reason="late cancellation",
+        )
+
+        assert completed.is_ok and completed.value is True
+        assert cancelled.is_ok and cancelled.value is False
+        terminal_events = await event_store.replay("session", "sess-terminal-marker-race")
+        assert [event.type for event in terminal_events] == [
+            "orchestrator.session.started",
+            "orchestrator.session.completed",
+        ]
+
+    async def test_raw_terminal_append_paths_are_rejected(self, event_store: EventStore) -> None:
+        """Terminal sessions must use the one-winner public append boundary."""
+        terminal = BaseEvent(
+            type="orchestrator.session.failed",
+            aggregate_type="session",
+            aggregate_id="sess-raw-terminal-path",
+            data={"error": "would bypass terminal CAS"},
+        )
+        benign = BaseEvent(
+            type="orchestrator.progress.updated",
+            aggregate_type="session",
+            aggregate_id="sess-raw-terminal-path",
+            data={"progress": {"messages_processed": 1}},
+        )
+
+        with pytest.raises(PersistenceError, match="one-winner guard"):
+            await event_store.append_with_rowid(terminal)
+        with pytest.raises(PersistenceError, match="cannot be appended in a batch"):
+            await event_store.append_batch([benign, terminal])
+
+        assert await event_store.replay("session", "sess-raw-terminal-path") == []
+
+    @staticmethod
+    def _acceptance_event(**overrides: object) -> BaseEvent:
+        data: dict[str, object] = {
+            "execution_id": "exec-acceptance-guard",
+            "session_id": "sess-acceptance-guard",
+            "acceptance_generation_id": acceptance_generation_id_for_session(
+                "sess-acceptance-guard", "exec-acceptance-guard"
+            ),
+            "root_ac_index": 0,
+            "final_retry_attempt": 1,
+            "accepted": True,
+            "disposition": "accepted",
+            "outcome": "succeeded",
+            "terminal_status": "completed",
+        }
+        data.update(overrides)
+        return BaseEvent(
+            type="execution.ac.acceptance_finalized",
+            aggregate_type="execution",
+            aggregate_id=str(data["execution_id"]),
+            data=data,
+        )
+
+    async def test_final_acceptance_is_idempotent_and_guarded(
+        self, event_store: EventStore
+    ) -> None:
+        payload = self._acceptance_event(
+            execution_id="exec-acceptance-idempotent",
+            session_id="sess-acceptance-idempotent",
+            acceptance_generation_id=acceptance_generation_id_for_session(
+                "sess-acceptance-idempotent", "exec-acceptance-idempotent"
+            ),
+        ).data
+        terminal = BaseEvent(
+            type="orchestrator.session.completed",
+            aggregate_type="session",
+            aggregate_id="sess-acceptance-idempotent",
+            data={"acceptance_finalizations": [payload, dict(payload)]},
+        )
+
+        await self._seed_session_start(
+            event_store,
+            session_id="sess-acceptance-idempotent",
+            execution_id="exec-acceptance-idempotent",
+        )
+        assert await event_store.append(terminal) is True
+
+        replayed = await event_store.replay("execution", payload["execution_id"])
+        assert [item.type for item in replayed] == ["execution.ac.acceptance_finalized"]
+
+    async def test_conflicting_final_acceptance_fails_closed(self, event_store: EventStore) -> None:
+        payload = self._acceptance_event(
+            execution_id="exec-acceptance-conflict",
+            session_id="sess-acceptance-conflict",
+            acceptance_generation_id=acceptance_generation_id_for_session(
+                "sess-acceptance-conflict", "exec-acceptance-conflict"
+            ),
+        )
+        conflicting = {**payload.data, "marker": "changed"}
+        terminal = BaseEvent(
+            type="orchestrator.session.completed",
+            aggregate_type="session",
+            aggregate_id="sess-acceptance-conflict",
+            data={"acceptance_finalizations": [payload.data, conflicting]},
+        )
+
+        await self._seed_session_start(
+            event_store,
+            session_id="sess-acceptance-conflict",
+            execution_id="exec-acceptance-conflict",
+        )
+        with pytest.raises(PersistenceError, match="Conflicting final acceptance"):
+            await event_store.append(terminal)
+
+        assert [
+            event.type for event in await event_store.replay("session", terminal.aggregate_id)
+        ] == ["orchestrator.session.started"]
+        assert await event_store.replay("execution", payload.aggregate_id) == []
+
+    async def test_terminal_acceptance_plan_is_atomic(self, event_store: EventStore) -> None:
+        """Terminal CAS and all planned root decisions commit together."""
+        payload = self._acceptance_event(
+            execution_id="exec-acceptance-plan",
+            session_id="sess-acceptance-plan",
+            acceptance_generation_id=acceptance_generation_id_for_session(
+                "sess-acceptance-plan", "exec-acceptance-plan"
+            ),
+        ).data
+        terminal = BaseEvent(
+            type="orchestrator.session.completed",
+            aggregate_type="session",
+            aggregate_id="sess-acceptance-plan",
+            data={"acceptance_finalizations": [payload]},
+        )
+
+        await self._seed_session_start(
+            event_store,
+            session_id="sess-acceptance-plan",
+            execution_id="exec-acceptance-plan",
+        )
+        assert await event_store.append(terminal) is True
+        assert sorted(
+            event.type for event in await event_store.replay("session", terminal.aggregate_id)
+        ) == sorted(["orchestrator.session.started", "orchestrator.session.completed"])
+        assert [
+            event.type for event in await event_store.replay("execution", payload["execution_id"])
+        ] == ["execution.ac.acceptance_finalized"]
+
+    @pytest.mark.parametrize(
+        "roots",
+        [[], [0], [0, 2], [0, 1, 2]],
+    )
+    async def test_current_terminal_plan_requires_exact_root_set(
+        self,
+        event_store: EventStore,
+        roots: list[int],
+    ) -> None:
+        session_id = "sess-root-set"
+        execution_id = "exec-root-set"
+
+        def payload(root: int) -> dict[str, object]:
+            return self._acceptance_event(
+                execution_id=execution_id,
+                session_id=session_id,
+                acceptance_generation_id=acceptance_generation_id_for_session(
+                    session_id, execution_id
+                ),
+                root_ac_index=root,
+                accepted=False,
+                disposition="failed",
+                outcome="failed",
+                terminal_status="failed",
+            ).data
+
+        await self._seed_session_start(
+            event_store,
+            session_id=session_id,
+            execution_id=execution_id,
+            acceptance_root_indices=[0, 1],
+        )
+        terminal = BaseEvent(
+            type="orchestrator.session.failed",
+            aggregate_type="session",
+            aggregate_id=session_id,
+            data={"acceptance_finalizations": [payload(root) for root in roots]},
+        )
+        with pytest.raises(PersistenceError, match="exactly match"):
+            await event_store.append(terminal)
+
+        assert [event.type for event in await event_store.replay("session", session_id)] == [
+            "orchestrator.session.started"
+        ]
+
+    async def test_current_zero_root_session_requires_explicit_empty_plan(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        session_id = "sess-zero-root-plan"
+        execution_id = "exec-zero-root-plan"
+        await self._seed_session_start(
+            event_store,
+            session_id=session_id,
+            execution_id=execution_id,
+            acceptance_root_indices=[],
+        )
+
+        with pytest.raises(PersistenceError, match="explicit acceptance plan"):
+            await event_store.append(
+                BaseEvent(
+                    type="orchestrator.session.completed",
+                    aggregate_type="session",
+                    aggregate_id=session_id,
+                    data={},
+                )
+            )
+
+        assert (
+            await event_store.append(
+                BaseEvent(
+                    type="orchestrator.session.completed",
+                    aggregate_type="session",
+                    aggregate_id=session_id,
+                    data={"acceptance_finalizations": []},
+                )
+            )
+            is True
+        )
+
+    async def test_current_terminal_plan_accepts_exact_durable_root_set(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        session_id = "sess-exact-root-set"
+        execution_id = "exec-exact-root-set"
+        await self._seed_session_start(
+            event_store,
+            session_id=session_id,
+            execution_id=execution_id,
+            acceptance_root_indices=[0, 1],
+        )
+        plan = [
+            self._acceptance_event(
+                execution_id=execution_id,
+                session_id=session_id,
+                acceptance_generation_id=acceptance_generation_id_for_session(
+                    session_id, execution_id
+                ),
+                root_ac_index=root,
+                accepted=False,
+                disposition="failed",
+                outcome="failed",
+                terminal_status="failed",
+            ).data
+            for root in (0, 1)
+        ]
+
+        assert (
+            await event_store.append(
+                BaseEvent(
+                    type="orchestrator.session.failed",
+                    aggregate_type="session",
+                    aggregate_id=session_id,
+                    data={"acceptance_finalizations": plan},
+                )
+            )
+            is True
+        )
+        assert len(await event_store.replay("execution", execution_id)) == 2
+
+    async def test_terminal_acceptance_binds_execution_to_session_start(
+        self, event_store: EventStore
+    ) -> None:
+        await self._seed_session_start(
+            event_store,
+            session_id="sess-identity-bound",
+            execution_id="exec-real",
+        )
+        payload = self._acceptance_event(
+            execution_id="exec-other",
+            session_id="sess-identity-bound",
+            acceptance_generation_id=acceptance_generation_id_for_session(
+                "sess-identity-bound", "exec-other"
+            ),
+        ).data
+        terminal = BaseEvent(
+            type="orchestrator.session.completed",
+            aggregate_type="session",
+            aggregate_id="sess-identity-bound",
+            data={"acceptance_finalizations": [payload]},
+        )
+
+        with pytest.raises(PersistenceError, match="durable session start"):
+            await event_store.append(terminal)
+
+        assert await event_store.replay("execution", "exec-other") == []
+
+    async def test_terminal_acceptance_plan_rolls_back_on_conflict(
+        self, event_store: EventStore
+    ) -> None:
+        """A contradictory plan cannot leave a terminal session without its winner."""
+        existing = self._acceptance_event(
+            execution_id="exec-acceptance-plan-conflict",
+            session_id="sess-acceptance-plan-conflict",
+            acceptance_generation_id=acceptance_generation_id_for_session(
+                "sess-acceptance-plan-conflict", "exec-acceptance-plan-conflict"
+            ),
+        )
+        conflicting = dict(
+            existing.data,
+            marker="changed",
+        )
+        terminal = BaseEvent(
+            type="orchestrator.session.completed",
+            aggregate_type="session",
+            aggregate_id="sess-acceptance-plan-conflict",
+            data={"acceptance_finalizations": [existing.data, conflicting]},
+        )
+
+        await self._seed_session_start(
+            event_store,
+            session_id="sess-acceptance-plan-conflict",
+            execution_id="exec-acceptance-plan-conflict",
+        )
+        with pytest.raises(PersistenceError, match="Conflicting final acceptance"):
+            await event_store.append(terminal)
+        assert [
+            event.type for event in await event_store.replay("session", terminal.aggregate_id)
+        ] == ["orchestrator.session.started"]
+
+    async def test_acceptance_digest_includes_additional_payload_fields(
+        self, event_store: EventStore
+    ) -> None:
+        """Extra final-event fields are part of fail-closed idempotence."""
+        event = self._acceptance_event(
+            execution_id="exec-acceptance-digest",
+            session_id="sess-acceptance-digest",
+            acceptance_generation_id=acceptance_generation_id_for_session(
+                "sess-acceptance-digest", "exec-acceptance-digest"
+            ),
+        )
+        conflicting = {**event.data, "marker": "changed"}
+        terminal = BaseEvent(
+            type="orchestrator.session.completed",
+            aggregate_type="session",
+            aggregate_id="sess-acceptance-digest",
+            data={"acceptance_finalizations": [event.data, conflicting]},
+        )
+
+        await self._seed_session_start(
+            event_store,
+            session_id="sess-acceptance-digest",
+            execution_id="exec-acceptance-digest",
+        )
+        with pytest.raises(PersistenceError, match="Conflicting final acceptance"):
+            await event_store.append(terminal)
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"acceptance_generation_id": ""},
+            {"root_ac_index": -1},
+            {"accepted": "true"},
+            {"final_retry_attempt": -1},
+            {"terminal_status": ""},
+            {"terminal_status": "paused"},
+            {"disposition": "rejected"},
+        ],
+    )
+    async def test_malformed_final_acceptance_is_rejected(
+        self, event_store: EventStore, overrides: dict[str, object]
+    ) -> None:
+        with pytest.raises(
+            PersistenceError,
+            match="Final acceptance|Accepted final|Rejected final|Terminal acceptance plan",
+        ):
+            payload = self._acceptance_event(**overrides).data
+            terminal = BaseEvent(
+                type="orchestrator.session.completed",
+                aggregate_type="session",
+                aggregate_id="sess-acceptance-guard",
+                data={"acceptance_finalizations": [payload]},
+            )
+            await self._seed_session_start(
+                event_store,
+                session_id="sess-acceptance-guard",
+                execution_id="exec-acceptance-guard",
+            )
+            await event_store.append(terminal)
+
+    async def test_final_acceptance_raw_append_paths_are_rejected(
+        self, event_store: EventStore
+    ) -> None:
+        event = self._acceptance_event()
+        benign = BaseEvent(
+            type="execution.progress.updated",
+            aggregate_type="execution",
+            aggregate_id=event.aggregate_id,
+            data={},
+        )
+
+        with pytest.raises(PersistenceError, match="one-winner guard"):
+            await event_store.append_with_rowid(event)
+        with pytest.raises(PersistenceError, match="cannot be appended in a batch"):
+            await event_store.append_batch([benign, event])
+        assert await event_store.replay("execution", event.aggregate_id) == []
+
+    async def test_conditional_pause_preserves_existing_terminal_winner(
+        self, event_store: EventStore
+    ) -> None:
+        """PAUSED cannot be appended behind an explicit terminal winner."""
+        session_id = "sess-terminal-before-pause"
+        cancelled = BaseEvent(
+            type="orchestrator.session.cancelled",
+            aggregate_type="session",
+            aggregate_id=session_id,
+            data={"reason": "terminal wins"},
+        )
+        paused = BaseEvent(
+            type="orchestrator.session.paused",
+            aggregate_type="session",
+            aggregate_id=session_id,
+            data={"reason": "too late"},
+        )
+
+        assert await event_store.append(cancelled) is True
+        assert await event_store.append_session_pause_if_active(paused) is False
+
+        events = await event_store.replay("session", session_id)
+        assert [event.type for event in events] == ["orchestrator.session.cancelled"]
 
     async def test_append_preserves_event_data(
         self, event_store: EventStore, sample_event: BaseEvent
@@ -797,6 +1282,41 @@ class TestSessionActivitySnapshots:
         assert snapshot.start_time is not None
         assert snapshot.last_activity is not None
         assert snapshot.status_event_type == "orchestrator.session.completed"
+
+    async def test_terminal_status_absorbs_later_running_progress(
+        self, event_store: EventStore
+    ) -> None:
+        session_id = "sess-terminal-with-late-progress"
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id=session_id,
+                data={"execution_id": "exec-terminal-with-late-progress"},
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.cancelled",
+                aggregate_type="session",
+                aggregate_id=session_id,
+                data={"reason": "user requested cancellation"},
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.progress.updated",
+                aggregate_type="session",
+                aggregate_id=session_id,
+                data={"progress": {"runtime_status": "running", "phase": "late"}},
+            )
+        )
+
+        snapshots = await event_store.get_session_activity_snapshots()
+        snapshot = next(item for item in snapshots if item.session_id == session_id)
+
+        assert snapshot.status_event_type == "orchestrator.session.cancelled"
+        assert snapshot.runtime_status is None
 
     async def test_includes_progress_only_session_without_started_event(
         self, event_store: EventStore
