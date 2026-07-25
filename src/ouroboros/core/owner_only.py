@@ -28,18 +28,37 @@ OWNER_ONLY_DIR = 0o700
 def write_owner_only(path: Path, text: str, *, encoding: str = "utf-8") -> None:
     """Write ``text`` to ``path`` as an owner-only file.
 
-    The mode is applied at CREATION, not after the write, so the content is
-    never briefly present at the umask default. Directories are not created
-    here — call :func:`secure_directory` for the parent when it is this
-    package's to own.
+    The creation mode covers a NEW file — it is ignored when the file already
+    exists, so overwriting one left from an earlier version kept that file's
+    old mode (round-60). The descriptor is therefore chmod'd as well, before
+    anything is written through it, so the content is never present at a wider
+    mode even briefly and an existing file is upgraded rather than trusted.
+
+    Directories are not touched here: a caller may write into a directory that
+    is not this package's to re-permission. Call :func:`secure_directory` only
+    for directories this package creates and owns.
     """
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, OWNER_ONLY_FILE)
+    try:
+        os.fchmod(descriptor, OWNER_ONLY_FILE)
+    except OSError:
+        # A filesystem that cannot represent the mode (or a platform without
+        # fchmod) must not turn a write into a crash; the creation mode above
+        # still covers the new-file case.
+        pass
     with os.fdopen(descriptor, "w", encoding=encoding) as handle:
         handle.write(text)
 
 
 def secure_directory(path: Path) -> None:
     """Create ``path`` if needed and make it owner-only.
+
+    Call this ONLY for directories this package creates and owns — the
+    interview state directory and the fan-out registry directory. A Seed is
+    written wherever the caller asks, which may be a shared project
+    directory, and narrowing that from 0755 to 0700 would be this package
+    changing something that is not its own (round-60). The Seed file itself is
+    still owner-only through :func:`write_owner_only`.
 
     ``mkdir``'s mode argument is ignored when the directory already exists, so
     an inherited `0755` state directory keeps its permissions unless it is
