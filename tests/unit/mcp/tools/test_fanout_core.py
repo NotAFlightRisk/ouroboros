@@ -6037,3 +6037,78 @@ def test_round52_cardinalities_only_and_transportable_content(tmp_path: Any) -> 
     assert out["malformed_keys"] == ["data_context"]
     # The response itself must survive the transport it describes.
     json_module.dumps(out, ensure_ascii=False).encode("utf-8")
+
+
+def test_round53_identifier_payloads_and_countable_units(tmp_path: Any) -> None:
+    """A tool name is not a payload, and a count is counted in countable things."""
+    import json as json_module
+
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+    from ouroboros.orchestrator.capabilities.interview_schemas import _data_context_lane_policy
+
+    policy = _data_context_lane_policy()
+
+    def _output(source: str = "clickhouse_query", unit: str = "users") -> dict[str, Any]:
+        return {
+            "lane_id": "data_context",
+            "data_needed": True,
+            "finding": "Growth leads.",
+            "confidence": "reported_by_tool",
+            "evidence": [
+                _typed_evidence(
+                    source=source,
+                    request={
+                        "operation": "read",
+                        "metric": "active_users",
+                        "aggregation": "count",
+                    },
+                    value={"number": 42, "unit": unit},
+                )
+            ],
+            "proposed_queries": [],
+            "requires_user_confirmation": True,
+            "caveats": ["Point-in-time."],
+        }
+
+    # B1 — an identifier-length digit run is a payload wearing the field.
+    assert any(
+        "identifier-length digit run" in error
+        for error in _data_evidence_boundary_violations(
+            _output(source="metrics_4111111111111111"), policy
+        )
+    )
+    # Tool names legitimately carry short numbers.
+    for source in ("metabase.card.4471", "s3_logs_20260725", "clickhouse_query"):
+        assert _data_evidence_boundary_violations(_output(source=source), policy) == [], source
+
+    # Warning — a cardinality is counted in countable things.
+    for unit in ("ms", "bytes", "%"):
+        assert _data_evidence_boundary_violations(_output(unit=unit), policy) != [], unit
+    for unit in ("users", "rows", "events"):
+        assert _data_evidence_boundary_violations(_output(unit=unit), policy) == [], unit
+
+    # End to end: the rejected payload reaches neither response nor record.
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-53", lanes=[dict(lane) for lane in advisory["lanes"]]
+    )
+    assert fanout_id is not None
+    results = [
+        {"key": lane, "content": {"lane_id": lane, "finding": "ok"}}
+        for lane in ("code_context", "web_context", "ambiguity_contrarian", "answer_simplifier")
+    ]
+    results.append({"key": "data_context", "content": _output(source="metrics_4111111111111111")})
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-53",
+        correlation_key="context.lane_id",
+        results=results,
+        fanout_id=fanout_id,
+    )
+    assert [item["lane_id"] for item in out["contract_violations"]] == ["data_context"]
+    assert "4111111111111111" not in json_module.dumps(out)
+    assert "4111111111111111" not in (tmp_path / f"{fanout_id}.json").read_text()

@@ -615,6 +615,25 @@ def _data_context_lane_policy() -> dict[str, Any]:
             # phone digits as the number, "phone" as the unit). Hosts that
             # need another unit extend this list; the engine enforces
             # whatever the snapshot declares.
+            # Executed evidence reports a cardinality, so its unit names what
+            # was counted. Time, size, and ratio units describe measurements
+            # the evidence path no longer carries (round-53: count(active_users)
+            # reported as 42 ms), and stay available to proposals.
+            "countable_units": [
+                "accounts",
+                "users",
+                "sessions",
+                "events",
+                "requests",
+                "calls",
+                "queries",
+                "rows",
+                "records",
+                "items",
+                "orders",
+                "messages",
+                "errors",
+            ],
             "allowed_units": [
                 "accounts",
                 "users",
@@ -1035,8 +1054,10 @@ def _data_evidence_boundary_violations(
     # snapshot (round-43): a limit that only the prompt knows about is a
     # suggestion, and max_evidence_chars had never been applied.
     evidence_policy = (policy or {}).get("evidence_policy")
-    allowed_units = (
-        evidence_policy.get("allowed_units") if isinstance(evidence_policy, Mapping) else None
+    # Executed evidence is a cardinality, so it is counted in countable
+    # things; the wider unit vocabulary belongs to proposals (round-53).
+    countable_units = (
+        evidence_policy.get("countable_units") if isinstance(evidence_policy, Mapping) else None
     )
     if isinstance(evidence_policy, Mapping) and isinstance(evidence_items, list):
         max_items = evidence_policy.get("max_evidence_items")
@@ -1066,7 +1087,7 @@ def _data_evidence_boundary_violations(
         errors.extend(
             f"evidence[{index}].value: {problem}"
             for problem in _aggregate_shape_problems(
-                item.get("value"), allowed_units, retained=retained
+                item.get("value"), countable_units, retained=retained
             )
         )
         errors.extend(
@@ -1132,6 +1153,11 @@ def _data_evidence_boundary_violations(
                 f"evidence[{index}].source: credential-shaped identifier; "
                 "name the read-only data tool instead"
             )
+        if isinstance(source, str) and _identifier_carries_payload(source):
+            errors.append(
+                f"evidence[{index}].source: carries an identifier-length digit "
+                "run; name the read-only data tool instead"
+            )
 
     proposals = output.get("proposed_queries")
     for index, item in enumerate(proposals if isinstance(proposals, list) else ()):
@@ -1156,6 +1182,11 @@ def _data_evidence_boundary_violations(
             errors.append(
                 f"proposed_queries[{index}].tool_name: credential-shaped "
                 "identifier; name the read-only data tool instead"
+            )
+        if isinstance(tool_name, str) and _identifier_carries_payload(tool_name):
+            errors.append(
+                f"proposed_queries[{index}].tool_name: carries an "
+                "identifier-length digit run; name the read-only data tool instead"
             )
         # ``expected_decision`` is advisory prose for the human.
         decision = item.get("expected_decision")
@@ -1287,6 +1318,8 @@ def _read_request_shape_problems(
     metric = request.get("metric")
     if not isinstance(metric, str) or not _READ_REQUEST_METRIC.match(metric):
         problems.append("metric must be a bounded identifier")
+    elif _identifier_carries_payload(metric):
+        problems.append("metric carries an identifier-length digit run")
     elif _identifier_looks_secret(metric):
         # A metric names what is measured; a credential-shaped name is the
         # leak wearing that field (round-45 probe: password_swordfish).
@@ -1560,6 +1593,18 @@ _QUALIFIABLE_CREDENTIAL_WORDS = frozenset({"token", "tokens", "key", "keys"})
 
 
 _CREDENTIAL_WORDS = _ABSOLUTE_CREDENTIAL_WORDS | _QUALIFIABLE_CREDENTIAL_WORDS
+
+
+#: A tool NAME may carry short numbers (metabase.card.4471, s3_logs_2026),
+#: but a run this long is a payload wearing the field — a card number, an
+#: SSN, a phone, an account id (round-53: source="metrics_4111111111111111").
+#: The bound is stated rather than inferred: nine digits is the shortest
+#: standard identifier (SSN), and eight keeps ISO-style date suffixes usable.
+_IDENTIFIER_DIGIT_PAYLOAD = re.compile(r"\d{9,}")
+
+
+def _identifier_carries_payload(value: str) -> bool:
+    return bool(_IDENTIFIER_DIGIT_PAYLOAD.search(value))
 
 
 def _identifier_looks_secret(value: str) -> bool:
