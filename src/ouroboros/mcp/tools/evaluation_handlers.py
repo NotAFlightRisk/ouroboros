@@ -2049,6 +2049,27 @@ class SubmitFanoutResultsHandler:
                         "result, object or text)."
                     ),
                     required=True,
+                    # The shape the handler already enforces, published on the
+                    # public schema too (round-64): an untyped array told hosts
+                    # nothing, so a malformed batch could only be discovered by
+                    # submitting it.
+                    items={
+                        "type": "object",
+                        "required": ["key", "content"],
+                        "properties": {
+                            "key": {
+                                "type": "string",
+                                "description": "The registered correlation value for this lane.",
+                            },
+                            "content": {
+                                "type": ["object", "string"],
+                                "description": (
+                                    "The child result: the structured object for a "
+                                    "lane with an answer contract, or text."
+                                ),
+                            },
+                        },
+                    },
                 ),
                 MCPToolParameter(
                     name="finalize",

@@ -6849,3 +6849,211 @@ def test_round62_resubmission_is_scoped_by_registered_contract(tmp_path: Any) ->
     )
     assert genuine["consent_status"] == "confirmable_resubmitted"
     assert genuine["resubmitted_keys"] == ["data_context"]
+
+
+# --------------------------------------------------------------------------- #
+# round-64 — hostile re-entry identifiers
+# --------------------------------------------------------------------------- #
+
+
+def test_round64_malformed_fanout_id_is_not_echoed(tmp_path: Any) -> None:
+    """A malformed id is rejected at the door without carrying its own size.
+
+    The submitted value used to be interpolated into the error, so a
+    100,000-character id produced a 100,000-character error that the MCP
+    frame, the host response, and every log line downstream then had to
+    carry.
+    """
+    hostile = "x" * 100_000
+
+    out = submit_fanout_results(
+        FanoutRegistry(tmp_path),
+        session_id="s",
+        correlation_key="context.persona",
+        results=[],
+        fanout_id=hostile,
+    )
+
+    assert out["status"] == "unknown_fanout_id"
+    assert hostile not in out["error"]
+    assert "x" * 200 not in out["error"]
+    assert len(out["error"]) < 500
+    assert hostile not in str(out)
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "../../etc/passwd",
+        "/absolute/path",
+        "has space",
+        "semi;colon",
+        "",
+        "y" * 129,
+    ],
+)
+def test_round64_identifier_grammar_is_enforced_before_routing(
+    tmp_path: Any,
+    hostile: str,
+) -> None:
+    out = submit_fanout_results(
+        FanoutRegistry(tmp_path),
+        session_id="s",
+        correlation_key="context.persona",
+        results=[],
+        fanout_id=hostile,
+    )
+    assert out["status"] == "unknown_fanout_id"
+    assert hostile not in out.get("error", "") or not hostile
+
+
+def test_round64_wellformed_unknown_id_still_names_itself(tmp_path: Any) -> None:
+    """The bound must not cost the diagnosis for ordinary mistakes.
+
+    A grammar-valid id is at most 128 characters, so echoing it is bounded —
+    and it is the only way a host can tell WHICH id it got wrong.
+    """
+    out = submit_fanout_results(
+        FanoutRegistry(tmp_path),
+        session_id="s",
+        correlation_key="context.persona",
+        results=[],
+        fanout_id="fanout-that-expired-42",
+    )
+    assert out["status"] == "unknown_fanout_id"
+    assert "fanout-that-expired-42" in out["error"]
+
+
+def test_round64_grammar_has_one_definition() -> None:
+    """The door reuses the registry's predicate instead of restating it."""
+    assert FanoutRegistry.valid_fanout_id("a" * 128)
+    assert not FanoutRegistry.valid_fanout_id("a" * 129)
+    assert not FanoutRegistry.valid_fanout_id("../escape")
+    assert not FanoutRegistry.valid_fanout_id("")
+
+
+def test_round64_results_item_shape_is_published() -> None:
+    """The shape the handler enforces is also the shape hosts are shown.
+
+    An untyped array let a host discover the required item shape only by
+    submitting a malformed batch.
+    """
+    definition = SubmitFanoutResultsHandler().definition
+    schema = definition.to_input_schema()
+    results = schema["properties"]["results"]
+
+    assert results["type"] == "array"
+    item = results["items"]
+    assert item["type"] == "object"
+    assert set(item["required"]) == {"key", "content"}
+    assert item["properties"]["key"]["type"] == "string"
+    assert item["properties"]["content"]["type"] == ["object", "string"]
+
+
+# --------------------------------------------------------------------------- #
+# round-64 — the published guarantee must describe the actual schema
+# --------------------------------------------------------------------------- #
+
+
+def _payload_defs() -> dict[str, Any]:
+    from ouroboros.contracts.data_evidence import _schema_defs
+
+    return dict(_schema_defs())
+
+
+def _lane_policy() -> dict[str, Any]:
+    from ouroboros.contracts.data_evidence import _data_context_lane_policy
+
+    return _data_context_lane_policy()["evidence_policy"]
+
+
+def test_round64_payload_defs_contain_no_free_text_field() -> None:
+    """The scoped half of the response_shape guarantee, checked not asserted.
+
+    ``engine_enforced.response_shape`` claims evidence and proposal payloads
+    are typed. A string field added there later with no ``enum``, ``const``,
+    or ``pattern`` would silently make that claim false again, so the claim
+    is derived from the schema here rather than trusted.
+    """
+    unconstrained: list[str] = []
+
+    def _walk(node: Any, path: str) -> None:
+        if not isinstance(node, Mapping):
+            return
+        if node.get("type") == "string":
+            if not any(key in node for key in ("enum", "const", "pattern")):
+                unconstrained.append(path)
+        for key, child in node.items():
+            if key in {"properties", "$defs"} and isinstance(child, Mapping):
+                for name, sub in child.items():
+                    _walk(sub, f"{path}.{name}")
+            elif key in {"items", "then", "if", "not"}:
+                _walk(child, f"{path}.{key}")
+            elif key == "allOf" and isinstance(child, list):
+                for index, sub in enumerate(child):
+                    _walk(sub, f"{path}.allOf[{index}]")
+
+    for name, body in _payload_defs().items():
+        _walk(body, name)
+
+    assert unconstrained == [], (
+        "these payload fields accept free text, so response_shape's "
+        f"'typed' claim no longer holds for them: {unconstrained}"
+    )
+
+
+def test_round64_response_shape_guarantee_names_its_exception() -> None:
+    """The guarantee must not read as 'the whole response is typed'.
+
+    ``finding`` is REQUIRED free text. Hosts are told this block, not the
+    prompt, is authoritative, so an unscoped claim could be read as "the
+    response is PII-safe" — which the engine does not establish.
+    """
+    policy = _lane_policy()
+    enforced = policy["engine_enforced"]
+    shape = enforced["response_shape"]
+    free_text_fields = policy["free_text_fields"]
+
+    assert "finding" in free_text_fields
+    assert "free_text_fields" in shape, (
+        "response_shape must point at the fields it excludes, not claim the "
+        f"whole response is typed: {shape!r}"
+    )
+    assert "defense-in-depth" in shape and "NOT as a guarantee" in shape
+    assert shape != "typed structures only; no free text"
+
+
+def test_round64_free_text_fields_are_never_retained() -> None:
+    """The 'response only' half of the guarantee.
+
+    The narrative is untrusted prose, so the claim that it never reaches
+    durable state is what keeps it survivable.
+    """
+    from ouroboros.contracts.data_evidence import (
+        data_evidence_retained_schema,
+        redact_prose_for_persistence,
+    )
+
+    policy = _lane_policy()
+    retained_properties = set(data_evidence_retained_schema()["properties"])
+
+    for field_name in policy["free_text_fields"]:
+        assert field_name not in retained_properties
+
+    summary = redact_prose_for_persistence(
+        {
+            "lane_id": "data_context",
+            "data_needed": True,
+            "confidence": "high",
+            "finding": "alice@example.com asked about churn",
+            "caveats": ["contact bob@example.com"],
+            "expected_decision": "call 010-1234-5678",
+            "evidence": [],
+            "proposed_queries": [],
+            "requires_user_confirmation": True,
+        }
+    )
+    serialized = str(summary)
+    assert "alice@example.com" not in serialized
+    assert "bob@example.com" not in serialized
+    assert "010-1234-5678" not in serialized

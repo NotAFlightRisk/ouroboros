@@ -482,9 +482,12 @@ def data_evidence_retained_schema() -> dict[str, Any]:
     """Schema of the DURABLE record — a server-owned summary, not an answer.
 
     Callers submit against the published contract; this form is what the
-    server keeps afterwards. It carries no field whose contents a child chose
-    (round-55), so the privacy guarantee is a property of the shape rather
-    than of a classifier that has to keep up.
+    server keeps afterwards. It retains no free-text or unbounded child value
+    (round-55): the lane's own ``data_needed`` and ``confidence`` do survive,
+    but as closed enums, alongside counts bounded by the contract. So the
+    privacy guarantee is a property of the shape rather than of a classifier
+    that has to keep up — see ``engine_enforced.durable_state``, which this
+    docstring must keep agreeing with (round-64).
     """
     return {
         "type": "object",
@@ -608,7 +611,21 @@ def _data_context_lane_policy() -> dict[str, Any]:
                     "retained lifecycle values are closed enums and counts "
                     "bounded by the contract"
                 ),
-                "response_shape": "typed structures only; no free text",
+                # Scoped to what is actually typed (round-64). The previous
+                # wording — "typed structures only; no free text" — was false
+                # for the response as a whole: `finding` is REQUIRED free
+                # text. Hosts are told this block, not the prompt, is
+                # authoritative, so the unscoped claim could be read as "the
+                # response is PII-safe", which the engine does not establish.
+                "response_shape": (
+                    "evidence and proposed_queries are typed: every field is a "
+                    "closed enum, a bounded integer, or a pattern-constrained "
+                    "token, so free text cannot occur there. The fields listed "
+                    "under free_text_fields are the exception — operator-facing "
+                    "narrative carried on the response only and never retained. "
+                    "A PII/credential scan runs over that prose as "
+                    "defense-in-depth, NOT as a guarantee: treat it as untrusted"
+                ),
                 "response_magnitude": "a count is bounded to a plausible row count",
                 "not_adjudicated": "whether a well-formed number is a true count",
             },

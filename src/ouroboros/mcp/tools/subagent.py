@@ -3068,7 +3068,7 @@ class FanoutRegistry:
         record.
         """
         fanout_id = path.name[: -len(".json")]
-        if not self._valid_id(fanout_id):
+        if not self.valid_fanout_id(fanout_id):
             # Not one of ours (no lock protocol applies): sweep directly.
             try:
                 path.unlink(missing_ok=True)
@@ -3163,7 +3163,15 @@ class FanoutRegistry:
         return fd_stat.st_ino == path_stat.st_ino and fd_stat.st_dev == path_stat.st_dev
 
     @classmethod
-    def _valid_id(cls, fanout_id: str) -> bool:
+    def valid_fanout_id(cls, fanout_id: str) -> bool:
+        """Whether ``fanout_id`` matches the registry's identifier grammar.
+
+        Public because the submission door has to reject a malformed id
+        BEFORE routing it (round-64): the rejection path used to echo the
+        submitted value, so a 100,000-character id produced a
+        100,000-character error. Callers must not restate the grammar — this
+        predicate is the single definition of it.
+        """
         return bool(cls._ID_PATTERN.match(fanout_id))
 
     def _path(self, fanout_id: str) -> Path:
@@ -3228,7 +3236,7 @@ class FanoutRegistry:
         replayable instead of tearing the live JSON file, so the documented
         resubmission path still finds the fan-out.
         """
-        if not self._valid_id(record.fanout_id):
+        if not self.valid_fanout_id(record.fanout_id):
             log.warning(
                 "fanout.registry.invalid_fanout_id",
                 fanout_id=record.fanout_id,
@@ -3287,7 +3295,7 @@ class FanoutRegistry:
         is retried against the recreated path. The GC side only unlinks a
         lock it can flock itself, so a HELD lock is never deleted.
         """
-        if not self._valid_id(fanout_id):
+        if not self.valid_fanout_id(fanout_id):
             yield
             return
         lock_path = self._dir / f".{fanout_id}.lock"
@@ -3348,7 +3356,7 @@ class FanoutRegistry:
         never re-exposed between GC passes. Saves refresh mtime, so active
         records never expire mid-flight.
         """
-        if not self._valid_id(fanout_id):
+        if not self.valid_fanout_id(fanout_id):
             return None
         import time
 
@@ -4346,6 +4354,22 @@ def submit_fanout_results(
     exactly one can terminalize a record and the other replays the terminal
     outcome instead of double-completing with a divergent result.
     """
+    if not registry.valid_fanout_id(fanout_id):
+        # A malformed id is rejected HERE, at the one door both transports
+        # share, rather than in each handler (round-64). It is reported as
+        # unknown because it is: an id that cannot match the grammar can
+        # never have been registered. Crucially the submitted value is NOT
+        # echoed — the previous path put it verbatim into the error, so a
+        # 100,000-character id produced a 100,000-character error that every
+        # log and MCP frame downstream then had to carry.
+        return {
+            "status": "unknown_fanout_id",
+            "error": (
+                "fanout_id does not match the registry identifier grammar "
+                "(1-128 characters, A-Z a-z 0-9 _ -), so no record can exist "
+                "for it. The submitted value is not echoed back."
+            ),
+        }
     with registry.exclusive(fanout_id):
         return _submit_fanout_results_locked(
             registry,
