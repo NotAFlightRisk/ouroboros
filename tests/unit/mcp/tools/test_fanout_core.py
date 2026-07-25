@@ -6776,3 +6776,76 @@ def test_round61_resubmission_is_the_submission_path(tmp_path: Any) -> None:
 
     # Nothing any of this touched entered durable state.
     assert "Growth leads" not in (tmp_path / f"{fanout_id}.json").read_text()
+
+
+def test_round62_resubmission_is_scoped_by_registered_contract(tmp_path: Any) -> None:
+    """What a lane IS comes from registration, never from a field in its value."""
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-62", lanes=[dict(lane) for lane in advisory["lanes"]]
+    )
+    assert fanout_id is not None
+    data_result = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Growth leads.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            _typed_evidence(
+                request={
+                    "operation": "read",
+                    "metric": "active_users",
+                    "aggregation": "count",
+                    "filters": ["plan=growth"],
+                },
+                value={"number": 42, "dimension": "plan=growth"},
+            )
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time."],
+    }
+    # Generic lanes claim the marker themselves — it must buy them nothing.
+    results = [
+        {
+            "key": lane,
+            "content": {"lane_id": lane, "finding": "ok", "content_retained": False},
+        }
+        for lane in ("code_context", "web_context", "ambiguity_contrarian", "answer_simplifier")
+    ]
+    results.append({"key": "data_context", "content": data_result})
+    assert (
+        submit_fanout_results(
+            registry,
+            session_id="sess-62",
+            correlation_key="context.lane_id",
+            results=results,
+            fanout_id=fanout_id,
+        )["status"]
+        == "complete"
+    )
+
+    spoof = submit_fanout_results(
+        registry,
+        session_id="sess-62",
+        correlation_key="context.lane_id",
+        results=[{"key": "code_context", "content": {"lane_id": "code_context", "finding": "ok"}}],
+        fanout_id=fanout_id,
+    )
+    assert spoof["consent_status"] == "not_confirmable_prose_not_retained"
+    assert not spoof.get("resubmitted_keys")
+
+    genuine = submit_fanout_results(
+        registry,
+        session_id="sess-62",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": data_result}],
+        fanout_id=fanout_id,
+    )
+    assert genuine["consent_status"] == "confirmable_resubmitted"
+    assert genuine["resubmitted_keys"] == ["data_context"]

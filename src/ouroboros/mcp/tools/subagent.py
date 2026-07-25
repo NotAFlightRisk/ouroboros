@@ -4423,13 +4423,31 @@ def _submit_fanout_results_locked(
         # (round-58): echoing it ahead of contract, malformed-content, and
         # transport checks made this path a validation bypass, which is worse
         # than the dead end it replaced.
+        # Scoped by the lane's REGISTERED contract, never by a field inside
+        # the stored value (round-62): reading content_retained off the output
+        # let a generic lane's resend flip the whole response to confirmable
+        # while the data lane stayed redacted. This is the same rule as
+        # round-50 — what a value is, is decided outside the value.
+        replay_lane_contracts = record.synthesizer_input.get("lane_answer_contracts")
+        replay_lane_contracts = (
+            replay_lane_contracts if isinstance(replay_lane_contracts, Mapping) else {}
+        )
+
+        def _is_redacted_data_lane(lane_id: str) -> bool:
+            contract = replay_lane_contracts.get(lane_id)
+            if not isinstance(contract, Mapping):
+                return False
+            if str(contract.get("contract_id") or "") != _DATA_EVIDENCE_CONTRACT_ID:
+                return False
+            stored = record.received_results.get(lane_id)
+            return isinstance(stored, Mapping) and stored.get("content_retained") is False
+
         resubmittable = {
             str(result.get("key"))
             for result in results
             if isinstance(result, Mapping)
             and str(result.get("key")) in record.expected_keys
-            and isinstance(record.received_results.get(str(result.get("key"))), Mapping)
-            and record.received_results[str(result.get("key"))].get("content_retained") is False
+            and _is_redacted_data_lane(str(result.get("key")))
         }
         if resubmittable:
             resent: dict[str, Any] = {}

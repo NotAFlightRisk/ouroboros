@@ -57,6 +57,7 @@ from ouroboros.contracts.data_evidence import (
 )
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.initial_context import resolve_initial_context_input
+from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
     InterviewTurnContext,
@@ -1288,7 +1289,12 @@ async def _plugin_save_state(state_dir: Path, state: InterviewState) -> Result[P
         content = state.model_dump_json(indent=2)
 
         def _sync_write() -> None:
-            file_path.write_text(content, encoding="utf-8")
+            # The plugin transport persists the same transcript the stdio one
+            # does, including confirmed [from-data] answers, so it uses the
+            # same owner-only writer (round-62: this fourth site was still on
+            # write_text and produced 0644 under a 022 umask).
+            secure_directory(file_path.parent)
+            write_owner_only(file_path, content)
 
         await asyncio.to_thread(_sync_write)
         return Result.ok(file_path)

@@ -597,7 +597,17 @@ def _data_context_lane_policy() -> dict[str, Any]:
             # confirming human, who sees the claim beside the request that
             # produced it, is that check.
             "engine_enforced": {
-                "durable_state": "no child-authored field is retained",
+                # Precisely what is true (round-62): the retained summary
+                # still carries the lane's own data_needed and confidence —
+                # closed enums — and counts bounded by the contract's maxItems.
+                # None of them can hold free text or a payload, which is the
+                # property that matters, but calling them "not child-authored"
+                # was false.
+                "durable_state": (
+                    "no free-text or unbounded child value is retained; the "
+                    "retained lifecycle values are closed enums and counts "
+                    "bounded by the contract"
+                ),
                 "response_shape": "typed structures only; no free text",
                 "response_magnitude": "a count is bounded to a plausible row count",
                 "not_adjudicated": "whether a well-formed number is a true count",

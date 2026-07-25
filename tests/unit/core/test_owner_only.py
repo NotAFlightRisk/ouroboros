@@ -165,3 +165,29 @@ def test_a_failed_write_leaves_nothing_behind(tmp_path: Path, monkeypatch: Any) 
 
     assert not target.exists()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_every_transport_that_persists_a_transcript_is_owner_only(tmp_path: Path) -> None:
+    """The plugin interview path writes the same transcript the stdio one does.
+
+    Round-62 found it still on ``write_text``: a fourth persistence site behind
+    three that had been converted. The class is "files carrying interview,
+    PM, Seed, or fan-out content", and every member of it goes through the
+    owner-only writer.
+    """
+    import asyncio
+
+    from ouroboros.bigbang.interview import InterviewState
+    from ouroboros.mcp.tools.authoring_handlers import _plugin_save_state
+
+    state_dir = tmp_path / "data"
+    state_dir.mkdir(mode=0o755)
+    os.chmod(state_dir, 0o755)
+
+    state = InterviewState(interview_id="iv_plugin", initial_context="ctx")
+    result = asyncio.run(_plugin_save_state(state_dir, state))
+    assert result.is_ok, result.error if result.is_err else None
+
+    saved = Path(result.value)
+    assert _mode(saved) == 0o600
+    assert _mode(saved.parent) == 0o700

@@ -51,6 +51,7 @@ from ouroboros.bigbang.question_classifier import (
 )
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
+from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
@@ -1180,7 +1181,7 @@ class PMInterviewEngine:
             ensure_ascii=False,
             indent=2,
         )
-        filepath.write_text(json_content, encoding="utf-8")
+        write_owner_only(filepath, json_content)
 
         log.info(
             "pm.seed_saved",

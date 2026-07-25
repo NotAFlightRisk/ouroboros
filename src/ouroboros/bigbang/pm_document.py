@@ -20,6 +20,7 @@ import structlog
 from ouroboros.bigbang.pm_seed import PMSeed
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -212,7 +213,7 @@ def save_pm_document(
         pm_path = output_dir / _PM_FILENAME
 
     content = generate_pm_markdown(seed)
-    pm_path.write_text(content, encoding="utf-8")
+    write_owner_only(pm_path, content)
 
     log.info(
         "pm.document_saved",
@@ -363,7 +364,7 @@ class PMDocumentGenerator:
         output_dir.mkdir(parents=True, exist_ok=True)
         pm_path = output_dir / _PM_FILENAME
 
-        pm_path.write_text(content, encoding="utf-8")
+        write_owner_only(pm_path, content)
 
         log.info(
             "pm.document_saved",

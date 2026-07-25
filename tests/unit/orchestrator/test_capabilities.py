@@ -4997,7 +4997,13 @@ def test_question_advisory_data_context_lane_ships_read_only_proposer_policy() -
     assert evidence["lane_instructions"]["aggregates_only"] is True
     assert evidence["lane_instructions"]["raw_rows_allowed"] is False
     assert evidence["lane_instructions"]["pii_scrub_required"] is True
-    assert evidence["engine_enforced"]["durable_state"] == "no child-authored field is retained"
+    # Round-62: the claim states what is true — the retained lifecycle values
+    # are closed enums and bounded counts, which is the property that matters,
+    # rather than the stronger "nothing child-authored" that was false.
+    assert (
+        "no free-text or unbounded child value is retained"
+        in (evidence["engine_enforced"]["durable_state"])
+    )
     assert "not_adjudicated" in evidence["engine_enforced"]
     assert evidence["max_evidence_items"] == 5
     assert evidence["max_evidence_chars"] == 2000
