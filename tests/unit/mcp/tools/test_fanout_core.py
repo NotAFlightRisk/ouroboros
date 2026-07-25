@@ -8063,3 +8063,62 @@ def test_round75_plugin_contract_section_covers_the_undeclared_data_lane() -> No
     )
     assert "data_evidence_answer.v1" in section
     assert "OMITTED" not in section
+
+
+def test_round76_rejected_secret_scope_key_is_not_echoed(tmp_path: Any) -> None:
+    """A value rejected FOR BEING secret-shaped may not ride the rejection.
+
+    The probe: filters=["sk_live_1234_name=smith"] was refused, and the same
+    secret appeared verbatim in contract_violations and in the persisted
+    terminal record. Same class as the round-69 fanout_id echo, one layer in.
+    """
+    secret_scope = "sk_live_1234_name=smith"
+    output = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Scoped count requested.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            {
+                "source": "warehouse",
+                "request": {
+                    "operation": "read",
+                    "metric": "logins",
+                    "aggregation": "count",
+                    "filters": [secret_scope],
+                },
+                "value": {"number": 3},
+                "observed_at": "2026-07-25T00:00:00Z",
+                "execution_status": "succeeded",
+            }
+        ],
+        "proposed_queries": [],
+        "caveats": ["point-in-time"],
+        "requires_user_confirmation": True,
+    }
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-76",
+        lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+    )
+    assert fanout_id is not None
+
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-76",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": output}],
+        fanout_id=fanout_id,
+    )
+
+    assert out.get("contract_violations"), "the secret-shaped scope was accepted"
+    serialized = json.dumps(out, ensure_ascii=False, default=str)
+    assert "sk_live_1234" not in serialized
+    assert "smith" not in serialized
+
+    record = registry.load(fanout_id)
+    assert record is not None
+    persisted = json.dumps(record.to_dict(), ensure_ascii=False, default=str)
+    assert "sk_live_1234" not in persisted

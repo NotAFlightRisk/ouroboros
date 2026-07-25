@@ -17,9 +17,26 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-REQUIREMENT_DISTILLATION_SCHEMA_VERSION = "requirement-distillation.v1"
+# v2 (round-76): the derivation policy changed — observation-marked answers
+# ([from-data]/[from-research]) are no longer promoted to requirement
+# candidates (round-73). The version participates in is_current(), so a
+# cache distilled under v1 with an observation-derived candidate is
+# invalidated by this bump instead of being reused past the new gate.
+REQUIREMENT_DISTILLATION_SCHEMA_VERSION = "requirement-distillation.v2"
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def redacted_segment(text: str) -> str:
+    """Digest form of a value that may not ride a report.
+
+    The single definition (round-76): the transport's error paths and the
+    contract's semantic diagnostics both need it, and the round-69 lesson was
+    that a value rejected FOR BEING secret-shaped must not then appear
+    verbatim in the rejection.
+    """
+    digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return f"<redacted-key sha256:{digest}>"
 
 
 def classify_answer_provenance(answer: str) -> str:

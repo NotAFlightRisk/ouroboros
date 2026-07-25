@@ -33,6 +33,8 @@ import math
 import re
 from typing import Any
 
+from ouroboros.core.requirement_candidate import redacted_segment
+
 CONTRACT_VERSION = "data_evidence_answer.v1"
 
 
@@ -1497,7 +1499,11 @@ def _identity_scope_problem(text: str, label: str) -> str | None:
         key, value = text, ""
     key, value = key.strip(), value.strip()
     if _entity_key(key):
-        return f"{label} keys an entity ({key!r}); aggregate by category instead"
+        # The key is caller text and this diagnostic rides the response AND
+        # the persisted terminal snapshot (round-76): a probe's
+        # `sk_live_1234_name=smith` was rejected as secret-shaped yet echoed
+        # verbatim by this line. Digested, like every other rejected value.
+        return f"{label} keys an entity ({redacted_segment(key)}); aggregate by category instead"
     # Round-48: grouping=["password"], filters=["access_token!=huntertwo"] —
     # the parsed key and the compared value are identifiers too, so they get
     # the same credential classification every other identifier field has.

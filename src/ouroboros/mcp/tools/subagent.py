@@ -37,7 +37,6 @@ from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -63,6 +62,7 @@ from ouroboros.contracts.data_evidence import (
     redact_prose_for_persistence,
 )
 from ouroboros.core.owner_only import fsync_parent_directory, secure_directory, write_owner_only
+from ouroboros.core.requirement_candidate import redacted_segment
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.assignment import AssignmentMessage
@@ -4004,9 +4004,13 @@ def _reportable_unexpected_key(key: str) -> str:
 
 
 def _redacted_segment(text: str) -> str:
-    """Digest form of a value that may not ride a report."""
-    digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:12]
-    return f"<redacted-key sha256:{digest}>"
+    """Digest form of a value that may not ride a report.
+
+    Delegates to the single definition in ``core.requirement_candidate``
+    (round-76): the contract's semantic diagnostics redact through the same
+    function, so the two report forms cannot drift.
+    """
+    return redacted_segment(text)
 
 
 def _schema_declared_property_names(schema: Any) -> frozenset[str]:

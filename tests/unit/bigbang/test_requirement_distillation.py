@@ -482,3 +482,62 @@ def test_round74_pm_transcript_withholds_the_same_class() -> None:
 
     assert "3DS" not in transcript
     assert OBSERVATION_WITHHELD_NOTE in transcript
+
+
+def test_round76_a_pre_change_cache_cannot_bypass_the_provenance_gate() -> None:
+    """The derivation-policy version participates in cache validity.
+
+    Rounds 73-74 changed what the distillation derives, but a cache computed
+    before the change matches on fingerprint and revision — a probe reused
+    one and emitted its research observation as a Seed acceptance criterion.
+    The version bump is the migration: v1 caches are recomputed, not reused.
+    """
+    from ouroboros.core.requirement_candidate import (
+        REQUIREMENT_DISTILLATION_SCHEMA_VERSION,
+        RequirementDistillation,
+    )
+
+    state = _state_with_answer("[from-research] The provider requires 3DS for EU cards.")
+    # A cache distilled under the pre-change policy: same inputs, old
+    # version, and the observation promoted the way v1 promoted it.
+    stale = RequirementDistillation(
+        candidates=(
+            RequirementCandidate(
+                candidate_id="round-1:requirement",
+                section=RequirementSection.ACCEPTANCE_CRITERION,
+                text="[from-research] The provider requires 3DS for EU cards.",
+                content_source=CandidateContentSource.USER_STATED,
+                resolution=CandidateResolution.CONFIRMED,
+                confirmation_authority=ConfirmationAuthority.USER,
+                evidence_ids=("round-1:answer",),
+                required=True,
+            ),
+        ),
+        evidence=(
+            RequirementEvidence(
+                evidence_id="round-1:answer",
+                kind=RequirementEvidenceKind.USER_STATEMENT,
+                text="[from-research] The provider requires 3DS for EU cards.",
+            ),
+        ),
+        schema_version="requirement-distillation.v1",
+        input_revision=state.requirement_input_revision,
+        input_fingerprint=state.requirement_input_fingerprint(),
+    )
+    state.requirement_distillation = stale
+    assert REQUIREMENT_DISTILLATION_SCHEMA_VERSION != "requirement-distillation.v1"
+
+    rebuilt = build_requirement_distillation(state)
+
+    assert rebuilt is not stale, "the pre-change cache was reused"
+    assert _round_candidates(rebuilt) == []
+    assert rebuilt.schema_version == REQUIREMENT_DISTILLATION_SCHEMA_VERSION
+
+
+def test_round76_a_current_cache_is_still_reused() -> None:
+    """The bump must not disable the cache — a v2 cache stays a cache."""
+    state = _state_with_answer("We must ship the reporting lane this quarter.")
+    first = build_requirement_distillation(state)
+    state.requirement_distillation = first
+
+    assert build_requirement_distillation(state) is first
