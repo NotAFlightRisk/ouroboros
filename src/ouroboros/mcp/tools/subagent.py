@@ -4313,6 +4313,21 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
             "finding: row-shaped (serialized-record) content is raw evidence "
             "and may not ride any persisted field; state aggregates only"
         )
+    # The error-shape rule binds the FINDING too (round-40 probe: a finding
+    # narrating "the query failed because access was denied" shipped
+    # alongside evidence). Same condition as caveats: the contradiction needs
+    # evidence to exist — a no-op (data_needed=false, empty evidence)
+    # legitimately narrates why no lookup ran.
+    if (
+        isinstance(finding, str)
+        and isinstance(evidence_items, list)
+        and evidence_items
+        and _DATA_EVIDENCE_ERROR_SHAPE.search(finding)
+    ):
+        errors.append(
+            "finding: describes a failed lookup; a failed call is a "
+            "no-evidence finding, not evidence with a narrative"
+        )
     caveats = output.get("caveats")
     for index, caveat in enumerate(caveats if isinstance(caveats, list) else ()):
         if isinstance(caveat, str) and _prose_contains_rows(caveat):
@@ -4586,49 +4601,64 @@ _SAFE_IDENTIFIER_SYNTAX = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 _VENDOR_SECRET_PREFIX = re.compile(
     r"^(ghp_|gho_|github_pat_|xox[a-z][-_]|sk[-_]|pk[-_]|AKIA|ASIA|ABIA|ACCA)",
 )
-# A credential word marks the identifier from ANY token position, not only
-# the first (round-38 probe: ``access_key_abcd1234`` wore the exemption
-# because "access" led). The word set is the vocabulary; position is not
-# part of it — closing the class instead of prepending known lead-ins.
-_CREDENTIAL_WORDS = frozenset(
+# Credential words that NEVER name a read-only data tool. No suffix
+# analysis applies to them: an identifier containing one is a credential
+# wherever it sits (round-40 probes: password_swordfish,
+# client_secret_huntertwo — an alphabetic suffix is not tool vocabulary when
+# the word itself only ever names a secret).
+_ABSOLUTE_CREDENTIAL_WORDS = frozenset(
     {
-        "token",
-        "tokens",
-        "secret",
-        "secrets",
-        "key",
-        "keys",
-        "apikey",
-        "apikeys",
-        "bearer",
         "password",
         "passwd",
+        "pwd",
+        "secret",
+        "secrets",
+        "bearer",
         "credential",
         "credentials",
         "creds",
+        "apikey",
+        "apikeys",
     }
 )
+# Credential words that DO appear in analytics vocabulary — "token usage",
+# "key metrics". English compounds put the head last, so a qualifier BEFORE
+# the word makes the word the head and the identifier a credential name
+# (refresh_token, access_key, private_key); the word LEADING makes it a
+# modifier and the identifier a tool name (token_usage_v2, key_metrics_30d).
+# That position rule is the whole exemption: it is granted only to a leading
+# credential word with a word-like tail, and everything else fails closed.
+_QUALIFIABLE_CREDENTIAL_WORDS = frozenset({"token", "tokens", "key", "keys"})
+_CREDENTIAL_WORDS = _ABSOLUTE_CREDENTIAL_WORDS | _QUALIFIABLE_CREDENTIAL_WORDS
 
 
 def _identifier_looks_secret(value: str) -> bool:
     if _VENDOR_SECRET_PREFIX.match(value):
         return True
     tokens = [tok for tok in re.split(r"[-_.]", value) if tok]
+    lowered = [tok.lower() for tok in tokens]
+    if any(tok in _ABSOLUTE_CREDENTIAL_WORDS for tok in lowered):
+        return True
     credential_index = next(
-        (index for index, tok in enumerate(tokens) if tok.lower() in _CREDENTIAL_WORDS),
+        (index for index, tok in enumerate(lowered) if tok in _QUALIFIABLE_CREDENTIAL_WORDS),
         None,
     )
     if credential_index is None:
         return False
-    # Credential-worded identifiers are secrets UNLESS every suffix token
-    # is recognizably word-like — the fail-closed inversion of the earlier
-    # "any gibberish segment marks it" rule (round-36 probe:
-    # api_key_staging_XYZ12345, whose non-hex opaque tail evaded the
-    # gibberish list; rounds 32-33: 123abc, live/supersecret markers).
-    # Word-like means a plain alphabetic non-marker word, a version tag
-    # (v2, v12), or a short window tag (7d, 30d) — so token_usage_v2 and
-    # key_metrics_30d keep naming read-only tools while any opaque tail
-    # fails closed.
+    # A qualifier before the credential word makes it the compound's HEAD —
+    # refresh_token_*, access_key_*, private_key_* are credential names, not
+    # tool names (round-38: access_key_abcd1234; round-40:
+    # refresh_token_alphabetic, whose word-like tail carried the exemption).
+    if credential_index > 0:
+        return True
+    # A LEADING credential word is a modifier, and the identifier stays
+    # exempt only while every remaining token is recognizably word-like —
+    # the fail-closed rule from round-36 (api_key_staging_XYZ12345, whose
+    # non-hex opaque tail evaded the gibberish list; rounds 32-33: 123abc,
+    # live/supersecret markers). Word-like means a plain alphabetic
+    # non-marker word, a version tag (v2, v12), or a short window tag
+    # (7d, 30d) — so token_usage_v2 and key_metrics_30d keep naming
+    # read-only tools while any opaque tail fails closed.
     suffix_tokens = tokens[credential_index + 1 :]
 
     # Secret-marker words mark alphabetic credentials too (round-33:

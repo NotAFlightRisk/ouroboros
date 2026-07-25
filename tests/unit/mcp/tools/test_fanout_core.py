@@ -5411,13 +5411,16 @@ def test_credential_word_marks_identifier_from_any_position() -> None:
     ):
         assert _identifier_looks_secret(value), value
 
+    # The exemption is granted only to a LEADING credential word with a
+    # word-like tail (round-40): qualifier-prefixed forms are credential
+    # names, so bigquery_keys_daily and s3_key_prefix_scan are no longer
+    # exempt — see the round-40 pin below.
     for value in (
         "token_usage_v2",
         "key_metrics_30d",
         "token_aggregation_warehouse",
         "clickhouse_query",
-        "bigquery_keys_daily",
-        "s3_key_prefix_scan",
+        "keys_daily_rollup",
     ):
         assert not _identifier_looks_secret(value), value
 
@@ -5657,3 +5660,93 @@ def test_unenforced_contract_marker_is_a_valid_v1_lane(tmp_path: Any) -> None:
     assert record is not None
     contracts = record.synthesizer_input["lane_answer_contracts"]
     assert contracts["data_context"]["response_model_schema"] == {"type": "object"}
+
+
+def test_error_shaped_finding_is_not_evidence() -> None:
+    """The error-shape rule binds the FINDING too (round-40 probe).
+
+    A contract-valid result whose ``finding`` narrates "the query failed
+    because access was denied" shipped alongside evidence and persisted —
+    contradicting ``error_shaped_tool_output=return_no_evidence_finding``.
+    The condition matches the caveats rule: the contradiction requires
+    evidence to exist, so a no-op legitimately narrates why nothing ran.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for finding in (
+        "The query failed because access was denied to the analytics dataset.",
+        "Lookup returned error: permission denied.",
+        "The request timed out before returning rows.",
+    ):
+        failed = _minimal_data_output("42 active users")
+        failed["finding"] = finding
+        assert any(
+            "describes a failed lookup" in error
+            for error in _data_evidence_boundary_violations(failed)
+        ), finding
+
+    # A NO-OP narrates the absence of a lookup and must stay valid.
+    noop = {
+        "lane_id": "data_context",
+        "data_needed": False,
+        "finding": "No data lookup was needed; this runtime has no MCP data tools available.",
+        "confidence": "no_evidence",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["No query was executed."],
+    }
+    assert _data_evidence_boundary_violations(noop) == []
+
+    # Ordinary findings alongside evidence stay valid.
+    ordinary = _minimal_data_output("42 active users")
+    ordinary["finding"] = "Weekly active users grew 12% over the last 30 days."
+    assert _data_evidence_boundary_violations(ordinary) == []
+
+
+def test_credential_identifier_exemption_is_position_scoped() -> None:
+    """The exemption is narrow and verified, not "any alphabetic tail".
+
+    Round-40 probes ``password_swordfish``, ``client_secret_huntertwo``, and
+    ``refresh_token_alphabetic`` all carried word-like tails. Words that never
+    name a data tool (password/secret/bearer/credential) now reject outright,
+    and for the analytics-plausible words (token/key) the exemption survives
+    only while the credential word LEADS — English compounds put the head
+    last, so a qualifier before it (refresh_token, access_key, private_key)
+    names a credential.
+    """
+    from ouroboros.mcp.tools.subagent import (
+        _data_evidence_boundary_violations,
+        _identifier_looks_secret,
+    )
+
+    for value in (
+        "password_swordfish",
+        "client_secret_huntertwo",
+        "refresh_token_alphabetic",
+        "private_key_material",
+        # Qualifier-prefixed forms that previously rode the exemption.
+        "s3_key_prefix_scan",
+        "bigquery_keys_daily",
+        "warehouse_token_usage_v2",
+        # Rounds 33-38 pins keep holding.
+        "access_key_abcd1234",
+        "api_key_staging_XYZ12345",
+        "api_key_abcdefghijklmnop",
+        "bearer_abcdefghijklmnop",
+    ):
+        assert _identifier_looks_secret(value), value
+
+    # A LEADING credential word with a word-like tail is tool vocabulary.
+    for value in (
+        "token_usage_v2",
+        "key_metrics_30d",
+        "token_aggregation_warehouse",
+        "keys_daily_rollup",
+        "clickhouse_query",
+    ):
+        assert not _identifier_looks_secret(value), value
+
+    leaked = _minimal_data_output("42 active accounts")
+    leaked["evidence"][0]["source"] = "password_swordfish"
+    assert any("credential" in error for error in _data_evidence_boundary_violations(leaked))
