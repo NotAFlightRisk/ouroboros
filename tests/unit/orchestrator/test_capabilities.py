@@ -5042,10 +5042,15 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
     # Informed-consent fields the confirming user needs are required.
     for field in ("data_needed", "evidence", "proposed_queries", "confidence"):
         assert field in schema["required"]
-    # ``finding`` is required AS SUBMITTED and absent in the RETAINED state
-    # (round-47): advisory prose is delivered to the host and then dropped, so
-    # the contract declares both forms rather than leaving the durable record
-    # looking like a mangled submission.
+    # The RETAINED state is server-owned (round-49): the published contract a
+    # caller submits against requires the finding and refuses the marker, so a
+    # fresh caller cannot declare itself retained to skip the prose. The
+    # durable form validates under its own derived schema.
+    from ouroboros.contracts.data_evidence import (
+        data_evidence_retained_schema,
+        redact_prose_for_persistence,
+    )
+
     submitted_only = Draft202012Validator(schema)
     without_finding = {
         "lane_id": "data_context",
@@ -5056,7 +5061,9 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
         "requires_user_confirmation": True,
     }
     assert list(submitted_only.iter_errors(without_finding))
-    assert list(submitted_only.iter_errors({**without_finding, "prose_retained": False})) == []
+    assert list(submitted_only.iter_errors({**without_finding, "prose_retained": False}))
+    retained = redact_prose_for_persistence({**without_finding, "finding": "No data needed."})
+    assert list(Draft202012Validator(data_evidence_retained_schema()).iter_errors(retained)) == []
     # Whole-form delivery invariant: the rendered contract is never truncated.
     rendered = _bounded_json(contract, _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS)
     assert "[truncated]" not in rendered

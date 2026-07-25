@@ -56,6 +56,7 @@ from ouroboros.contracts.data_evidence import (
     _DATA_EVIDENCE_CONTRACT_ID,
     _data_evidence_boundary_violations,
     _data_evidence_fallback_schema,
+    data_evidence_retained_schema,
     redact_prose_for_persistence,
 )
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
@@ -3223,22 +3224,19 @@ class FanoutRegistry:
         tmp_path = target.with_name(f".{target.name}.tmp-{uuid4().hex}")
         try:
             self._dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-            tmp_path.write_text(
+            # Secure the directory FIRST (round-49): mkdir's mode is ignored
+            # when the directory already exists, so an inherited 0755 left a
+            # write window during which the record was world-readable.
+            with suppress(OSError):
+                os.chmod(self._dir, 0o700)
+            _write_owner_only(
+                tmp_path,
                 # allow_nan=False: NaN/Infinity are not JSON. A record that
                 # would serialize to a non-standard document fails the write
                 # (reported as a persistence failure) instead of producing a
                 # file no compliant parser can read back (round-43).
                 json.dumps(record.to_dict(), ensure_ascii=False, allow_nan=False),
-                encoding="utf-8",
             )
-            # Owner-only, set BEFORE the rename so the record is never briefly
-            # world-readable (round-44 warning: the default 022 umask left
-            # child findings at 0644 for the whole retention window). mkdir's
-            # mode is ignored when the directory already exists, so the
-            # directory is chmod'd explicitly too.
-            os.chmod(tmp_path, 0o600)
-            with suppress(OSError):
-                os.chmod(self._dir, 0o700)
             os.replace(tmp_path, target)
         # UnicodeError: json.dumps happily escapes a lone surrogate, but
         # utf-8 encoding at write time raises UnicodeEncodeError — that is a
@@ -3868,7 +3866,19 @@ def _lane_answer_contract_violations(
             if contract_id == _DATA_EVIDENCE_CONTRACT_ID
             else []
         )
-        schema = contract.get("response_model_schema")
+        # A result carried forward from an earlier submission is in the
+        # RETAINED lifecycle state, so it is validated against that state's
+        # schema (round-49): re-checking the server's own durable form against
+        # the submission schema would reject it and drop the lane.
+        schema = (
+            data_evidence_retained_schema()
+            if (
+                contract_id == _DATA_EVIDENCE_CONTRACT_ID
+                and isinstance(output, Mapping)
+                and output.get("prose_retained") is False
+            )
+            else contract.get("response_model_schema")
+        )
         if not isinstance(schema, Mapping):
             if boundary_errors:
                 violations.append(
@@ -4145,6 +4155,31 @@ def register_question_advisory_fanout_from_lanes(
     )
 
 
+def _write_owner_only(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` as an owner-only file.
+
+    The mode is applied at CREATION rather than after the write, so the
+    content never exists at the umask default even briefly (round-49).
+    """
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def _carries_redacted_data(results: Mapping[str, Any] | None) -> bool:
+    """Whether a data result present here has already lost its prose.
+
+    The consent marker follows the ACTUAL retained result (round-49
+    suggestion): a completion whose optional data lane never arrived has no
+    consent to qualify, and a completion assembled from lanes accumulated in
+    earlier calls has lost the narrative just as a replay has (round-49 B2).
+    """
+    for output in (results or {}).values():
+        if isinstance(output, Mapping) and output.get("prose_retained") is False:
+            return True
+    return False
+
+
 def _durable_results(contracts: Mapping[str, Any], provided: Mapping[str, Any]) -> dict[str, Any]:
     """Lane results as they are STORED — data-lane prose is not retained.
 
@@ -4298,12 +4333,7 @@ def _submit_fanout_results_locked(
         # and says plainly that consent must be re-obtained by re-running the
         # fan-out. Silently returning a consent-shaped payload without its
         # consent context would be the worse failure.
-        data_lane_replayed = any(
-            isinstance(contract, Mapping)
-            and str(contract.get("contract_id") or "") == _DATA_EVIDENCE_CONTRACT_ID
-            for contract in (record.synthesizer_input.get("lane_answer_contracts") or {}).values()
-        )
-        if data_lane_replayed:
+        if _carries_redacted_data(record.received_results):
             replay["consent_status"] = "not_confirmable_prose_not_retained"
             replay["consent_note"] = (
                 "This replay carries the measurements only. The advisory "
@@ -4638,6 +4668,14 @@ def _submit_fanout_results_locked(
     }
     if durable_outcome is not None:
         terminal_snapshot["result"] = durable_outcome
+    if _carries_redacted_data(provided):
+        completion["consent_status"] = "not_confirmable_prose_not_retained"
+        completion["consent_note"] = (
+            "A data result accumulated in an earlier submission is present "
+            "without the advisory narrative a user confirms; it is not "
+            "retained in durable state. Re-run the advisory fan-out to obtain "
+            "a confirmable data answer."
+        )
     terminal_persisted = registry.save(
         replace(
             record,

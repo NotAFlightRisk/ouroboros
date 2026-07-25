@@ -5591,3 +5591,134 @@ def test_round48_request_fields_and_replay_consent(tmp_path: Any) -> None:
     assert replay["consent_status"] == "not_confirmable_prose_not_retained"
     assert "re-run" in replay["consent_note"]
     assert "Growth leads" not in json_module.dumps(replay)
+
+
+def test_round49_retained_state_is_server_owned(tmp_path: Any) -> None:
+    """Round-49: lifecycle states are separate schemas, and one vocabulary."""
+    import json as json_module
+
+    from jsonschema import Draft202012Validator
+
+    from ouroboros.contracts.data_evidence import (
+        _aggregation_kinds,
+        _data_context_answer_contract,
+        _read_request_fields,
+        _read_request_shape_problems,
+        data_evidence_retained_schema,
+        redact_prose_for_persistence,
+    )
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    published = _data_context_answer_contract()["response_model_schema"]
+    submitted = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Growth leads at 78%.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            _typed_evidence(
+                request={
+                    "operation": "read",
+                    "metric": "active_users",
+                    "aggregation": "count",
+                    "filters": ["plan=growth"],
+                },
+                value={"number": 42, "unit": "accounts", "dimension": "plan=growth"},
+            )
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time."],
+    }
+    # B1 — a fresh caller cannot declare itself retained to skip the prose.
+    assert list(Draft202012Validator(published).iter_errors(submitted)) == []
+    self_declared = {k: v for k, v in submitted.items() if k not in ("finding", "caveats")}
+    self_declared["prose_retained"] = False
+    assert list(Draft202012Validator(published).iter_errors(self_declared))
+    # The server's own durable form validates under the retained schema.
+    assert (
+        list(
+            Draft202012Validator(data_evidence_retained_schema()).iter_errors(
+                redact_prose_for_persistence(submitted)
+            )
+        )
+        == []
+    )
+
+    # Warning 1 — the semantic vocabulary is the schema's vocabulary.
+    assert _aggregation_kinds() == frozenset(published["$defs"]["aggregation_kind"]["enum"])
+    assert _read_request_fields() == frozenset(published["$defs"]["read_request"]["properties"])
+    assert (
+        _read_request_shape_problems(
+            {
+                "operation": "read",
+                "metric": "latency",
+                "aggregation": "percentile",
+                "percentile": 95,
+            }
+        )
+        == []
+    )
+
+    # B3 — a category value is a lowercase label; a proper noun is not one.
+    def _with_filter(value: str) -> dict[str, Any]:
+        return {
+            "lane_id": "data_context",
+            "data_needed": True,
+            "finding": "Needs a lookup.",
+            "confidence": "inferred",
+            "evidence": [],
+            "proposed_queries": [
+                {
+                    "tool_name": "warehouse",
+                    "request": {
+                        "operation": "read",
+                        "metric": "u",
+                        "aggregation": "count",
+                        "filters": [value],
+                    },
+                    "expected_decision": "why",
+                    "source_class": "metered",
+                }
+            ],
+            "requires_user_confirmation": True,
+        }
+
+    for value in ("segment=AliceSmith", "user=Bob"):
+        assert list(Draft202012Validator(published).iter_errors(_with_filter(value))), value
+    for value in ("plan=growth", "region=kr", "cohort=2026-01"):
+        assert list(Draft202012Validator(published).iter_errors(_with_filter(value))) == [], value
+
+    # B2 — a completion assembled from an earlier accumulation says it is not
+    # confirmable, exactly as a replay does.
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    lanes = [dict(lane) for lane in advisory["lanes"]]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-acc", lanes=lanes
+    )
+    assert fanout_id is not None
+    first = submit_fanout_results(
+        registry,
+        session_id="sess-acc",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": submitted}],
+        fanout_id=fanout_id,
+        finalize=False,
+    )
+    assert first["status"] == "accumulated"
+    closing = submit_fanout_results(
+        registry,
+        session_id="sess-acc",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": lane, "content": {"lane_id": lane, "finding": "ok"}}
+            for lane in ("code_context", "web_context", "ambiguity_contrarian", "answer_simplifier")
+        ],
+        fanout_id=fanout_id,
+    )
+    assert closing["status"] == "complete"
+    assert closing["consent_status"] == "not_confirmable_prose_not_retained"
+    assert "Growth leads" not in json_module.dumps(closing)

@@ -31,6 +31,580 @@ import re
 from typing import Any
 
 CONTRACT_VERSION = "data_evidence_answer.v1"
+
+
+# Raw-evidence shapes the data_context evidence policy forbids (aggregates
+# only, PII-scrubbed): an email-shaped substring is PII, a credential prefix
+# glued to an opaque digit-bearing suffix is a leaked secret, and a
+# phone-shaped digit group is PII — never an aggregate. Written without
+# inline regex flags so the same strings are valid in both Python `re` and
+# the ECMA dialect JSON Schema validators use; the re-entry enforcement
+# point recompiles the case-sensitive ones case-insensitively.
+DATA_EVIDENCE_EMAIL_PATTERN = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+
+
+# The digit lookahead keeps ordinary hyphenated vocabulary ("token-counts",
+# "secret-santa") out: a credential suffix carries digits, a compound noun
+# does not.
+# Vendor token prefixes are PUBLISHED constants, so they are the one part of
+# credential detection that is a fact rather than a heuristic. Declared once
+# and shared by the content scan and the identifier classifier (round-42:
+# the content scan knew "xox" while the identifier classifier knew "xox[a-z]",
+# so the standard xoxb-/xoxp- Slack forms passed content validation).
+DATA_EVIDENCE_VENDOR_TOKEN_PREFIX = r"(?:github_pat|ghp|gho|ghu|ghs|ghr|xox[a-z]|sk|pk)[-_]"
+
+
+# The prefix is recognized after ANY separator, not only at a \b word
+# boundary (round-43: "warehouse_xoxb-123456789..." — an underscore is a word
+# character, so \b never matched and the compound name hid the token).
+DATA_EVIDENCE_SECRET_PATTERN = (
+    r"(?:^|[^A-Za-z0-9])"
+    + DATA_EVIDENCE_VENDOR_TOKEN_PREFIX
+    + r"(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{4,}"
+    r"|\b(sk|pk|token|secret|bearer|api[_-]?key|ghp|gho|xox)"
+    r"[-_=:](?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{4,}"
+)
+
+
+# Standard credential header/assignment forms (bot-review round-6 probe):
+# an Authorization/Bearer phrase followed by a digit-bearing opaque value, a
+# password assignment (sensitive regardless of digits), or an AWS-style
+# access key id.
+DATA_EVIDENCE_AUTH_HEADER_PATTERN = (
+    # Space-separated form needs a digit-bearing value ("authorization
+    # required for X" stays valid); the explicit colon HEADER form is a
+    # credential shape regardless of alphabet (round-7 probe: alphabetic
+    # Bearer values).
+    r"\b(authorization|bearer)\b[:= ]+(?=[^\s]*\d)[A-Za-z0-9_.=/+-]{8,}"
+    r"|\b(authorization|bearer)\s*:\s*\S{6,}"
+)
+
+
+DATA_EVIDENCE_PASSWORD_PATTERN = r"\b(password|passwd|pwd)\b\s*[:=]\s*\S{4,}"
+
+
+# Credential ASSIGNMENTS are secrets regardless of alphabet (round-34:
+# "api_key=supersecret"; round-35: alphabetic "bearer=..." assignments) —
+# the assignment itself is the signal, no digit entropy required.
+# The credential word marks the assignment from ANY position inside a
+# compound name (round-39: client_secret=, refresh_token=, private_key=) —
+# the same position-independent vocabulary the identifier classifier applies,
+# so the content scan and the identifier scan cannot disagree about what a
+# credential is named.
+DATA_EVIDENCE_CREDENTIAL_ASSIGNMENT_PATTERN = (
+    r"\b(?:[A-Za-z0-9]+[_-])*"
+    r"(api[_-]?key|access[_-]?key|keys?|secrets?|tokens?|bearer|credentials?|creds)"
+    r"(?:[_-][A-Za-z0-9]+)*"
+    r"\s*[:=]\s*[A-Za-z0-9_\-/+]{6,}"
+)
+
+
+DATA_EVIDENCE_AWS_KEY_PATTERN = r"(?:^|[^A-Za-z0-9])(AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}"
+
+
+# RFC 3986 userinfo: a ``scheme://user:password@host`` connection string
+# carries the password in the URI itself (round-41 probe:
+# "endpoint=https://alice:swordfish@localhost:8443"), which no credential
+# WORD appears in. The shape is unambiguous, so it is matched structurally.
+DATA_EVIDENCE_URI_USERINFO_PATTERN = r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@"
+
+
+# US Social Security Number shape (round-7 probe): the phone pattern's group
+# widths deliberately do not cover the 3-2-4 split.
+DATA_EVIDENCE_SSN_PATTERN = r"\b\d{3}-\d{2}-\d{4}\b"
+
+
+# Phone shapes: international (+ then 7+ digits), separator-grouped local
+# numbers, or the US parenthesized area-code form. Comma-grouped magnitudes
+# ("1,234,567") and ISO dates/times do not match (comma and colon are not in
+# the separator class, and date groups are 2-digit).
+DATA_EVIDENCE_PHONE_PATTERN = (
+    r"\+\d{7,}|\b\d{2,4}[-.\s]\d{3,4}[-.\s]\d{4}\b|\(\d{3}\)\s*\d{3}[-.\s]?\d{4}"
+)
+
+
+# An executed evidence value is a MEASUREMENT: aggregation is numeric by
+# definition, so a value with no numeral is a claim or a name roster, never
+# query output (qualitative context belongs in finding). This is the
+# structural rule that makes digit-free record lists unrepresentable under
+# any delimiter.
+DATA_EVIDENCE_MEASUREMENT_PATTERN = r"\d"
+
+
+# A value that opens as a JSON list/object is serialized rows, not an
+# aggregate.
+DATA_EVIDENCE_ROW_SHAPE_PATTERN = r"^\s*[\[{]"
+
+
+# An aggregate is a single-line scalar statement: any embedded newline means
+# a record list (two customer rows separated by one newline are raw data).
+DATA_EVIDENCE_MULTILINE_PATTERN = r"[\r\n]"
+
+
+def _data_context_answer_contract() -> dict[str, Any]:
+    """Return the answer contract for the data_context advisory lane.
+
+    Unlike ``code_fact_investigation_answer.v1`` this contract has NO grade
+    clause (``prefix_semantics``) and no auto-confirmed path: every data
+    answer requires user confirmation, because data evidence is point-in-time
+    and cannot be cheaply re-verified the way a manifest exact-match can
+    (Q00/ouroboros#1671). The contract's job is informed consent — the form
+    must give the confirming user everything needed to judge: what was
+    executed (evidence), what was deliberately NOT executed and why
+    (proposed_queries with source_class), and validity caveats.
+
+    Kept intentionally compact: the serialized contract must fit whole inside
+    the subagent prompt JSON budget (see the truncation of the code contract
+    at ``_INTERVIEW_ADVISORY_MAX_JSON_CHARS``).
+    """
+    answer_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "lane_id",
+            "data_needed",
+            "finding",
+            "confidence",
+            "evidence",
+            "proposed_queries",
+            "requires_user_confirmation",
+        ],
+        "properties": {
+            "lane_id": {"const": "data_context"},
+            "data_needed": {"type": "boolean"},
+            "finding": {"type": "string", "minLength": 1, "maxLength": 600},
+            "confidence": {"enum": ["reported_by_tool", "inferred", "no_evidence"]},
+            "evidence": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    # observed_at is required: executed data evidence is
+                    # point-in-time by nature, and an aggregate without its
+                    # observation timestamp loses that meaning by the time it
+                    # reaches the confirming user and persisted state.
+                    # execution_status is required and TYPED (round-42): the
+                    # "a failed call is not evidence" rule was enforced only
+                    # by recognizing failure vocabulary in prose, which is a
+                    # detector, not an invariant. Declaring the outcome makes
+                    # it a contract term — evidence may exist only for a
+                    # succeeded execution, and any other value is a located
+                    # violation instead of a missed phrase.
+                    "required": [
+                        "source",
+                        "request",
+                        "value",
+                        "observed_at",
+                        "execution_status",
+                    ],
+                    "properties": {
+                        "execution_status": {
+                            "const": "succeeded",
+                        },
+                        "source": {
+                            "type": "string",
+                            "maxLength": 64,
+                            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$",
+                        },
+                        # Executed evidence carries ONE number, so a grouped
+                        # request cannot describe it: a single value cannot say
+                        # which group it came from (round-46). Per-category
+                        # evidence is one item per category, narrowed by a
+                        # filter; grouping stays available on proposals.
+                        "request": {
+                            "allOf": [
+                                {"$ref": "#/$defs/read_request"},
+                                {"not": {"required": ["grouping"]}},
+                            ]
+                        },
+                        "value": {"$ref": "#/$defs/aggregate"},
+                        "observed_at": {
+                            "type": "string",
+                            "maxLength": 40,
+                            # ISO-8601-shaped WITH calendar/clock ranges: a real
+                            # date, optionally followed by a real time and zone
+                            # offset. Draft 2020-12 validators do not enforce
+                            # "format", and a digits-only shape accepted
+                            # month 99 / hour 99 (bot-review round-3 probe).
+                            "pattern": (
+                                r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])"
+                                r"([T ]([01]\d|2[0-3]):[0-5]\d(:[0-5]\d(\.\d{1,6})?)?"
+                                r"([Zz]|[+-]([01]\d|2[0-3]):?[0-5]\d)?)?$"
+                            ),
+                        },
+                    },
+                },
+            },
+            "proposed_queries": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["tool_name", "request", "expected_decision", "source_class"],
+                    # An unexecuted proposal is only useful if the parent
+                    # session can actually run and judge it: empty tool,
+                    # request, or decision fields are not a proposal.
+                    "properties": {
+                        "tool_name": {
+                            "type": "string",
+                            "maxLength": 64,
+                            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$",
+                        },
+                        "request": {"$ref": "#/$defs/read_request"},
+                        "expected_decision": {"type": "string", "minLength": 1, "maxLength": 300},
+                        "source_class": {
+                            "enum": [
+                                "metered",
+                                "external",
+                                "side_effect_ambiguous",
+                                "unknown",
+                            ]
+                        },
+                    },
+                },
+            },
+            "requires_user_confirmation": {"const": True},
+            "caveats": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {"type": "string", "minLength": 1, "maxLength": 200},
+            },
+        },
+        "$defs": {
+            "aggregation_kind": {
+                # Each kind names ONE measurement. ratio/share/duration were
+                # under-specified (no numerator, denominator, or unit basis),
+                # so two identical requests could mean different things — a
+                # share is reported as its numerator and its total, which is
+                # also what makes it auditable.
+                "enum": [
+                    "count",
+                    "distinct_count",
+                    "sum",
+                    "avg",
+                    "median",
+                    "percentile",
+                    "min",
+                    "max",
+                ]
+            },
+            "aggregate": {
+                # An aggregate IS a number with a unit — that is what makes it
+                # an aggregate rather than a record. Typing it this way makes
+                # raw rows, PII, credentials, and error narratives
+                # UNREPRESENTABLE in the durable evidence path instead of
+                # something a text classifier must recognize and reject.
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["number", "unit"],
+                "properties": {
+                    "number": {"type": "number"},
+                    "unit": {
+                        "type": "string",
+                        "maxLength": 24,
+                        "pattern": "^[a-z%][a-z_/%]{0,23}$",
+                    },
+                    "dimension": {
+                        "type": "string",
+                        "maxLength": 48,
+                        "pattern": "^[a-z][a-z0-9_]{0,23}=[a-z0-9][a-z0-9_.-]{0,21}$",
+                    },
+                },
+            },
+            "read_request": {
+                "allOf": [
+                    {
+                        "if": {"properties": {"aggregation": {"const": "percentile"}}},
+                        "then": {"required": ["percentile"]},
+                    }
+                ],
+                # A read request is a STRUCTURE, not a query string. The lane
+                # names what to measure; the parent session builds and runs the
+                # actual query after user confirmation. Mutating statements,
+                # side-effecting functions, and prose instructions have no
+                # field to live in.
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["operation", "metric", "aggregation"],
+                "properties": {
+                    "operation": {"const": "read"},
+                    "metric": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^[A-Za-z][A-Za-z0-9_.*-]{0,63}$",
+                    },
+                    "aggregation": {"$ref": "#/$defs/aggregation_kind"},
+                    # Required when aggregation is percentile: p95 and p50 are
+                    # different measurements and must not share a request form.
+                    "percentile": {"type": "integer", "minimum": 1, "maximum": 99},
+                    "filters": {
+                        "type": "array",
+                        "maxItems": 5,
+                        "items": {
+                            "type": "string",
+                            "maxLength": 48,
+                            "pattern": "^[a-z][a-z0-9_]{0,23}(=|!=|<|>|<=|>=)[a-z0-9][a-z0-9_.:+-]{0,21}$",
+                        },
+                    },
+                    "grouping": {
+                        "type": "array",
+                        "maxItems": 3,
+                        "items": {
+                            "type": "string",
+                            "maxLength": 32,
+                            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+                        },
+                    },
+                },
+            },
+        },
+        # The DURABLE form is declared, not improvised (round-47): advisory
+        # prose is delivered to the host and then dropped, so the retained
+        # record is a different — and equally contract-valid — state of the
+        # same answer. Declaring it here is what makes a replayed completion
+        # validate instead of looking like a mangled submission.
+        "allOf": [
+            {
+                # As SUBMITTED: the advisory narrative is the lane's point, so
+                # finding is required and caveats accompany executed evidence.
+                # As RETAINED (prose_retained: false): both are absent by
+                # design, and a replayed completion is still this contract.
+                "if": {"not": {"required": ["prose_retained"]}},
+                "then": {"required": ["finding"]},
+            },
+            {
+                "if": {"required": ["prose_retained"]},
+                "then": {"not": {"anyOf": [{"required": ["finding"]}, {"required": ["caveats"]}]}},
+            },
+            {
+                "if": {"properties": {"data_needed": {"const": False}}},
+                "then": {
+                    "properties": {
+                        "confidence": {"const": "no_evidence"},
+                        "evidence": {"maxItems": 0},
+                        "proposed_queries": {"maxItems": 0},
+                    }
+                },
+            },
+            {
+                "if": {"properties": {"data_needed": {"const": True}}},
+                "then": {
+                    "anyOf": [
+                        {"properties": {"evidence": {"minItems": 1}}, "required": ["evidence"]},
+                        {
+                            "properties": {"proposed_queries": {"minItems": 1}},
+                            "required": ["proposed_queries"],
+                        },
+                    ]
+                },
+            },
+            {
+                # confidence is tied to what was actually executed:
+                # "reported_by_tool" without a single executed evidence item
+                # (e.g. a proposal-only response) is a category error.
+                "if": {"properties": {"confidence": {"const": "reported_by_tool"}}},
+                "then": {
+                    "properties": {"evidence": {"minItems": 1}},
+                    "required": ["evidence"],
+                },
+            },
+            {
+                # Executed evidence must carry its point-in-time warning to the
+                # confirming user: at least one caveat is required whenever any
+                # evidence item exists.
+                "if": {
+                    "properties": {"evidence": {"minItems": 1}},
+                    "required": ["evidence"],
+                },
+                "then": {
+                    "properties": {"caveats": {"minItems": 1}},
+                    "required": ["caveats"],
+                },
+            },
+            {
+                # The confidence constraint is two-way (round-12): executed
+                # evidence alongside confidence="no_evidence" is contradictory
+                # informed-consent state, just as reported_by_tool without
+                # evidence is.
+                "if": {
+                    "properties": {"evidence": {"minItems": 1}},
+                    "required": ["evidence"],
+                },
+                "then": {
+                    "properties": {"confidence": {"enum": ["reported_by_tool", "inferred"]}},
+                },
+            },
+        ],
+    }
+    return {
+        "contract_id": "data_evidence_answer.v1",
+        "scope": "single_data_context_advisory_lane",
+        "response_model_schema": answer_schema,
+        "proposed_query_semantics": {
+            "execution": "parent_session_only_after_user_confirmation",
+            "auto_execution": "forbidden",
+        },
+        "runtime_instruction": (
+            "Evidence and proposals are STRUCTURED, not prose: each carries a "
+            "read_request; evidence adds the resulting aggregate, observed_at, "
+            "and execution_status. There is no free-text value or query field — "
+            "what cannot be expressed as an aggregate is a no-evidence finding, "
+            "and a lookup you did not run belongs in proposed_queries with its "
+            "source_class. Narrative goes in finding and caveats."
+        ),
+    }
+
+
+def data_evidence_retained_schema() -> dict[str, Any]:
+    """Schema of the DURABLE record — a server-owned lifecycle state.
+
+    Callers submit against the published contract, which requires the advisory
+    prose and forbids these markers (round-49: a fresh caller could otherwise
+    declare itself "retained" and skip the finding it exists to provide). This
+    form is derived from that contract and never advertised as a submission
+    target: prose is absent because the server removed it, not because a
+    client chose to omit it.
+    """
+    schema = json.loads(json.dumps(_data_context_answer_contract()["response_model_schema"]))
+    schema["required"] = [key for key in schema["required"] if key != "finding"]
+    schema["properties"]["prose_retained"] = {"const": False}
+    schema["properties"]["proposed_queries"]["items"]["properties"]["decision_retained"] = {
+        "const": False
+    }
+    schema["properties"]["proposed_queries"]["items"]["required"] = [
+        key
+        for key in schema["properties"]["proposed_queries"]["items"]["required"]
+        if key != "expected_decision"
+    ]
+    schema["required"] = [*schema["required"], "prose_retained"]
+    schema["allOf"] = [
+        clause
+        for clause in schema.get("allOf", [])
+        if "caveats" not in json.dumps(clause.get("then", {}))
+    ]
+    return schema
+
+
+def data_evidence_structural_schema() -> dict[str, Any]:
+    """The data answer contract's schema, used when a lane's DECLARED contract
+    cannot be enforced.
+
+    It is the published schema itself. The fallback is never delivered to a
+    child, so it carries no prompt budget and there is no reason for it to
+    drop a single required field or conditional (round-45: a trimmed copy let
+    a required lane terminalize without data_needed, confidence, evidence, or
+    no-op consistency). What a degraded contract loses is the DECLARED form's
+    own field grammar — never the invariants this contract states.
+    """
+    return _data_context_answer_contract()["response_model_schema"]
+
+
+def _data_context_lane_policy() -> dict[str, Any]:
+    """Return the machine-readable data-access policy for the data_context lane.
+
+    Prompt text alone is too weak for a lane that touches production data
+    stores (Q00/ouroboros#1671). Hosts with permission systems get this block
+    to enforce; the lane prompt restates it as the fallback. The lane is a
+    read-only *proposer*: it directly executes only obviously local, free,
+    read-only lookups and returns everything else as proposed queries for the
+    parent session to run after user confirmation.
+    """
+    return {
+        "read_only": True,
+        "aggregate_only": True,
+        "relevance_gate": "decide_from_question_text_before_any_tool_call",
+        "direct_execution_scope": "local_free_read_only_lookups_only",
+        "metered_or_uncertain_sources": "return_proposed_queries_without_executing",
+        "error_shaped_tool_output": "return_no_evidence_finding",
+        "forbidden_operation_patterns": [
+            "insert",
+            "update",
+            "delete",
+            "drop",
+            "alter",
+            "truncate",
+            "create",
+            "grant",
+            "write",
+            "save",
+            "upload",
+            "publish",
+            "upsert",
+            "replace",
+            "merge",
+            "call",
+            "exec",
+            "execute",
+            # Destructive-verb synonyms (bot-review round-37 probe:
+            # destroy_database / remove_user / rename_database advertised as
+            # preferred tools): the identifier filter matches these as whole
+            # tokens, so read-only vocabulary ("removed duplicates in the
+            # rollup") is unaffected — prose is scanned by operation SHAPES,
+            # not this list.
+            "destroy",
+            "remove",
+            "rename",
+            "purge",
+            "wipe",
+            "erase",
+            "revoke",
+        ],
+        "evidence_policy": {
+            "max_evidence_items": 5,
+            "max_evidence_chars": 2000,
+            "aggregates_only": True,
+            "raw_rows_allowed": False,
+            "pii_scrub_required": True,
+            # How the policy above is ENFORCED rather than merely asserted:
+            # evidence values and proposed lookups are typed structures in
+            # data_evidence_answer.v1, so raw rows, PII values, credentials,
+            # error envelopes, and mutating statements have no field to
+            # occupy. Prose survives only in operator-facing narrative.
+            "enforcement": "typed_contract_fields",
+            "free_text_fields": ["finding", "caveats", "expected_decision"],
+            # A unit is a MEASUREMENT unit. Declaring the vocabulary makes
+            # "this unit is one of the declared kinds" a decidable claim, so
+            # an identity attribute cannot be worn as a unit (round-44 probe:
+            # phone digits as the number, "phone" as the unit). Hosts that
+            # need another unit extend this list; the engine enforces
+            # whatever the snapshot declares.
+            "allowed_units": [
+                "accounts",
+                "users",
+                "sessions",
+                "events",
+                "requests",
+                "calls",
+                "queries",
+                "rows",
+                "records",
+                "items",
+                "orders",
+                "messages",
+                "errors",
+                "ms",
+                "s",
+                "minutes",
+                "hours",
+                "days",
+                "weeks",
+                "months",
+                "bytes",
+                "kb",
+                "mb",
+                "gb",
+                "%",
+                "ratio",
+                "count",
+                "krw",
+                "usd",
+            ],
+        },
+    }
+
+
 #: Historical alias kept for readability at call sites; the version above is
 #: the single definition (round-47 suggestion).
 _DATA_EVIDENCE_CONTRACT_ID = CONTRACT_VERSION
@@ -588,7 +1162,7 @@ def _aggregate_shape_problems(value: Any, allowed_units: Any = None) -> list[str
         problem := _identity_scope_problem(dimension, "dimension")
     ):
         problems.append(problem)
-    unknown = set(value) - {"number", "unit", "dimension"}
+    unknown = set(value) - _aggregate_fields()
     if unknown:
         problems.append("carries fields outside the aggregate shape")
     return problems
@@ -628,7 +1202,7 @@ def _read_request_shape_problems(request: Any, *, executed: bool = False) -> lis
             "an identity metric may only be counted; a value-returning "
             "aggregation over it reports the identity itself"
         )
-    if request.get("aggregation") not in _AGGREGATION_KINDS:
+    if request.get("aggregation") not in _aggregation_kinds():
         problems.append("aggregation is not one of the declared kinds")
     for list_field, pattern, limit in (
         ("filters", _READ_REQUEST_FILTER, 5),
@@ -648,7 +1222,7 @@ def _read_request_shape_problems(request: Any, *, executed: bool = False) -> lis
             for item in items
             if (problem := _identity_scope_problem(item, list_field)) is not None
         )
-    unknown = set(request) - {"operation", "metric", "aggregation", "filters", "grouping"}
+    unknown = set(request) - _read_request_fields()
     if unknown:
         problems.append("carries fields outside the read-request shape")
     if executed and request.get("grouping"):
@@ -667,21 +1241,30 @@ def _read_request_shape_problems(request: Any, *, executed: bool = False) -> lis
 # The typed vocabularies the contract declares. Kept beside the re-entry
 # checks so the schema and the enforcement point cannot disagree about what a
 # typed aggregate or read request IS.
-_AGGREGATION_KINDS = frozenset(
-    {
-        "count",
-        "distinct_count",
-        "sum",
-        "avg",
-        "median",
-        "percentile",
-        "min",
-        "max",
-        "ratio",
-        "share",
-        "duration",
-    }
-)
+@lru_cache(maxsize=1)
+def _schema_defs() -> Mapping[str, Any]:
+    return _data_context_answer_contract()["response_model_schema"]["$defs"]
+
+
+@lru_cache(maxsize=1)
+def _aggregation_kinds() -> frozenset[str]:
+    """The aggregation vocabulary, read from the SCHEMA (round-49).
+
+    Maintaining it twice is how the validator came to reject a percentile the
+    schema advertised while still accepting kinds the schema had dropped.
+    """
+    return frozenset(_schema_defs()["aggregation_kind"]["enum"])
+
+
+@lru_cache(maxsize=1)
+def _read_request_fields() -> frozenset[str]:
+    """Fields the schema's read_request declares — the validator's allowlist."""
+    return frozenset(_schema_defs()["read_request"]["properties"])
+
+
+@lru_cache(maxsize=1)
+def _aggregate_fields() -> frozenset[str]:
+    return frozenset(_schema_defs()["aggregate"]["properties"])
 
 
 def _data_evidence_fallback_schema() -> dict[str, Any]:
