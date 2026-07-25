@@ -228,7 +228,11 @@ def test_submit_unknown_fanout_id_is_clean_error(tmp_path: Any) -> None:
         fanout_id="ghost",
     )
     assert out["status"] == "unknown_fanout_id"
-    assert "ghost" in out["error"]
+    # The id is digested rather than echoed (round-69): an unknown id is by
+    # definition one the registry never issued, so it is caller text heading
+    # for host logs, and the grammar admits credential-shaped values.
+    assert "ghost" not in out["error"]
+    assert out["fanout_id"].startswith("<redacted-key sha256:")
 
 
 def test_submit_partial_lists_missing_keys(tmp_path: Any) -> None:
@@ -6945,7 +6949,9 @@ def test_round64_wellformed_unknown_id_still_names_itself(tmp_path: Any) -> None
         fanout_id="fanout-that-expired-42",
     )
     assert out["status"] == "unknown_fanout_id"
-    assert "fanout-that-expired-42" in out["error"]
+    # The id is digested, not echoed (round-69), but it stays correlatable.
+    assert "fanout-that-expired-42" not in out["error"]
+    assert out["fanout_id"].startswith("<redacted-key sha256:")
 
 
 def test_round64_grammar_has_one_definition() -> None:
@@ -7502,3 +7508,78 @@ def test_round67_published_contract_equals_the_bound_one(tmp_path: Any) -> None:
 
     # A non-data lane keeps the existing behaviour: declared or nothing.
     assert effective_lane_contract("code_context", None) is None
+
+
+# --------------------------------------------------------------------------- #
+# round-69 — an unknown identifier is caller text, and a lifecycle status
+# --------------------------------------------------------------------------- #
+
+
+def test_round69_unknown_identifier_is_digested_not_echoed(tmp_path: Any) -> None:
+    """A grammar-valid id can still be a secret.
+
+    Round 64 bounded the id's LENGTH, and I argued from that bound that
+    echoing a well-formed one was safe. `ghp_abcdef1234567890` satisfies the
+    grammar: the harm is the content, not the size, and an unknown id is by
+    definition one the registry never issued.
+    """
+    secret = "ghp_abcdef1234567890"
+
+    out = submit_fanout_results(
+        FanoutRegistry(tmp_path),
+        session_id="s",
+        correlation_key="context.persona",
+        results=[],
+        fanout_id=secret,
+    )
+
+    assert out["status"] == "unknown_fanout_id"
+    serialized = json.dumps(out, ensure_ascii=False, default=str)
+    assert secret not in serialized
+    # Still correlatable — the digest is stable, which is what the echo was for.
+    assert out["fanout_id"].startswith("<redacted-key sha256:")
+    again = submit_fanout_results(
+        FanoutRegistry(tmp_path),
+        session_id="s",
+        correlation_key="context.persona",
+        results=[],
+        fanout_id=secret,
+    )
+    assert again["fanout_id"] == out["fanout_id"]
+    # And two different ids stay distinguishable.
+    other = submit_fanout_results(
+        FanoutRegistry(tmp_path),
+        session_id="s",
+        correlation_key="context.persona",
+        results=[],
+        fanout_id="fanout-that-expired-42",
+    )
+    assert other["fanout_id"] != out["fanout_id"]
+
+
+@pytest.mark.asyncio
+async def test_round69_unknown_fanout_id_survives_as_a_structured_status(
+    tmp_path: Any,
+) -> None:
+    """The advertised lifecycle status must reach the host, not become an error.
+
+    Raising it made the transport drop the outcome metadata and surface a
+    plain exception, so a host could not tell an expired record from a tool
+    failure — which is the distinction the contract advertises.
+    """
+    handler = SubmitFanoutResultsHandler(fanout_registry=FanoutRegistry(tmp_path))
+
+    result = await handler.handle(
+        {
+            "fanout_id": "fanout-that-never-existed",
+            "session_id": "s",
+            "correlation_key": "context.persona",
+            "results": [],
+        }
+    )
+
+    assert result.is_ok, "the lifecycle status was raised instead of returned"
+    payload = result.value
+    assert payload.is_error is True
+    assert payload.meta["status"] == "unknown_fanout_id"
+    assert json.loads(payload.content[0].text)["status"] == "unknown_fanout_id"

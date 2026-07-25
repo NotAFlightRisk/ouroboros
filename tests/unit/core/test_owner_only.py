@@ -435,3 +435,47 @@ def test_owner_only_write_survives_a_target_at_the_filename_limit(tmp_path: Path
     assert target.read_text(encoding="utf-8") == "goal: ship\n"
     # And nothing was left behind.
     assert [path.name for path in tmp_path.iterdir()] == [name]
+
+
+def test_no_bytes_are_written_when_the_filesystem_widens_the_mode(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """The widened-mode check must run BEFORE the content exists.
+
+    This check exists for the filesystem that ignores or widens the requested
+    0600. Verifying it after the write meant that on exactly that filesystem
+    the content had already existed group- or world-readable — the window the
+    check was added to close (round-69).
+    """
+    from ouroboros.core import owner_only
+
+    real_open = os.open
+    widened: list[Path] = []
+
+    def _widening_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        fd = real_open(path, flags, *args, **kwargs)
+        if flags & os.O_EXCL:
+            os.fchmod(fd, 0o644)  # the filesystem "ignores" the requested mode
+            widened.append(Path(path))
+        return fd
+
+    written: list[str] = []
+    real_fdopen = os.fdopen
+
+    def _recording_fdopen(fd: int, *args: Any, **kwargs: Any) -> Any:
+        written.append("fdopen")
+        return real_fdopen(fd, *args, **kwargs)
+
+    monkeypatch.setattr(owner_only.os, "open", _widening_open)
+    monkeypatch.setattr(owner_only.os, "fdopen", _recording_fdopen)
+
+    target = tmp_path / "secret.json"
+    with pytest.raises(OSError, match="owner-only"):
+        write_owner_only(target, '{"answer": "confirmed"}')
+
+    # The failure happened before anything could be wrapped for writing.
+    assert written == [], "content was written into a widened temporary"
+    assert not target.exists()
+    assert widened, "the probe never created a temporary"
+    assert list(tmp_path.iterdir()) == [], "a widened temporary was left behind"

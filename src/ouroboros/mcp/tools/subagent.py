@@ -4512,14 +4512,25 @@ def _submit_fanout_results_locked(
 ) -> dict[str, Any]:
     record = registry.load(fanout_id)
     if record is None:
+        # The id is digested rather than echoed (round-69). Bounding it to
+        # the registry grammar bounded its LENGTH, which was the round-64
+        # finding, and I argued from that bound that echoing a well-formed id
+        # was safe. The grammar admits `ghp_abcdef1234567890` — the harm is
+        # the CONTENT, not the size, and an unknown id is by definition one
+        # the registry never issued, so it is caller text heading for host
+        # logs. The digest still lets a host correlate which id it sent,
+        # which is what the echo was for, and uses the same form the
+        # unexpected-key path already reports rejected values in.
         return {
             "status": "unknown_fanout_id",
-            "fanout_id": fanout_id,
+            "fanout_id": _redacted_segment(fanout_id),
             "error": (
-                f"No fan-out record exists for fanout_id={fanout_id!r}. "
-                "Records (including completed ones held for replay) are "
-                "retained for 7 days after their last update, so an expired "
-                "id and a never-registered id are indistinguishable here."
+                "No fan-out record exists for the submitted fanout_id "
+                f"({_redacted_segment(fanout_id)}); the value itself is not "
+                "echoed back. Records (including completed ones held for "
+                "replay) are retained for 7 days after their last update, so "
+                "an expired id and a never-registered id are "
+                "indistinguishable here."
             ),
         }
     # Correlation is validated BEFORE terminal replay, and STRICTLY: when the

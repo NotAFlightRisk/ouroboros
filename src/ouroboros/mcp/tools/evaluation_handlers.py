@@ -2170,13 +2170,14 @@ class SubmitFanoutResultsHandler:
             finalize=raw_finalize if isinstance(raw_finalize, bool) else None,
         )
 
-        if outcome.get("status") == "unknown_fanout_id":
-            return Result.err(
-                MCPToolError(
-                    str(outcome.get("error") or "unknown fanout_id"),
-                    tool_name="ouroboros_submit_fanout_results",
-                )
-            )
+        # `unknown_fanout_id` is advertised as a lifecycle STATUS — an expired
+        # or never-registered record is an ordinary outcome a host must be able
+        # to tell apart from a tool failure. Raising it as an error made the
+        # transport drop the outcome metadata and surface a plain exception,
+        # so the documented distinction did not survive the wire (round-69).
+        # It travels as a structured result now, flagged `is_error` so a host
+        # that only reads that bit still sees something went wrong.
+        is_error = outcome.get("status") == "unknown_fanout_id"
 
         return Result.ok(
             MCPToolResult(
@@ -2186,7 +2187,7 @@ class SubmitFanoutResultsHandler:
                         text=json.dumps(outcome, ensure_ascii=False, sort_keys=True),
                     ),
                 ),
-                is_error=False,
+                is_error=is_error,
                 meta=outcome,
             )
         )

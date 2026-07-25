@@ -111,16 +111,20 @@ def write_owner_only(path: Path, text: str, *, encoding: str = "utf-8") -> bool:
     raw_fd: int | None = None
     try:
         raw_fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_ONLY_FILE)
+        # Checked BEFORE a single byte is written (round-69). This check exists
+        # for the filesystem that ignores or widens the requested mode, and
+        # verifying it after the write meant that on exactly that filesystem
+        # the content had already existed group- or world-readable — the
+        # window the check was added to close. fstat on the descriptor, not
+        # stat on the path, so nothing can be swapped underneath it.
+        if stat.S_IMODE(os.fstat(raw_fd).st_mode) != OWNER_ONLY_FILE:
+            raise OSError(f"cannot create {target} with owner-only permissions on this filesystem")
         handle = os.fdopen(raw_fd, "w", encoding=encoding)
         raw_fd = None
         with handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        if stat.S_IMODE(os.stat(tmp_path).st_mode) != OWNER_ONLY_FILE:
-            # A filesystem that cannot represent the mode must not receive the
-            # content at all.
-            raise OSError(f"cannot create {target} with owner-only permissions on this filesystem")
         os.replace(tmp_path, target)
     except BaseException:
         if raw_fd is not None:
