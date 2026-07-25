@@ -282,17 +282,20 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    the interview from the returned synthesis; keep the user-facing question
    visible throughout.
 
-   **Consent lifecycle for `data_context`.** A data result's `finding` and
-   `caveats` — the narrative the user actually confirms — are delivered in the
-   response and deliberately NOT retained server-side. So a `complete` outcome
-   is ready for synthesis only when it also lacks `consent_status`. If the
-   outcome carries `consent_status: "not_confirmable_prose_not_retained"` —
-   which happens when the data lane arrived in an EARLIER call and was carried
-   forward, or when you are replaying an `already_complete` outcome — the
-   measurements are intact but the consent context is gone: do NOT forward a
-   `[from-data]` answer from it. Re-run the advisory fan-out for that question
-   to obtain a confirmable result. Submitting every lane in one call is the
-   normal path and never produces this state.
+   **Consent lifecycle for `data_context`.** A data result's content — the
+   evidence and the narrative the user confirms — is delivered in the response
+   and deliberately NOT retained server-side, because nothing a child writes
+   can be shown to be free of PII. Two consequences:
+
+   - **Submit the data lane in the same call you finalize.** A data result
+     sent in an earlier `finalize: false` call is not carried forward: the
+     server kept only a summary of it, so the lane is reported under
+     `missing_optional_keys` until you resend it. Submitting every lane in one
+     call is the normal path and never hits this.
+   - **A replayed `already_complete` is not confirmable.** It carries
+     `consent_status: "not_confirmable_prose_not_retained"`; the measurements
+     are gone with the narrative, so do NOT forward a `[from-data]` answer from
+     it. Re-run the advisory fan-out for that question instead.
 
    **Milestone lateral-review dispatch**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it

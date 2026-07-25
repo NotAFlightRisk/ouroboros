@@ -51,6 +51,7 @@ from ouroboros.bigbang.requirement_distillation import (
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.contracts.data_evidence import (
+    _identifier_carries_payload,
     _identifier_looks_secret,
     _mutating_tool_verb,
 )
@@ -772,6 +773,7 @@ def _advisory_lanes_with_known_data_tools(advisory: Mapping[str, Any]) -> list[d
         and _KNOWN_DATA_TOOL_NAME.match(item.strip())
         and _mutating_tool_verb(item.strip()) is None
         and not _identifier_looks_secret(item.strip())
+        and not _identifier_carries_payload(item.strip())
     ][:_MAX_KNOWN_DATA_TOOLS]
     if known_tools:
         for lane in lanes:

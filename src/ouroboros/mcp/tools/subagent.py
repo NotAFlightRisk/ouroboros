@@ -1566,8 +1566,8 @@ def build_interview_question_advisory_subagents(
                 )
                 output_rule = (
                     "Return ONE JSON object in the published data answer form: "
-                    "typed evidence (source, request, value as a number with a "
-                    "unit, observed_at, execution_status 'succeeded'), typed "
+                    "typed evidence (source, request, value as a count of rows, "
+                    "observed_at, execution_status 'succeeded'), typed "
                     "proposed_queries, point-in-time caveats, a finding, and "
                     "requires_user_confirmation: true. The Data Access Policy "
                     "above binds and is enforced."
@@ -4473,7 +4473,17 @@ def _submit_fanout_results_locked(
     # the record, so "submit lane A, then submit the remaining lane B" reaches
     # completion exactly as the partial-retry contract documents. The latest
     # accepted submission wins on a per-key conflict.
-    provided: dict[str, Any] = {**record.received_results, **accepted}
+    # A carried-forward result whose CONTENT was not retained is bookkeeping,
+    # not an answer (round-56): claiming it as received would complete a
+    # fan-out around a summary and hand the host a result it never got. It
+    # stays missing until the lane is resent, which the tool description and
+    # the skill both say is the normal single-call path anyway.
+    carried = {
+        key: value
+        for key, value in record.received_results.items()
+        if not (isinstance(value, Mapping) and value.get("content_retained") is False)
+    }
+    provided: dict[str, Any] = {**carried, **accepted}
 
     # Accumulated state is validated BEFORE every durable write, not only at
     # synthesis (bot-review round-15): a legacy violating value must not ride
@@ -4487,7 +4497,7 @@ def _submit_fanout_results_locked(
     # Only results the SERVER carried forward may be validated as retained
     # state (round-50): the lifecycle is chosen from where a value came from,
     # never from a field inside it.
-    carried_forward = frozenset(record.received_results) - frozenset(accepted)
+    carried_forward = frozenset(carried) - frozenset(accepted)
     accumulated_violations = _lane_answer_contract_violations(
         contracts, provided, policies, carried_forward=carried_forward
     )

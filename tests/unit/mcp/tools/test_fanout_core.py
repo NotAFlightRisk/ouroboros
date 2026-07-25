@@ -2394,10 +2394,10 @@ def test_rejected_duplicate_does_not_suppress_accumulated_result(tmp_path: Any) 
     aggregated = {
         item["lane_id"]: item["output"] for item in closing["result"]["aggregated_outputs"]
     }
-    # Round-47 B1: partial state may not retain prose, so a lane accumulated
-    # in an earlier call comes back in its durable form.
-    assert aggregated["data_context"]["content_retained"] is False
-    assert "evidence" not in aggregated["data_context"]
+    # Round-56: a lane whose content was not retained is not a received lane,
+    # so it is reported missing instead of completing around a summary.
+    assert "data_context" not in aggregated
+    assert "data_context" in closing["missing_optional_keys"]
 
 
 def test_finalize_accumulation_is_advisory_only(tmp_path: Any) -> None:
@@ -5726,8 +5726,12 @@ def test_round49_retained_state_is_server_owned(tmp_path: Any) -> None:
         ],
         fanout_id=fanout_id,
     )
+    # Round-56: the server kept only a summary of that earlier submission, so
+    # the lane is honestly MISSING rather than completed around a stub. The
+    # host resends it in the final call, which is the normal single-call path.
     assert closing["status"] == "complete"
-    assert closing["consent_status"] == "not_confirmable_prose_not_retained"
+    assert "data_context" in closing["missing_optional_keys"]
+    assert "consent_status" not in closing
     assert "Growth leads" not in json_module.dumps(closing)
 
 
@@ -6240,3 +6244,136 @@ def test_rendered_instructions_agree_with_the_shipped_schema() -> None:
     # And the instruction names what the schema actually requires.
     assert "count of rows" in data_prompt
     assert "execution_status" in data_prompt
+
+    # The FALLBACK instruction is rendered when a declared contract cannot be
+    # delivered, and it is enforced against the same published schema — so it
+    # must agree too (round-56: it still asked for a unit).
+    oversized = {
+        "contract_id": "data_evidence_answer.v1",
+        "response_model_schema": {
+            "type": "object",
+            "properties": {
+                f"field_{index}": {"type": "string", "description": "x" * 300}
+                for index in range(80)
+            },
+        },
+    }
+    fallback_lane = dict(
+        next(lane for lane in advisory["lanes"] if lane["lane_id"] == "data_context")
+    )
+    fallback_lane["answer_contract"] = oversized
+    fallback_prompt = build_interview_question_advisory_subagents(
+        {
+            "session_id": "sess-prompt-fallback",
+            "question_identity": "interview-question:0123456789abcdef",
+            "question": "Which plan tier do most active users hit?",
+            "lanes": [fallback_lane],
+        }
+    )[0].prompt
+    for stale in ("number with a unit", "allowed_units"):
+        assert stale not in fallback_prompt, stale
+    assert "count of rows" in fallback_prompt
+
+
+def test_round56_unretained_content_is_missing_not_received(tmp_path: Any) -> None:
+    """A summary is bookkeeping, not an answer — so the lane stays missing."""
+    import json as json_module
+
+    from ouroboros.contracts.data_evidence import _aggregate_shape_problems
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    # B2 — a row count has a plausible ceiling, so a PAN cannot wear the field.
+    assert _aggregate_shape_problems({"number": 4111111111111111})
+    assert _aggregate_shape_problems({"number": 4200}) == []
+    assert _aggregate_shape_problems({"number": 1_000_000_000_000}) == []
+
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-56", lanes=[dict(lane) for lane in advisory["lanes"]]
+    )
+    assert fanout_id is not None
+    data_result = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Growth leads.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            _typed_evidence(
+                request={
+                    "operation": "read",
+                    "metric": "active_users",
+                    "aggregation": "count",
+                    "filters": ["plan=growth"],
+                },
+                value={"number": 42, "dimension": "plan=growth"},
+            )
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time."],
+    }
+
+    # B1 — sent early, then not resent: the lane is missing, not completed.
+    assert (
+        submit_fanout_results(
+            registry,
+            session_id="sess-56",
+            correlation_key="context.lane_id",
+            results=[{"key": "data_context", "content": data_result}],
+            fanout_id=fanout_id,
+            finalize=False,
+        )["status"]
+        == "accumulated"
+    )
+    closing = submit_fanout_results(
+        registry,
+        session_id="sess-56",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": lane, "content": {"lane_id": lane, "finding": "ok"}}
+            for lane in ("code_context", "web_context", "ambiguity_contrarian", "answer_simplifier")
+        ],
+        fanout_id=fanout_id,
+    )
+    assert closing["status"] == "complete"
+    assert "data_context" in closing["missing_optional_keys"]
+    assert "Growth leads" not in json_module.dumps(closing)
+
+    # Resent in the finalizing call — the normal path — it is a real result.
+    single = FanoutRegistry(tmp_path / "single")
+    single_id = register_question_advisory_fanout_from_lanes(
+        single, session_id="sess-56b", lanes=[dict(lane) for lane in advisory["lanes"]]
+    )
+    assert single_id is not None
+    results = [
+        {"key": lane, "content": {"lane_id": lane, "finding": "ok"}}
+        for lane in ("code_context", "web_context", "ambiguity_contrarian", "answer_simplifier")
+    ]
+    results.append({"key": "data_context", "content": data_result})
+    out = submit_fanout_results(
+        single,
+        session_id="sess-56b",
+        correlation_key="context.lane_id",
+        results=results,
+        fanout_id=single_id,
+    )
+    assert out["status"] == "complete"
+    assert "data_context" not in out["missing_optional_keys"]
+    assert "Growth leads" in json_module.dumps(out)
+
+
+def test_round56_configured_tools_round_trip_to_evidence(monkeypatch: Any) -> None:
+    """A hint that survives configuration is never rejected as a source."""
+    from ouroboros.mcp.tools.authoring_handlers import _advisory_lanes_with_known_data_tools
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    monkeypatch.setenv("OUROBOROS_KNOWN_DATA_TOOLS", "metrics_4111111111111111,clickhouse_query")
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    lanes = _advisory_lanes_with_known_data_tools(advisory)
+    data_lane = next(lane for lane in lanes if lane["lane_id"] == "data_context")
+    assert data_lane["known_data_tools"] == ["clickhouse_query"]

@@ -328,7 +328,13 @@ def _data_context_answer_contract() -> dict[str, Any]:
                     # A cardinality is a whole number of rows. Bound here
                     # rather than left to "is finite" (round-52: a count of
                     # -1.5 validated), since evidence only ever reports one.
-                    "number": {"type": "integer", "minimum": 0},
+                    # A cardinality counts rows, and a row count has a
+                    # plausible ceiling (round-56: 4111111111111111 is a card
+                    # number, not a count). This bounds the class of numeric
+                    # payloads that can wear the field; it does not decide
+                    # whether a plausible number is a real count, which no
+                    # server can — the confirming human is that check.
+                    "number": {"type": "integer", "minimum": 0, "maximum": 1_000_000_000_000},
                     "dimension": {
                         "type": "string",
                         "maxLength": 48,
@@ -392,11 +398,6 @@ def _data_context_answer_contract() -> dict[str, Any]:
                 },
             },
         },
-        # The DURABLE form is declared, not improvised (round-47): advisory
-        # prose is delivered to the host and then dropped, so the retained
-        # record is a different — and equally contract-valid — state of the
-        # same answer. Declaring it here is what makes a replayed completion
-        # validate instead of looking like a mangled submission.
         "allOf": [
             {
                 # As SUBMITTED: the advisory narrative is the lane's point, so
@@ -596,12 +597,6 @@ def _data_context_lane_policy() -> dict[str, Any]:
             # occupy. Prose survives only in operator-facing narrative.
             "enforcement": "typed_contract_fields",
             "free_text_fields": ["finding", "caveats", "expected_decision"],
-            # A unit is a MEASUREMENT unit. Declaring the vocabulary makes
-            # "this unit is one of the declared kinds" a decidable claim, so
-            # an identity attribute cannot be worn as a unit (round-44 probe:
-            # phone digits as the number, "phone" as the unit). Hosts that
-            # need another unit extend this list; the engine enforces
-            # whatever the snapshot declares.
         },
     }
 
@@ -1183,6 +1178,8 @@ def _aggregate_shape_problems(value: Any, *, retained: bool = False) -> list[str
         problems.append("a cardinality is a whole number of rows")
     elif number < 0:
         problems.append("a cardinality is not negative")
+    elif number > _MAX_PLAUSIBLE_CARDINALITY:
+        problems.append("a row count does not reach this magnitude")
     elif not math.isfinite(number):
         # 1e400 parses as a valid JSON number and becomes float infinity,
         # which json.dumps then writes as non-standard `Infinity` into the
@@ -1362,6 +1359,9 @@ _READ_REQUEST_GROUPING = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 #: submission grammar is the same category error as validating it against the
 #: submission schema (round-50).
 _RETAINED_SCOPE_KEY = re.compile(r"^[a-z][a-z0-9_]{0,23}$")
+#: A trillion rows is past any real table; a 13-19 digit card number and other
+#: long numeric identifiers are not counts (round-56).
+_MAX_PLAUSIBLE_CARDINALITY = 1_000_000_000_000
 
 
 # An ENTITY key identifies a person or account; grouping or scoping by one
