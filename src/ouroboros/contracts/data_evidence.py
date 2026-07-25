@@ -895,12 +895,16 @@ def redact_prose_for_persistence(output: Any) -> Any:
     of 4111111111111111 is a card number wearing a cardinality, and no typing
     of an integer says otherwise.
 
-    The end of that line is this: the record keeps what the SERVER derived —
-    that the lane answered, how many findings it carried, and that consent was
-    required — and keeps nothing the child wrote. The content is delivered in
-    the response, where the confirming human reads it; the record exists to
-    correlate and complete a fan-out, which needs the shape and not the
-    substance.
+    The end of that line is this: the record keeps counts and flags the SERVER
+    derived — that the lane answered, how many findings it carried, that
+    consent was required — plus the lane's own ``data_needed`` and
+    ``confidence``, which the child does choose but can only choose from a
+    closed enum. What it keeps is bounded and cannot hold a payload; saying it
+    keeps "nothing the child wrote" was the stronger claim and the false one
+    (round-66, matching ``engine_enforced.durable_state``). The content is
+    delivered in the response, where the confirming human reads it; the record
+    exists to correlate and complete a fan-out, which needs the shape and not
+    the substance.
     """
     if not isinstance(output, Mapping):
         return output
