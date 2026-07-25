@@ -31,6 +31,9 @@ import re
 from typing import Any
 
 CONTRACT_VERSION = "data_evidence_answer.v1"
+#: Historical alias kept for readability at call sites; the version above is
+#: the single definition (round-47 suggestion).
+_DATA_EVIDENCE_CONTRACT_ID = CONTRACT_VERSION
 
 
 @lru_cache(maxsize=1)
@@ -416,17 +419,21 @@ def _data_evidence_boundary_violations(
         if isinstance(executed, Mapping) and isinstance(reported, Mapping):
             dimension = reported.get("dimension")
             if isinstance(dimension, str) and "=" in dimension:
-                scoped = dimension.split("=", 1)[0]
                 filters = executed.get("filters")
                 applied = {
-                    text[: match.start()]
+                    text
                     for text in (filters if isinstance(filters, list) else [])
-                    if isinstance(text, str) and (match := _FILTER_OPERATOR.search(text))
+                    if isinstance(text, str)
                 }
-                if scoped not in applied:
+                # The whole predicate must match, not just the key (round-47:
+                # a request filtered to plan=free reported as plan=growth is a
+                # mislabelled measurement, and the label is what the user
+                # confirms).
+                if dimension not in applied:
                     errors.append(
-                        f"evidence[{index}].value.dimension: scopes by "
-                        f"{scoped!r}, which the executed request did not filter on"
+                        f"evidence[{index}].value.dimension: reports a scope the "
+                        "executed request did not apply; it must repeat one of "
+                        "the request's filters exactly"
                     )
         # Evidence exists only for a SUCCEEDED execution (round-42): the
         # outcome is declared, so a failed lookup is a located violation
@@ -644,9 +651,6 @@ def _read_request_shape_problems(request: Any, *, executed: bool = False) -> lis
             "group; narrow with filters and report one item per category"
         )
     return problems
-
-
-_DATA_EVIDENCE_CONTRACT_ID = "data_evidence_answer.v1"
 
 
 # The typed vocabularies the contract declares. Kept beside the re-entry

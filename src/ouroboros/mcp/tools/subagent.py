@@ -81,9 +81,14 @@ _INTERVIEW_ADVISORY_MAX_JSON_CHARS = 2_400
 # The data_context answer contract must reach the subagent WHOLE — a torn form
 # defeats its informed-consent purpose (the code contract is truncated at the
 # generic budget above; see Q00/ouroboros#1671 follow-ups). Pinned by tests.
-# Sized above the rendered contract with headroom for boundary-pattern
-# additions (the evidence policy patterns live inside the schema).
-_INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS = 8_000
+# The number is a DELIVERY budget, not a design constraint: what it protects
+# is the whole-form invariant (a torn contract defeats informed consent), and
+# that invariant is pinned by test independently of the figure. It was sized
+# when the evidence policy lived in the schema as regex patterns; the typed
+# structure that replaced them is larger and buys the guarantees those
+# patterns only approximated, so the budget follows the contract rather than
+# the contract being trimmed to fit the budget.
+_INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS = 12_000
 _LATERAL_PANEL_FALLBACK_ID = "lateral_persona_panel.v1"
 _LATERAL_PANEL_FALLBACK_TOOL = "ouroboros_lateral_think"
 _LATERAL_PANEL_FALLBACK_SEQUENTIAL_MODE = "sequential_persona_payload_dispatch"
@@ -1544,17 +1549,24 @@ def build_interview_question_advisory_subagents(
                     "caveats."
                 )
             else:
+                # What the child is told must be what re-entry does
+                # (round-47): registration substitutes the PUBLISHED data
+                # contract for an undeliverable declared one, so saying "not
+                # enforced" made a compliant child permanently partial.
                 contract_block = (
                     "## Answer Contract\n"
                     "The declared data answer contract could not be delivered "
-                    "whole (oversized or invalid), so its full schema is NOT "
-                    "enforced at re-entry.\n"
+                    "whole (oversized or invalid). The PUBLISHED "
+                    "data_evidence_answer.v1 contract is enforced at re-entry "
+                    "in its place.\n"
                 )
                 output_rule = (
-                    "The Data Access Policy above still binds and IS enforced "
-                    "at re-entry: return ONE JSON object with aggregates-only, "
-                    "PII-scrubbed evidence, point-in-time caveats, and "
-                    "requires_user_confirmation: true."
+                    "Return ONE JSON object in the published data answer form: "
+                    "typed evidence (source, request, value as a number with a "
+                    "unit, observed_at, execution_status 'succeeded'), typed "
+                    "proposed_queries, point-in-time caveats, a finding, and "
+                    "requires_user_confirmation: true. The Data Access Policy "
+                    "above binds and is enforced."
                 )
             raw_known_tools = raw_lane.get("known_data_tools")
             known_tools = (
@@ -4426,7 +4438,9 @@ def _submit_fanout_results_locked(
         # submitting lanes one at a time, so even a required-complete set
         # must NOT terminalize yet — optional results still in flight would
         # be permanently discarded behind already_complete.
-        persisted = registry.save(replace(record, received_results=provided))
+        persisted = registry.save(
+            replace(record, received_results=_durable_results(contracts, provided))
+        )
         return {
             "status": "accumulated",
             "fanout_id": fanout_id,
@@ -4446,7 +4460,9 @@ def _submit_fanout_results_locked(
             ),
         }
     if missing_required:
-        persisted = registry.save(replace(record, received_results=provided))
+        persisted = registry.save(
+            replace(record, received_results=_durable_results(contracts, provided))
+        )
         return {
             "status": "partial",
             "fanout_id": fanout_id,

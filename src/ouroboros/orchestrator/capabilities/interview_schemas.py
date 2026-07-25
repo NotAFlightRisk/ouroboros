@@ -580,7 +580,6 @@ def _data_context_answer_contract() -> dict[str, Any]:
         "required": [
             "lane_id",
             "data_needed",
-            "finding",
             "confidence",
             "evidence",
             "proposed_queries",
@@ -621,10 +620,20 @@ def _data_context_answer_contract() -> dict[str, Any]:
                         },
                         "source": {
                             "type": "string",
-                            "maxLength": 120,
-                            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,119}$",
+                            "maxLength": 64,
+                            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$",
                         },
-                        "request": {"$ref": "#/$defs/read_request"},
+                        # Executed evidence carries ONE number, so a grouped
+                        # request cannot describe it: a single value cannot say
+                        # which group it came from (round-46). Per-category
+                        # evidence is one item per category, narrowed by a
+                        # filter; grouping stays available on proposals.
+                        "request": {
+                            "allOf": [
+                                {"$ref": "#/$defs/read_request"},
+                                {"not": {"required": ["grouping"]}},
+                            ]
+                        },
                         "value": {"$ref": "#/$defs/aggregate"},
                         "observed_at": {
                             "type": "string",
@@ -649,15 +658,15 @@ def _data_context_answer_contract() -> dict[str, Any]:
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["tool_name", "request", "expected_decision", "source_class"],
+                    "required": ["tool_name", "request", "source_class"],
                     # An unexecuted proposal is only useful if the parent
                     # session can actually run and judge it: empty tool,
                     # request, or decision fields are not a proposal.
                     "properties": {
                         "tool_name": {
                             "type": "string",
-                            "maxLength": 120,
-                            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,119}$",
+                            "maxLength": 64,
+                            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$",
                         },
                         "request": {"$ref": "#/$defs/read_request"},
                         "expected_decision": {"type": "string", "minLength": 1, "maxLength": 300},
@@ -673,6 +682,9 @@ def _data_context_answer_contract() -> dict[str, Any]:
                 },
             },
             "requires_user_confirmation": {"const": True},
+            # False marks the RETAINED state: the advisory prose was delivered
+            # to the host and is deliberately absent from durable state.
+            "prose_retained": {"const": False},
             "caveats": {
                 "type": "array",
                 "maxItems": 5,
@@ -756,7 +768,24 @@ def _data_context_answer_contract() -> dict[str, Any]:
                 },
             },
         },
+        # The DURABLE form is declared, not improvised (round-47): advisory
+        # prose is delivered to the host and then dropped, so the retained
+        # record is a different — and equally contract-valid — state of the
+        # same answer. Declaring it here is what makes a replayed completion
+        # validate instead of looking like a mangled submission.
         "allOf": [
+            {
+                # As SUBMITTED: the advisory narrative is the lane's point, so
+                # finding is required and caveats accompany executed evidence.
+                # As RETAINED (prose_retained: false): both are absent by
+                # design, and a replayed completion is still this contract.
+                "if": {"not": {"required": ["prose_retained"]}},
+                "then": {"required": ["finding"]},
+            },
+            {
+                "if": {"required": ["prose_retained"]},
+                "then": {"not": {"anyOf": [{"required": ["finding"]}, {"required": ["caveats"]}]}},
+            },
             {
                 "if": {"properties": {"data_needed": {"const": False}}},
                 "then": {
@@ -796,6 +825,7 @@ def _data_context_answer_contract() -> dict[str, Any]:
                 "if": {
                     "properties": {"evidence": {"minItems": 1}},
                     "required": ["evidence"],
+                    "not": {"required": ["prose_retained"]},
                 },
                 "then": {
                     "properties": {"caveats": {"minItems": 1}},

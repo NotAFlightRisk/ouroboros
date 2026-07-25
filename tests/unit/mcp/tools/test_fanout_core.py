@@ -2385,7 +2385,12 @@ def test_rejected_duplicate_does_not_suppress_accumulated_result(tmp_path: Any) 
     aggregated = {
         item["lane_id"]: item["output"] for item in closing["result"]["aggregated_outputs"]
     }
-    assert aggregated["data_context"] == valid_data
+    # Round-47 B1: partial state may not retain prose, so a lane accumulated
+    # in an earlier call comes back in its durable form.
+    assert aggregated["data_context"] == {
+        **{k: v for k, v in valid_data.items() if k not in ("finding", "caveats")},
+        "prose_retained": False,
+    }
 
 
 def test_finalize_accumulation_is_advisory_only(tmp_path: Any) -> None:
@@ -2514,8 +2519,8 @@ def test_unenforceable_data_contract_fails_closed(tmp_path: Any) -> None:
     payloads = build_interview_question_advisory_subagents(request)
     prompt = payloads[0].prompt
     assert "[truncated]" not in prompt
-    assert "NOT enforced" in prompt
-    assert "still binds" in prompt
+    assert "enforced at re-entry in its place" in prompt
+    assert "binds and is enforced" in prompt
 
 
 def test_scalar_contract_is_not_advertised(tmp_path: Any) -> None:
@@ -4500,6 +4505,7 @@ def test_combinator_depth_never_binds_before_the_size_budget() -> None:
     deepest sub-budget chains stay enforceable.
     """
     from ouroboros.mcp.tools.subagent import (
+        _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
         _canonical_contract_json,
         _enforceable_lane_contract,
     )
@@ -4513,12 +4519,13 @@ def test_combinator_depth_never_binds_before_the_size_budget() -> None:
     # Sub-budget deep nesting is enforceable — the old cap of 32 is gone
     # as a reachable boundary.
     assert _enforceable_lane_contract(_chain(25))
+    assert _enforceable_lane_contract(_chain(33))
     # 33-deep CANNOT be sub-budget in the canonical serialization: its
     # minimal form already exceeds the declared budget, so it is rejected
     # by contract (deliverable-whole), not by an undocumented cap.
-    rendered = _canonical_contract_json(_chain(33))
-    assert rendered is not None and len(rendered) > 8_000
-    assert not _enforceable_lane_contract(_chain(33))
+    rendered = _canonical_contract_json(_chain(40))
+    assert rendered is not None and len(rendered) > _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS
+    assert not _enforceable_lane_contract(_chain(40))
 
 
 def test_credential_word_marks_identifier_from_any_position() -> None:
@@ -5306,8 +5313,7 @@ def test_round44_ownership_and_evidence_invariants(tmp_path: Any) -> None:
         _typed_evidence(value={"number": 42, "unit": "usd", "dimension": "plan=growth"})
     ]
     assert any(
-        "did not filter on" in error
-        for error in _data_evidence_boundary_violations(mismatched, policy)
+        "did not apply" in error for error in _data_evidence_boundary_violations(mismatched, policy)
     )
     assert _data_evidence_boundary_violations(_minimal_data_output(), policy) == []
 
@@ -5353,8 +5359,7 @@ def test_round45_field_grammars_close_their_classes() -> None:
         _typed_evidence(value={"number": 42, "unit": "accounts", "dimension": "plan=growth"})
     ]
     assert any(
-        "did not filter on" in error
-        for error in _data_evidence_boundary_violations(unfiltered, policy)
+        "did not apply" in error for error in _data_evidence_boundary_violations(unfiltered, policy)
     )
     # Round-46: executed evidence is one number, so its request narrows with
     # filters rather than grouping.

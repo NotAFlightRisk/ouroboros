@@ -2098,6 +2098,17 @@ class SubmitFanoutResultsHandler:
             serialized_size = len(
                 json.dumps(list(raw_results), ensure_ascii=False).encode("utf-8", "replace")
             )
+        except RecursionError:
+            # Nesting depth is caller-controlled, and json.dumps recurses
+            # before the size limit can reject anything (round-47). A hostile
+            # payload gets a bounded validation error, never a stack overflow
+            # surfacing through the public handler.
+            return Result.err(
+                MCPToolError(
+                    "results is nested too deeply to validate",
+                    tool_name="ouroboros_submit_fanout_results",
+                )
+            )
         except (TypeError, ValueError):
             return Result.err(
                 MCPToolError(

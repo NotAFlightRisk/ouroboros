@@ -5040,8 +5040,23 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
         "auto_execution": "forbidden",
     }
     # Informed-consent fields the confirming user needs are required.
-    for field in ("data_needed", "finding", "evidence", "proposed_queries", "confidence"):
+    for field in ("data_needed", "evidence", "proposed_queries", "confidence"):
         assert field in schema["required"]
+    # ``finding`` is required AS SUBMITTED and absent in the RETAINED state
+    # (round-47): advisory prose is delivered to the host and then dropped, so
+    # the contract declares both forms rather than leaving the durable record
+    # looking like a mangled submission.
+    submitted_only = Draft202012Validator(schema)
+    without_finding = {
+        "lane_id": "data_context",
+        "data_needed": False,
+        "confidence": "no_evidence",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+    }
+    assert list(submitted_only.iter_errors(without_finding))
+    assert list(submitted_only.iter_errors({**without_finding, "prose_retained": False})) == []
     # Whole-form delivery invariant: the rendered contract is never truncated.
     rendered = _bounded_json(contract, _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS)
     assert "[truncated]" not in rendered
@@ -5088,11 +5103,13 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
         "evidence": [
             {
                 "source": "clickhouse_query",
+                # Executed evidence is one number, so its request narrows with
+                # a filter rather than grouping (round-46/47).
                 "request": {
                     "operation": "read",
                     "metric": "user_id",
                     "aggregation": "distinct_count",
-                    "grouping": ["plan_tier"],
+                    "filters": ["plan=free"],
                 },
                 "value": {"number": 78, "unit": "%", "dimension": "plan=free"},
                 "observed_at": "2026-07-22T02:00:00+09:00",
