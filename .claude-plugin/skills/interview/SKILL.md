@@ -259,7 +259,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    remaining lanes (partial submissions accumulate server-side; if the
    response carries `accumulation_persisted: false`, resubmit those lanes
    again together with the remainder). Keys not registered on the fan-out are
-   rejected and echoed back as `unexpected_keys`; keys whose content the
+   rejected and reported under `unexpected_keys` — ordinary well-formed keys by name, hostile or secret-shaped keys as `<redacted-key sha256:...>` digests, so a rejected value never rides its own rejection; keys whose content the
    synthesizer rejects (e.g. a `code_facts` output bound to the wrong
    session) come back as `synthesis_rejected_keys` on a `partial` response —
    fix and resubmit them. `status="completion_not_persisted"` means the

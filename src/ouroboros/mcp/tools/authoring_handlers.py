@@ -1310,15 +1310,23 @@ async def _plugin_save_state(state_dir: Path, state: InterviewState) -> Result[P
         state.mark_updated()
         content = state.model_dump_json(indent=2)
 
-        def _sync_write() -> None:
+        def _sync_write() -> bool:
             # The plugin transport persists the same transcript the stdio one
             # does, including confirmed [from-data] answers, so it uses the
             # same owner-only writer (round-62: this fourth site was still on
             # write_text and produced 0644 under a 022 umask).
             secure_directory(file_path.parent)
-            write_owner_only(file_path, content)
+            return write_owner_only(file_path, content)
 
-        await asyncio.to_thread(_sync_write)
+        durability_confirmed = await asyncio.to_thread(_sync_write)
+        if not durability_confirmed:
+            # The stdio writer logs this state; discarding it here reported a
+            # durability the filesystem never confirmed (round-78).
+            log.warning(
+                "plugin.state_save_durability_uncertain",
+                interview_id=state.interview_id,
+                file_path=str(file_path),
+            )
         return Result.ok(file_path)
     except (OSError, ValueError) as e:
         return Result.err(f"Failed to save interview state: {e}")

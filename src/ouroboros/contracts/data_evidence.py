@@ -376,7 +376,10 @@ def _data_context_answer_contract() -> dict[str, Any]:
                     "metric": {
                         "type": "string",
                         "maxLength": 64,
-                        "pattern": "^(?!.*[0-9]{12})[A-Za-z][A-Za-z0-9_.*-]{0,63}$",
+                        # METRIC_TOKEN_PATTERN: one definition for
+                        # advertisement and enforcement (round-78), so the
+                        # two can never drift.
+                        "pattern": METRIC_TOKEN_PATTERN,
                     },
                     "aggregation": {"$ref": "#/$defs/aggregation_kind"},
                     # Required when aggregation is percentile: p95 and p50 are
@@ -714,7 +717,12 @@ def _mutating_tool_verb(tool_name: str) -> str | None:
     tokenized on non-alphanumerics AND camelCase boundaries because ``\\b``
     splits neither snake_case nor ``SaveReport``.
     """
-    decamelled = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", tool_name)
+    # BOTH camel boundaries (round-78): lower-to-upper (SaveReport) and
+    # acronym-to-word (DROPDatabase, EXECQuery — an upper RUN followed by a
+    # capitalized word). Splitting only the first left DROPDatabase one
+    # token, and a retained known-data-tool named that way completed re-entry
+    # as a proposal tool_name.
+    decamelled = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", tool_name)
     tokens = re.split(r"[^a-z0-9]+", decamelled.lower())
     verbs = _mutating_tool_verbs()
     return next((token for token in tokens if token in verbs), None)
@@ -1447,7 +1455,7 @@ _AGGREGATE_UNIT = re.compile(r"^[a-z%][a-z_/%]{0,23}$")
 _AGGREGATE_DIMENSION = re.compile(r"^[a-z][a-z0-9_]{0,23}=[A-Za-z0-9_.-]{1,22}$")
 
 
-_READ_REQUEST_METRIC = re.compile(r"^[A-Za-z][A-Za-z0-9_.*-]{0,63}$")
+# _READ_REQUEST_METRIC is compiled below, after METRIC_TOKEN_PATTERN.
 
 
 _READ_REQUEST_FILTER = re.compile(r"^[a-z][a-z0-9_]{0,23}[=<>!]{1,2}[A-Za-z0-9_.:+-]{1,22}$")
@@ -1616,6 +1624,24 @@ _ABSOLUTE_CREDENTIAL_WORDS = frozenset(
 # modifier and the identifier a tool name (token_usage_v2, key_metrics_30d).
 # That position rule is the whole exemption: it is granted only to a leading
 # credential word with a word-like tail, and everything else fails closed.
+#: The metric grammar, ONE definition for the published schema and the
+#: enforcement-side compile (round-78). Lowercase only — a metric names a
+#: measurement in snake_case, and admitting camelCase is how a pasted
+#: credential value (apiKeyHunterTwo) could be schema-valid — and with the
+#: ABSOLUTE credential words excluded per token, so password_resets is
+#: refused by the ADVERTISED grammar rather than accepted by the schema and
+#: rejected by enforcement. The word-shape route (distinguishing
+#: password_resets from round-45's password_swordfish) is not decidable, so
+#: the grammar is where the two surfaces can agree.
+_METRIC_ABSOLUTE_WORD_EXCLUSION = "|".join(sorted(_ABSOLUTE_CREDENTIAL_WORDS))
+METRIC_TOKEN_PATTERN = (
+    r"^(?!.*[0-9]{12})"
+    rf"(?!.*(?:^|[_.*-])(?:{_METRIC_ABSOLUTE_WORD_EXCLUSION})(?:[_.*-]|$))"
+    r"[a-z][a-z0-9_.*-]{0,63}$"
+)
+
+_READ_REQUEST_METRIC = re.compile(METRIC_TOKEN_PATTERN)
+
 _QUALIFIABLE_CREDENTIAL_WORDS = frozenset({"token", "tokens", "key", "keys"})
 
 
@@ -1638,7 +1664,12 @@ def _identifier_carries_payload(value: str) -> bool:
 def _identifier_looks_secret(value: str) -> bool:
     if _vendor_secret_prefix().search(value):
         return True
-    tokens = [tok for tok in re.split(r"[-_.]", value) if tok]
+    # Camel boundaries count as separators (round-78): splitting only on
+    # -_. left apiKeyHunterTwo a single token, so no credential word was
+    # ever seen — and the identifier exemption then removed it from the
+    # whole-output scan, returning it unchanged through a schema-valid lane.
+    decamelled = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", value)
+    tokens = [tok for tok in re.split(r"[-_.]", decamelled) if tok]
     lowered = [tok.lower() for tok in tokens]
     if any(tok in _ABSOLUTE_CREDENTIAL_WORDS for tok in lowered):
         return True

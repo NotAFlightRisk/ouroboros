@@ -8220,3 +8220,70 @@ def test_round77_real_credentials_in_those_same_fields_still_fail(tmp_path: Any)
     assert out.get("contract_violations")
     serialized = json.dumps(out, ensure_ascii=False, default=str)
     assert "sk_live_abc123" not in serialized
+
+
+# --------------------------------------------------------------------------- #
+# round-78 — camel boundaries are boundaries; one metric grammar
+# --------------------------------------------------------------------------- #
+
+
+def test_round78_acronym_prefixed_mutators_are_caught(tmp_path: Any) -> None:
+    """DROPDatabase and EXECQuery are mutators wearing an acronym.
+
+    The tokenizer split lower-to-upper but not acronym-to-word, so an upper
+    RUN followed by a capitalized word stayed one token and the verb was
+    never seen — a retained known-data-tool named DROPDatabase completed
+    re-entry as a proposal tool_name.
+    """
+    from ouroboros.contracts.data_evidence import _mutating_tool_verb
+
+    assert _mutating_tool_verb("DROPDatabase") == "drop"
+    assert _mutating_tool_verb("EXECQuery") == "exec"
+    assert _mutating_tool_verb("TRUNCATETable") is not None
+    # The boundary must not turn legitimate camel tool names into false hits.
+    assert _mutating_tool_verb("BigQuery") is None
+    assert _mutating_tool_verb("PostgreSQL") is None
+
+
+def test_round78_camelcase_credentials_lose_the_exemption(tmp_path: Any) -> None:
+    """apiKeyHunterTwo is api_key_hunter_two wearing camelCase.
+
+    Splitting only on -_. left it one token, no credential word was seen,
+    and the identifier exemption removed it from the whole-output scan — a
+    schema-valid required lane returned it unchanged.
+    """
+    from ouroboros.contracts.data_evidence import _identifier_looks_secret
+
+    assert _identifier_looks_secret("apiKeyHunterTwo")
+    assert _identifier_looks_secret("clientSecretHunterTwo")
+    # And the exemption still holds for what rounds 29-57 deliberately allow.
+    assert not _identifier_looks_secret("token_usage_v2")
+    assert not _identifier_looks_secret("key_metrics_30d")
+    assert not _identifier_looks_secret("BigQuery")
+
+
+def test_round78_metric_grammar_is_advertised_iff_enforced() -> None:
+    """One pattern, derived once, on both surfaces.
+
+    password_resets was schema-valid yet rejected by enforcement — a child
+    holding a zero-error answer had no way to comply. The resolution
+    CONSTRAINS the grammar (the reviewer's second option): distinguishing
+    password_resets from round-45's password_swordfish by shape is not
+    decidable, so the advertised pattern now refuses absolute credential
+    words and camelCase, and what the schema admits, re-entry accepts.
+    """
+    from ouroboros.contracts.data_evidence import (
+        _READ_REQUEST_METRIC,
+        _data_context_answer_contract,
+    )
+
+    published = _data_context_answer_contract()["response_model_schema"]["$defs"]["read_request"][
+        "properties"
+    ]["metric"]["pattern"]
+    assert published == _READ_REQUEST_METRIC.pattern
+
+    # Refused by the ADVERTISED grammar, not accepted-then-rejected.
+    for refused in ("password_resets", "apiKeyHunterTwo", "secret_rotations"):
+        assert not _READ_REQUEST_METRIC.match(refused), refused
+    for admitted in ("token_usage_v2", "logins", "key_metrics_30d", "api.requests-total"):
+        assert _READ_REQUEST_METRIC.match(admitted), admitted
