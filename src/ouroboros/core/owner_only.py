@@ -97,6 +97,26 @@ def write_owner_only(path: Path, text: str, *, encoding: str = "utf-8") -> bool:
     for directories this package creates and owns.
     """
     target = Path(path)
+    if os.name != "posix":
+        # Native Windows does not get this guarantee, and must not be told it
+        # does (round-71). `os.open` with 0o600 only sets the CRT read/write
+        # flags there; access is still governed by the inherited ACL, and
+        # `st_mode` reflects the flags rather than the ACL — so the check
+        # below would PASS for a file other accounts can read. That is a
+        # vacuous check standing in for a confidentiality guarantee, which is
+        # the failure mode this whole contract exists to eliminate.
+        #
+        # This function's rule since round 61 is that failing to establish the
+        # mode is failing to write: nothing sensitive reaches disk at a wider
+        # mode, ever. Applying it here means these writers refuse to run on
+        # native Windows until an owner-only DACL is implemented, rather than
+        # writing interview transcripts and Seeds under whatever ACL the
+        # directory happened to carry while reporting success.
+        raise OSError(
+            f"cannot establish owner-only permissions for {target} on this platform: "
+            "0600 does not create an owner-only DACL on native Windows, so the "
+            "confidentiality of interview and data content cannot be guaranteed here"
+        )
     # The temporary must not be longer than the filesystem allows just because
     # the target is near the limit (round-68). Embedding the WHOLE target name
     # added a fixed 38 characters, so a caller that had carefully bounded its

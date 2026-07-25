@@ -479,3 +479,27 @@ def test_no_bytes_are_written_when_the_filesystem_widens_the_mode(
     assert not target.exists()
     assert widened, "the probe never created a temporary"
     assert list(tmp_path.iterdir()) == [], "a widened temporary was left behind"
+
+
+def test_native_windows_refuses_rather_than_claiming_a_guarantee_it_cannot_keep(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """0600 does not create an owner-only DACL on native Windows.
+
+    `os.open` there sets only the CRT read/write flags; access stays governed
+    by the inherited ACL, and `st_mode` reflects the flags rather than the
+    ACL — so the mode check would pass for a file other accounts can read.
+    This function's rule since round 61 is that failing to establish the mode
+    is failing to write (round-71).
+    """
+    from ouroboros.core import owner_only
+
+    monkeypatch.setattr(owner_only.os, "name", "nt")
+
+    target = tmp_path / "secret.json"
+    with pytest.raises(OSError, match="owner-only"):
+        write_owner_only(target, '{"answer": "confirmed"}')
+
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == [], "content reached disk on an unprotected platform"

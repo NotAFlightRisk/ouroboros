@@ -6689,7 +6689,10 @@ def test_round59_metadata_publishes_what_is_enforced() -> None:
                     "purpose": "p",
                     "capability": "future",
                     "required": False,
-                    "answer_contract": oversized,
+                    # Its OWN contract id. Reusing the reserved one here now
+                    # means "bind the canonical contract" (round-70), which is
+                    # a different property from the one this test pins.
+                    "answer_contract": {**oversized, "contract_id": "future_additive.v1"},
                 },
             ]
         )
@@ -7734,3 +7737,92 @@ def test_round70_a_conforming_borrowed_lane_still_completes(tmp_path: Any) -> No
         fanout_id=fanout_id,
     )
     assert out["status"] == "complete", out.get("contract_violations")
+
+
+# --------------------------------------------------------------------------- #
+# round-71 — one resolution, reached from all three surfaces
+# --------------------------------------------------------------------------- #
+
+
+def test_round71_publication_matches_what_registration_binds(tmp_path: Any) -> None:
+    """A child must be shown the contract re-entry will actually enforce.
+
+    A foreign lane declaring the reserved id was PUBLISHED its own weak
+    schema while registration bound the canonical one, so a child that
+    followed the advertised contract was rejected and a required lane stayed
+    permanently partial.
+    """
+    from ouroboros.mcp.tools.subagent import (
+        effective_lane_contract,
+        published_lane_contract_fields,
+    )
+
+    for lane_id in ("data_context", "extra_metrics_lane"):
+        published = published_lane_contract_fields(dict(_WEAK_DATA_DECLARATION), lane_id)
+        bound = effective_lane_contract(lane_id, dict(_WEAK_DATA_DECLARATION))
+        assert bound is not None
+        assert published["answer_contract"] == bound, lane_id
+        assert published["answer_contract"]["response_model_schema"] != {"type": "object"}
+
+
+def test_round71_prompt_advertises_the_enforced_contract() -> None:
+    """The same decision has to reach the rendered prompt, not just the payload."""
+    payloads = build_interview_question_advisory_subagents(
+        {
+            "session_id": "sess-71",
+            "question_identity": "interview-question:00112233445566bb",
+            "question": "How many enterprise accounts churned last quarter?",
+            "user_question_first": True,
+            "lanes": [
+                {
+                    "lane_id": "extra_metrics_lane",
+                    "capability": "call_mcp",
+                    "required": True,
+                    "answer_contract": dict(_WEAK_DATA_DECLARATION),
+                }
+            ],
+        }
+    )
+    assert payloads
+    published = payloads[0].context["answer_contract"]
+    assert published["response_model_schema"] != {"type": "object"}
+    assert "$defs" in published["response_model_schema"]
+
+
+def test_round71_legacy_data_lane_without_a_contract_is_not_fail_open(tmp_path: Any) -> None:
+    """A record predating the binding is resolved from the lane it EXPECTS.
+
+    Round 70 normalized only an existing reserved id, so a legacy
+    `data_context` lane whose contract was absent — or named something else —
+    stayed unbound and accepted raw rows.
+    """
+    registry = FanoutRegistry(tmp_path)
+    for label, stored in (
+        ("absent", {}),
+        ("foreign id", {"data_context": {"contract_id": "anything.v1"}}),
+    ):
+        fanout_id = f"legacy-71-{label.replace(' ', '-')}"
+        record = FanoutRecord(
+            fanout_id=fanout_id,
+            kind=FANOUT_KIND_QUESTION_ADVISORY,
+            session_id="sess-71-legacy",
+            correlation_key="context.lane_id",
+            expected_keys=("data_context",),
+            required_keys=("data_context",),
+            synthesizer_input={"lane_ids": ["data_context"], "lane_answer_contracts": stored},
+        )
+        assert bool(registry.save(record)), label
+
+        out = submit_fanout_results(
+            registry,
+            session_id="sess-71-legacy",
+            correlation_key="context.lane_id",
+            results=[{"key": "data_context", "content": dict(_HOSTILE_DATA_OUTPUT)}],
+            fanout_id=fanout_id,
+        )
+
+        assert out["status"] == "partial", label
+        assert out.get("contract_violations"), label
+        serialized = json.dumps(out, ensure_ascii=False, default=str)
+        assert "alice@example.com" not in serialized, label
+        assert not registry.load(fanout_id).received_results, label

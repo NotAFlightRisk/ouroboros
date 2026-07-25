@@ -3527,12 +3527,15 @@ def published_lane_contract_fields(
     partial — the same divergence the prompts carried in rounds 57 and 58, one
     surface over.
     """
-    # The data lane publishes what re-entry will actually enforce, which is
-    # decided by the lane id and not by this declaration (round-67).
-    if lane_id == "data_context":
-        return {"answer_contract": canonical_data_lane_contract()}
-    if _enforceable_lane_contract(contract):
-        return {"answer_contract": dict(contract)}
+    # Publication asks registration what it will enforce rather than deciding
+    # again (round-71). Two decisions meant a foreign lane declaring the
+    # reserved id was PUBLISHED its own weak schema while registration bound
+    # the canonical one, so a child that followed the advertised contract was
+    # rejected and a required lane stayed permanently partial — advertised
+    # IFF enforced, broken one surface over for the third time (57, 59, 71).
+    enforced = effective_lane_contract(lane_id, contract)
+    if enforced is not None:
+        return {"answer_contract": enforced}
     return {
         UNENFORCED_CONTRACT_FIELD: {
             "contract_id": str(contract.get("contract_id") or "unversioned"),
@@ -3630,24 +3633,45 @@ def effective_lane_contract(lane_id: str, declared: Any) -> dict[str, Any] | Non
     return None
 
 
-def loaded_lane_contracts(raw: Any) -> dict[str, Any]:
-    """Persisted lane contracts, with reserved ids restored to canonical form.
+def loaded_lane_contracts(raw: Any, expected_keys: Iterable[str] = ()) -> dict[str, Any]:
+    """Persisted lane contracts, resolved exactly as registration resolves them.
 
-    Registration cannot be the only place this holds: a record persisted
-    before round-70 may carry a weak contract under the reserved id, and it
-    is read back on every submission, replay, and resubmission. Normalizing
-    on load means an old record cannot enforce less than a new one.
+    Registration cannot be the only place this holds. A record persisted
+    before this PR is read back on every submission, replay, and
+    resubmission, and it may carry a weak contract under the reserved id —
+    or, for a ``data_context`` lane, no contract at all. Round 70 normalized
+    only the first case, so a legacy data lane whose contract was absent or
+    named something else stayed fail-open: raw rows completed with no
+    violations (round-71).
+
+    ``expected_keys`` is what closes that: a lane the record EXPECTS is
+    resolved even when the contract map has no entry for it, so an old record
+    cannot enforce less than a new one. The resolution itself is
+    :func:`effective_lane_contract`, so load, registration, and publication
+    cannot drift apart.
     """
-    if not isinstance(raw, Mapping):
-        return {}
+    declared = raw if isinstance(raw, Mapping) else {}
+    lane_ids = [str(key) for key in declared]
+    lane_ids.extend(str(key) for key in expected_keys if str(key) not in lane_ids)
     normalized: dict[str, Any] = {}
-    for lane_id, contract in raw.items():
-        if not isinstance(contract, Mapping):
-            continue
-        if str(contract.get("contract_id") or "") == _DATA_EVIDENCE_CONTRACT_ID:
-            normalized[str(lane_id)] = canonical_data_lane_contract()
-        else:
-            normalized[str(lane_id)] = dict(contract)
+    for lane_id in lane_ids:
+        contract = declared.get(lane_id)
+        reserved = (
+            isinstance(contract, Mapping)
+            and str(contract.get("contract_id") or "") == _DATA_EVIDENCE_CONTRACT_ID
+        )
+        if lane_id == "data_context" or reserved:
+            normalized[lane_id] = canonical_data_lane_contract()
+        elif isinstance(contract, Mapping):
+            # Preserved EXACTLY, enforceable or not. Registration skips a
+            # contract it cannot enforce, but load must not: a legacy record
+            # may hold a contract that was ADVERTISED and is broken — an
+            # unresolvable $ref, say — and round 17 established that such a
+            # lane fails closed, its violation reported and the lane left
+            # missing. Dropping it here would hand the lane no schema at all
+            # and complete it unvalidated, turning that fail-closed into the
+            # fail-open it was written to prevent.
+            normalized[lane_id] = dict(contract)
     return normalized
 
 
@@ -4623,7 +4647,7 @@ def _submit_fanout_results_locked(
         # while the data lane stayed redacted. This is the same rule as
         # round-50 — what a value is, is decided outside the value.
         replay_lane_contracts = loaded_lane_contracts(
-            record.synthesizer_input.get("lane_answer_contracts")
+            record.synthesizer_input.get("lane_answer_contracts"), record.expected_keys
         )
         replay_lane_contracts = (
             replay_lane_contracts if isinstance(replay_lane_contracts, Mapping) else {}
@@ -4666,7 +4690,7 @@ def _submit_fanout_results_locked(
                     continue
                 resent[key] = content
             replay_contracts = loaded_lane_contracts(
-                record.synthesizer_input.get("lane_answer_contracts")
+                record.synthesizer_input.get("lane_answer_contracts"), record.expected_keys
             )
             _normalize_contracted_text(resent, replay_contracts)
             raw_policies_replay = record.synthesizer_input.get("lane_data_policies")
@@ -4712,7 +4736,9 @@ def _submit_fanout_results_locked(
             )
         elif _carries_redacted_data(
             record.received_results,
-            loaded_lane_contracts(record.synthesizer_input.get("lane_answer_contracts")),
+            loaded_lane_contracts(
+                record.synthesizer_input.get("lane_answer_contracts"), record.expected_keys
+            ),
         ):
             replay["consent_status"] = "not_confirmable_prose_not_retained"
             replay["consent_note"] = (
@@ -4789,7 +4815,9 @@ def _submit_fanout_results_locked(
     # Contract validation happens at the door, BEFORE anything is merged or
     # persisted: a violating data-lane output (raw rows, PII-shaped evidence,
     # skipped confirmation) must never enter the durable record.
-    contracts = loaded_lane_contracts(record.synthesizer_input.get("lane_answer_contracts"))
+    contracts = loaded_lane_contracts(
+        record.synthesizer_input.get("lane_answer_contracts"), record.expected_keys
+    )
     raw_policies = record.synthesizer_input.get("lane_data_policies")
     policies = raw_policies if isinstance(raw_policies, Mapping) else {}
     # The public tool accepts ``content`` as object OR text (round-25): a
