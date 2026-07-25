@@ -1504,7 +1504,10 @@ def build_interview_question_advisory_subagents(
                 "(count, share, duration); qualitative context belongs in "
                 "the finding field. "
                 "Treat error-shaped tool output (for example an HTTP 200 body "
-                "carrying an error envelope) as no evidence, not as evidence. "
+                "carrying an error envelope) as no evidence, not as evidence: "
+                "every evidence item must declare execution_status "
+                "'succeeded', and a failed, denied, timed-out, or partial "
+                "lookup belongs in the finding as a no-evidence result. "
                 "If this runtime has no MCP or data-tool access, return the "
                 "no-op finding: the no-op IS your completion signal, so never "
                 "skip returning a result."
@@ -4035,6 +4038,80 @@ def _mutating_source_identifier_verb(source: str) -> str | None:
     return None
 
 
+# Builtins that mutate or reach outside the database while wearing a
+# read-only statement head (round-42 probe: SELECT count(nextval(...))
+# advances a sequence). These are DOCUMENTED side-effecting functions —
+# mechanically decidable facts about named builtins, not a guess about
+# unknown names, which is why an allowlist-of-known-bad is the right shape
+# here and the compound-identifier rule below covers everything else.
+_SIDE_EFFECTING_SQL_FUNCTIONS = frozenset(
+    {
+        "nextval",
+        "setval",
+        "pg_sleep",
+        "pg_read_file",
+        "pg_read_binary_file",
+        "pg_ls_dir",
+        "pg_terminate_backend",
+        "pg_cancel_backend",
+        "pg_logical_emit_message",
+        "lo_import",
+        "lo_export",
+        "dblink",
+        "dblink_exec",
+        "load_file",
+        "sys_exec",
+        "sys_eval",
+        "xp_cmdshell",
+        "sp_executesql",
+        "utl_http",
+        "utl_file",
+        "dbms_lock",
+        "dbms_pipe",
+    }
+)
+# Function words that can precede an imperative, and the determiners and
+# quantifiers that follow a transitive verb. Together they mark VERB
+# position, so a mutating word used as a NOUN ("call volume by day", "grant
+# program signups", "merge rate of upgrades") stays valid while an
+# instruction ("Please delete every customer record") does not.
+_IMPERATIVE_LEAD_INS = frozenset(
+    {"please", "can", "could", "would", "you", "kindly", "we", "i", "let", "us", "then", "first"}
+)
+_OBJECT_DETERMINERS = frozenset(
+    {"the", "a", "an", "all", "every", "each", "any", "this", "that", "these", "those", "our"}
+)
+# Canonical mutating verbs whose ordinary English imperative is a READ
+# instruction: "Call the analytics API", "Write a query that counts …",
+# "Merge the daily counts", "Replace the label in the output", "Create a
+# weekly cohort query". Their STATEMENT forms (CALL proc(), CREATE TABLE,
+# MERGE INTO, REPLACE INTO) are still rejected by the operation shapes and
+# the statement-head classification — this exclusion applies only to the
+# prose-imperative reading, where flagging them would block the proposals
+# the lane exists to hand a human.
+_READ_SIDE_IMPERATIVES = frozenset({"call", "merge", "replace", "create", "write"})
+
+
+def _imperative_mutating_verb(text: str) -> str | None:
+    """A mutating verb used as an INSTRUCTION in prose, if any.
+
+    A proposal is executable payload — the parent runs it after the user
+    confirms — so a natural-language proposal that instructs a mutation is a
+    read-only violation even though it never reaches SQL classification
+    (round-42 probe: "Please delete every customer record").
+    """
+    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text.lower())
+    verbs = _mutating_tool_verbs() - _READ_SIDE_IMPERATIVES
+    for index, token in enumerate(tokens):
+        if token not in verbs:
+            continue
+        leads_the_clause = all(prior in _IMPERATIVE_LEAD_INS for prior in tokens[:index])
+        takes_an_object = index + 1 < len(tokens) and tokens[index + 1] in _OBJECT_DETERMINERS
+        if leads_the_clause or takes_an_object:
+            return token
+    return None
+
+
 def _mutating_called_function(query: str) -> tuple[str, str] | None:
     """A mutating function INVOKED by the query, if any.
 
@@ -4048,6 +4125,9 @@ def _mutating_called_function(query: str) -> tuple[str, str] | None:
     """
     for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_.]*)\s*\(", _strip_sql_comments(query)):
         name = match.group(1)
+        bare = name.rsplit(".", 1)[-1].lower()
+        if bare in _SIDE_EFFECTING_SQL_FUNCTIONS:
+            return name, bare
         is_compound = bool(re.search(r"[_.]", name) or re.search(r"(?<=[a-z0-9])[A-Z]", name))
         if is_compound and (verb := _mutating_tool_verb(name)):
             return name, verb
@@ -4204,6 +4284,13 @@ _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     # Failure prose variants (round-33: "query failed because permission was
     # denied"); plural metric forms ("queries failed: 12") stay valid.
     r"|\b(query|request|call|lookup|connection)\s+failed\b"
+    # Negated success is the same statement (round-42: "lookup unsuccessful;
+    # attempts=3"). Negation is a closed grammatical form, not another
+    # failure synonym.
+    r"|\b(query|request|call|lookup|connection|execution)\s+"
+    r"(was\s+)?(unsuccessful|not\s+successful)\b"
+    r"|\b(unable\s+to|could\s+not|failed\s+to)\s+"
+    r"(fetch|query|run|execute|reach|connect|retrieve|read|complete)\b"
     # Bare HTTP failure statuses (round-34: "403 Forbidden", "returned 403").
     r"|\b[45]\d{2}\s+(forbidden|unauthorized|not\s+found|bad\s+request"
     r"|unavailable|error)\b"
@@ -4231,11 +4318,29 @@ _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
 _EMBEDDED_JSON_ROWS = re.compile(r"\[\s*\{|\}\s*,\s*\{|\{\s*\"[^\"]+\"\s*:")
 
 
+# An identity-shaped token: an alphabetic label bound to a numeric id
+# (user-123, acct_4471, cust-9001). One is a reference; SEVERAL SHARING THE
+# SAME LABEL are a column of ids — that repetition is the row signature, and
+# it holds under any delimiter (round-42 probe: "user-123 has 12 seats /
+# user-456 has 13 seats" used " / " to evade the comma and semicolon forms).
+_IDENTITY_TOKEN = re.compile(r"\b([A-Za-z][A-Za-z0-9]*)[-_](\d{2,})\b")
+
+
+def _repeats_identity_tokens(text: str) -> bool:
+    """Whether prose enumerates several ids under one label."""
+    by_label: dict[str, set[str]] = {}
+    for label, number in _IDENTITY_TOKEN.findall(text):
+        by_label.setdefault(label.lower(), set()).add(number)
+    return any(len(numbers) >= 2 for numbers in by_label.values())
+
+
 def _prose_contains_rows(text: str) -> bool:
     """Row-shaped content embedded in a prose field (not evidence.value)."""
     if _EMBEDDED_JSON_ROWS.search(text):
         return True
     if len(re.findall(r"[A-Za-z],[A-Za-z]", text)) >= 2:
+        return True
+    if _repeats_identity_tokens(text):
         return True
     segments = [segment for segment in text.split(";") if segment.strip()]
     return len(segments) >= 2 and all(segment.count(",") >= 2 for segment in segments)
@@ -4406,6 +4511,20 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                     "output is not evidence; return a no-evidence finding "
                     "instead"
                 )
+        # TYPED execution invariant (round-42): evidence exists only for a
+        # SUCCEEDED execution. Declaring the outcome turns "a failed call is
+        # not evidence" from a detector that has to recognize failure prose
+        # into a contract term with a located violation; the failure-vocabulary
+        # scan below stays as defense-in-depth against a contradicting
+        # narrative. Absent is fail-closed: an undeclared outcome is not a
+        # successful one.
+        execution_status = item.get("execution_status")
+        if execution_status != "succeeded":
+            errors.append(
+                f"evidence[{index}].execution_status: evidence requires a "
+                "succeeded execution; a failed, denied, timed-out, or "
+                "undeclared lookup is a no-evidence finding"
+            )
         observed_at = item.get("observed_at")
         if isinstance(observed_at, str) and not _parseable_timestamp(observed_at):
             errors.append(
@@ -4475,6 +4594,16 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                 f"proposed_queries[{index}].query: {head.upper()} is not a "
                 "read-only statement; the data lane may only propose "
                 "SELECT/WITH/SHOW/DESCRIBE/EXPLAIN reads"
+            )
+        # A prose proposal is executable payload too — the parent runs it
+        # after confirmation — so an instruction to mutate is a violation
+        # even though it never reaches SQL classification (round-42 probe:
+        # "Please delete every customer record").
+        if isinstance(query, str) and (imperative := _imperative_mutating_verb(query)):
+            errors.append(
+                f"proposed_queries[{index}].query: instructs a mutating "
+                f"operation ({imperative!r}); the data lane may only propose "
+                "reads"
             )
         # A read-only HEAD does not make the statement read-only — the
         # projection can invoke a mutator (round-41 probe: "SELECT
@@ -4641,9 +4770,20 @@ _SAFE_IDENTIFIER_SYNTAX = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 # unambiguous vendor prefixes, or a credential word whose suffix is not
 # made of recognizable words/tags (fail-closed since round-36).
 # token_usage_v2 keeps its exemption — "usage" is a word, not entropy.
-_VENDOR_SECRET_PREFIX = re.compile(
-    r"^(ghp_|gho_|github_pat_|xox[a-z][-_]|sk[-_]|pk[-_]|AKIA|ASIA|ABIA|ACCA)",
-)
+
+
+@lru_cache(maxsize=1)
+def _vendor_secret_prefix() -> re.Pattern[str]:
+    """Vendor token prefixes, from the SAME published vocabulary the content
+    scan uses (round-42): two copies drifted, and the copy that knew the
+    standard Slack forms was not the one guarding persisted content."""
+    from ouroboros.orchestrator.capabilities.interview_schemas import (
+        DATA_EVIDENCE_VENDOR_TOKEN_PREFIX,
+    )
+
+    return re.compile(r"^(?:" + DATA_EVIDENCE_VENDOR_TOKEN_PREFIX + r"|AKIA|ASIA|ABIA|ACCA)")
+
+
 # Credential words that NEVER name a read-only data tool. No suffix
 # analysis applies to them: an identifier containing one is a credential
 # wherever it sits (round-40 probes: password_swordfish,
@@ -4676,7 +4816,7 @@ _CREDENTIAL_WORDS = _ABSOLUTE_CREDENTIAL_WORDS | _QUALIFIABLE_CREDENTIAL_WORDS
 
 
 def _identifier_looks_secret(value: str) -> bool:
-    if _VENDOR_SECRET_PREFIX.match(value):
+    if _vendor_secret_prefix().match(value):
         return True
     tokens = [tok for tok in re.split(r"[-_.]", value) if tok]
     lowered = [tok.lower() for tok in tokens]

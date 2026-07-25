@@ -16,8 +16,15 @@ DATA_EVIDENCE_EMAIL_PATTERN = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 # The digit lookahead keeps ordinary hyphenated vocabulary ("token-counts",
 # "secret-santa") out: a credential suffix carries digits, a compound noun
 # does not.
+# Vendor token prefixes are PUBLISHED constants, so they are the one part of
+# credential detection that is a fact rather than a heuristic. Declared once
+# and shared by the content scan and the identifier classifier (round-42:
+# the content scan knew "xox" while the identifier classifier knew "xox[a-z]",
+# so the standard xoxb-/xoxp- Slack forms passed content validation).
+DATA_EVIDENCE_VENDOR_TOKEN_PREFIX = r"(?:github_pat|ghp|gho|ghu|ghs|ghr|xox[a-z]|sk|pk)[-_]"
 DATA_EVIDENCE_SECRET_PATTERN = (
-    r"\b(sk|pk|token|secret|bearer|api[_-]?key|ghp|gho|xox)"
+    r"\b" + DATA_EVIDENCE_VENDOR_TOKEN_PREFIX + r"(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{4,}"
+    r"|\b(sk|pk|token|secret|bearer|api[_-]?key|ghp|gho|xox)"
     r"[-_=:](?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{4,}"
 )
 # Standard credential header/assignment forms (bot-review round-6 probe):
@@ -589,8 +596,31 @@ def _data_context_answer_contract() -> dict[str, Any]:
                     # point-in-time by nature, and an aggregate without its
                     # observation timestamp loses that meaning by the time it
                     # reaches the confirming user and persisted state.
-                    "required": ["source", "query_summary", "value", "observed_at"],
+                    # execution_status is required and TYPED (round-42): the
+                    # "a failed call is not evidence" rule was enforced only
+                    # by recognizing failure vocabulary in prose, which is a
+                    # detector, not an invariant. Declaring the outcome makes
+                    # it a contract term — evidence may exist only for a
+                    # succeeded execution, and any other value is a located
+                    # violation instead of a missed phrase.
+                    "required": [
+                        "source",
+                        "query_summary",
+                        "value",
+                        "observed_at",
+                        "execution_status",
+                    ],
                     "properties": {
+                        "execution_status": {
+                            "const": "succeeded",
+                            "description": (
+                                "Execution outcome of THIS lookup. Only 'succeeded' is "
+                                "admissible as evidence: a failed, timed-out, denied, or "
+                                "partial call is a no-evidence finding "
+                                "(data_needed=false-style narration in 'finding'), never "
+                                "an evidence item with a caveat."
+                            ),
+                        },
                         "source": {"type": "string", "minLength": 1, "maxLength": 120},
                         "query_summary": {"type": "string", "minLength": 1, "maxLength": 300},
                         "value": {

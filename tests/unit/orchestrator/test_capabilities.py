@@ -5086,6 +5086,7 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
                 "query_summary": "count distinct MAU by plan tier",
                 "value": "78% of MAU are on the free tier",
                 "observed_at": "2026-07-22T02:00:00+09:00",
+                "execution_status": "succeeded",
             }
         ],
         "caveats": ["Point-in-time aggregate; may change after re-query."],

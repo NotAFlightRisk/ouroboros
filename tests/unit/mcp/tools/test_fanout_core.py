@@ -1062,6 +1062,7 @@ def test_data_evidence_pii_shaped_value_is_rejected_at_reentry(tmp_path: Any) ->
                 "query_summary": "count users by plan tier",
                 "value": "alice@example.com token=sk-live-123",
                 "observed_at": "2026-07-23T09:00:00Z",
+                "execution_status": "succeeded",
             }
         ],
         "proposed_queries": [],
@@ -1182,6 +1183,7 @@ def test_row_shaped_evidence_value_is_rejected_at_reentry(tmp_path: Any) -> None
                 "query_summary": "sample customers",
                 "value": '[{"name": "Alice Kim", "phone": "010-1234-5678"}]',
                 "observed_at": "2026-07-23T09:00:00Z",
+                "execution_status": "succeeded",
             }
         ],
         "proposed_queries": [],
@@ -1221,6 +1223,7 @@ def test_impossible_calendar_date_is_rejected_at_reentry(tmp_path: Any) -> None:
                 "query_summary": "count users",
                 "value": "78% of MAU are on the free tier",
                 "observed_at": "2026-02-31T10:00:00Z",
+                "execution_status": "succeeded",
             }
         ],
         "proposed_queries": [],
@@ -1255,6 +1258,7 @@ def test_boundary_scan_allows_hyphenated_vocabulary() -> None:
                 "query_summary": "sum token-counts grouped by plan",
                 "value": "premium plans average 12,400 tokens/day",
                 "observed_at": "2026-07-23",
+                "execution_status": "succeeded",
             }
         ],
         "proposed_queries": [],
@@ -1457,6 +1461,7 @@ def test_executed_evidence_claiming_mutation_is_rejected(tmp_path: Any) -> None:
                 "query_summary": "DELETE FROM customers WHERE stale = 1",
                 "value": "1,204 rows affected",
                 "observed_at": "2026-07-23T09:00:00Z",
+                "execution_status": "succeeded",
             }
         ],
         "proposed_queries": [],
@@ -1554,6 +1559,7 @@ def test_single_newline_two_row_value_is_rejected(tmp_path: Any) -> None:
                 "query_summary": "top customers by revenue",
                 "value": "Kim Minsu, premium tier\nLee Jiwoo, premium tier",
                 "observed_at": "2026-07-23T09:00:00Z",
+                "execution_status": "succeeded",
             }
         ],
         "proposed_queries": [],
@@ -1703,6 +1709,7 @@ def _minimal_data_output(value: str) -> dict[str, Any]:
                 "query_summary": "count users",
                 "value": value,
                 "observed_at": "2026-07-23T09:00:00Z",
+                "execution_status": "succeeded",
             }
         ],
         "proposed_queries": [],
@@ -5830,5 +5837,180 @@ def test_mutating_function_calls_inside_reads_are_rejected() -> None:
         "SELECT count(distinct date_trunc('day', created_at)) FROM events",
         "SELECT approx_count_distinct(user_id) FROM events",
         "SELECT count(coalesce(plan, 'none')) FROM accounts",
+    ):
+        assert _data_evidence_boundary_violations(_data_proposal(query)) == [], query
+
+
+def test_nested_result_content_does_not_recurse() -> None:
+    """Caller-controlled nesting depth may not crash request validation.
+
+    Round-42 probe: a 1,200-level object under ``results[*].content`` raised
+    an uncaught RecursionError inside ``SecurityLayer.check_request`` — before
+    any handler size check. The walk is iterative now, and exempt subtrees are
+    skipped DURING traversal so exempt content costs nothing to descend.
+    """
+    from ouroboros.mcp.server.security import InputValidator
+
+    deep: Any = {"leaf": "42 active users"}
+    for _ in range(1_200):
+        deep = {"nested": deep}
+
+    validator = InputValidator()
+    result = validator.validate(
+        "ouroboros_submit_fanout_results",
+        {
+            "session_id": "sess-deep",
+            "correlation_key": "context.lane_id",
+            "results": [{"key": "data_context", "content": deep}],
+        },
+    )
+    assert result.is_ok
+
+    # Routing fields around the exempt subtree stay validated at depth.
+    rejected = validator.validate(
+        "ouroboros_submit_fanout_results",
+        {
+            "session_id": "sess-deep",
+            "correlation_key": "context.lane_id",
+            "results": [{"key": "data; rm -rf /", "content": {"finding": "ok"}}],
+        },
+    )
+    assert rejected.is_err
+
+
+def test_vendor_token_prefixes_are_one_vocabulary() -> None:
+    """The content scan and the identifier classifier share one prefix list.
+
+    Round-42 probe: ``xoxb-123456789-abcdefghij`` passed the CONTENT scan
+    because it knew ``xox`` while the identifier classifier knew ``xox[a-z]``.
+    """
+    from ouroboros.mcp.tools.subagent import (
+        _data_evidence_boundary_violations,
+        _identifier_looks_secret,
+    )
+
+    for value in (
+        "xoxb-123456789-abcdefghij; count=42",
+        "xoxp-99887766-zzz111; 7 rows",
+        "ghp_abcd1234efgh5678; 3 repos",
+    ):
+        assert any(
+            "credential" in error
+            for error in _data_evidence_boundary_violations(_minimal_data_output(value))
+        ), value
+
+    # Both surfaces agree on the same token.
+    assert _identifier_looks_secret("xoxb-123456789-abcdefghij")
+
+
+def test_repeated_identity_tokens_are_rows_in_any_prose_field() -> None:
+    """Several ids under one label are a column, whatever the delimiter.
+
+    Round-42 probe: ``"user-123 has 12 seats / user-456 has 13 seats"`` used
+    " / " to evade the comma and semicolon row forms. Repetition of the
+    identity token is the row signature and is delimiter-independent.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for rows in (
+        "user-123 has 12 seats / user-456 has 13 seats",
+        "acct_4471 12 seats | acct_4472 13 seats",
+    ):
+        with_finding = _minimal_data_output("42 active users")
+        with_finding["finding"] = rows
+        assert any(
+            "row-shaped" in error for error in _data_evidence_boundary_violations(with_finding)
+        ), rows
+
+        with_caveat = _minimal_data_output("42 active users")
+        with_caveat["caveats"] = [rows]
+        assert any(
+            "row-shaped" in error for error in _data_evidence_boundary_violations(with_caveat)
+        ), rows
+
+    # A single reference and ordinary aggregates stay valid.
+    for prose in (
+        "Weekly active users grew 12% over the last 30 days.",
+        "Growth in region-01 was 12% against the 30-day baseline.",
+    ):
+        ordinary = _minimal_data_output("42 active users")
+        ordinary["finding"] = prose
+        assert _data_evidence_boundary_violations(ordinary) == [], prose
+
+
+def test_evidence_requires_a_succeeded_execution() -> None:
+    """The failed-call rule is a TYPED contract term now (round-42).
+
+    ``value="lookup unsuccessful; attempts=3"`` passed the numeric-measurement
+    rule and the failure vocabulary. Evidence now requires a declared
+    ``execution_status: succeeded``; anything else — including an undeclared
+    outcome — is a located violation rather than a missed phrase.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for status in ("failed", "timeout", "partial"):
+        failed = _minimal_data_output("42 active users")
+        failed["evidence"][0]["execution_status"] = status
+        assert any(
+            "requires a succeeded execution" in error
+            for error in _data_evidence_boundary_violations(failed)
+        ), status
+
+    undeclared = _minimal_data_output("42 active users")
+    del undeclared["evidence"][0]["execution_status"]
+    assert any(
+        "requires a succeeded execution" in error
+        for error in _data_evidence_boundary_violations(undeclared)
+    )
+
+    # The vocabulary scan stays as defense-in-depth against a contradicting
+    # narrative shipped under a "succeeded" status.
+    for value in (
+        "lookup unsuccessful; attempts=3",
+        "query was not successful, 0 rows",
+        "unable to reach the warehouse endpoint 3 times",
+    ):
+        contradicting = _minimal_data_output(value)
+        assert any(
+            "error-shaped" in error for error in _data_evidence_boundary_violations(contradicting)
+        ), value
+
+    assert _data_evidence_boundary_violations(_minimal_data_output("42 active users")) == []
+
+
+def test_prose_instructions_and_side_effecting_functions_are_rejected() -> None:
+    """Both halves of round-42's read-only gap.
+
+    ``Please delete every customer record`` never reaches SQL classification,
+    and ``SELECT count(nextval('billing_seq'))`` performs a side effect behind
+    a read-only head. Confirmed proposals are executed verbatim, so both are
+    executable payload.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for query, marker in (
+        ("Please delete every customer record", "instructs a mutating operation"),
+        ("purge all archived rows", "instructs a mutating operation"),
+        ("Save the results to a new table", "instructs a mutating operation"),
+        (
+            "SELECT count(nextval('billing_seq')) FROM generate_series(1, 5)",
+            "invokes a mutating function",
+        ),
+        ("SELECT count(pg_read_file('/etc/passwd')) FROM users", "invokes a mutating function"),
+    ):
+        assert any(
+            marker in error for error in _data_evidence_boundary_violations(_data_proposal(query))
+        ), query
+
+    # Mutating WORDS used as nouns, and read-side English imperatives whose
+    # STATEMENT forms are rejected elsewhere, stay valid.
+    for query in (
+        "Count grant program signups by month",
+        "Report call volume by day",
+        "Show the merge rate of premium upgrades",
+        "Call the analytics API for the weekly signup count",
+        "Write a query that counts signups by plan",
+        "Create a weekly cohort rollup query",
+        "SELECT count(*) FROM users",
     ):
         assert _data_evidence_boundary_violations(_data_proposal(query)) == [], query
