@@ -12,6 +12,7 @@ Covers PR-J:
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
 import os
 from typing import Any
 
@@ -579,7 +580,22 @@ def test_advisory_submitted_optional_lane_still_aggregates(tmp_path: Any) -> Non
         session_id="sess-optional-lanes",
         correlation_key="context.lane_id",
         results=[
-            {"key": "data_context", "content": "data-evidence"},
+            # Structured, because the data lane is bound to its contract by
+            # identity even with no declaration (round-67). This used to submit
+            # the bare string "data-evidence", which only aggregated because
+            # the lane registered with nothing bound.
+            {
+                "key": "data_context",
+                "content": {
+                    "lane_id": "data_context",
+                    "data_needed": False,
+                    "finding": "This question does not depend on data evidence.",
+                    "confidence": "no_evidence",
+                    "evidence": [],
+                    "proposed_queries": [],
+                    "requires_user_confirmation": True,
+                },
+            },
             {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
             {"key": "answer_simplifier", "content": "simplifier-advice"},
         ],
@@ -7298,3 +7314,191 @@ def test_round66_no_tool_access_does_not_misreport_relevance() -> None:
     assert "data_needed=true" in prompt
     assert "confidence=no_evidence" in prompt
     assert "never flip data_needed to false because you could not look" in prompt
+
+
+# --------------------------------------------------------------------------- #
+# round-67 — the data lane's contract follows its identity, not its declaration
+# --------------------------------------------------------------------------- #
+
+
+_HOSTILE_DATA_OUTPUT = {
+    "lane_id": "data_context",
+    "data_needed": True,
+    "finding": "rows: alice@example.com, bob@example.com",
+    "confidence": "reported_by_tool",
+    "evidence": [{"source": "db", "value": "alice@example.com, 010-1234-5678"}],
+    "proposed_queries": [],
+    "requires_user_confirmation": False,
+}
+
+
+def _data_lane(**overrides: Any) -> dict[str, Any]:
+    lane: dict[str, Any] = {"lane_id": "data_context", "capability": "data_context"}
+    lane.update(overrides)
+    return lane
+
+
+@pytest.mark.parametrize(
+    ("label", "lane"),
+    [
+        ("no answer_contract at all", _data_lane()),
+        (
+            "a foreign contract_id",
+            _data_lane(
+                answer_contract={
+                    "contract_id": "anything_goes.v1",
+                    "response_model_schema": {"type": "object"},
+                }
+            ),
+        ),
+        ("an empty declaration", _data_lane(answer_contract={})),
+    ],
+)
+def test_round67_data_lane_never_registers_unbound(
+    tmp_path: Any,
+    label: str,
+    lane: dict[str, Any],
+) -> None:
+    """Absent or foreign metadata must not leave the data lane unenforced.
+
+    The probe: submit raw rows, an email, and requires_user_confirmation=false.
+    Before this, registration bound nothing in these cases, so re-entry
+    returned `complete`, reported no violations, and persisted the content.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id=f"sess-67-{abs(hash(label))}",
+        lanes=[lane],
+    )
+    assert fanout_id is not None
+
+    record = registry.load(fanout_id)
+    assert record is not None
+    bound = record.synthesizer_input.get("lane_answer_contracts", {})
+    assert "data_context" in bound, f"{label}: the data lane registered with nothing bound"
+    assert bound["data_context"]["contract_id"] == "data_evidence_answer.v1"
+
+    out = submit_fanout_results(
+        registry,
+        session_id=f"sess-67-{abs(hash(label))}",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": dict(_HOSTILE_DATA_OUTPUT)}],
+        fanout_id=fanout_id,
+    )
+
+    assert out.get("contract_violations"), f"{label}: no violation reported"
+    # An optional lane that fails its contract is simply missing, not fatal —
+    # what must never happen is its content being accepted.
+    assert "data_context" in (out.get("missing_optional_keys") or []), label
+    assert "data_context" not in (out.get("received_keys") or []), label
+
+    serialized = json.dumps(out, ensure_ascii=False, default=str)
+    assert "alice@example.com" not in serialized
+    assert "010-1234-5678" not in serialized
+
+    stored = registry.load(fanout_id)
+    assert stored is not None
+    assert not stored.received_results, f"{label}: hostile content reached durable state"
+
+
+@pytest.mark.parametrize(
+    ("label", "lane"),
+    [
+        ("no answer_contract at all", _data_lane(required=True)),
+        (
+            "a foreign contract_id",
+            _data_lane(
+                required=True,
+                answer_contract={
+                    "contract_id": "anything_goes.v1",
+                    "response_model_schema": {"type": "object"},
+                },
+            ),
+        ),
+    ],
+)
+def test_round67_required_data_lane_stays_partial_until_conforming(
+    tmp_path: Any,
+    label: str,
+    lane: dict[str, Any],
+) -> None:
+    """When the lane is required, hostile content cannot complete the fan-out."""
+    registry = FanoutRegistry(tmp_path)
+    session = f"sess-67-req-{abs(hash(label))}"
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id=session, lanes=[lane]
+    )
+    assert fanout_id is not None
+
+    out = submit_fanout_results(
+        registry,
+        session_id=session,
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": dict(_HOSTILE_DATA_OUTPUT)}],
+        fanout_id=fanout_id,
+    )
+
+    assert out["status"] == "partial", label
+    assert "data_context" in out["missing_required_keys"], label
+    assert out.get("contract_violations"), label
+
+
+def test_round67_conforming_data_lane_still_completes(tmp_path: Any) -> None:
+    """Binding by identity must not block the ordinary, conforming lane."""
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-67-ok",
+        lanes=[_data_lane(required=True)],
+    )
+    assert fanout_id is not None
+
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-67-ok",
+        correlation_key="context.lane_id",
+        results=[
+            {
+                "key": "data_context",
+                "content": {
+                    "lane_id": "data_context",
+                    "data_needed": False,
+                    "finding": "This question does not depend on data evidence.",
+                    "confidence": "no_evidence",
+                    "evidence": [],
+                    "proposed_queries": [],
+                    "requires_user_confirmation": True,
+                },
+            }
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete", out.get("contract_violations")
+
+
+def test_round67_published_contract_equals_the_bound_one(tmp_path: Any) -> None:
+    """Advertised IFF enforced, for every declaration a caller can write.
+
+    Deciding separately on the two surfaces is how the lane came to publish a
+    canonical contract it had not bound.
+    """
+    from ouroboros.mcp.tools.subagent import (
+        effective_lane_contract,
+        published_lane_contract_fields,
+    )
+
+    declarations = [
+        None,
+        {},
+        {"contract_id": "anything_goes.v1", "response_model_schema": {"type": "object"}},
+        {"contract_id": "data_evidence_answer.v1", "response_model_schema": {"type": "object"}},
+    ]
+    for declared in declarations:
+        published = published_lane_contract_fields(declared or {}, "data_context")
+        bound = effective_lane_contract("data_context", declared)
+        assert bound is not None
+        assert published["answer_contract"] == bound, declared
+
+    # A non-data lane keeps the existing behaviour: declared or nothing.
+    assert effective_lane_contract("code_context", None) is None

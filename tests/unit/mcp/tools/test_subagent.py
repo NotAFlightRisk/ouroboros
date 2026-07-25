@@ -825,7 +825,17 @@ class TestBuildInterviewQuestionAdvisorySubagents:
         assert payload.context["capability"] == "call_mcp"
         assert payload.context["required"] is False
         assert payload.context["data_policy"] == data_policy
-        assert payload.context["answer_contract"] == answer_contract
+        # The data lane publishes the contract re-entry will actually enforce,
+        # which its identity decides (round-67). This declaration names the
+        # right contract_id but carries a degenerate {"type": "object"} schema
+        # that enforces nothing, so the canonical contract is published and
+        # bound instead — advertised IFF enforced.
+        from ouroboros.mcp.tools.subagent import canonical_data_lane_contract
+
+        published = payload.context["answer_contract"]
+        assert published == canonical_data_lane_contract()
+        assert published["contract_id"] == answer_contract["contract_id"]
+        assert published["response_model_schema"] != answer_contract["response_model_schema"]
         # The proposer contract must be in the prompt: pre-call relevance
         # gate, proposed queries for metered sources, no-op as completion
         # signal, TYPED evidence, skeptical error handling.

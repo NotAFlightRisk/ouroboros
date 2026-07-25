@@ -3527,10 +3527,12 @@ def published_lane_contract_fields(
     partial — the same divergence the prompts carried in rounds 57 and 58, one
     surface over.
     """
+    # The data lane publishes what re-entry will actually enforce, which is
+    # decided by the lane id and not by this declaration (round-67).
+    if lane_id == "data_context":
+        return {"answer_contract": canonical_data_lane_contract()}
     if _enforceable_lane_contract(contract):
         return {"answer_contract": dict(contract)}
-    if lane_id == "data_context":
-        return {"answer_contract": _data_context_answer_contract()}
     return {
         UNENFORCED_CONTRACT_FIELD: {
             "contract_id": str(contract.get("contract_id") or "unversioned"),
@@ -3557,6 +3559,63 @@ def lanes_with_published_contracts(lanes: Iterable[Any]) -> list[dict[str, Any]]
             )
         published.append(lane_copy)
     return published
+
+
+def _is_canonical_data_declaration(declared: Any) -> bool:
+    """Whether a data lane declared exactly the contract it will be bound to.
+
+    The whole contract is compared, not just ``contract_id``. A declaration
+    naming ``data_evidence_answer.v1`` while carrying a degenerate schema like
+    ``{"type": "object"}`` enforces nothing, and treating it as canonical
+    would leave the substitution unlogged — the predicate would then disagree
+    with what the code actually does, which is the drift this PR keeps paying
+    for elsewhere.
+    """
+    return isinstance(declared, Mapping) and dict(declared) == canonical_data_lane_contract()
+
+
+def canonical_data_lane_contract() -> dict[str, Any]:
+    """The contract the ``data_context`` lane is bound to, whatever it declared.
+
+    The lane's IDENTITY determines its contract — not a field inside the
+    caller-supplied metadata (round-67). Reading it from the declaration made
+    the lane fail OPEN in two ways that a probe walked straight through: a
+    lane with no ``answer_contract`` at all, and a lane declaring some other
+    ``contract_id``, both registered with nothing bound, so raw rows, an
+    email, and ``requires_user_confirmation=false`` were accepted, reported
+    no violations, and persisted.
+
+    Deriving it from the lane id instead makes those cases unrepresentable
+    rather than detected: there is no declaration a caller can write that
+    changes what ``data_context`` means. This is the same rule rounds 50 and
+    62 established for consent — the state is chosen outside the value.
+
+    The full published contract is used when it is deliverable whole; when it
+    is not, the structural fallback keeps confirmation and the typed
+    evidence/proposal shapes, which are what the lane means.
+    """
+    canonical = _data_context_answer_contract()
+    if _enforceable_lane_contract(canonical):
+        return dict(canonical)
+    return {
+        "contract_id": _DATA_EVIDENCE_CONTRACT_ID,
+        "response_model_schema": _data_evidence_fallback_schema(),
+    }
+
+
+def effective_lane_contract(lane_id: str, declared: Any) -> dict[str, Any] | None:
+    """The contract re-entry will ENFORCE for this lane.
+
+    One definition for both surfaces. Registration and publication used to
+    decide separately, which is how the data lane came to publish a canonical
+    contract it had not bound (rounds 57-59 were the same divergence, one
+    surface over).
+    """
+    if lane_id == "data_context":
+        return canonical_data_lane_contract()
+    if isinstance(declared, Mapping) and _enforceable_lane_contract(declared):
+        return dict(declared)
+    return None
 
 
 def declared_lane_contract(lane: Mapping[str, Any]) -> Any:
@@ -4209,33 +4268,36 @@ def register_question_advisory_fanout_from_lanes(
         if isinstance(lane_policy, Mapping):
             lane_data_policies[lane_id] = dict(lane_policy)
         answer_contract = declared_lane_contract(lane)
-        if isinstance(answer_contract, Mapping):
-            # Enforced IFF deliverable whole (round-11): an oversized
-            # contract is skipped here so re-entry never validates against a
-            # schema the child could only have received torn.
-            if _enforceable_lane_contract(answer_contract):
-                lane_answer_contracts[lane_id] = dict(answer_contract)
-            else:
-                log.warning(
-                    "fanout.lane_contract.unenforceable_not_enforced",
-                    lane_id=lane_id,
-                    contract_id=str(answer_contract.get("contract_id") or ""),
-                )
-                if lane_id == "data_context":
-                    # The data lane FAILS CLOSED (bot-review round-13):
-                    # dropping its unenforceable contract entirely would also
-                    # drop the contract-id-keyed evidence boundary scan,
-                    # letting PII/credential content persist unvalidated. A
-                    # minimal object contract keeps the policy scan active
-                    # while the undeliverable full schema stays unenforced.
-                    # The fallback keeps the STRUCTURAL invariants, not just
-                    # "an object" (round-43): confirmation and the typed
-                    # evidence/proposal shapes are what the lane means, so a
-                    # degraded contract must still assert them.
-                    lane_answer_contracts[lane_id] = {
-                        "contract_id": _DATA_EVIDENCE_CONTRACT_ID,
-                        "response_model_schema": _data_evidence_fallback_schema(),
-                    }
+        # Enforced IFF deliverable whole (round-11): an oversized contract is
+        # skipped so re-entry never validates against a schema the child could
+        # only have received torn. For data_context the lane's IDENTITY, not
+        # its declaration, decides — see effective_lane_contract (round-67).
+        effective = effective_lane_contract(lane_id, answer_contract)
+        if effective is not None:
+            lane_answer_contracts[lane_id] = effective
+        if isinstance(answer_contract, Mapping) and not _enforceable_lane_contract(answer_contract):
+            log.warning(
+                "fanout.lane_contract.unenforceable_not_enforced",
+                lane_id=lane_id,
+                contract_id=str(answer_contract.get("contract_id") or ""),
+            )
+        if lane_id == "data_context" and not _is_canonical_data_declaration(answer_contract):
+            # The declaration was absent, or named another contract. Both used
+            # to leave the lane with nothing bound, which is how a probe got
+            # raw rows, an email, and requires_user_confirmation=false past
+            # re-entry. The substitution is logged because the host is being
+            # given something other than what it declared — and it is
+            # published on every surface, so the child is told the same.
+            log.warning(
+                "fanout.data_lane_contract.substituted",
+                lane_id=lane_id,
+                declared_contract_id=(
+                    str(answer_contract.get("contract_id") or "")
+                    if isinstance(answer_contract, Mapping)
+                    else ""
+                ),
+                bound_contract_id=_DATA_EVIDENCE_CONTRACT_ID,
+            )
     if not expected_keys:
         return None
     synthesizer_input: dict[str, Any] = {"lane_ids": list(expected_keys)}
