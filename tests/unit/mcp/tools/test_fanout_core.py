@@ -6697,3 +6697,82 @@ def test_round59_plugin_prompt_states_the_completion_rule() -> None:
     # The compatibility rules a host needs are stated, not left implicit.
     assert "unsupported capability" in prompt
     assert "never skipped" in prompt
+
+
+def test_round61_resubmission_is_the_submission_path(tmp_path: Any) -> None:
+    """One door means one door: same normalization, and consent follows it."""
+    import json as json_module
+
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-61", lanes=[dict(lane) for lane in advisory["lanes"]]
+    )
+    assert fanout_id is not None
+    data_result = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Growth leads.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            _typed_evidence(
+                request={
+                    "operation": "read",
+                    "metric": "active_users",
+                    "aggregation": "count",
+                    "filters": ["plan=growth"],
+                },
+                value={"number": 42, "dimension": "plan=growth"},
+            )
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time."],
+    }
+    results = [
+        {"key": lane, "content": {"lane_id": lane, "finding": "ok"}}
+        for lane in ("code_context", "web_context", "ambiguity_contrarian", "answer_simplifier")
+    ]
+    results.append({"key": "data_context", "content": data_result})
+    assert (
+        submit_fanout_results(
+            registry,
+            session_id="sess-61",
+            correlation_key="context.lane_id",
+            results=results,
+            fanout_id=fanout_id,
+        )["status"]
+        == "complete"
+    )
+
+    # Without a resubmission the replay is still unconfirmable.
+    bare = submit_fanout_results(
+        registry,
+        session_id="sess-61",
+        correlation_key="context.lane_id",
+        results=[],
+        fanout_id=fanout_id,
+    )
+    assert bare["consent_status"] == "not_confirmable_prose_not_retained"
+
+    # B1 — a conforming resubmission puts the narrative back, so the response
+    # says it may be forwarded rather than forcing the host to discard it.
+    for content in (data_result, json_module.dumps(data_result)):
+        restored = submit_fanout_results(
+            registry,
+            session_id="sess-61",
+            correlation_key="context.lane_id",
+            results=[{"key": "data_context", "content": content}],
+            fanout_id=fanout_id,
+        )
+        # B2 — JSON text is normalized exactly as on a first submission.
+        assert restored["resubmitted_keys"] == ["data_context"], content
+        assert restored["consent_status"] == "confirmable_resubmitted"
+        assert "Growth leads" in json_module.dumps(restored)
+
+    # Nothing any of this touched entered durable state.
+    assert "Growth leads" not in (tmp_path / f"{fanout_id}.json").read_text()

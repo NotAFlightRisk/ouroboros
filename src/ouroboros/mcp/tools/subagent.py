@@ -4188,6 +4188,25 @@ def register_question_advisory_fanout_from_lanes(
     )
 
 
+def _normalize_contracted_text(submitted: dict[str, Any], contracts: Mapping[str, Any]) -> None:
+    """Decode JSON-serialized text into the object a contract validates.
+
+    The public tool accepts ``content`` as object OR text (round-25): a
+    text-transport child submitting its answer as JSON text must validate as
+    the decoded object rather than be rejected for not being one. Shared by
+    the initial and the resubmission paths, because a second copy of this rule
+    drifted from the first within one round (round-61).
+    """
+    for lane_key in list(submitted):
+        if lane_key in contracts and isinstance(submitted[lane_key], str):
+            try:
+                decoded = json.loads(submitted[lane_key])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(decoded, dict):
+                submitted[lane_key] = decoded
+
+
 def _is_transportable(content: Any) -> bool:
     """Whether content can cross the MCP transport at all.
 
@@ -4432,6 +4451,12 @@ def _submit_fanout_results_locked(
                     rejected.append(key)
                     continue
                 resent[key] = content
+            _normalize_contracted_text(
+                resent,
+                record.synthesizer_input.get("lane_answer_contracts")
+                if isinstance(record.synthesizer_input.get("lane_answer_contracts"), Mapping)
+                else {},
+            )
             raw_contracts_replay = record.synthesizer_input.get("lane_answer_contracts")
             replay_contracts = (
                 raw_contracts_replay if isinstance(raw_contracts_replay, Mapping) else {}
@@ -4463,7 +4488,21 @@ def _submit_fanout_results_locked(
         # and says plainly that consent must be re-obtained by re-running the
         # fan-out. Silently returning a consent-shaped payload without its
         # consent context would be the worse failure.
-        if _carries_redacted_data(
+        # Consent follows what THIS response carries, not what the record
+        # kept (round-61): a conforming resubmission puts the full, validated
+        # narrative back in the caller's hands, so stamping it unconfirmable
+        # would force the host to discard what it just supplied.
+        restored = set(replay.get("resubmitted_keys") or ())
+        if restored:
+            replay["consent_status"] = "confirmable_resubmitted"
+            replay["consent_note"] = (
+                "The lanes listed under resubmitted_keys were validated exactly "
+                "as a first submission and are returned complete, so a "
+                "data-derived answer may be forwarded from them. Nothing was "
+                "added to durable state; a later replay without a resubmission "
+                "will be unconfirmable again."
+            )
+        elif _carries_redacted_data(
             record.received_results, record.synthesizer_input.get("lane_answer_contracts")
         ):
             replay["consent_status"] = "not_confirmable_prose_not_retained"
@@ -4547,14 +4586,7 @@ def _submit_fanout_results_locked(
     # text-transport child submitting its answer as JSON-serialized text is
     # normalized here so contracted lanes validate the decoded object
     # instead of rejecting every textual result.
-    for lane_key in list(submitted):
-        if lane_key in contracts and isinstance(submitted[lane_key], str):
-            try:
-                decoded = json.loads(submitted[lane_key])
-            except (TypeError, ValueError):
-                continue
-            if isinstance(decoded, dict):
-                submitted[lane_key] = decoded
+    _normalize_contracted_text(submitted, contracts)
     # Door validation is always against the SUBMISSION schema: a fresh result
     # is a submission whatever it claims about itself (round-50).
     contract_violations = _lane_answer_contract_violations(contracts, submitted, policies)

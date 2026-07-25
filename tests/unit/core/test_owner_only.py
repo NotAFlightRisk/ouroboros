@@ -121,3 +121,47 @@ def test_seed_save_leaves_the_target_directory_alone(tmp_path: Path) -> None:
 
     assert _mode(shared) == 0o755
     assert _mode(seed_path) == 0o600
+
+
+def test_the_mode_is_established_not_repaired(tmp_path: Path) -> None:
+    """Content reaches disk only through a file created owner-only (round-61).
+
+    The earlier version chmod'd an existing file and suppressed failure, so a
+    filesystem or ownership that refused the repair got the new secret at the
+    old mode. Establishing the mode at creation removes the failure branch
+    entirely, and the replacement is atomic so no reader sees a partial file.
+    """
+    target = tmp_path / "seed.yaml"
+    target.write_text("old", encoding="utf-8")
+    os.chmod(target, 0o644)
+
+    write_owner_only(target, "SECRET")
+
+    assert _mode(target) == 0o600
+    assert target.read_text(encoding="utf-8") == "SECRET"
+    # No temporary is left behind on success.
+    assert [entry.name for entry in tmp_path.iterdir() if entry.name.startswith(".")] == []
+
+
+def test_a_failed_write_leaves_nothing_behind(tmp_path: Path, monkeypatch: Any) -> None:
+    """A write that cannot complete must not deposit the content anywhere."""
+    import ouroboros.core.owner_only as owner_only
+
+    target = tmp_path / "seed.yaml"
+    original_write = os.fdopen
+
+    def _explode(*args: Any, **kwargs: Any) -> Any:
+        handle = original_write(*args, **kwargs)
+        handle.close()
+        raise OSError("disk full")
+
+    monkeypatch.setattr(owner_only.os, "fdopen", _explode)
+    try:
+        owner_only.write_owner_only(target, "SECRET")
+    except OSError:
+        pass
+    else:  # pragma: no cover - the monkeypatch always raises
+        raise AssertionError("expected the write to fail")
+
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []
