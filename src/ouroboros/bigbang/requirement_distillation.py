@@ -17,6 +17,7 @@ from ouroboros.core.requirement_candidate import (
     RequirementEvidence,
     RequirementEvidenceKind,
     RequirementSection,
+    classify_answer_provenance,
     evaluate_promotion,
 )
 from ouroboros.core.seed import (
@@ -150,6 +151,19 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
         )
         explicitly_required = bool(_EXPLICIT_REQUIREMENT_RE.search(answer))
         if not explicitly_required:
+            continue
+        # A user-adopted external observation is not a product decision
+        # (round-73). A `[from-data]` answer is a point-in-time measurement
+        # the user confirmed AS AN OBSERVATION — and its narrative routinely
+        # contains this gate's own trigger words ("confirmed", "required") —
+        # so promoting it here manufactured a Seed requirement with
+        # confirmation_authority=USER out of a decision the user never made,
+        # contradicting the provenance contract the marker exists to carry.
+        # `[from-research]` is the same class (the intent guard already
+        # groups them). The requirement path stays open: the user states the
+        # decision in their own words, in an unmarked answer, and that
+        # promotes exactly as before.
+        if classify_answer_provenance(answer) in {"data_fact", "research_fact"}:
             continue
 
         referenced = tuple(

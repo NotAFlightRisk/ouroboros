@@ -374,3 +374,67 @@ async def test_seed_generator_returns_typed_reopen_error_for_conflict(tmp_path) 
     assert result.error.details["code"] == "interview_reopen_required"
     assert result.error.details["blockers"][0]["reason"] == "conflict_requires_tradeoff"
     adapter.complete.assert_not_awaited()
+
+
+def _round_candidates(distillation: RequirementDistillation) -> list[RequirementCandidate]:
+    """Only the candidates promoted from interview ROUNDS.
+
+    The initial goal always yields its own candidate; the round-73 property
+    is about answers.
+    """
+    return [c for c in distillation.candidates if c.candidate_id.startswith("round-")]
+
+
+def _state_with_answer(answer: str) -> InterviewState:
+    return InterviewState(
+        interview_id="iv_provenance",
+        initial_context="Build the reporting lane",
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question="What must the system guarantee?",
+                user_response=answer,
+            )
+        ],
+    )
+
+
+def test_round73_data_observation_is_not_promoted_to_a_requirement() -> None:
+    """A [from-data] answer is a confirmed OBSERVATION, not a product decision.
+
+    Its narrative routinely contains this gate's own trigger words —
+    "confirmed", "required" — so the deterministic promotion manufactured a
+    requirement with confirmation_authority=USER out of a decision the user
+    never made. End-to-end through build_requirement_distillation, as the
+    review asked.
+    """
+    marked = "[from-data] Confirmed: 42 enterprise accounts require SSO today."
+    distillation = build_requirement_distillation(_state_with_answer(marked))
+
+    assert _round_candidates(distillation) == []
+
+    # The same sentence in the user's own words IS a decision, and promotes.
+    unmarked = "Confirmed: 42 enterprise accounts require SSO today."
+    promoted = _round_candidates(build_requirement_distillation(_state_with_answer(unmarked)))
+
+    assert len(promoted) == 1
+    assert promoted[0].text == unmarked
+
+
+def test_round73_research_observation_is_the_same_class() -> None:
+    """[from-research] carries the same user-adopted-observation provenance;
+    the intent guard already groups them, and a second grouping here is how
+    the two surfaces would drift."""
+    marked = "[from-research] The payment provider requires 3DS for EU cards."
+    assert _round_candidates(build_requirement_distillation(_state_with_answer(marked))) == []
+
+
+def test_round73_users_own_words_around_data_still_decide() -> None:
+    """A mixed answer the USER leads is the user's decision.
+
+    The marker is a provenance stamp on what the answer leads with; an answer
+    that opens in the user's own words and cites data inline promotes.
+    """
+    mixed = "We must support 100 concurrent sessions given [from-data] 42 accounts."
+    promoted = _round_candidates(build_requirement_distillation(_state_with_answer(mixed)))
+    assert len(promoted) == 1

@@ -58,6 +58,7 @@ from ouroboros.contracts.data_evidence import (
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.owner_only import secure_directory, write_owner_only
+from ouroboros.core.requirement_candidate import classify_answer_provenance
 from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
     InterviewTurnContext,
@@ -1014,26 +1015,14 @@ def _interview_reasoning_meta(
 
 
 def _classify_interview_answer_source(answer: str) -> str:
-    """Return a coarse provenance class for an ``ooo interview`` answer.
+    """Provenance class for an ``ooo interview`` answer.
 
-    ``data_fact`` / ``research_fact`` are user-adopted external facts: the
-    human confirmed them before forwarding, but unlike ``repo_fact`` they are
-    point-in-time and not cheaply re-verifiable, so the intent guard treats
-    them like a typed human answer (WARN on contract change) rather than
-    silently passing them as evidence.
+    Delegates to the single definition in ``core.requirement_candidate``
+    (round-73): the deterministic requirement promotion reads the same
+    classifier, so an answer cannot be an observation to the guard and a
+    decision to the distiller.
     """
-    lowered = str(answer).lstrip().casefold()
-    if lowered.startswith("[from-code]") or lowered.startswith("[from-repo]"):
-        return "repo_fact"
-    if lowered.startswith("[from-data]"):
-        return "data_fact"
-    if lowered.startswith("[from-research]"):
-        return "research_fact"
-    if lowered.startswith("[from-auto]") or lowered.startswith("[from-safe-default]"):
-        return "generated"
-    if lowered.startswith("[from-assumption]") or lowered.startswith("[from-inference]"):
-        return "generated"
-    return "human"
+    return classify_answer_provenance(answer)
 
 
 def _guard_interview_answer(

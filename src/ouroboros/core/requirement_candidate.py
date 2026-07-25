@@ -22,6 +22,30 @@ _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
+def classify_answer_provenance(answer: str) -> str:
+    """Return a coarse provenance class for an interview answer.
+
+    The marker an answer LEADS with is its provenance stamp: ``data_fact`` /
+    ``research_fact`` are user-adopted external facts — the human confirmed
+    them before forwarding, but confirmed them AS OBSERVATIONS. This is the
+    single definition (round-73): the intent guard and the deterministic
+    requirement promotion both key off it, and a second prefix list in either
+    place is how the two would drift.
+    """
+    lowered = str(answer).lstrip().casefold()
+    if lowered.startswith("[from-code]") or lowered.startswith("[from-repo]"):
+        return "repo_fact"
+    if lowered.startswith("[from-data]"):
+        return "data_fact"
+    if lowered.startswith("[from-research]"):
+        return "research_fact"
+    if lowered.startswith("[from-auto]") or lowered.startswith("[from-safe-default]"):
+        return "generated"
+    if lowered.startswith("[from-assumption]") or lowered.startswith("[from-inference]"):
+        return "generated"
+    return "human"
+
+
 class CandidateContentSource(StrEnum):
     """Where candidate content originated."""
 
