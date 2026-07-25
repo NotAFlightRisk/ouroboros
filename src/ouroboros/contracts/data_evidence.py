@@ -318,7 +318,16 @@ def _data_context_answer_contract() -> dict[str, Any]:
                     {
                         "if": {"properties": {"aggregation": {"const": "percentile"}}},
                         "then": {"required": ["percentile"]},
-                    }
+                    },
+                    {
+                        # Two-way (round-50): a percentile on a count is a
+                        # contradictory request, not a harmless extra field.
+                        "if": {
+                            "properties": {"aggregation": {"not": {"const": "percentile"}}},
+                            "required": ["aggregation"],
+                        },
+                        "then": {"not": {"required": ["percentile"]}},
+                    },
                 ],
                 # A read request is a STRUCTURE, not a query string. The lane
                 # names what to measure; the parent session builds and runs the
@@ -478,6 +487,14 @@ def data_evidence_retained_schema() -> dict[str, Any]:
         for key in schema["properties"]["proposed_queries"]["items"]["required"]
         if key != "expected_decision"
     ]
+    key_only = {"type": "string", "maxLength": 24, "pattern": "^[a-z][a-z0-9_]{0,23}$"}
+    defs = schema["$defs"]
+    defs["aggregate"]["properties"]["dimension"] = key_only
+    defs["read_request"]["properties"]["filters"] = {
+        "type": "array",
+        "maxItems": 5,
+        "items": key_only,
+    }
     schema["required"] = [*schema["required"], "prose_retained"]
     schema["allOf"] = [
         clause
@@ -858,13 +875,52 @@ def redact_prose_for_persistence(output: Any) -> Any:
             else item
             for item in proposals
         ]
+    # A category VALUE is free-form and can be an address or a name however it
+    # is cased (round-50: street=123_main_st). The keys say what the
+    # measurement was scoped by, which is what the durable record needs; the
+    # values were shown to the user in the response and are not retained.
+    evidence = redacted.get("evidence")
+    if isinstance(evidence, list):
+        redacted["evidence"] = [_scope_keys_only(item) for item in evidence]
+    proposals = redacted.get("proposed_queries")
+    if isinstance(proposals, list):
+        redacted["proposed_queries"] = [_scope_keys_only(item) for item in proposals]
     redacted["prose_retained"] = False
     return redacted
+
+
+def _predicate_key(text: str) -> str:
+    match = _FILTER_OPERATOR.search(text)
+    return text[: match.start()] if match else text
+
+
+def _scope_keys_only(item: Any) -> Any:
+    """Drop category VALUES from a retained evidence item or proposal."""
+    if not isinstance(item, Mapping):
+        return item
+    reduced = dict(item)
+    request = reduced.get("request")
+    if isinstance(request, Mapping):
+        request = dict(request)
+        filters = request.get("filters")
+        if isinstance(filters, list):
+            request["filters"] = [
+                _predicate_key(text) if isinstance(text, str) else text for text in filters
+            ]
+        reduced["request"] = request
+    value = reduced.get("value")
+    if isinstance(value, Mapping) and isinstance(value.get("dimension"), str):
+        value = dict(value)
+        value["dimension"] = _predicate_key(value["dimension"])
+        reduced["value"] = value
+    return reduced
 
 
 def _data_evidence_boundary_violations(
     output: Mapping[str, Any],
     policy: Mapping[str, Any] | None = None,
+    *,
+    retained: bool = False,
 ) -> list[str]:
     """Check a data-lane output against the data policy at re-entry.
 
@@ -981,11 +1037,15 @@ def _data_evidence_boundary_violations(
         # missing or unenforceable.
         errors.extend(
             f"evidence[{index}].value: {problem}"
-            for problem in _aggregate_shape_problems(item.get("value"), allowed_units)
+            for problem in _aggregate_shape_problems(
+                item.get("value"), allowed_units, retained=retained
+            )
         )
         errors.extend(
             f"evidence[{index}].request: {problem}"
-            for problem in _read_request_shape_problems(item.get("request"), executed=True)
+            for problem in _read_request_shape_problems(
+                item.get("request"), executed=True, retained=retained
+            )
         )
         # The value states only the number, its unit, and its scope — the
         # aggregation lives in the request alone (round-45), so "a count
@@ -1056,7 +1116,7 @@ def _data_evidence_boundary_violations(
         # are all unrepresentable rather than filtered.
         errors.extend(
             f"proposed_queries[{index}].request: {problem}"
-            for problem in _read_request_shape_problems(item.get("request"))
+            for problem in _read_request_shape_problems(item.get("request"), retained=retained)
         )
         tool_name = item.get("tool_name")
         if isinstance(tool_name, str) and (verb := _mutating_tool_verb(tool_name)):
@@ -1125,7 +1185,9 @@ def _data_evidence_boundary_violations(
     return errors
 
 
-def _aggregate_shape_problems(value: Any, allowed_units: Any = None) -> list[str]:
+def _aggregate_shape_problems(
+    value: Any, allowed_units: Any = None, *, retained: bool = False
+) -> list[str]:
     """Whether an evidence value is a typed aggregate.
 
     An aggregate is a NUMBER with a unit. Enforcing that here — not only in
@@ -1154,8 +1216,9 @@ def _aggregate_shape_problems(value: Any, allowed_units: Any = None) -> list[str
         # identity attribute cannot be worn as a unit.
         problems.append("unit is not one of the units the data policy declares")
     dimension = value.get("dimension")
+    scope_grammar = _RETAINED_SCOPE_KEY if retained else _AGGREGATE_DIMENSION
     if dimension is not None and (
-        not isinstance(dimension, str) or not _AGGREGATE_DIMENSION.match(dimension)
+        not isinstance(dimension, str) or not scope_grammar.match(dimension)
     ):
         problems.append("dimension must be a single bounded category scope (key=value)")
     elif isinstance(dimension, str) and (
@@ -1168,7 +1231,9 @@ def _aggregate_shape_problems(value: Any, allowed_units: Any = None) -> list[str
     return problems
 
 
-def _read_request_shape_problems(request: Any, *, executed: bool = False) -> list[str]:
+def _read_request_shape_problems(
+    request: Any, *, executed: bool = False, retained: bool = False
+) -> list[str]:
     """Whether a read request is the typed structure the contract declares.
 
     The lane names WHAT to measure; the parent session builds and runs the
@@ -1204,8 +1269,14 @@ def _read_request_shape_problems(request: Any, *, executed: bool = False) -> lis
         )
     if request.get("aggregation") not in _aggregation_kinds():
         problems.append("aggregation is not one of the declared kinds")
+    elif request.get("aggregation") == "percentile" and not isinstance(
+        request.get("percentile"), int
+    ):
+        problems.append("a percentile request must state which percentile")
+    elif request.get("aggregation") != "percentile" and "percentile" in request:
+        problems.append("percentile applies only to a percentile aggregation")
     for list_field, pattern, limit in (
-        ("filters", _READ_REQUEST_FILTER, 5),
+        ("filters", _RETAINED_SCOPE_KEY if retained else _READ_REQUEST_FILTER, 5),
         ("grouping", _READ_REQUEST_GROUPING, 3),
     ):
         items = request.get(list_field)
@@ -1297,6 +1368,11 @@ _READ_REQUEST_FILTER = re.compile(r"^[a-z][a-z0-9_]{0,23}[=<>!]{1,2}[A-Za-z0-9_.
 
 
 _READ_REQUEST_GROUPING = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+#: The RETAINED form keeps a scope's key and drops its value, so its grammar
+#: is the bare key. Re-checking a carried-forward result against the
+#: submission grammar is the same category error as validating it against the
+#: submission schema (round-50).
+_RETAINED_SCOPE_KEY = re.compile(r"^[a-z][a-z0-9_]{0,23}$")
 
 
 # An ENTITY key identifies a person or account; grouping or scoping by one

@@ -282,6 +282,18 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    the interview from the returned synthesis; keep the user-facing question
    visible throughout.
 
+   **Consent lifecycle for `data_context`.** A data result's `finding` and
+   `caveats` — the narrative the user actually confirms — are delivered in the
+   response and deliberately NOT retained server-side. So a `complete` outcome
+   is ready for synthesis only when it also lacks `consent_status`. If the
+   outcome carries `consent_status: "not_confirmable_prose_not_retained"` —
+   which happens when the data lane arrived in an EARLIER call and was carried
+   forward, or when you are replaying an `already_complete` outcome — the
+   measurements are intact but the consent context is gone: do NOT forward a
+   `[from-data]` answer from it. Re-run the advisory fan-out for that question
+   to obtain a confirmable result. Submitting every lane in one call is the
+   normal path and never produces this state.
+
    **Milestone lateral-review dispatch**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it
    as a required lightweight subagent review for that turn. The interview just

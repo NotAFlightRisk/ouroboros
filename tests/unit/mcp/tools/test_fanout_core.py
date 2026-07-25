@@ -5722,3 +5722,108 @@ def test_round49_retained_state_is_server_owned(tmp_path: Any) -> None:
     assert closing["status"] == "complete"
     assert closing["consent_status"] == "not_confirmable_prose_not_retained"
     assert "Growth leads" not in json_module.dumps(closing)
+
+
+def test_round50_lifecycle_is_provenance_and_scopes_are_keys(tmp_path: Any) -> None:
+    """Round-50: state comes from where a value came from, not from the value."""
+    import json as json_module
+
+    from ouroboros.contracts.data_evidence import (
+        _read_request_shape_problems,
+        redact_prose_for_persistence,
+    )
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    lanes = [dict(lane) for lane in advisory["lanes"]]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-50", lanes=lanes
+    )
+    assert fanout_id is not None
+
+    # B1 — a FRESH result claiming to be retained is still a submission.
+    self_declared = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "confidence": "reported_by_tool",
+        "evidence": [_typed_evidence()],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "prose_retained": False,
+    }
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-50",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": self_declared}],
+        fanout_id=fanout_id,
+        finalize=False,
+    )
+    assert [item["lane_id"] for item in out["contract_violations"]] == ["data_context"]
+
+    # B2 — a category value never reaches durable state; its key does.
+    submitted = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Growth leads at 78%.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            _typed_evidence(
+                request={
+                    "operation": "read",
+                    "metric": "active_users",
+                    "aggregation": "count",
+                    "filters": ["street=123_main_st"],
+                },
+                value={"number": 42, "unit": "accounts", "dimension": "street=123_main_st"},
+            )
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time."],
+    }
+    retained = redact_prose_for_persistence(submitted)
+    assert retained["evidence"][0]["request"]["filters"] == ["street"]
+    assert retained["evidence"][0]["value"]["dimension"] == "street"
+    assert "123_main_st" not in json_module.dumps(retained)
+
+    # Warning — the percentile discriminator is two-way.
+    assert _read_request_shape_problems(
+        {"operation": "read", "metric": "m", "aggregation": "count", "percentile": 95}
+    )
+    assert (
+        _read_request_shape_problems(
+            {"operation": "read", "metric": "m", "aggregation": "percentile", "percentile": 95}
+        )
+        == []
+    )
+
+    # Warning — the consent marker belongs to the data contract's own results.
+    generic = FanoutRegistry(tmp_path / "generic")
+    generic_id = register_question_advisory_fanout_from_lanes(
+        generic,
+        session_id="sess-generic",
+        lanes=[
+            {
+                "lane_id": "code_context",
+                "purpose": "p",
+                "capability": "inspect_code",
+                "required": True,
+            }
+        ],
+    )
+    assert generic_id is not None
+    generic_out = submit_fanout_results(
+        generic,
+        session_id="sess-generic",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "code_context", "content": {"lane_id": "code_context", "prose_retained": False}}
+        ],
+        fanout_id=generic_id,
+    )
+    assert generic_out["status"] == "complete"
+    assert "consent_status" not in generic_out

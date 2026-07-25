@@ -3828,6 +3828,8 @@ def _lane_answer_contract_violations(
     contracts: Mapping[str, Any],
     provided: Mapping[str, Any],
     policies: Mapping[str, Any] | None = None,
+    *,
+    carried_forward: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Validate submitted lane outputs against their registered answer contracts.
 
@@ -3861,7 +3863,9 @@ def _lane_answer_contract_violations(
         lane_policy = (policies or {}).get(lane_id)
         boundary_errors = (
             _data_evidence_boundary_violations(
-                output, policy=lane_policy if isinstance(lane_policy, Mapping) else None
+                output,
+                policy=lane_policy if isinstance(lane_policy, Mapping) else None,
+                retained=lane_id in carried_forward,
             )
             if contract_id == _DATA_EVIDENCE_CONTRACT_ID
             else []
@@ -3872,11 +3876,7 @@ def _lane_answer_contract_violations(
         # the submission schema would reject it and drop the lane.
         schema = (
             data_evidence_retained_schema()
-            if (
-                contract_id == _DATA_EVIDENCE_CONTRACT_ID
-                and isinstance(output, Mapping)
-                and output.get("prose_retained") is False
-            )
+            if (contract_id == _DATA_EVIDENCE_CONTRACT_ID and lane_id in carried_forward)
             else contract.get("response_model_schema")
         )
         if not isinstance(schema, Mapping):
@@ -4166,7 +4166,9 @@ def _write_owner_only(path: Path, text: str) -> None:
         handle.write(text)
 
 
-def _carries_redacted_data(results: Mapping[str, Any] | None) -> bool:
+def _carries_redacted_data(
+    results: Mapping[str, Any] | None, contracts: Mapping[str, Any] | None = None
+) -> bool:
     """Whether a data result present here has already lost its prose.
 
     The consent marker follows the ACTUAL retained result (round-49
@@ -4174,8 +4176,18 @@ def _carries_redacted_data(results: Mapping[str, Any] | None) -> bool:
     consent to qualify, and a completion assembled from lanes accumulated in
     earlier calls has lost the narrative just as a replay has (round-49 B2).
     """
-    for output in (results or {}).values():
-        if isinstance(output, Mapping) and output.get("prose_retained") is False:
+    for lane_id, output in (results or {}).items():
+        contract = (contracts or {}).get(lane_id)
+        contract_id = (
+            str(contract.get("contract_id") or "") if isinstance(contract, Mapping) else ""
+        )
+        # Scoped to the data contract (round-50): a generic lane that happens
+        # to carry the field is not a redacted data result.
+        if (
+            contract_id == _DATA_EVIDENCE_CONTRACT_ID
+            and isinstance(output, Mapping)
+            and output.get("prose_retained") is False
+        ):
             return True
     return False
 
@@ -4333,7 +4345,9 @@ def _submit_fanout_results_locked(
         # and says plainly that consent must be re-obtained by re-running the
         # fan-out. Silently returning a consent-shaped payload without its
         # consent context would be the worse failure.
-        if _carries_redacted_data(record.received_results):
+        if _carries_redacted_data(
+            record.received_results, record.synthesizer_input.get("lane_answer_contracts")
+        ):
             replay["consent_status"] = "not_confirmable_prose_not_retained"
             replay["consent_note"] = (
                 "This replay carries the measurements only. The advisory "
@@ -4422,6 +4436,8 @@ def _submit_fanout_results_locked(
                 continue
             if isinstance(decoded, dict):
                 submitted[lane_key] = decoded
+    # Door validation is always against the SUBMISSION schema: a fresh result
+    # is a submission whatever it claims about itself (round-50).
     contract_violations = _lane_answer_contract_violations(contracts, submitted, policies)
     violating_lanes = {item["lane_id"] for item in contract_violations}
     accepted = {key: value for key, value in submitted.items() if key not in violating_lanes}
@@ -4441,7 +4457,13 @@ def _submit_fanout_results_locked(
     # call (bot-review round-21): when a lane's replacement ALSO violates,
     # the old violating value it failed to replace must still be scrubbed —
     # only the violation REPORT is deduplicated per lane.
-    accumulated_violations = _lane_answer_contract_violations(contracts, provided, policies)
+    # Only results the SERVER carried forward may be validated as retained
+    # state (round-50): the lifecycle is chosen from where a value came from,
+    # never from a field inside it.
+    carried_forward = frozenset(record.received_results) - frozenset(accepted)
+    accumulated_violations = _lane_answer_contract_violations(
+        contracts, provided, policies, carried_forward=carried_forward
+    )
     if accumulated_violations:
         scrubbed_lanes = {item["lane_id"] for item in accumulated_violations}
         provided = {key: value for key, value in provided.items() if key not in scrubbed_lanes}
@@ -4573,7 +4595,9 @@ def _submit_fanout_results_locked(
         # lane — door validation kept the bad duplicate out of ``provided``,
         # so the provided value is the one to judge. This same pass is the
         # belt against records persisted before door validation existed.
-        provided_violations = _lane_answer_contract_violations(contracts, provided, policies)
+        provided_violations = _lane_answer_contract_violations(
+            contracts, provided, policies, carried_forward=carried_forward
+        )
         excluded_lanes = {item["lane_id"] for item in provided_violations}
         reported_lanes = {item["lane_id"] for item in contract_violations}
         contract_violations = [
@@ -4668,7 +4692,7 @@ def _submit_fanout_results_locked(
     }
     if durable_outcome is not None:
         terminal_snapshot["result"] = durable_outcome
-    if _carries_redacted_data(provided):
+    if _carries_redacted_data(provided, contracts):
         completion["consent_status"] = "not_confirmable_prose_not_retained"
         completion["consent_note"] = (
             "A data result accumulated in an earlier submission is present "
