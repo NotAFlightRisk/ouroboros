@@ -228,7 +228,7 @@ def _data_context_answer_contract() -> dict[str, Any]:
                                 {"not": {"required": ["grouping"]}},
                                 {
                                     "properties": {
-                                        "aggregation": {"$ref": "#/$defs/reducing_aggregation"}
+                                        "aggregation": {"$ref": "#/$defs/cardinality_aggregation"}
                                     }
                                 },
                             ]
@@ -288,8 +288,15 @@ def _data_context_answer_contract() -> dict[str, Any]:
             },
         },
         "$defs": {
-            "reducing_aggregation": {
-                "enum": ["count", "distinct_count", "sum", "avg"],
+            "cardinality_aggregation": {
+                # A cardinality counts ROWS, so it is provably never one of
+                # the values in them. sum/avg looked safe but a singleton
+                # cohort makes either return its input verbatim (round-52:
+                # sum(credit_card_number) over one row IS the card number).
+                # Evidence is the only place a number becomes durable, so it
+                # carries only counts; everything else is requestable as a
+                # proposal, which carries no value.
+                "enum": ["count", "distinct_count"],
             },
             "aggregation_kind": {
                 # Each kind names ONE measurement. ratio/share/duration were
@@ -318,7 +325,10 @@ def _data_context_answer_contract() -> dict[str, Any]:
                 "additionalProperties": False,
                 "required": ["number", "unit"],
                 "properties": {
-                    "number": {"type": "number"},
+                    # A cardinality is a whole number of rows. Bound here
+                    # rather than left to "is finite" (round-52: a count of
+                    # -1.5 validated), since evidence only ever reports one.
+                    "number": {"type": "integer", "minimum": 0},
                     "unit": {
                         "type": "string",
                         "maxLength": 24,
@@ -1219,6 +1229,10 @@ def _aggregate_shape_problems(
     number = value.get("number")
     if isinstance(number, bool) or not isinstance(number, (int, float)):
         problems.append("number must be a JSON number")
+    elif isinstance(number, float) and not number.is_integer():
+        problems.append("a cardinality is a whole number of rows")
+    elif number < 0:
+        problems.append("a cardinality is not negative")
     elif not math.isfinite(number):
         # 1e400 parses as a valid JSON number and becomes float infinity,
         # which json.dumps then writes as non-standard `Infinity` into the
@@ -1277,7 +1291,7 @@ def _read_request_shape_problems(
         # A metric names what is measured; a credential-shaped name is the
         # leak wearing that field (round-45 probe: password_swordfish).
         problems.append("metric is credential-shaped; name the measurement instead")
-    elif _entity_key(metric) and request.get("aggregation") not in _reducing_aggregations():
+    elif _entity_key(metric) and request.get("aggregation") not in _cardinality_aggregations():
         # Counting identities yields a cardinality; taking their min/max/median
         # yields an identity (round-48 probe: max(ssn)). The typed form makes
         # that decidable per field instead of per SQL projection.
@@ -1314,11 +1328,11 @@ def _read_request_shape_problems(
     unknown = set(request) - _read_request_fields()
     if unknown:
         problems.append("carries fields outside the read-request shape")
-    if executed and request.get("aggregation") not in _reducing_aggregations():
+    if executed and request.get("aggregation") not in _cardinality_aggregations():
         problems.append(
-            "executed evidence may only report an aggregation that reduces "
-            "(count/distinct_count/sum/avg); a value-returning aggregation "
-            "reports one of the inputs verbatim"
+            "executed evidence may only report a cardinality "
+            "(count/distinct_count); every other aggregation can reproduce a "
+            "value from the rows it read"
         )
     if executed and request.get("grouping"):
         # A grouped query returns one row per group; an evidence item carries
@@ -1460,14 +1474,15 @@ _FILTER_OPERATOR = re.compile(r"[=<>!]{1,2}")
 #: returns one of the input VALUES, which is why an identity metric may only
 #: be counted.
 @lru_cache(maxsize=1)
-def _reducing_aggregations() -> frozenset[str]:
+def _cardinality_aggregations() -> frozenset[str]:
     """Aggregations whose result is provably not one of the inputs.
 
-    Read from the schema (round-49 rule: one vocabulary). A value-returning
-    aggregation reports an input verbatim, which is why executed evidence may
-    not use one — the number would be whatever the column holds.
+    Read from the schema (round-49 rule: one vocabulary). A cardinality counts
+    rows; every other kind can reproduce a value from them — verbatim for
+    min/max/median/percentile, and for sum/avg whenever the cohort is a single
+    row (round-52).
     """
-    return frozenset(_schema_defs()["reducing_aggregation"]["enum"])
+    return frozenset(_schema_defs()["cardinality_aggregation"]["enum"])
 
 
 def _identity_scope_problem(text: str, label: str) -> str | None:

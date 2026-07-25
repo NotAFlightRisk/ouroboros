@@ -4155,6 +4155,23 @@ def register_question_advisory_fanout_from_lanes(
     )
 
 
+def _is_transportable(content: Any) -> bool:
+    """Whether content can cross the MCP transport at all.
+
+    A lone unpaired surrogate is valid in a Python str and in JSON text,
+    but cannot be encoded to UTF-8 — so it fails the durable write AND the
+    serialization of the failure report that would describe it, turning a
+    reportable persistence failure into an uncaught transport error
+    (round-52). Content that cannot round-trip is rejected at the door, where
+    a malformed key is already the documented answer.
+    """
+    try:
+        json.dumps(content, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError):
+        return False
+    return True
+
+
 def _write_owner_only(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` as an owner-only file.
 
@@ -4409,6 +4426,7 @@ def _submit_fanout_results_locked(
             or (isinstance(raw_content, str) and not raw_content.strip())
             or not isinstance(raw_content, (str, Mapping))
             or (isinstance(raw_content, Mapping) and not raw_content)
+            or not _is_transportable(raw_content)
         ):
             if resolved_key not in malformed_keys:
                 malformed_keys.append(resolved_key)

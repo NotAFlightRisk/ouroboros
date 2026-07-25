@@ -1525,8 +1525,16 @@ def test_omitted_correlation_does_not_bypass_the_boundary(tmp_path: Any) -> None
     assert "result" not in replay_omitted
 
 
-def test_surrogate_content_reports_persistence_failure(tmp_path: Any) -> None:
-    """A lone surrogate must degrade honestly, not crash re-entry (round-5)."""
+def test_surrogate_content_is_rejected_at_the_door(tmp_path: Any) -> None:
+    """A lone surrogate must degrade honestly, not crash re-entry (round-5).
+
+    Round-52 strengthens where it degrades: content that cannot be encoded to
+    UTF-8 fails the durable write AND the serialization of the failure report
+    describing it, so it is rejected as malformed at the door rather than
+    reported as a persistence failure that cannot itself cross the transport.
+    """
+    import json as json_module
+
     registry = FanoutRegistry(tmp_path)
     fanout_id = register_question_advisory_fanout(
         registry,
@@ -1537,11 +1545,12 @@ def test_surrogate_content_reports_persistence_failure(tmp_path: Any) -> None:
         registry,
         session_id="sess-surrogate",
         correlation_key="context.lane_id",
-        results=[{"key": "ambiguity_contrarian", "content": "bad \ud800 surrogate"}],
+        results=[{"key": "ambiguity_contrarian", "content": "bad " + chr(0xD800) + " surrogate"}],
         fanout_id=fanout_id,
     )
     assert out["status"] == "partial"
-    assert out["accumulation_persisted"] is False
+    assert out["malformed_keys"] == ["ambiguity_contrarian"]
+    json_module.dumps(out, ensure_ascii=False).encode("utf-8")
 
 
 def test_stale_records_are_swept_on_register(tmp_path: Any) -> None:
@@ -5075,9 +5084,11 @@ def test_forbidden_content_classes_are_unrepresentable_not_filtered() -> None:
 
     # And the legitimate uses those 42 rounds kept threatening stay valid.
     for aggregate in (
+        # Round-52: evidence reports a cardinality, so the number is a whole
+        # non-negative count of rows.
         {"number": 42, "unit": "accounts"},
-        {"number": 78.5, "unit": "%", "dimension": "plan=growth"},
-        {"number": 240, "unit": "ms"},
+        {"number": 0, "unit": "accounts"},
+        {"number": 240, "unit": "rows"},
         {"number": 12400, "unit": "users"},
     ):
         valid = _minimal_data_output()
@@ -5174,9 +5185,9 @@ def test_round43_durable_boundary_invariants(tmp_path: Any) -> None:
         assert not _identifier_looks_secret(value), value
 
     # B4 — a measurement is finite; 1e400 is not.
-    assert _aggregate_shape_problems({"number": float("1e400"), "unit": "rows"}) == [
-        "number must be finite"
-    ]
+    # Round-52: a cardinality is a whole, non-negative number of rows, and an
+    # infinity fails that before finiteness is reached.
+    assert _aggregate_shape_problems({"number": float("1e400"), "unit": "rows"})
 
     # B5 — the advertised policy is persisted and its caps are enforced.
     registry = FanoutRegistry(tmp_path)
@@ -5948,3 +5959,81 @@ def test_round51_value_returning_aggregations_cannot_carry_a_number(tmp_path: An
     from ouroboros.orchestrator.capabilities.interview_schemas import _data_context_lane_policy
 
     assert _data_evidence_boundary_violations(proposing, _data_context_lane_policy()) == []
+
+
+def test_round52_cardinalities_only_and_transportable_content(tmp_path: Any) -> None:
+    """Evidence carries counts, and untransportable content stops at the door."""
+    import json as json_module
+
+    from jsonschema import Draft202012Validator
+
+    from ouroboros.contracts.data_evidence import (
+        _aggregate_shape_problems,
+        _cardinality_aggregations,
+        _data_context_answer_contract,
+    )
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    schema = _data_context_answer_contract()["response_model_schema"]
+
+    def _evidence_with(aggregation: str, number: Any = 42) -> dict[str, Any]:
+        return {
+            "lane_id": "data_context",
+            "data_needed": True,
+            "finding": "Highest stored value.",
+            "confidence": "reported_by_tool",
+            "evidence": [
+                _typed_evidence(
+                    request={
+                        "operation": "read",
+                        "metric": "credit_card_number",
+                        "aggregation": aggregation,
+                    },
+                    value={"number": number, "unit": "count"},
+                )
+            ],
+            "proposed_queries": [],
+            "requires_user_confirmation": True,
+            "caveats": ["Point-in-time."],
+        }
+
+    # B1 — sum/avg can reproduce an input on a singleton cohort, so evidence
+    # reports only cardinalities.
+    assert _cardinality_aggregations() == frozenset({"count", "distinct_count"})
+    for aggregation in ("sum", "avg", "max", "min", "median"):
+        assert list(Draft202012Validator(schema).iter_errors(_evidence_with(aggregation))), (
+            aggregation
+        )
+    for aggregation in ("count", "distinct_count"):
+        assert list(Draft202012Validator(schema).iter_errors(_evidence_with(aggregation))) == [], (
+            aggregation
+        )
+
+    # Warning — a cardinality is a whole, non-negative number of rows.
+    assert _aggregate_shape_problems({"number": -1.5, "unit": "count"})
+    assert _aggregate_shape_problems({"number": -3, "unit": "count"})
+    assert _aggregate_shape_problems({"number": 4200, "unit": "users"}) == []
+
+    # B2 — content that cannot cross the transport is malformed at the door,
+    # so no outcome is built around it and no response fails to serialize.
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-52", lanes=[dict(lane) for lane in advisory["lanes"]]
+    )
+    assert fanout_id is not None
+    unpaired = "counted " + chr(0xD800) + " rows"
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-52",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": {"lane_id": "data_context", "finding": unpaired}}
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["malformed_keys"] == ["data_context"]
+    # The response itself must survive the transport it describes.
+    json_module.dumps(out, ensure_ascii=False).encode("utf-8")
