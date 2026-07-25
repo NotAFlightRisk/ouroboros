@@ -62,7 +62,7 @@ from ouroboros.contracts.data_evidence import (
     data_evidence_retained_schema,
     redact_prose_for_persistence,
 )
-from ouroboros.core.owner_only import secure_directory, write_owner_only
+from ouroboros.core.owner_only import fsync_parent_directory, secure_directory, write_owner_only
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.assignment import AssignmentMessage
@@ -1538,9 +1538,15 @@ def build_interview_question_advisory_subagents(
                 "denied, timed-out, or partial lookup belongs in the finding as "
                 "a no-evidence result. Narrative for the human goes in finding "
                 "and caveats; keep PII out of it. "
-                "If this runtime has no MCP or data-tool access, return the "
-                "no-op finding: the no-op IS your completion signal, so never "
-                "skip returning a result."
+                "If this runtime has no MCP or data-tool access, answer "
+                "according to what you already decided about relevance, not "
+                "according to what you can reach. If the question does not "
+                "depend on data, that is the no-op finding. If it DOES, keep "
+                "data_needed=true with confidence=no_evidence and both lists "
+                "empty, and say in the finding that this runtime has no data "
+                "tool access — never flip data_needed to false because you "
+                "could not look. Either way you must return a result: it IS "
+                "your completion signal, so never skip it."
             )
             data_policy_json = _bounded_json(data_policy, _INTERVIEW_ADVISORY_MAX_JSON_CHARS)
             # Rendering uses the SAME enforceability decision as registration
@@ -2976,6 +2982,30 @@ class FanoutRecord:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class RecordWrite:
+    """Outcome of persisting a fan-out record.
+
+    ``written`` and ``durable`` are different facts and the recovery for each
+    is different (round-66). A record that was never written is recovered by
+    resubmitting it. A record whose content reached disk but whose directory
+    entry the OS did not confirm is ALREADY readable and, once terminal,
+    already replayable — resubmitting it cannot improve anything, because the
+    next call short-circuits on the completed record. What helps there is
+    flushing the directory again.
+
+    Truthiness stays "fully persisted" so existing accumulation call sites
+    keep their meaning: for a non-terminal record, resubmission genuinely is
+    the recovery, so an unconfirmed write should read as not persisted.
+    """
+
+    written: bool
+    durable: bool
+
+    def __bool__(self) -> bool:
+        return self.written and self.durable
+
+
 class FanoutRegistry:
     """File-backed store for pending fan-out expected-key state.
 
@@ -3216,7 +3246,7 @@ class FanoutRegistry:
             return None
         return resolved_id
 
-    def save(self, record: FanoutRecord) -> bool:
+    def save(self, record: FanoutRecord) -> RecordWrite:
         """Persist ``record``, overwriting any prior state.
 
         Used both by :meth:`register` and by partial-submission accumulation:
@@ -3242,7 +3272,7 @@ class FanoutRegistry:
                 fanout_id=record.fanout_id,
                 kind=record.kind,
             )
-            return False
+            return RecordWrite(written=False, durable=False)
         target = self._path(record.fanout_id)
         try:
             # Secure the directory FIRST (round-49): mkdir's mode is ignored
@@ -3264,16 +3294,14 @@ class FanoutRegistry:
                 json.dumps(record.to_dict(), ensure_ascii=False, allow_nan=False),
             )
             if not durable:
-                # Reported as a persistence failure, not logged and swallowed:
-                # the caller turns this into accumulation_persisted=false /
-                # completion_not_persisted, which tells the host to resubmit.
-                # Claiming durability we did not get is the worse error.
+                # Surfaced, never swallowed — but as its own fact. Reporting
+                # it as "not written" sent the host down a recovery that
+                # cannot work for a terminal record (round-66).
                 log.warning(
                     "fanout.registry.durability_unconfirmed",
                     fanout_id=record.fanout_id,
                     kind=record.kind,
                 )
-                return False
         # UnicodeError: json.dumps happily escapes a lone surrogate, but
         # utf-8 encoding at write time raises UnicodeEncodeError — that is a
         # persistence failure to report (accumulation_persisted=false /
@@ -3287,8 +3315,8 @@ class FanoutRegistry:
             )
             # No temp to clean up here: write_owner_only removes its own on
             # every failure path, so a partial record never survives.
-            return False
-        return True
+            return RecordWrite(written=False, durable=False)
+        return RecordWrite(written=True, durable=durable)
 
     @contextmanager
     def exclusive(self, fanout_id: str) -> Iterator[None]:
@@ -3359,6 +3387,23 @@ class FanoutRegistry:
                 except OSError:
                     pass
                 os.close(locked_fd)
+
+    def confirm_durability(self, fanout_id: str) -> bool:
+        """Re-flush a record's directory entry and report whether it took.
+
+        The retry that actually helps an unconfirmed write (round-66). The
+        content is already on disk — rewriting it would change nothing — so
+        what is retried is the one step that failed. Called on the terminal
+        replay path, which is where the host lands when it follows the
+        "resubmit" instruction, so that instruction now establishes the
+        durability it promises instead of short-circuiting to a no-op.
+        """
+        if not self.valid_fanout_id(fanout_id):
+            return False
+        path = self._path(fanout_id)
+        if not path.exists():
+            return False
+        return fsync_parent_directory(path)
 
     def load(self, fanout_id: str) -> FanoutRecord | None:
         """Load a persisted fan-out record, or ``None`` if unknown/invalid/corrupt.
@@ -4449,6 +4494,12 @@ def _submit_fanout_results_locked(
         replay: dict[str, Any] = (
             dict(record.terminal_response) if record.terminal_response is not None else {}
         )
+        # This is where a host lands after being told to resubmit an
+        # unconfirmed completion, so it is where the flush is retried
+        # (round-66). Retrying the CONTENT would be pointless — it is already
+        # on disk and the record is terminal — and reporting the outcome here
+        # is what makes the documented recovery able to establish durability.
+        replay["durability_confirmed"] = registry.confirm_durability(fanout_id)
         # A completed fan-out still ACCEPTS a lane whose content was never
         # retained (round-57). Refusing it made the host stuck: the content is
         # not recoverable from the record by design, so the only way back is
@@ -4749,7 +4800,7 @@ def _submit_fanout_results_locked(
             "contract_violations": contract_violations,
             "unexpected_keys": unexpected_keys,
             "malformed_keys": malformed_keys,
-            "accumulation_persisted": persisted,
+            "accumulation_persisted": bool(persisted),
             "note": (
                 "Results accumulated; the fan-out stays open. Submit the "
                 "remaining lanes, then close with a finalizing submission "
@@ -4779,7 +4830,7 @@ def _submit_fanout_results_locked(
             "unexpected_keys": unexpected_keys,
             "malformed_keys": malformed_keys,
             "synthesis_rejected_keys": early_rejected,
-            "accumulation_persisted": persisted,
+            "accumulation_persisted": bool(persisted),
         }
     # Every remaining missing key is optional: proceed to synthesis without it
     # instead of pinning the fan-out at "partial" (Q00/ouroboros#1671).
@@ -4892,7 +4943,7 @@ def _submit_fanout_results_locked(
             "malformed_keys": malformed_keys,
             "synthesis_rejected_keys": rejected_present,
             "result": outcome,
-            "accumulation_persisted": persisted,
+            "accumulation_persisted": bool(persisted),
         }
 
     completion = {
@@ -4940,7 +4991,7 @@ def _submit_fanout_results_locked(
             terminal_response=terminal_snapshot,
         )
     )
-    if not terminal_persisted:
+    if not terminal_persisted.written:
         return {
             **completion,
             "status": "completion_not_persisted",
@@ -4949,6 +5000,26 @@ def _submit_fanout_results_locked(
                 "terminal fan-out record could not be persisted; completion is "
                 "not durable and the fan-out remains open. Resubmit the same "
                 "results to complete durably."
+            ),
+        }
+    if not terminal_persisted.durable:
+        # The record IS written, terminal, and replayable — calling this
+        # "not persisted" sent the host into a recovery that cannot work,
+        # because the resubmission short-circuits on the completed record
+        # (round-66). What is uncertain is only the directory flush, so the
+        # completion stands and the uncertainty is reported as its own fact.
+        # Resubmitting is still useful, but for a different reason: the
+        # replay path retries the flush.
+        return {
+            **completion,
+            "durability_confirmed": False,
+            "durability_note": (
+                "The fan-out completed and the terminal record is written and "
+                "replayable, but the filesystem did not confirm the directory "
+                "flush, so a machine crash could still lose it. The synthesis "
+                "above stands. Resubmitting the same results returns "
+                "already_complete and retries the flush; it will not and need "
+                "not rewrite the record."
             ),
         }
     return completion

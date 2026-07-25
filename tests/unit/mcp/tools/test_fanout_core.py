@@ -32,6 +32,7 @@ from ouroboros.mcp.tools.subagent import (
     FANOUT_KIND_QUESTION_ADVISORY,
     FanoutRecord,
     FanoutRegistry,
+    RecordWrite,
     build_fanout_subagents,
     build_interview_question_advisory_subagents,
     build_subagent_payload,
@@ -840,7 +841,9 @@ def test_partial_reports_failed_accumulation_persistence(tmp_path: Any) -> None:
         session_id="sess-io-fail",
         payloads=_mixed_advisory_payloads(),
     )
-    with patch.object(FanoutRegistry, "save", return_value=False):
+    with patch.object(
+        FanoutRegistry, "save", return_value=RecordWrite(written=False, durable=False)
+    ):
         out = submit_fanout_results(
             registry,
             session_id="sess-io-fail",
@@ -965,7 +968,9 @@ def test_completion_is_not_claimed_when_terminal_write_fails(tmp_path: Any) -> N
         {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
         {"key": "answer_simplifier", "content": "simplifier-advice"},
     ]
-    with patch.object(FanoutRegistry, "save", return_value=False):
+    with patch.object(
+        FanoutRegistry, "save", return_value=RecordWrite(written=False, durable=False)
+    ):
         out = submit_fanout_results(
             registry,
             session_id="sess-terminal-io",
@@ -1209,7 +1214,9 @@ def test_registration_failure_is_not_advertised(tmp_path: Any) -> None:
     from unittest.mock import patch
 
     registry = FanoutRegistry(tmp_path)
-    with patch.object(FanoutRegistry, "save", return_value=False):
+    with patch.object(
+        FanoutRegistry, "save", return_value=RecordWrite(written=False, durable=False)
+    ):
         assert (
             register_question_advisory_fanout(
                 registry,
@@ -7160,7 +7167,7 @@ def test_round65_save_reports_unconfirmed_durability(tmp_path: Any, monkeypatch:
         synthesizer_input={},
     )
 
-    assert registry.save(record) is True
+    assert bool(registry.save(record)) is True
 
     real_fsync = owner_only.os.fsync
 
@@ -7171,7 +7178,7 @@ def test_round65_save_reports_unconfirmed_durability(tmp_path: Any, monkeypatch:
 
     monkeypatch.setattr(owner_only.os, "fsync", _fail_directory_fsync)
 
-    assert registry.save(record) is False
+    assert bool(registry.save(record)) is False
 
 
 def test_round65_single_rename_leaves_no_stray_temp(tmp_path: Any) -> None:
@@ -7186,8 +7193,108 @@ def test_round65_single_rename_leaves_no_stray_temp(tmp_path: Any) -> None:
         synthesizer_input={},
     )
 
-    assert registry.save(record) is True
+    assert bool(registry.save(record)) is True
 
     written = sorted(path.name for path in tmp_path.iterdir())
     assert written == ["single-rename.json"]
     assert registry.load("single-rename") is not None
+
+
+# --------------------------------------------------------------------------- #
+# round-66 — durability is retryable; unavailability is not irrelevance
+# --------------------------------------------------------------------------- #
+
+
+def _persona_record(fanout_id: str) -> Any:
+    return FanoutRecord(
+        fanout_id=fanout_id,
+        kind=FANOUT_KIND_LATERAL_PERSONA_PANEL,
+        session_id="sess-66",
+        correlation_key="context.persona",
+        expected_keys=("researcher",),
+        synthesizer_input={},
+    )
+
+
+def _fail_directory_fsync(monkeypatch: Any) -> None:
+    import errno as _errno
+    import stat as _stat
+
+    from ouroboros.core import owner_only
+
+    real_fsync = owner_only.os.fsync
+
+    def _failing(fd: int) -> None:
+        if _stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(_errno.EIO, "directory fsync failed")
+        real_fsync(fd)
+
+    monkeypatch.setattr(owner_only.os, "fsync", _failing)
+
+
+def test_round66_unconfirmed_write_is_written_not_lost(tmp_path: Any, monkeypatch: Any) -> None:
+    """`written` and `durable` are separate facts with separate recoveries.
+
+    Reporting an unconfirmed flush as "not written" sent the host into a
+    recovery that cannot work: the record is on disk and terminal, so the
+    resubmission short-circuits.
+    """
+    registry = FanoutRegistry(tmp_path)
+    record = _persona_record("durability-66")
+
+    _fail_directory_fsync(monkeypatch)
+    outcome = registry.save(record)
+
+    assert outcome.written is True
+    assert outcome.durable is False
+    assert bool(outcome) is False  # non-terminal callers still see "resubmit"
+    # The content really is readable — this is why "not persisted" was wrong.
+    assert registry.load("durability-66") is not None
+
+
+def test_round66_durability_is_retryable(tmp_path: Any, monkeypatch: Any) -> None:
+    """The retry flushes again rather than rewriting content that is fine."""
+    registry = FanoutRegistry(tmp_path)
+    record = _persona_record("retry-66")
+
+    _fail_directory_fsync(monkeypatch)
+    assert registry.save(record).durable is False
+    assert registry.confirm_durability("retry-66") is False
+
+    monkeypatch.undo()
+    # Same record, untouched content, and durability can now be established.
+    assert registry.confirm_durability("retry-66") is True
+    assert registry.load("retry-66") is not None
+
+
+def test_round66_confirm_durability_refuses_absent_and_malformed(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    assert registry.confirm_durability("never-registered") is False
+    assert registry.confirm_durability("../escape") is False
+    assert registry.confirm_durability("z" * 129) is False
+
+
+def test_round66_no_tool_access_does_not_misreport_relevance() -> None:
+    """Unavailability is not irrelevance.
+
+    The no-op form means `data_needed=false`. Telling a child with no MCP
+    access to return it made a data-relevant question produce schema-valid
+    state claiming the data was never needed.
+    """
+    from ouroboros.mcp.tools.subagent import build_interview_question_advisory_subagents
+
+    payloads = build_interview_question_advisory_subagents(
+        {
+            "session_id": "sess-66",
+            "question_identity": "interview-question:00112233445566aa",
+            "question": "How many enterprise accounts churned last quarter?",
+            "user_question_first": True,
+            "lanes": [{"lane_id": "data_context", "capability": "data_context", "required": False}],
+        }
+    )
+    assert payloads, "no data_context payload was built"
+    prompt = payloads[0].prompt
+
+    assert "data_needed=true" in prompt
+    assert "confidence=no_evidence" in prompt
+    assert "never flip data_needed to false because you could not look" in prompt

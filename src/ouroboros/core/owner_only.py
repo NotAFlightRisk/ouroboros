@@ -28,8 +28,13 @@ OWNER_ONLY_FILE = 0o600
 OWNER_ONLY_DIR = 0o700
 
 
-def _fsync_parent_directory(file_path: Path) -> bool:
+def fsync_parent_directory(file_path: Path) -> bool:
     """Flush the directory entry so the rename itself survives a crash.
+
+    Public because durability has to be RETRYABLE (round-66): a record whose
+    content reached disk but whose directory entry was not confirmed is
+    already readable and already terminal, so the recovery that helps is
+    flushing again — not rewriting content that is not the problem.
 
     Returns whether durability could be confirmed. A filesystem that cannot
     fsync a directory (``EINVAL``/``ENOTSUP``) is reported as confirmed: it
@@ -114,7 +119,7 @@ def write_owner_only(path: Path, text: str, *, encoding: str = "utf-8") -> bool:
         with suppress(OSError):
             os.unlink(tmp_path)
         raise
-    return _fsync_parent_directory(target)
+    return fsync_parent_directory(target)
 
 
 def secure_directory(path: Path) -> None:
