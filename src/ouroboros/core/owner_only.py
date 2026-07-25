@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from contextlib import suppress
 import errno
+import logging
 import os
 from pathlib import Path
 import stat
@@ -29,6 +30,42 @@ OWNER_ONLY_DIR = 0o700
 #: How much of the target name a temporary may borrow. Bounds the temporary
 #: at 70 characters however long the target is.
 _TMP_NAME_PREFIX_CHARS = 32
+
+_log = logging.getLogger(__name__)
+
+
+def _posix() -> bool:
+    """Whether the platform can represent the owner-only mode.
+
+    A function rather than an inline ``os.name`` check so tests can probe
+    the non-POSIX branch without patching the global ``os.name`` — which
+    pathlib also reads, turning every ``Path()`` into a ``WindowsPath``.
+    """
+    return os.name == "posix"
+
+
+#: Emitted once per process on a platform where the mode cannot be enforced.
+_degradation_warned = False
+
+
+def package_owned_directory(path: Path) -> bool:
+    """Whether ``path`` lies inside the package namespace ``~/.ouroboros``.
+
+    Ownership of a DIRECTORY is decided by provenance, not by which module
+    happens to call mkdir (round-72). The interview state directory, the
+    fan-out registry, and the plugin state directory all default under the
+    package namespace but are caller-suppliable, and a probe showed an
+    explicitly supplied 0755 directory being narrowed to 0700 — revoking
+    access this package had no business revoking. Inside ``~/.ouroboros``
+    the directories are this package's to repair (a 0755 one inherited
+    from an older version included); outside it they are the caller's.
+    """
+    try:
+        resolved = Path(path).expanduser().resolve()
+        namespace = (Path.home() / ".ouroboros").resolve()
+    except OSError:
+        return False
+    return resolved == namespace or namespace in resolved.parents
 
 
 def fsync_parent_directory(file_path: Path) -> bool:
@@ -44,7 +81,7 @@ def fsync_parent_directory(file_path: Path) -> bool:
     never owed the guarantee, so treating it as a failure would make every
     write on that filesystem look suspect.
     """
-    if os.name != "posix":
+    if not _posix():
         return True
 
     flags = os.O_RDONLY
@@ -97,26 +134,29 @@ def write_owner_only(path: Path, text: str, *, encoding: str = "utf-8") -> bool:
     for directories this package creates and owns.
     """
     target = Path(path)
-    if os.name != "posix":
-        # Native Windows does not get this guarantee, and must not be told it
-        # does (round-71). `os.open` with 0o600 only sets the CRT read/write
-        # flags there; access is still governed by the inherited ACL, and
-        # `st_mode` reflects the flags rather than the ACL — so the check
-        # below would PASS for a file other accounts can read. That is a
-        # vacuous check standing in for a confidentiality guarantee, which is
-        # the failure mode this whole contract exists to eliminate.
-        #
-        # This function's rule since round 61 is that failing to establish the
-        # mode is failing to write: nothing sensitive reaches disk at a wider
-        # mode, ever. Applying it here means these writers refuse to run on
-        # native Windows until an owner-only DACL is implemented, rather than
-        # writing interview transcripts and Seeds under whatever ACL the
-        # directory happened to carry while reporting success.
-        raise OSError(
-            f"cannot establish owner-only permissions for {target} on this platform: "
-            "0600 does not create an owner-only DACL on native Windows, so the "
-            "confidentiality of interview and data content cannot be guaranteed here"
-        )
+    if not _posix():
+        # The owner-only guarantee is scoped to POSIX (round-72). `os.open`
+        # with 0o600 on native Windows only sets the CRT read/write flags —
+        # access stays governed by the inherited ACL, and `st_mode` reflects
+        # the flags, so the mode check below would be vacuous there. Round 71
+        # made this path refuse outright; the review pointed out that native
+        # Windows is an advertised (experimental) platform and refusing every
+        # Interview/Seed/PM/Auto write makes it unusable. So the write
+        # proceeds atomically under the directory's inherited ACL, the
+        # degradation is stated loudly once per process instead of being
+        # discovered, and no surface may advertise owner-only permissions on
+        # this platform. An owner-only DACL implementation can restore the
+        # guarantee later; a mode check that cannot fail must not stand in
+        # for it meanwhile.
+        global _degradation_warned
+        if not _degradation_warned:
+            _degradation_warned = True
+            _log.warning(
+                "owner-only file permissions cannot be established on this "
+                "platform; %s is written under the directory's inherited ACL",
+                target,
+            )
+        return _write_atomic_unscoped(target, text, encoding=encoding)
     # The temporary must not be longer than the filesystem allows just because
     # the target is near the limit (round-68). Embedding the WHOLE target name
     # added a fixed 38 characters, so a caller that had carefully bounded its
@@ -156,6 +196,35 @@ def write_owner_only(path: Path, text: str, *, encoding: str = "utf-8") -> bool:
     return fsync_parent_directory(target)
 
 
+def _write_atomic_unscoped(target: Path, text: str, *, encoding: str) -> bool:
+    """The atomic half of :func:`write_owner_only`, without the mode contract.
+
+    Used only where the platform cannot represent the contract (native
+    Windows). Same temporary shape, same replace, same cleanup — only the
+    permission establishment and its verification are absent, because there
+    is nothing true they could verify there.
+    """
+    tmp_path = target.with_name(f".{target.name[:_TMP_NAME_PREFIX_CHARS]}.tmp-{uuid4().hex}")
+    raw_fd: int | None = None
+    try:
+        raw_fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_ONLY_FILE)
+        handle = os.fdopen(raw_fd, "w", encoding=encoding)
+        raw_fd = None
+        with handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, target)
+    except BaseException:
+        if raw_fd is not None:
+            with suppress(OSError):
+                os.close(raw_fd)
+        with suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+    return fsync_parent_directory(target)
+
+
 def secure_directory(path: Path) -> None:
     """Create ``path`` if needed and make it owner-only.
 
@@ -171,7 +240,18 @@ def secure_directory(path: Path) -> None:
     chmod'd explicitly. Failure is suppressed: a directory we do not own is
     not ours to re-permission, and refusing to run there would be worse than
     proceeding with the file mode we do control.
+
+    Ownership is checked HERE rather than trusted to the caller (round-72):
+    every one of these directories is caller-suppliable, and a supplied
+    ``0755`` directory outside the package namespace was being narrowed to
+    ``0700`` — revoking collaborator access this package had no business
+    revoking. Outside ``~/.ouroboros`` the directory is created if missing
+    and otherwise left exactly as found; the files written into it are still
+    owner-only through :func:`write_owner_only`.
     """
+    if not package_owned_directory(path):
+        path.mkdir(parents=True, exist_ok=True)
+        return
     path.mkdir(parents=True, exist_ok=True, mode=OWNER_ONLY_DIR)
     with suppress(OSError):
         os.chmod(path, OWNER_ONLY_DIR)

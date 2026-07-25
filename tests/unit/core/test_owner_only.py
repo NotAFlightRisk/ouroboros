@@ -30,16 +30,40 @@ def test_write_owner_only_never_exists_at_the_umask_default(tmp_path: Path) -> N
     assert target.read_text(encoding="utf-8") == '{"answer": "confirmed"}'
 
 
-def test_secure_directory_repairs_an_inherited_open_directory(tmp_path: Path) -> None:
-    directory = tmp_path / "data"
-    directory.mkdir(mode=0o755)
+def test_secure_directory_repairs_an_inherited_open_namespace_directory(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Inside ~/.ouroboros the directory is ours — an inherited 0755 is repaired."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    directory = tmp_path / ".ouroboros" / "data"
+    directory.mkdir(parents=True, mode=0o755)
     os.chmod(directory, 0o755)
     secure_directory(directory)
     assert _mode(directory) == 0o700
 
 
+def test_secure_directory_leaves_a_caller_supplied_directory_alone(tmp_path: Path) -> None:
+    """Outside the namespace the directory is the caller's (round-72).
+
+    An explicitly supplied 0755 state directory was being narrowed to 0700,
+    revoking collaborator access this package had no business revoking.
+    Ownership follows the path's provenance, not which module calls mkdir.
+    """
+    directory = tmp_path / "shared-state"
+    directory.mkdir(mode=0o755)
+    os.chmod(directory, 0o755)
+    secure_directory(directory)
+    assert _mode(directory) == 0o755
+
+
 def test_interview_state_is_owner_only(tmp_path: Path) -> None:
-    """The transcript holds confirmed data answers and lives indefinitely."""
+    """The transcript holds confirmed data answers and lives indefinitely.
+
+    The FILE is owner-only wherever it lands; a caller-supplied state
+    directory keeps its own permissions (round-72) — this is the reviewer's
+    probe: InterviewEngine(state_dir=<existing 0755 dir>).
+    """
     from ouroboros.bigbang.interview import InterviewEngine, InterviewState
 
     state_dir = tmp_path / "data"
@@ -53,7 +77,7 @@ def test_interview_state_is_owner_only(tmp_path: Path) -> None:
 
     saved = state_dir / "interview_iv_owner_only.json"
     assert _mode(saved) == 0o600
-    assert _mode(state_dir) == 0o700
+    assert _mode(state_dir) == 0o755
 
 
 def test_overwriting_an_existing_open_file_upgrades_it(tmp_path: Path) -> None:
@@ -192,7 +216,9 @@ def test_every_transport_that_persists_a_transcript_is_owner_only(tmp_path: Path
 
     saved = Path(result.value)
     assert _mode(saved) == 0o600
-    assert _mode(saved.parent) == 0o700
+    # The directory is caller-supplied (outside ~/.ouroboros), so its
+    # permissions are its own (round-72); the FILE carries the guarantee.
+    assert _mode(saved.parent) == 0o755
 
 
 def test_owner_only_write_reports_durability(tmp_path: Path) -> None:
@@ -481,25 +507,34 @@ def test_no_bytes_are_written_when_the_filesystem_widens_the_mode(
     assert list(tmp_path.iterdir()) == [], "a widened temporary was left behind"
 
 
-def test_native_windows_refuses_rather_than_claiming_a_guarantee_it_cannot_keep(
+def test_native_windows_degrades_loudly_instead_of_refusing(
     tmp_path: Path,
     monkeypatch: Any,
+    caplog: Any,
 ) -> None:
-    """0600 does not create an owner-only DACL on native Windows.
+    """The guarantee is scoped to POSIX; Windows still writes, and says so.
 
-    `os.open` there sets only the CRT read/write flags; access stays governed
-    by the inherited ACL, and `st_mode` reflects the flags rather than the
-    ACL — so the mode check would pass for a file other accounts can read.
-    This function's rule since round 61 is that failing to establish the mode
-    is failing to write (round-71).
+    Round 71 made this path refuse outright; round 72 pointed out native
+    Windows is an advertised (experimental) platform and refusing every
+    Interview/Seed/PM/Auto write makes it unusable. The write proceeds
+    atomically under the inherited ACL, the degradation is stated once per
+    process rather than discovered, and the vacuous mode check does not run —
+    a check that cannot fail must not stand in for a guarantee.
     """
+    import logging
+
     from ouroboros.core import owner_only
 
-    monkeypatch.setattr(owner_only.os, "name", "nt")
+    monkeypatch.setattr(owner_only, "_posix", lambda: False)
+    monkeypatch.setattr(owner_only, "_degradation_warned", False)
 
     target = tmp_path / "secret.json"
-    with pytest.raises(OSError, match="owner-only"):
-        write_owner_only(target, '{"answer": "confirmed"}')
+    with caplog.at_level(logging.WARNING, logger="ouroboros.core.owner_only"):
+        assert write_owner_only(target, '{"answer": "confirmed"}') is True
+        write_owner_only(target, '{"answer": "again"}')
 
-    assert not target.exists()
-    assert list(tmp_path.iterdir()) == [], "content reached disk on an unprotected platform"
+    assert target.read_text(encoding="utf-8") == '{"answer": "again"}'
+    degradations = [r for r in caplog.records if "inherited ACL" in r.getMessage()]
+    assert len(degradations) == 1, "the degradation must be stated exactly once per process"
+    # Atomic on that platform too: no temporary survives.
+    assert [path.name for path in tmp_path.iterdir()] == ["secret.json"]
