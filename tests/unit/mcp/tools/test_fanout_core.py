@@ -12,6 +12,7 @@ Covers PR-J:
 from __future__ import annotations
 
 from collections.abc import Mapping
+import os
 from typing import Any
 
 import pytest
@@ -7057,3 +7058,136 @@ def test_round64_free_text_fields_are_never_retained() -> None:
     assert "alice@example.com" not in serialized
     assert "bob@example.com" not in serialized
     assert "010-1234-5678" not in serialized
+
+
+# --------------------------------------------------------------------------- #
+# round-65 — the honest failed lookup, and durability that is not overstated
+# --------------------------------------------------------------------------- #
+
+
+def _answer_schema() -> dict[str, Any]:
+    from ouroboros.contracts.data_evidence import _data_context_answer_contract
+
+    return _data_context_answer_contract()["response_model_schema"]
+
+
+def _validate_answer(payload: dict[str, Any]) -> str | None:
+    import jsonschema
+
+    try:
+        jsonschema.validate(payload, _answer_schema())
+    except jsonschema.ValidationError as error:
+        return error.message
+    return None
+
+
+def _failed_lookup_output() -> dict[str, Any]:
+    return {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "The analytics lookup returned an error envelope; no count is available.",
+        "confidence": "no_evidence",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+    }
+
+
+def test_round65_honest_failed_lookup_is_representable() -> None:
+    """A relevant lane whose lookup failed must have something true to say.
+
+    It holds no evidence — a failure is not a measurement — and may have no
+    proposal to make. Before this, its only representable escape was to claim
+    `data_needed=false`, misreporting relevance, which is the exact failure
+    this contract exists to prevent.
+    """
+    assert _validate_answer(_failed_lookup_output()) is None
+
+
+def test_round65_failure_state_does_not_loosen_the_other_branches() -> None:
+    """The new branch is the no-evidence terminal, not a general escape."""
+    # Claiming a tool reported something, with nothing executed, stays a
+    # category error.
+    reported_without_evidence = _failed_lookup_output() | {"confidence": "reported_by_tool"}
+    assert _validate_answer(reported_without_evidence) is not None
+
+    # "inferred" with nothing to infer from is still rejected: the branch is
+    # keyed to no_evidence, which is the only confidence that means this.
+    inferred_from_nothing = _failed_lookup_output() | {"confidence": "inferred"}
+    assert _validate_answer(inferred_from_nothing) is not None
+
+    # data_needed=false still forces the empty, no_evidence shape.
+    irrelevant_but_confident = _failed_lookup_output() | {
+        "data_needed": False,
+        "confidence": "inferred",
+    }
+    assert _validate_answer(irrelevant_but_confident) is not None
+
+
+def test_round65_prompt_states_the_representable_failure(tmp_path: Any) -> None:
+    """The schema and the instruction must move together.
+
+    Loosening the schema without telling the child leaves a compliant child
+    still choosing between two false answers (the round-55 failure).
+    """
+    from ouroboros.contracts.data_evidence import _data_context_answer_contract
+
+    instruction = _data_context_answer_contract()["runtime_instruction"]
+    assert "confidence=no_evidence" in instruction
+    assert "data_needed=true" in instruction
+    assert "error envelope" in instruction
+
+
+def test_round65_save_reports_unconfirmed_durability(tmp_path: Any, monkeypatch: Any) -> None:
+    """`save()` must not claim durable persistence it did not get.
+
+    The round-64 merge staged into a second temp and replaced it again, so the
+    final rename's directory entry was never fsync'd, and the durability
+    boolean was discarded on top of that.
+    """
+    import errno as _errno
+    import stat as _stat
+
+    from ouroboros.core import owner_only
+
+    registry = FanoutRegistry(tmp_path)
+    record = FanoutRecord(
+        fanout_id="durability-probe",
+        kind=FANOUT_KIND_LATERAL_PERSONA_PANEL,
+        session_id="sess-65",
+        correlation_key="context.persona",
+        expected_keys=("researcher",),
+        synthesizer_input={},
+    )
+
+    assert registry.save(record) is True
+
+    real_fsync = owner_only.os.fsync
+
+    def _fail_directory_fsync(fd: int) -> None:
+        if _stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(_errno.EIO, "directory fsync failed")
+        real_fsync(fd)
+
+    monkeypatch.setattr(owner_only.os, "fsync", _fail_directory_fsync)
+
+    assert registry.save(record) is False
+
+
+def test_round65_single_rename_leaves_no_stray_temp(tmp_path: Any) -> None:
+    """The record is written straight to its target, atomically, once."""
+    registry = FanoutRegistry(tmp_path)
+    record = FanoutRecord(
+        fanout_id="single-rename",
+        kind=FANOUT_KIND_LATERAL_PERSONA_PANEL,
+        session_id="sess-65",
+        correlation_key="context.persona",
+        expected_keys=("researcher",),
+        synthesizer_input={},
+    )
+
+    assert registry.save(record) is True
+
+    written = sorted(path.name for path in tmp_path.iterdir())
+    assert written == ["single-rename.json"]
+    assert registry.load("single-rename") is not None

@@ -3244,21 +3244,36 @@ class FanoutRegistry:
             )
             return False
         target = self._path(record.fanout_id)
-        tmp_path = target.with_name(f".{target.name}.tmp-{uuid4().hex}")
         try:
             # Secure the directory FIRST (round-49): mkdir's mode is ignored
             # when the directory already exists, so an inherited 0755 left a
             # write window during which the record was world-readable.
             secure_directory(self._dir)
-            write_owner_only(
-                tmp_path,
+            # Written straight to the target: write_owner_only is already
+            # temp-file + atomic rename, so the prior record still survives a
+            # failure mid-write. Staging into a second temp and replacing it
+            # again (round-64 merge) renamed the file a second time WITHOUT
+            # fsyncing that directory entry, so the durable-persistence claim
+            # covered a rename that could still be lost (round-65).
+            durable = write_owner_only(
+                target,
                 # allow_nan=False: NaN/Infinity are not JSON. A record that
                 # would serialize to a non-standard document fails the write
                 # (reported as a persistence failure) instead of producing a
                 # file no compliant parser can read back (round-43).
                 json.dumps(record.to_dict(), ensure_ascii=False, allow_nan=False),
             )
-            os.replace(tmp_path, target)
+            if not durable:
+                # Reported as a persistence failure, not logged and swallowed:
+                # the caller turns this into accumulation_persisted=false /
+                # completion_not_persisted, which tells the host to resubmit.
+                # Claiming durability we did not get is the worse error.
+                log.warning(
+                    "fanout.registry.durability_unconfirmed",
+                    fanout_id=record.fanout_id,
+                    kind=record.kind,
+                )
+                return False
         # UnicodeError: json.dumps happily escapes a lone surrogate, but
         # utf-8 encoding at write time raises UnicodeEncodeError — that is a
         # persistence failure to report (accumulation_persisted=false /
@@ -3270,10 +3285,8 @@ class FanoutRegistry:
                 kind=record.kind,
                 error=str(exc),
             )
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            # No temp to clean up here: write_owner_only removes its own on
+            # every failure path, so a partial record never survives.
             return False
         return True
 
@@ -4526,10 +4539,10 @@ def _submit_fanout_results_locked(
                 )
         # A replayed data completion is NOT confirmable (round-48): the
         # advisory narrative the user would consent to was delivered once and
-        # is deliberately not durable, so the replay carries the measurements
-        # and says plainly that consent must be re-obtained by re-running the
-        # fan-out. Silently returning a consent-shaped payload without its
-        # consent context would be the worse failure.
+        # is deliberately not durable, so the replay carries the server-owned
+        # summary and says plainly that consent must be re-obtained by
+        # re-running the fan-out. Silently returning a consent-shaped payload
+        # without its consent context would be the worse failure.
         # Consent follows what THIS response carries, not what the record
         # kept (round-61): a conforming resubmission puts the full, validated
         # narrative back in the caller's hands, so stamping it unconfirmable
@@ -4549,8 +4562,10 @@ def _submit_fanout_results_locked(
         ):
             replay["consent_status"] = "not_confirmable_prose_not_retained"
             replay["consent_note"] = (
-                "This replay carries the measurements only. The advisory "
-                "narrative a user confirms is not retained in durable state, "
+                "This replay carries the server-owned summary of the data "
+                "lane — its lifecycle flags and item counts, not the measured "
+                "numbers, which are not retained either (round-65). The "
+                "advisory narrative a user confirms is not in durable state, "
                 "so a data-derived answer may not be forwarded from a replay — "
                 "re-run the advisory fan-out to obtain it."
             )

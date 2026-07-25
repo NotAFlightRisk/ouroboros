@@ -418,6 +418,25 @@ def _data_context_answer_contract() -> dict[str, Any]:
                             "properties": {"proposed_queries": {"minItems": 1}},
                             "required": ["proposed_queries"],
                         },
+                        # The honest failed lookup (round-65). Without this
+                        # branch, a lane that WAS relevant and whose lookup
+                        # returned an error envelope had nothing true to say:
+                        # it holds no evidence (a failure is not a
+                        # measurement) and may have no proposal to make, so
+                        # its only representable escape was to claim
+                        # data_needed=false — misreporting relevance, which
+                        # is the exact failure this contract exists to
+                        # prevent. `no_evidence` already means this; it just
+                        # had no way to co-occur with data_needed=true.
+                        # The reason belongs in `finding`, which is required.
+                        {
+                            "properties": {
+                                "confidence": {"const": "no_evidence"},
+                                "evidence": {"maxItems": 0},
+                                "proposed_queries": {"maxItems": 0},
+                            },
+                            "required": ["confidence"],
+                        },
                     ]
                 },
             },
@@ -473,7 +492,12 @@ def _data_context_answer_contract() -> dict[str, Any]:
             "and execution_status. There is no free-text value or query field — "
             "what cannot be expressed as an aggregate is a no-evidence finding, "
             "and a lookup you did not run belongs in proposed_queries with its "
-            "source_class. Narrative goes in finding and caveats."
+            "source_class. A lookup you DID run that failed or returned an "
+            "error envelope is not evidence and need not become a proposal: "
+            "keep data_needed=true, set confidence=no_evidence with both lists "
+            "empty, and say what failed in finding. Never flip data_needed to "
+            "false to make a failure fit — that misreports relevance. "
+            "Narrative goes in finding and caveats."
         ),
     }
 

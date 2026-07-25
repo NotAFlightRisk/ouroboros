@@ -5090,9 +5090,20 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
         "requires_user_confirmation": True,
     }
     validator.validate(noop)
-    # A data-needed answer must carry evidence or proposed queries.
-    empty_but_needed = {**noop, "data_needed": True}
-    assert list(validator.iter_errors(empty_but_needed))
+    # A data-needed answer must carry evidence, a proposal, or an explicit
+    # no-evidence declaration. The third branch was missing until round-65:
+    # a relevant lane whose lookup returned an error envelope holds no
+    # evidence (a failure is not a measurement) and may have no proposal to
+    # make, so requiring one of the first two left it nothing true to say —
+    # its only representable escape was to claim data_needed=false, which
+    # misreports relevance. `finding` still carries what failed.
+    honest_failure = {**noop, "data_needed": True}
+    assert list(validator.iter_errors(honest_failure)) == []
+    # What that branch must NOT admit: a confidence the emptiness cannot
+    # support. Claiming a tool reported something, with nothing executed,
+    # stays a category error.
+    for unsupported in ("reported_by_tool", "inferred"):
+        assert list(validator.iter_errors({**honest_failure, "confidence": unsupported}))
     proposer = {
         **noop,
         "data_needed": True,
