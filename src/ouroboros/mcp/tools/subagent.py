@@ -33,7 +33,7 @@ Payload structure:
 from __future__ import annotations
 
 import base64
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
@@ -1678,7 +1678,10 @@ forwarding anything back to ouroboros_interview."""
         if isinstance(data_policy, Mapping):
             lane_context["data_policy"] = dict(data_policy)
         if isinstance(lane_answer_contract, Mapping):
-            lane_context["answer_contract"] = dict(lane_answer_contract)
+            # The SAME enforceability decision the prompt and registration
+            # apply (round-38): the machine-readable payload context may not
+            # carry a full form that re-entry will not enforce.
+            lane_context["answer_contract"] = published_lane_contract(lane_answer_contract)
         raw_lane_known_tools = raw_lane.get("known_data_tools")
         if isinstance(raw_lane_known_tools, (list, tuple)) and raw_lane_known_tools:
             lane_context["known_data_tools"] = [str(tool) for tool in raw_lane_known_tools]
@@ -3474,6 +3477,43 @@ def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
     return _schema_local_refs_resolve(schema)
 
 
+def published_lane_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
+    """PUBLIC-metadata form of a lane answer contract — advertised IFF enforced.
+
+    The enforceability decision is made once and must reach every public
+    surface identically (round-38 probe: an oversized contract was correctly
+    omitted from the child prompt and from registry enforcement, yet its full
+    form survived under ``payload.context.answer_contract``, so a host reading
+    the payload would follow a form re-entry silently ignores). An
+    unenforceable contract is published as an explicit non-enforced marker
+    carrying only its id and the reason.
+    """
+    if _enforceable_lane_contract(contract):
+        return dict(contract)
+    return {
+        "contract_id": str(contract.get("contract_id") or "unversioned"),
+        "enforced": False,
+        "omitted_reason": (
+            "exceeds the whole-form delivery budget or carries an invalid "
+            "schema; it is NOT enforced at re-entry"
+        ),
+    }
+
+
+def lanes_with_published_contracts(lanes: Iterable[Any]) -> list[dict[str, Any]]:
+    """Copy lanes with every ``answer_contract`` in its publishable form."""
+    published: list[dict[str, Any]] = []
+    for lane in lanes:
+        if not isinstance(lane, Mapping):
+            continue
+        lane_copy = dict(lane)
+        contract = lane_copy.get("answer_contract")
+        if isinstance(contract, Mapping):
+            lane_copy["answer_contract"] = published_lane_contract(contract)
+        published.append(lane_copy)
+    return published
+
+
 def _declares_object_root(
     schema: Mapping[str, Any],
     node: Any,
@@ -3763,6 +3803,174 @@ def _blank_paren_content(text: str) -> str:
         elif depth == 0:
             out.append(char)
     return "".join(out)
+
+
+# READ-ONLY statement heads. A recognized SQL statement whose head is not
+# in this set is rejected for NOT BEING read-only — the classification is an
+# allowlist within recognized SQL, so an unlisted mutating or utility
+# statement (round-38 probe: ``COPY users FROM PROGRAM 'curl …'``, which
+# executes a program and loads rows while matching no mutation shape) fails
+# closed instead of waiting to be blacklisted.
+_READ_ONLY_SQL_HEADS = frozenset(
+    {"select", "with", "values", "table", "show", "describe", "desc", "explain"}
+)
+# The recognized SQL statement-head vocabulary across the mainstream
+# dialects. Membership is what makes a string a STATEMENT rather than prose:
+# a proposal whose first word is not a statement head is natural language or
+# another dialect and stays under the confirming human's gate, which is the
+# structural guarantee this lint is defense-in-depth for.
+_SQL_STATEMENT_HEADS = _READ_ONLY_SQL_HEADS | frozenset(
+    {
+        "insert",
+        "update",
+        "delete",
+        "merge",
+        "upsert",
+        "replace",
+        "truncate",
+        "drop",
+        "create",
+        "alter",
+        "rename",
+        "comment",
+        "grant",
+        "revoke",
+        "deny",
+        "copy",
+        "load",
+        "import",
+        "export",
+        "unload",
+        "backup",
+        "restore",
+        "call",
+        "exec",
+        "execute",
+        "do",
+        "begin",
+        "start",
+        "commit",
+        "rollback",
+        "savepoint",
+        "set",
+        "reset",
+        "use",
+        "attach",
+        "detach",
+        "pragma",
+        "vacuum",
+        "analyze",
+        "optimize",
+        "cluster",
+        "reindex",
+        "refresh",
+        "lock",
+        "unlock",
+        "install",
+        "kill",
+        "shutdown",
+        "prepare",
+        "deallocate",
+        "declare",
+        "checkpoint",
+        "discard",
+    }
+)
+# Clause words that only appear in statement syntax, and determiners that
+# only appear in prose. Together they keep an English sentence opening with
+# a statement word ("Load the dashboard from Metabase", "Call the analytics
+# API") out of the SQL classification — a false rejection would block the
+# natural-language proposals the lane is designed to hand a human.
+_SQL_CLAUSE_MARKER = re.compile(
+    r"\b(from|into|table|values|set|where|program|join|database|schema)\b", re.IGNORECASE
+)
+_PROSE_DETERMINERS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "our",
+        "my",
+        "your",
+        "their",
+        "its",
+        "this",
+        "that",
+        "these",
+        "those",
+        "all",
+        "any",
+        "some",
+        "each",
+        "every",
+        "up",
+    }
+)
+
+
+def _non_read_only_statement_head(query: str) -> str | None:
+    """The statement head of a recognized SQL statement that is not read-only.
+
+    Returns ``None`` when the text is read-only SQL or is not a recognized
+    SQL statement at all (prose, another dialect).
+    """
+    text = _strip_sql_comments(query).strip()
+    match = re.match(r"([A-Za-z][A-Za-z_]*)\s+(\S+)", text)
+    if not match:
+        return None
+    head = match.group(1).lower()
+    if head in _READ_ONLY_SQL_HEADS or head not in _SQL_STATEMENT_HEADS:
+        return None
+    if match.group(2).strip("\"'`").lower() in _PROSE_DETERMINERS:
+        return None
+    if not _SQL_CLAUSE_MARKER.search(text):
+        return None
+    return head
+
+
+def _call_argument_spans(text: str, name_pattern: str) -> list[tuple[int, int]]:
+    """``(start, end)`` of each matching call's argument text, parens balanced.
+
+    Balanced-span extraction replaces "identity column immediately inside the
+    aggregate" matching (round-38 probe: ``max(lower(email))`` laundered the
+    column through one nested call), so an identity expression is seen at any
+    nesting depth of the argument.
+    """
+    spans: list[tuple[int, int]] = []
+    for match in re.finditer(r"\b(?:" + name_pattern + r")\s*\(", text, re.IGNORECASE):
+        depth = 1
+        index = match.end()
+        while index < len(text) and depth:
+            if text[index] == "(":
+                depth += 1
+            elif text[index] == ")":
+                depth -= 1
+            index += 1
+        spans.append((match.end(), index - 1 if depth == 0 else len(text)))
+    return spans
+
+
+# Aggregates that return one of the input VALUES (so a PII column stays PII)
+# versus aggregates that reduce to a NUMBER (so count(email) is a count).
+_VALUE_RETURNING_AGGREGATES = (
+    r"min|max|any_value|first_value|last_value|mode|string_agg|group_concat|array_agg|listagg"
+)
+_NUMERIC_AGGREGATES = (
+    r"count|sum|avg|mean|median|stddev\w*|variance|var_\w+|percentile\w*|approx\w*"
+)
+
+
+def _blank_numeric_aggregate_arguments(text: str) -> str:
+    """Blank the arguments of NUMBER-reducing aggregates.
+
+    ``max(count(email))`` is a count of emails, not an email — blanking the
+    numeric aggregate's argument keeps that valid while
+    ``max(lower(email))`` still exposes the column.
+    """
+    blanked = text
+    for start, end in reversed(_call_argument_spans(text, _NUMERIC_AGGREGATES)):
+        blanked = blanked[:start] + " " * (end - start) + blanked[end:]
+    return blanked
 
 
 def _main_select_segment(query: str) -> str:
@@ -4199,6 +4407,17 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                 f"proposed_queries[{index}].query: proposes forbidden operation "
                 f"{match.group(0).split()[0].lower()!r}; the data lane is read-only"
             )
+        # Fail-closed statement classification, not a mutation blacklist
+        # (round-38 probe: COPY … FROM PROGRAM matches no mutation shape yet
+        # executes a program). A recognized SQL statement must open with a
+        # read-only head; user confirmation gates EXECUTION of read-only
+        # proposals and can never make a non-read-only statement permissible.
+        elif isinstance(query, str) and (head := _non_read_only_statement_head(query)):
+            errors.append(
+                f"proposed_queries[{index}].query: {head.upper()} is not a "
+                "read-only statement; the data lane may only propose "
+                "SELECT/WITH/SHOW/DESCRIBE/EXPLAIN reads"
+            )
         tool_name = item.get("tool_name")
         if isinstance(tool_name, str) and (verb := _mutating_tool_verb(tool_name)):
             errors.append(
@@ -4274,16 +4493,18 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
             )
             # VALUE-RETURNING aggregates over an identity/PII column return
             # the raw value itself (round-36 probe: "SELECT max(email) FROM
-            # users" — an aggregate wrapper around a raw email). Numeric
-            # aggregates (count/sum/avg) reduce to numbers and stay valid,
-            # e.g. count(email). Scanned on the un-blanked main statement
-            # because the column name lives INSIDE the parens.
-            value_extracting_pii = re.search(
-                r"\b(?:min|max|any_value|first_value|last_value|mode"
-                r"|string_agg|group_concat|array_agg|listagg)"
-                r"\s*\(\s*(?:distinct\s+)?(?:\w+\.)?" + identity_columns + r"\b",
-                main_statement,
-                re.IGNORECASE,
+            # users" — an aggregate wrapper around a raw email). The WHOLE
+            # balanced argument is scanned, so a nested expression cannot
+            # launder the column (round-38 probe: max(lower(email))). Numeric
+            # aggregates reduce to numbers and stay valid, so count(email)
+            # and max(count(email)) are both fine.
+            value_extracting_pii = any(
+                re.search(
+                    r"\b(?:\w+\.)?" + identity_columns + r"\b",
+                    _blank_numeric_aggregate_arguments(main_statement[start:end]),
+                    re.IGNORECASE,
+                )
+                for start, end in _call_argument_spans(main_statement, _VALUE_RETURNING_AGGREGATES)
             )
             distinct_pii = re.search(
                 r"\bdistinct\b[^,]*\b" + identity_columns + r"\b",
@@ -4355,16 +4576,41 @@ _SAFE_IDENTIFIER_SYNTAX = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 _VENDOR_SECRET_PREFIX = re.compile(
     r"^(ghp_|gho_|github_pat_|xox[a-z][-_]|sk[-_]|pk[-_]|AKIA|ASIA|ABIA|ACCA)",
 )
-_CREDENTIAL_WORD_PREFIX = re.compile(r"^(token|secret|key|bearer|api_?key)[-_]", re.IGNORECASE)
+# A credential word marks the identifier from ANY token position, not only
+# the first (round-38 probe: ``access_key_abcd1234`` wore the exemption
+# because "access" led). The word set is the vocabulary; position is not
+# part of it — closing the class instead of prepending known lead-ins.
+_CREDENTIAL_WORDS = frozenset(
+    {
+        "token",
+        "tokens",
+        "secret",
+        "secrets",
+        "key",
+        "keys",
+        "apikey",
+        "apikeys",
+        "bearer",
+        "password",
+        "passwd",
+        "credential",
+        "credentials",
+        "creds",
+    }
+)
 
 
 def _identifier_looks_secret(value: str) -> bool:
     if _VENDOR_SECRET_PREFIX.match(value):
         return True
-    match = _CREDENTIAL_WORD_PREFIX.match(value)
-    if not match:
+    tokens = [tok for tok in re.split(r"[-_.]", value) if tok]
+    credential_index = next(
+        (index for index, tok in enumerate(tokens) if tok.lower() in _CREDENTIAL_WORDS),
+        None,
+    )
+    if credential_index is None:
         return False
-    # Credential-prefixed identifiers are secrets UNLESS every suffix token
+    # Credential-worded identifiers are secrets UNLESS every suffix token
     # is recognizably word-like — the fail-closed inversion of the earlier
     # "any gibberish segment marks it" rule (round-36 probe:
     # api_key_staging_XYZ12345, whose non-hex opaque tail evaded the
@@ -4373,7 +4619,7 @@ def _identifier_looks_secret(value: str) -> bool:
     # (v2, v12), or a short window tag (7d, 30d) — so token_usage_v2 and
     # key_metrics_30d keep naming read-only tools while any opaque tail
     # fails closed.
-    suffix_tokens = [tok for tok in re.split(r"[-_.]", value[match.end() :]) if tok]
+    suffix_tokens = tokens[credential_index + 1 :]
 
     # Secret-marker words mark alphabetic credentials too (round-33:
     # api_key_live_supersecret) — live/test-key conventions and the word
@@ -4408,8 +4654,59 @@ def _reportable_unexpected_key(key: str) -> str:
     """
     if _LANE_KEY_SHAPE.match(key):
         return key
-    digest = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return _redacted_segment(key)
+
+
+def _redacted_segment(text: str) -> str:
+    """Digest form of a value that may not ride a report."""
+    digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:12]
     return f"<redacted-key sha256:{digest}>"
+
+
+def _schema_declared_property_names(schema: Any) -> frozenset[str]:
+    """Every property name the CONTRACT declares.
+
+    Violation locations are the contract's own vocabulary; a name that only
+    the submission introduced is content (round-38 probe: a property literally
+    named ``alice@example.com``), and violations ride both the response and
+    the persisted terminal record. Collecting the declared names lets the path
+    renderer echo structure while redacting anything the submitter invented.
+    """
+    names: set[str] = set()
+    stack: list[Any] = [schema]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if isinstance(node, Mapping):
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            properties = node.get("properties")
+            if isinstance(properties, Mapping):
+                names.update(str(key) for key in properties)
+            stack.extend(node.values())
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+    return frozenset(names)
+
+
+def _redacted_error_path(path_parts: Any, declared: frozenset[str]) -> str:
+    """Render a violation location without echoing submitter-chosen names.
+
+    Array indices and property names the contract DECLARES are structure and
+    are echoed; every other segment is digested. Built from
+    ``absolute_path`` rather than ``json_path`` so the redaction cannot be
+    bypassed by the library's own path formatting.
+    """
+    rendered = "$"
+    for part in path_parts:
+        if isinstance(part, int):
+            rendered += f"[{part}]"
+        elif str(part) in declared:
+            rendered += f".{part}"
+        else:
+            rendered += f".{_redacted_segment(str(part))}"
+    return rendered
 
 
 def _lane_answer_contract_violations(
@@ -4473,8 +4770,15 @@ def _lane_answer_contract_violations(
             # so any lane's rejected value would otherwise leak into durable
             # state through its own violation report. Report the location and
             # the violated keyword, never the content.
+            #
+            # The LOCATION is content too when the submitter chose the
+            # property name (round-38 probe: ``{"alice@example.com": ...}``
+            # under an additive lane) — so path segments are echoed only when
+            # the contract declares them.
+            declared_names = _schema_declared_property_names(schema)
             errors = sorted(
-                f"{error.json_path}: violates {error.validator!r}"
+                f"{_redacted_error_path(error.absolute_path, declared_names)}: "
+                f"violates {error.validator!r}"
                 for error in validator.iter_errors(dict(output))
             )
         except Exception:

