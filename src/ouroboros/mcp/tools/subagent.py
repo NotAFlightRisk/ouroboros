@@ -39,6 +39,7 @@ from dataclasses import dataclass, field, replace
 from functools import lru_cache
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -3205,7 +3206,11 @@ class FanoutRegistry:
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
             tmp_path.write_text(
-                json.dumps(record.to_dict(), ensure_ascii=False),
+                # allow_nan=False: NaN/Infinity are not JSON. A record that
+                # would serialize to a non-standard document fails the write
+                # (reported as a persistence failure) instead of producing a
+                # file no compliant parser can read back (round-43).
+                json.dumps(record.to_dict(), ensure_ascii=False, allow_nan=False),
                 encoding="utf-8",
             )
             os.replace(tmp_path, target)
@@ -3930,7 +3935,10 @@ def _parseable_timestamp(value: str) -> bool:
     return True
 
 
-def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
+def _data_evidence_boundary_violations(
+    output: Mapping[str, Any],
+    policy: Mapping[str, Any] | None = None,
+) -> list[str]:
     """Check a data-lane output against the data policy at re-entry.
 
     ``data_evidence_answer.v1`` carries evidence and proposals as TYPED
@@ -4000,7 +4008,40 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
         )
     ]
 
+    # Confirmation is the lane's defining term, so it is checked HERE rather
+    # than only in the schema (round-43): when the declared contract is
+    # unenforceable the registry keeps a minimal fallback, and a fallback that
+    # carried only {"type": "object"} let requires_user_confirmation=false
+    # through. A code-level invariant cannot be degraded by a fallback.
+    if output.get("requires_user_confirmation") is not True:
+        errors.append(
+            "requires_user_confirmation: every data answer requires explicit "
+            "user confirmation; the field must be present and true"
+        )
+
     evidence_items = output.get("evidence")
+    # Caps the ADVERTISED policy declares are enforced from the persisted
+    # snapshot (round-43): a limit that only the prompt knows about is a
+    # suggestion, and max_evidence_chars had never been applied.
+    evidence_policy = (policy or {}).get("evidence_policy")
+    if isinstance(evidence_policy, Mapping) and isinstance(evidence_items, list):
+        max_items = evidence_policy.get("max_evidence_items")
+        if isinstance(max_items, int) and len(evidence_items) > max_items:
+            errors.append(
+                f"evidence: {len(evidence_items)} items exceeds the declared "
+                f"max_evidence_items ({max_items})"
+            )
+        max_chars = evidence_policy.get("max_evidence_chars")
+        if isinstance(max_chars, int):
+            try:
+                measured = len(json.dumps(evidence_items, ensure_ascii=False, default=str))
+            except (TypeError, ValueError):
+                measured = max_chars + 1
+            if measured > max_chars:
+                errors.append(
+                    f"evidence: {measured} serialized chars exceeds the declared "
+                    f"max_evidence_chars ({max_chars})"
+                )
     for index, item in enumerate(evidence_items if isinstance(evidence_items, list) else ()):
         if not isinstance(item, Mapping):
             continue
@@ -4138,6 +4179,12 @@ def _aggregate_shape_problems(value: Any) -> list[str]:
     number = value.get("number")
     if isinstance(number, bool) or not isinstance(number, (int, float)):
         problems.append("number must be a JSON number")
+    elif not math.isfinite(number):
+        # 1e400 parses as a valid JSON number and becomes float infinity,
+        # which json.dumps then writes as non-standard `Infinity` into the
+        # response AND the persisted record (round-43). A measurement is
+        # finite by definition.
+        problems.append("number must be finite")
     unit = value.get("unit")
     if not isinstance(unit, str) or not _AGGREGATE_UNIT.match(unit):
         problems.append("unit must be a short lowercase unit token")
@@ -4146,6 +4193,10 @@ def _aggregate_shape_problems(value: Any) -> list[str]:
         not isinstance(dimension, str) or not _AGGREGATE_DIMENSION.match(dimension)
     ):
         problems.append("dimension must be a single bounded category scope (key=value)")
+    elif isinstance(dimension, str) and (
+        problem := _identity_scope_problem(dimension, "dimension")
+    ):
+        problems.append(problem)
     unknown = set(value) - {"aggregation", "number", "unit", "dimension"}
     if unknown:
         problems.append("carries fields outside the aggregate shape")
@@ -4188,6 +4239,12 @@ def _read_request_shape_problems(request: Any) -> list[str]:
             continue
         if any(not isinstance(item, str) or not pattern.match(item) for item in items):
             problems.append(f"{list_field} entries must match the declared grammar")
+            continue
+        problems.extend(
+            problem
+            for item in items
+            if (problem := _identity_scope_problem(item, list_field)) is not None
+        )
     unknown = set(request) - {"operation", "metric", "aggregation", "filters", "grouping"}
     if unknown:
         problems.append("carries fields outside the read-request shape")
@@ -4214,11 +4271,81 @@ _AGGREGATION_KINDS = frozenset(
         "duration",
     }
 )
+
+
+def _data_evidence_fallback_schema() -> dict[str, Any]:
+    """Minimal schema kept when the declared data contract is unenforceable.
+
+    It asserts the invariants that define the lane — confirmation is required
+    and evidence/proposals are typed objects — so a degraded contract cannot
+    become a weaker contract. The full form's field-level grammar is what is
+    lost, and the code-level checks in
+    ``_data_evidence_boundary_violations`` still cover it.
+    """
+    return {
+        "type": "object",
+        "required": ["requires_user_confirmation"],
+        "properties": {
+            "requires_user_confirmation": {"const": True},
+            "evidence": {"type": "array", "items": {"type": "object"}},
+            "proposed_queries": {"type": "array", "items": {"type": "object"}},
+        },
+    }
+
+
 _AGGREGATE_UNIT = re.compile(r"^[a-z%][a-z_/%]{0,23}$")
 _AGGREGATE_DIMENSION = re.compile(r"^[a-z][a-z0-9_]{0,23}=[A-Za-z0-9_.-]{1,22}$")
 _READ_REQUEST_METRIC = re.compile(r"^[A-Za-z][A-Za-z0-9_.*-]{0,63}$")
 _READ_REQUEST_FILTER = re.compile(r"^[a-z][a-z0-9_]{0,23}[=<>!]{1,2}[A-Za-z0-9_.:+-]{1,22}$")
 _READ_REQUEST_GROUPING = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+# An ENTITY key identifies a person or account; grouping or scoping by one
+# produces per-identity results, which the aggregate-only policy forbids
+# (round-43 probes: grouping ["user_id"], dimension "user_id=847291").
+# Mechanically decidable from the key alone: the `*_id`/`*_uuid` suffix is the
+# universal entity-key convention, plus the identity columns the policy names.
+_ENTITY_KEY_SUFFIX = re.compile(r"(?:^|_)(id|ids|uuid|guid|key|keys)$")
+_IDENTITY_KEYS = frozenset(
+    {
+        "email",
+        "emails",
+        "phone",
+        "address",
+        "ssn",
+        "name",
+        "first_name",
+        "last_name",
+        "full_name",
+        "username",
+        "user",
+        "customer",
+        "account",
+        "member",
+    }
+)
+# A category VALUE is a label ("growth", "kr", "2026-01"); an opaque entity
+# identifier is a bare number or a UUID/hash. Scoping an aggregate to one of
+# those makes it a single-entity row however the key is spelled.
+_OPAQUE_ENTITY_VALUE = re.compile(
+    r"^(?:\d{3,}|[0-9a-fA-F]{8,}|[0-9a-fA-F-]{16,})$",
+)
+
+
+def _entity_key(key: str) -> bool:
+    lowered = key.lower()
+    return lowered in _IDENTITY_KEYS or bool(_ENTITY_KEY_SUFFIX.search(lowered))
+
+
+def _identity_scope_problem(text: str, label: str) -> str | None:
+    """Whether ``key=value`` scopes an aggregate to an identified entity."""
+    key, _, value = text.partition("=")
+    if not _:
+        key, value = text, ""
+    if _entity_key(key.strip()):
+        return f"{label} keys an entity ({key.strip()!r}); aggregate by category instead"
+    if value and _OPAQUE_ENTITY_VALUE.match(value.strip()):
+        return f"{label} scopes to an opaque entity identifier; aggregate by category instead"
+    return None
+
 
 # A safe identifier is one token of word/dot/dash characters — no spaces,
 # no '=', no ':' — so a credential can never wear the exemption.
@@ -4239,7 +4366,12 @@ def _vendor_secret_prefix() -> re.Pattern[str]:
         DATA_EVIDENCE_VENDOR_TOKEN_PREFIX,
     )
 
-    return re.compile(r"^(?:" + DATA_EVIDENCE_VENDOR_TOKEN_PREFIX + r"|AKIA|ASIA|ABIA|ACCA)")
+    # Recognized at the START or after any separator (round-43 probes:
+    # warehouse_xoxb-…, tool_ghp_…, reader_AKIA…): a vendor token does not
+    # stop being one because a word was glued in front of it.
+    return re.compile(
+        r"(?:^|[-_.])(?:" + DATA_EVIDENCE_VENDOR_TOKEN_PREFIX + r"|AKIA|ASIA|ABIA|ACCA)"
+    )
 
 
 # Credential words that NEVER name a read-only data tool. No suffix
@@ -4274,7 +4406,7 @@ _CREDENTIAL_WORDS = _ABSOLUTE_CREDENTIAL_WORDS | _QUALIFIABLE_CREDENTIAL_WORDS
 
 
 def _identifier_looks_secret(value: str) -> bool:
-    if _vendor_secret_prefix().match(value):
+    if _vendor_secret_prefix().search(value):
         return True
     tokens = [tok for tok in re.split(r"[-_.]", value) if tok]
     lowered = [tok.lower() for tok in tokens]
@@ -4393,6 +4525,7 @@ def _redacted_error_path(path_parts: Any, declared: frozenset[str]) -> str:
 def _lane_answer_contract_violations(
     contracts: Mapping[str, Any],
     provided: Mapping[str, Any],
+    policies: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Validate submitted lane outputs against their registered answer contracts.
 
@@ -4423,8 +4556,11 @@ def _lane_answer_contract_violations(
         # is keyed on the contract identity, so a legacy record whose
         # persisted schema is missing, non-mapping, or invalid still gets the
         # policy scan — schema unenforceability never disables it.
+        lane_policy = (policies or {}).get(lane_id)
         boundary_errors = (
-            _data_evidence_boundary_violations(output)
+            _data_evidence_boundary_violations(
+                output, policy=lane_policy if isinstance(lane_policy, Mapping) else None
+            )
             if contract_id == _DATA_EVIDENCE_CONTRACT_ID
             else []
         )
@@ -4631,6 +4767,7 @@ def register_question_advisory_fanout_from_lanes(
     expected_keys: list[str] = []
     required_keys: list[str] = []
     lane_answer_contracts: dict[str, Any] = {}
+    lane_data_policies: dict[str, Any] = {}
     for lane in lanes:
         if not isinstance(lane, Mapping):
             continue
@@ -4651,6 +4788,13 @@ def register_question_advisory_fanout_from_lanes(
         # submitted output against it BEFORE synthesis — a data lane result
         # is otherwise arbitrary content flowing toward user confirmation and
         # persisted interview state.
+        # The ADVERTISED policy is persisted with the record (round-43):
+        # re-entry happens after the advertising turn is gone, so a policy
+        # that is not snapshotted cannot be replayed — and caps it declares
+        # (max_evidence_items/chars) were advertised but never enforced.
+        lane_policy = lane.get("data_policy")
+        if isinstance(lane_policy, Mapping):
+            lane_data_policies[lane_id] = dict(lane_policy)
         answer_contract = declared_lane_contract(lane)
         if isinstance(answer_contract, Mapping):
             # Enforced IFF deliverable whole (round-11): an oversized
@@ -4671,15 +4815,21 @@ def register_question_advisory_fanout_from_lanes(
                     # letting PII/credential content persist unvalidated. A
                     # minimal object contract keeps the policy scan active
                     # while the undeliverable full schema stays unenforced.
+                    # The fallback keeps the STRUCTURAL invariants, not just
+                    # "an object" (round-43): confirmation and the typed
+                    # evidence/proposal shapes are what the lane means, so a
+                    # degraded contract must still assert them.
                     lane_answer_contracts[lane_id] = {
                         "contract_id": _DATA_EVIDENCE_CONTRACT_ID,
-                        "response_model_schema": {"type": "object"},
+                        "response_model_schema": _data_evidence_fallback_schema(),
                     }
     if not expected_keys:
         return None
     synthesizer_input: dict[str, Any] = {"lane_ids": list(expected_keys)}
     if lane_answer_contracts:
         synthesizer_input["lane_answer_contracts"] = lane_answer_contracts
+    if lane_data_policies:
+        synthesizer_input["lane_data_policies"] = lane_data_policies
     return registry.register(
         kind=FANOUT_KIND_QUESTION_ADVISORY,
         session_id=session_id,
@@ -4880,6 +5030,8 @@ def _submit_fanout_results_locked(
     # skipped confirmation) must never enter the durable record.
     raw_contracts = record.synthesizer_input.get("lane_answer_contracts")
     contracts = raw_contracts if isinstance(raw_contracts, Mapping) else {}
+    raw_policies = record.synthesizer_input.get("lane_data_policies")
+    policies = raw_policies if isinstance(raw_policies, Mapping) else {}
     # The public tool accepts ``content`` as object OR text (round-25): a
     # text-transport child submitting its answer as JSON-serialized text is
     # normalized here so contracted lanes validate the decoded object
@@ -4892,7 +5044,7 @@ def _submit_fanout_results_locked(
                 continue
             if isinstance(decoded, dict):
                 submitted[lane_key] = decoded
-    contract_violations = _lane_answer_contract_violations(contracts, submitted)
+    contract_violations = _lane_answer_contract_violations(contracts, submitted, policies)
     violating_lanes = {item["lane_id"] for item in contract_violations}
     accepted = {key: value for key, value in submitted.items() if key not in violating_lanes}
 
@@ -4911,7 +5063,7 @@ def _submit_fanout_results_locked(
     # call (bot-review round-21): when a lane's replacement ALSO violates,
     # the old violating value it failed to replace must still be scrubbed —
     # only the violation REPORT is deduplicated per lane.
-    accumulated_violations = _lane_answer_contract_violations(contracts, provided)
+    accumulated_violations = _lane_answer_contract_violations(contracts, provided, policies)
     if accumulated_violations:
         scrubbed_lanes = {item["lane_id"] for item in accumulated_violations}
         provided = {key: value for key, value in provided.items() if key not in scrubbed_lanes}
@@ -5038,7 +5190,7 @@ def _submit_fanout_results_locked(
         # lane — door validation kept the bad duplicate out of ``provided``,
         # so the provided value is the one to judge. This same pass is the
         # belt against records persisted before door validation existed.
-        provided_violations = _lane_answer_contract_violations(contracts, provided)
+        provided_violations = _lane_answer_contract_violations(contracts, provided, policies)
         excluded_lanes = {item["lane_id"] for item in provided_violations}
         reported_lanes = {item["lane_id"] for item in contract_violations}
         contract_violations = [

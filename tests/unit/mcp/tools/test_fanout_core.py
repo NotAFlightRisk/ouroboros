@@ -2468,7 +2468,11 @@ def test_unenforceable_data_contract_fails_closed(tmp_path: Any) -> None:
     assert record is not None
     fallback = record.synthesizer_input["lane_answer_contracts"]["data_context"]
     assert fallback["contract_id"] == "data_evidence_answer.v1"
-    assert fallback["response_model_schema"] == {"type": "object"}
+    # The fallback keeps the invariants that DEFINE the lane (round-43): a
+    # degraded contract must not become a weaker contract.
+    fallback_schema = fallback["response_model_schema"]
+    assert fallback_schema["properties"]["requires_user_confirmation"] == {"const": True}
+    assert "requires_user_confirmation" in fallback_schema["required"]
 
     pii_output = {
         "lane_id": "data_context",
@@ -4746,7 +4750,8 @@ def test_unenforced_contract_marker_is_a_valid_v1_lane(tmp_path: Any) -> None:
     record = registry.load(fanout_id)
     assert record is not None
     contracts = record.synthesizer_input["lane_answer_contracts"]
-    assert contracts["data_context"]["response_model_schema"] == {"type": "object"}
+    fallback_schema = contracts["data_context"]["response_model_schema"]
+    assert fallback_schema["properties"]["requires_user_confirmation"] == {"const": True}
 
 
 def test_error_shaped_finding_is_not_evidence() -> None:
@@ -5089,3 +5094,117 @@ def test_forbidden_content_classes_are_unrepresentable_not_filtered() -> None:
             }
         ]
         assert _data_evidence_boundary_violations(valid) == [], request
+
+
+def test_round43_durable_boundary_invariants(tmp_path: Any) -> None:
+    """Round-43's five probes, each closed by a decidable invariant."""
+    from ouroboros.mcp.tools.subagent import (
+        _aggregate_shape_problems,
+        _data_evidence_boundary_violations,
+        _identifier_looks_secret,
+        _read_request_shape_problems,
+    )
+
+    # B1 — confirmation is a code-level invariant, so a degraded fallback
+    # contract cannot let a skipped confirmation through.
+    assert any(
+        "requires_user_confirmation" in error
+        for error in _data_evidence_boundary_violations(
+            {"finding": "No confirmation was requested.", "requires_user_confirmation": False}
+        )
+    )
+
+    # B2 — the typed grammar no longer admits identity-scoped evidence.
+    assert _aggregate_shape_problems(
+        {"aggregation": "count", "number": 1, "unit": "rows", "dimension": "user_id=847291"}
+    )
+    assert _read_request_shape_problems(
+        {"operation": "read", "metric": "events", "aggregation": "count", "grouping": ["user_id"]}
+    )
+    assert _read_request_shape_problems(
+        {
+            "operation": "read",
+            "metric": "events",
+            "aggregation": "count",
+            "filters": ["customer_id=847291"],
+        }
+    )
+    # Category scopes and category groupings stay valid.
+    assert (
+        _aggregate_shape_problems(
+            {"aggregation": "share", "number": 78, "unit": "%", "dimension": "plan=growth"}
+        )
+        == []
+    )
+    assert (
+        _read_request_shape_problems(
+            {
+                "operation": "read",
+                "metric": "events.checkout",
+                "aggregation": "count",
+                "filters": ["plan=growth", "created_at>2026-01-01"],
+                "grouping": ["month", "region"],
+            }
+        )
+        == []
+    )
+
+    # B3 — a vendor token does not stop being one because a word precedes it.
+    for value in (
+        "warehouse_xoxb-123456789-abcdefghij",
+        "tool_ghp_abcd1234efgh5678",
+        "reader_AKIAIOSFODNN7EXAMPLE",
+    ):
+        assert _identifier_looks_secret(value), value
+    for value in ("clickhouse_query", "token_usage_v2", "metabase.card.query"):
+        assert not _identifier_looks_secret(value), value
+
+    # B4 — a measurement is finite; 1e400 is not.
+    assert _aggregate_shape_problems(
+        {"aggregation": "count", "number": float("1e400"), "unit": "rows"}
+    ) == ["number must be finite"]
+
+    # B5 — the advertised policy is persisted and its caps are enforced.
+    registry = FanoutRegistry(tmp_path)
+    policy = {
+        "read_only": True,
+        "aggregate_only": True,
+        "evidence_policy": {"max_evidence_items": 5, "max_evidence_chars": 400},
+    }
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-policy",
+        lanes=[
+            {
+                "lane_id": "data_context",
+                "purpose": "Data evidence.",
+                "capability": "call_mcp",
+                "required": True,
+                "data_policy": policy,
+                "answer_contract": {
+                    "contract_id": "data_evidence_answer.v1",
+                    "response_model_schema": {"type": "object"},
+                },
+            }
+        ],
+    )
+    assert fanout_id is not None
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.synthesizer_input["lane_data_policies"]["data_context"] == policy
+
+    oversized = _minimal_data_output()
+    oversized["evidence"] = [_typed_evidence(source=f"warehouse_{index}") for index in range(4)]
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-policy",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": oversized}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert any(
+        "max_evidence_chars" in error
+        for violation in out["contract_violations"]
+        for error in violation["errors"]
+    )

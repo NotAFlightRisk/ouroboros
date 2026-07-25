@@ -22,8 +22,13 @@ DATA_EVIDENCE_EMAIL_PATTERN = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 # the content scan knew "xox" while the identifier classifier knew "xox[a-z]",
 # so the standard xoxb-/xoxp- Slack forms passed content validation).
 DATA_EVIDENCE_VENDOR_TOKEN_PREFIX = r"(?:github_pat|ghp|gho|ghu|ghs|ghr|xox[a-z]|sk|pk)[-_]"
+# The prefix is recognized after ANY separator, not only at a \b word
+# boundary (round-43: "warehouse_xoxb-123456789..." — an underscore is a word
+# character, so \b never matched and the compound name hid the token).
 DATA_EVIDENCE_SECRET_PATTERN = (
-    r"\b" + DATA_EVIDENCE_VENDOR_TOKEN_PREFIX + r"(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{4,}"
+    r"(?:^|[^A-Za-z0-9])"
+    + DATA_EVIDENCE_VENDOR_TOKEN_PREFIX
+    + r"(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{4,}"
     r"|\b(sk|pk|token|secret|bearer|api[_-]?key|ghp|gho|xox)"
     r"[-_=:](?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{4,}"
 )
@@ -54,7 +59,7 @@ DATA_EVIDENCE_CREDENTIAL_ASSIGNMENT_PATTERN = (
     r"(?:[_-][A-Za-z0-9]+)*"
     r"\s*[:=]\s*[A-Za-z0-9_\-/+]{6,}"
 )
-DATA_EVIDENCE_AWS_KEY_PATTERN = r"\b(AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b"
+DATA_EVIDENCE_AWS_KEY_PATTERN = r"(?:^|[^A-Za-z0-9])(AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}"
 # RFC 3986 userinfo: a ``scheme://user:password@host`` connection string
 # carries the password in the URI itself (round-41 probe:
 # "endpoint=https://alice:swordfish@localhost:8443"), which no credential
