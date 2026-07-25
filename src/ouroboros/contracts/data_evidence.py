@@ -205,7 +205,7 @@ def _data_context_answer_contract() -> dict[str, Any]:
                         "source": {
                             "type": "string",
                             "maxLength": 64,
-                            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$",
+                            "pattern": "^(?!.*[0-9]{12})[A-Za-z][A-Za-z0-9_.-]{0,63}$",
                         },
                         # Executed evidence carries ONE number, so a grouped
                         # request cannot describe it: a single value cannot say
@@ -265,7 +265,7 @@ def _data_context_answer_contract() -> dict[str, Any]:
                         "tool_name": {
                             "type": "string",
                             "maxLength": 64,
-                            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$",
+                            "pattern": "^(?!.*[0-9]{12})[A-Za-z][A-Za-z0-9_.-]{0,63}$",
                         },
                         "request": {"$ref": "#/$defs/read_request"},
                         "expected_decision": {"type": "string", "minLength": 1, "maxLength": 300},
@@ -371,7 +371,7 @@ def _data_context_answer_contract() -> dict[str, Any]:
                     "metric": {
                         "type": "string",
                         "maxLength": 64,
-                        "pattern": "^[A-Za-z][A-Za-z0-9_.*-]{0,63}$",
+                        "pattern": "^(?!.*[0-9]{12})[A-Za-z][A-Za-z0-9_.*-]{0,63}$",
                     },
                     "aggregation": {"$ref": "#/$defs/aggregation_kind"},
                     # Required when aggregation is percentile: p95 and p50 are
@@ -399,18 +399,6 @@ def _data_context_answer_contract() -> dict[str, Any]:
             },
         },
         "allOf": [
-            {
-                # As SUBMITTED: the advisory narrative is the lane's point, so
-                # finding is required and caveats accompany executed evidence.
-                # As RETAINED (prose_retained: false): both are absent by
-                # design, and a replayed completion is still this contract.
-                "if": {"not": {"required": ["prose_retained"]}},
-                "then": {"required": ["finding"]},
-            },
-            {
-                "if": {"required": ["prose_retained"]},
-                "then": {"not": {"anyOf": [{"required": ["finding"]}, {"required": ["caveats"]}]}},
-            },
             {
                 "if": {"properties": {"data_needed": {"const": False}}},
                 "then": {
@@ -595,6 +583,19 @@ def _data_context_lane_policy() -> dict[str, Any]:
             # data_evidence_answer.v1, so raw rows, PII values, credentials,
             # error envelopes, and mutating statements have no field to
             # occupy. Prose survives only in operator-facing narrative.
+            # What the ENGINE guarantees, distinguished from what the lane is
+            # instructed to do (round-57). pii_scrub_required above is an
+            # instruction to the child; these are the properties re-entry
+            # actually establishes. A child that mislabels a phone number as a
+            # row count cannot be caught by any server-side rule — the
+            # confirming human, who sees the claim beside the request that
+            # produced it, is that check.
+            "engine_enforced": {
+                "durable_state": "no child-authored field is retained",
+                "response_shape": "typed structures only; no free text",
+                "response_magnitude": "a count is bounded to a plausible row count",
+                "not_adjudicated": "whether a well-formed number is a true count",
+            },
             "enforcement": "typed_contract_fields",
             "free_text_fields": ["finding", "caveats", "expected_decision"],
         },
@@ -1522,12 +1523,13 @@ _QUALIFIABLE_CREDENTIAL_WORDS = frozenset({"token", "tokens", "key", "keys"})
 _CREDENTIAL_WORDS = _ABSOLUTE_CREDENTIAL_WORDS | _QUALIFIABLE_CREDENTIAL_WORDS
 
 
-#: A tool NAME may carry short numbers (metabase.card.4471, s3_logs_2026),
-#: but a run this long is a payload wearing the field — a card number, an
-#: SSN, a phone, an account id (round-53: source="metrics_4111111111111111").
-#: The bound is stated rather than inferred: nine digits is the shortest
-#: standard identifier (SSN), and eight keeps ISO-style date suffixes usable.
-_IDENTIFIER_DIGIT_PAYLOAD = re.compile(r"\d{9,}")
+#: A tool NAME may carry an id (metabase.card.123456789, s3_logs_20260725),
+#: but a run this long is a payload wearing the field. The bound moved from
+#: nine to twelve in round-57: nine refused documented tool identifiers, which
+#: is over-blocking, and twelve still stops the card-number class (13-19
+#: digits). The SAME bound is written into the published pattern below, so
+#: what is advertised is what is enforced.
+_IDENTIFIER_DIGIT_PAYLOAD = re.compile(r"\d{12,}")
 
 
 def _identifier_carries_payload(value: str) -> bool:

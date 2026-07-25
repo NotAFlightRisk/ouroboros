@@ -2526,7 +2526,10 @@ def test_unenforceable_data_contract_fails_closed(tmp_path: Any) -> None:
     payloads = build_interview_question_advisory_subagents(request)
     prompt = payloads[0].prompt
     assert "[truncated]" not in prompt
-    assert "enforced at re-entry in its place" in prompt
+    # Round-57: the enforced form is DELIVERED, not paraphrased — a prose
+    # summary of a schema drifts from the schema.
+    assert "is what re-entry enforces in its place" in prompt
+    assert '"contract_id": "data_evidence_answer.v1"' in prompt
     assert "binds and is enforced" in prompt
 
 
@@ -6377,3 +6380,78 @@ def test_round56_configured_tools_round_trip_to_evidence(monkeypatch: Any) -> No
     lanes = _advisory_lanes_with_known_data_tools(advisory)
     data_lane = next(lane for lane in lanes if lane["lane_id"] == "data_context")
     assert data_lane["known_data_tools"] == ["clickhouse_query"]
+
+
+def test_round57_delivery_is_not_recovery_but_is_not_a_dead_end(tmp_path: Any) -> None:
+    """Content that was never retained cannot be replayed — but can be resent."""
+    import json as json_module
+
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-57", lanes=[dict(lane) for lane in advisory["lanes"]]
+    )
+    assert fanout_id is not None
+    data_result = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Growth leads.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            _typed_evidence(
+                request={
+                    "operation": "read",
+                    "metric": "active_users",
+                    "aggregation": "count",
+                    "filters": ["plan=growth"],
+                },
+                value={"number": 42, "dimension": "plan=growth"},
+            )
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time."],
+    }
+    results = [
+        {"key": lane, "content": {"lane_id": lane, "finding": "ok"}}
+        for lane in ("code_context", "web_context", "ambiguity_contrarian", "answer_simplifier")
+    ]
+    results.append({"key": "data_context", "content": data_result})
+    complete = submit_fanout_results(
+        registry,
+        session_id="sess-57",
+        correlation_key="context.lane_id",
+        results=results,
+        fanout_id=fanout_id,
+    )
+    assert complete["status"] == "complete"
+    assert '"number": 42' in json_module.dumps(complete)
+
+    # An empty retry replays honestly: no measurement, and it says why.
+    replay = submit_fanout_results(
+        registry,
+        session_id="sess-57",
+        correlation_key="context.lane_id",
+        results=[],
+        fanout_id=fanout_id,
+    )
+    assert replay["status"] == "already_complete"
+    assert replay["consent_status"] == "not_confirmable_prose_not_retained"
+    assert '"number": 42' not in json_module.dumps(replay)
+
+    # A host that still holds the child output is not stuck: resubmitting the
+    # lane returns it unchanged, and nothing enters durable state.
+    resent = submit_fanout_results(
+        registry,
+        session_id="sess-57",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": data_result}],
+        fanout_id=fanout_id,
+    )
+    assert resent["resubmitted_keys"] == ["data_context"]
+    assert '"number": 42' in json_module.dumps(resent)
+    assert '"number": 42' not in (tmp_path / f"{fanout_id}.json").read_text()

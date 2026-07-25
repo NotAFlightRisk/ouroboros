@@ -54,6 +54,7 @@ from ouroboros.backends.capabilities import (
 )
 from ouroboros.contracts.data_evidence import (
     _DATA_EVIDENCE_CONTRACT_ID,
+    _data_context_answer_contract,
     _data_evidence_boundary_violations,
     _data_evidence_fallback_schema,
     _identifier_carries_payload,
@@ -1557,20 +1558,23 @@ def build_interview_question_advisory_subagents(
                 # (round-47): registration substitutes the PUBLISHED data
                 # contract for an undeliverable declared one, so saying "not
                 # enforced" made a compliant child permanently partial.
+                # The enforced form is DELIVERED, not paraphrased (round-57):
+                # registration substitutes the published contract, and a prose
+                # summary of it omitted required fields, so a child following
+                # the fallback was rejected. Prose about a schema drifts from
+                # the schema; the schema does not drift from itself.
+                published = _data_context_answer_contract()
                 contract_block = (
                     "## Answer Contract\n"
                     "The declared data answer contract could not be delivered "
-                    "whole (oversized or invalid). The PUBLISHED "
-                    "data_evidence_answer.v1 contract is enforced at re-entry "
-                    "in its place.\n"
+                    "whole (oversized or invalid). The PUBLISHED contract below "
+                    "is what re-entry enforces in its place — fill this form "
+                    "exactly:\n"
+                    f"```json\n{_canonical_contract_json(published) or '{}'}\n```\n"
                 )
                 output_rule = (
-                    "Return ONE JSON object in the published data answer form: "
-                    "typed evidence (source, request, value as a count of rows, "
-                    "observed_at, execution_status 'succeeded'), typed "
-                    "proposed_queries, point-in-time caveats, a finding, and "
-                    "requires_user_confirmation: true. The Data Access Policy "
-                    "above binds and is enforced."
+                    "Return EXACTLY one JSON object matching the contract "
+                    "above. The Data Access Policy binds and is enforced."
                 )
             raw_known_tools = raw_lane.get("known_data_tools")
             known_tools = (
@@ -4365,6 +4369,34 @@ def _submit_fanout_results_locked(
         replay: dict[str, Any] = (
             dict(record.terminal_response) if record.terminal_response is not None else {}
         )
+        # A completed fan-out still ACCEPTS a lane whose content was never
+        # retained (round-57). Refusing it made the host stuck: the content is
+        # not recoverable from the record by design, so the only way back is
+        # to submit it again, and `already_complete` was closing that door
+        # too. Terminal immutability is preserved for everything the record
+        # actually holds — this admits only what it never held.
+        resubmittable = {
+            str(result.get("key"))
+            for result in results
+            if isinstance(result, Mapping)
+            and str(result.get("key")) in record.expected_keys
+            and isinstance(record.received_results.get(str(result.get("key"))), Mapping)
+            and record.received_results[str(result.get("key"))].get("content_retained") is False
+        }
+        if resubmittable:
+            replay["status"] = "already_complete"
+            replay["resubmitted_keys"] = sorted(resubmittable)
+            replay["resubmitted_results"] = {
+                str(result.get("key")): result.get("content")
+                for result in results
+                if isinstance(result, Mapping) and str(result.get("key")) in resubmittable
+            }
+            replay["resubmission_note"] = (
+                "These lanes' content was delivered once and is not retained, "
+                "so the record could not replay it. The values you just sent "
+                "are returned here unchanged; nothing was added to durable "
+                "state."
+            )
         # A replayed data completion is NOT confirmable (round-48): the
         # advisory narrative the user would consent to was delivered once and
         # is deliberately not durable, so the replay carries the measurements

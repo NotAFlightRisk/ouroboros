@@ -292,10 +292,12 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      server kept only a summary of it, so the lane is reported under
      `missing_optional_keys` until you resend it. Submitting every lane in one
      call is the normal path and never hits this.
-   - **A replayed `already_complete` is not confirmable.** It carries
-     `consent_status: "not_confirmable_prose_not_retained"`; the measurements
-     are gone with the narrative, so do NOT forward a `[from-data]` answer from
-     it. Re-run the advisory fan-out for that question instead.
+   - **A replayed `already_complete` does not return the data content.** It
+     carries `consent_status: "not_confirmable_prose_not_retained"`, so do NOT
+     forward a `[from-data]` answer from it. If you still hold the child's
+     output, resubmit that lane against the completed fan-out: it is returned
+     to you unchanged under `resubmitted_results` and nothing is added to
+     durable state. If you do not, re-run the advisory fan-out.
 
    **Milestone lateral-review dispatch**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it
