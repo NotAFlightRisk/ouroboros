@@ -53,6 +53,7 @@ from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
+from ouroboros.core.requirement_candidate import extraction_safe_answer
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -1242,7 +1243,9 @@ class PMInterviewEngine:
                 continue
             parts.append(f"\nQ: {round_data.question}")
             if round_data.user_response:
-                parts.append(f"A: {round_data.user_response}")
+                # Same withholding as the dev Seed path (round-74): a PMSeed is
+                # durable too, and the PM extractor paraphrases the same way.
+                parts.append(f"A: {extraction_safe_answer(round_data.user_response)}")
 
         return "\n".join(parts)
 

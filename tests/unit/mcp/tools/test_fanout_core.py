@@ -7888,9 +7888,15 @@ def test_round71_registration_and_publication_never_disagree(
 
     if bound is None:
         # Nothing is enforced, and the metadata must say exactly that rather
-        # than advertise a form re-entry ignores.
+        # than advertise a form re-entry ignores. What "that" is depends on
+        # whether anything was DECLARED (round-74): an unenforced notice
+        # exists to warn about a declared form that will not be enforced —
+        # about a declaration that never existed it would be its own lie.
         assert "answer_contract" not in published, (lane_id, label)
-        assert UNENFORCED_CONTRACT_FIELD in published, (lane_id, label)
+        if declared:
+            assert UNENFORCED_CONTRACT_FIELD in published, (lane_id, label)
+        else:
+            assert published == {}, (lane_id, label)
     else:
         assert published.get("answer_contract") == bound, (lane_id, label)
         assert UNENFORCED_CONTRACT_FIELD not in published, (lane_id, label)
@@ -7898,3 +7904,41 @@ def test_round71_registration_and_publication_never_disagree(
     # And the data lane is bound whatever it declared.
     if lane_id == "data_context":
         assert bound == canonical_data_lane_contract(), label
+
+
+def test_round74_undeclared_data_lane_publishes_its_bound_contract() -> None:
+    """Transport parity for the lane that declared nothing.
+
+    Registration binds the canonical contract by identity and the prompt says
+    so, but payload.context published nothing because publication was gated
+    on an existing declaration — so a context-driven consumer submitted the
+    generic shape re-entry rejects.
+    """
+    payloads = build_interview_question_advisory_subagents(
+        {
+            "session_id": "sess-74",
+            "question_identity": "interview-question:00112233445566cc",
+            "question": "How many enterprise accounts churned last quarter?",
+            "user_question_first": True,
+            "lanes": [{"lane_id": "data_context", "capability": "data_context", "required": False}],
+        }
+    )
+    assert payloads
+    context = payloads[0].context
+    assert context["answer_contract"] == canonical_data_lane_contract()
+
+
+def test_round74_undeclared_generic_lane_publishes_nothing() -> None:
+    """No declaration and no identity contract → no contract fields at all.
+
+    An "unenforced" notice about a declaration that never existed would be
+    its own lie; the generic output shape applies.
+    """
+    from ouroboros.mcp.tools.subagent import (
+        UNENFORCED_CONTRACT_FIELD,
+        published_lane_contract_fields,
+    )
+
+    published = published_lane_contract_fields(None, "code_context")
+    assert published == {}
+    assert UNENFORCED_CONTRACT_FIELD not in published

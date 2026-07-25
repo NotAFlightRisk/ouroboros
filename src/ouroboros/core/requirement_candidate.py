@@ -46,6 +46,34 @@ def classify_answer_provenance(answer: str) -> str:
     return "human"
 
 
+#: What a withheld observation is replaced with in extraction inputs. A fixed
+#: string: nothing of the observation survives to be paraphrased.
+OBSERVATION_WITHHELD_NOTE = (
+    "[point-in-time observation withheld from requirement extraction: "
+    "data/research observations are not requirements. Any requirement the "
+    "user derived from it appears in their own words in their own answers.]"
+)
+
+
+def extraction_safe_answer(answer: str) -> str:
+    """The form of an answer that may enter requirement extraction.
+
+    A ``[from-data]`` / ``[from-research]`` answer is an observation the user
+    confirmed AS AN OBSERVATION. The deterministic promotion gate skips it
+    (round-73), but the ordinary interview path hands the whole transcript to
+    an LLM extractor, which paraphrases — `[from-data] Confirmed: 42
+    enterprise accounts require SSO today` came back as the Seed AC
+    "Support SSO for enterprise accounts" (round-74). A paraphrase cannot be
+    matched against the marker afterwards, so the enforcement point is the
+    extraction INPUT: the observation's content is replaced with a fixed
+    note, and what the extractor never receives it cannot promote. A Seed is
+    a durable artifact; a point-in-time measurement decays inside it.
+    """
+    if classify_answer_provenance(answer) in {"data_fact", "research_fact"}:
+        return OBSERVATION_WITHHELD_NOTE
+    return answer
+
+
 class CandidateContentSource(StrEnum):
     """Where candidate content originated."""
 

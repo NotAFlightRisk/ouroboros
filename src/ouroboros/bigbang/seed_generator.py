@@ -37,6 +37,7 @@ from ouroboros.bigbang.requirement_distillation import (
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.owner_only import write_owner_only
+from ouroboros.core.requirement_candidate import extraction_safe_answer
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     BrownfieldContext,
@@ -704,7 +705,10 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                 continue
             parts.append(f"\nQ: {round_data.question}")
             if round_data.user_response:
-                parts.append(f"A: {round_data.user_response}")
+                # Observation-marked answers do not reach the extractor
+                # (round-74): an LLM paraphrase cannot be provenance-checked
+                # afterwards, so the content is withheld at the input.
+                parts.append(f"A: {extraction_safe_answer(round_data.user_response)}")
 
         return "\n".join(parts)
 

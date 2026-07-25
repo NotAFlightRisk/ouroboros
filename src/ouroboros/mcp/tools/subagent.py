@@ -1726,11 +1726,13 @@ forwarding anything back to ouroboros_interview."""
         }
         if isinstance(data_policy, Mapping):
             lane_context["data_policy"] = dict(data_policy)
-        if isinstance(lane_answer_contract, Mapping):
-            # The SAME enforceability decision the prompt and registration
-            # apply (round-38): the machine-readable payload context may not
-            # carry a full form that re-entry will not enforce.
-            lane_context.update(published_lane_contract_fields(lane_answer_contract, lane_id))
+        # Unconditional (round-74): gating this on an EXISTING declaration
+        # meant a data lane that declared nothing was bound to the canonical
+        # contract at registration and told about it in the prompt, while the
+        # machine-readable payload.context carried no contract at all — a
+        # context-driven consumer then submits the generic shape re-entry
+        # rejects. The decision function handles absent declarations itself.
+        lane_context.update(published_lane_contract_fields(lane_answer_contract, lane_id))
         raw_lane_known_tools = raw_lane.get("known_data_tools")
         if isinstance(raw_lane_known_tools, (list, tuple)) and raw_lane_known_tools:
             lane_context["known_data_tools"] = [str(tool) for tool in raw_lane_known_tools]
@@ -3509,9 +3511,7 @@ def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
 UNENFORCED_CONTRACT_FIELD = "answer_contract_unenforced"
 
 
-def published_lane_contract_fields(
-    contract: Mapping[str, Any], lane_id: str = ""
-) -> dict[str, Any]:
+def published_lane_contract_fields(contract: Any, lane_id: str = "") -> dict[str, Any]:
     """PUBLIC lane fields for a declared contract — advertised IFF enforced.
 
     The enforceability decision is made once and must reach every public
@@ -3533,9 +3533,14 @@ def published_lane_contract_fields(
     # the canonical one, so a child that followed the advertised contract was
     # rejected and a required lane stayed permanently partial — advertised
     # IFF enforced, broken one surface over for the third time (57, 59, 71).
-    enforced = effective_lane_contract(lane_id, contract)
+    enforced = effective_lane_contract(lane_id, contract if isinstance(contract, Mapping) else None)
     if enforced is not None:
         return {"answer_contract": enforced}
+    if not isinstance(contract, Mapping) or not contract:
+        # Nothing declared and nothing bound by identity: the generic output
+        # shape applies and there is no contract to publish — an "unenforced"
+        # notice about a declaration that never existed would be its own lie.
+        return {}
     return {
         UNENFORCED_CONTRACT_FIELD: {
             "contract_id": str(contract.get("contract_id") or "unversioned"),

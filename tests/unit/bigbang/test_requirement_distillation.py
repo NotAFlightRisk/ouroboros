@@ -438,3 +438,47 @@ def test_round73_users_own_words_around_data_still_decide() -> None:
     mixed = "We must support 100 concurrent sessions given [from-data] 42 accounts."
     promoted = _round_candidates(build_requirement_distillation(_state_with_answer(mixed)))
     assert len(promoted) == 1
+
+
+def test_round74_observation_content_never_reaches_the_extractor() -> None:
+    """The LLM path is enforced at its INPUT, where enforcement is decidable.
+
+    Round 73 gated the deterministic candidates; the ordinary interview hands
+    the transcript to an LLM extractor, which paraphrased the observation into
+    a Seed AC. A paraphrase cannot be provenance-checked afterwards, so the
+    content must not reach the prompt at all.
+    """
+    from ouroboros.bigbang.seed_generator import SeedGenerator
+    from ouroboros.core.requirement_candidate import OBSERVATION_WITHHELD_NOTE
+
+    state = _state_with_answer("[from-data] Confirmed: 42 enterprise accounts require SSO today.")
+    state.rounds.append(
+        InterviewRound(
+            round_number=2,
+            question="So what must the product guarantee?",
+            user_response="Enterprise accounts must be able to use SSO.",
+        )
+    )
+
+    generator = SeedGenerator.__new__(SeedGenerator)
+    context = generator._build_interview_context(state)
+
+    assert "42 enterprise accounts" not in context
+    assert "[from-data]" not in context
+    assert OBSERVATION_WITHHELD_NOTE in context
+    # The user's own decision still reaches the extractor verbatim.
+    assert "Enterprise accounts must be able to use SSO." in context
+
+
+def test_round74_pm_transcript_withholds_the_same_class() -> None:
+    """A PMSeed is durable too, and the PM extractor paraphrases the same way."""
+    from ouroboros.bigbang.pm_interview import PMInterviewEngine
+    from ouroboros.core.requirement_candidate import OBSERVATION_WITHHELD_NOTE
+
+    state = _state_with_answer("[from-research] The provider requires 3DS for EU cards.")
+
+    engine = PMInterviewEngine.__new__(PMInterviewEngine)
+    transcript = engine._build_interview_context(state)
+
+    assert "3DS" not in transcript
+    assert OBSERVATION_WITHHELD_NOTE in transcript
