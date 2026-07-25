@@ -7942,3 +7942,124 @@ def test_round74_undeclared_generic_lane_publishes_nothing() -> None:
     published = published_lane_contract_fields(None, "code_context")
     assert published == {}
     assert UNENFORCED_CONTRACT_FIELD not in published
+
+
+# --------------------------------------------------------------------------- #
+# round-75 — every prompt surface renders the enforced contract; the plugin
+# extraction transcript withholds observations
+# --------------------------------------------------------------------------- #
+
+
+def test_round75_plugin_extraction_transcript_withholds_observations() -> None:
+    """The third extraction surface, after the in-process and PM extractors.
+
+    The plugin Seed path formats the transcript for a child instructed to
+    extract all requirements; the observation's content must not reach it.
+    """
+    from ouroboros.bigbang.interview import InterviewRound, InterviewState
+    from ouroboros.core.requirement_candidate import OBSERVATION_WITHHELD_NOTE
+    from ouroboros.mcp.tools.authoring_handlers import (
+        _format_extraction_transcript,
+        _format_interview_transcript,
+    )
+
+    state = InterviewState(
+        interview_id="iv_75",
+        initial_context="Build the reporting lane",
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question="What did the data show?",
+                user_response=("[from-data] Confirmed: 42 enterprise accounts require SSO today."),
+            ),
+            InterviewRound(
+                round_number=2,
+                question="So what must the product guarantee?",
+                user_response="Enterprise accounts must be able to use SSO.",
+            ),
+        ],
+    )
+
+    extraction = _format_extraction_transcript(state)
+    assert "42 enterprise accounts" not in extraction
+    assert "[from-data]" not in extraction
+    assert OBSERVATION_WITHHELD_NOTE in extraction
+    assert "Enterprise accounts must be able to use SSO." in extraction
+
+    # The CONVERSATIONAL transcript keeps the full history: the child helping
+    # the user answer legitimately sees the observation.
+    conversational = _format_interview_transcript(state)
+    assert "42 enterprise accounts" in conversational
+
+
+def test_round75_host_prompt_renders_the_enforced_contract() -> None:
+    """A data lane declaring another enforceable contract is shown the
+    canonical one — what the child is told is what re-entry does."""
+    foreign_but_enforceable = {
+        "contract_id": "other_form.v1",
+        "response_model_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"note": {"type": "string", "maxLength": 40, "pattern": "^[a-z ]+$"}},
+        },
+    }
+    payloads = build_interview_question_advisory_subagents(
+        {
+            "session_id": "sess-75",
+            "question_identity": "interview-question:00112233445566dd",
+            "question": "How many enterprise accounts churned last quarter?",
+            "user_question_first": True,
+            "lanes": [
+                {
+                    "lane_id": "data_context",
+                    "capability": "data_context",
+                    "required": False,
+                    "answer_contract": foreign_but_enforceable,
+                }
+            ],
+        }
+    )
+    assert payloads
+    prompt = payloads[0].prompt
+    assert "other_form.v1" not in prompt.split("## Answer Contract")[1]
+    assert "data_evidence_answer.v1" in prompt
+    assert '"$defs"' in prompt or "$defs" in prompt
+
+
+def test_round75_generic_prompt_renders_canonical_for_borrowed_id() -> None:
+    """An additive lane declaring the reserved id sees the canonical schema,
+    matching what re-entry enforces (round-70 binding)."""
+    payloads = build_interview_question_advisory_subagents(
+        {
+            "session_id": "sess-75b",
+            "question_identity": "interview-question:00112233445566ee",
+            "question": "Which module owns retries?",
+            "user_question_first": True,
+            "lanes": [
+                {
+                    "lane_id": "extra_metrics_lane",
+                    "capability": "call_mcp",
+                    "required": False,
+                    "answer_contract": dict(_WEAK_DATA_DECLARATION),
+                }
+            ],
+        }
+    )
+    assert payloads
+    prompt = payloads[0].prompt
+    assert '{"type": "object"}' not in prompt
+    assert "aggregation" in prompt  # canonical schema field, not the weak declaration
+
+
+def test_round75_plugin_contract_section_covers_the_undeclared_data_lane() -> None:
+    """The plugin prompt runs the same decision even with NO declaration —
+    the parity gap round 74 closed on payload.context, closed here too."""
+    from ouroboros.mcp.tools.subagent import _plugin_advisory_contract_section
+
+    section = _plugin_advisory_contract_section(
+        "fanout_75",
+        {"lanes": [{"lane_id": "data_context", "capability": "data_context"}]},
+        "sess-75c",
+    )
+    assert "data_evidence_answer.v1" in section
+    assert "OMITTED" not in section

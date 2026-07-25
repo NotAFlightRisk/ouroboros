@@ -58,7 +58,10 @@ from ouroboros.contracts.data_evidence import (
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.owner_only import secure_directory, write_owner_only
-from ouroboros.core.requirement_candidate import classify_answer_provenance
+from ouroboros.core.requirement_candidate import (
+    classify_answer_provenance,
+    extraction_safe_answer,
+)
 from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
     InterviewTurnContext,
@@ -1251,7 +1254,13 @@ def _stored_ambiguity_snapshot_is_degraded(state: InterviewState) -> bool:
 
 
 def _format_interview_transcript(state: InterviewState) -> str:
-    """Format persisted interview rounds as a readable transcript for subagent context."""
+    """Format persisted interview rounds as a readable transcript for subagent context.
+
+    CONVERSATIONAL context only — the interview child helping the user answer
+    legitimately sees the whole history, observations included. A transcript
+    heading for requirement extraction goes through
+    :func:`_format_extraction_transcript` instead (round-75).
+    """
     if not state.rounds:
         return ""
     lines: list[str] = []
@@ -1262,6 +1271,30 @@ def _format_interview_transcript(state: InterviewState) -> str:
         lines.append(f"**Q{r.round_number}:** {r.question}")
         if r.user_response:
             lines.append(f"**A{r.round_number}:** {r.user_response}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _format_extraction_transcript(state: InterviewState) -> str:
+    """The transcript form that may be handed to a requirement extractor.
+
+    The plugin Seed path formats the transcript for a child instructed to
+    "extract all requirements" — the third extraction surface, after the
+    in-process and PM extractors fixed in round 74 (round-75). Same rule,
+    same reason: an extractor paraphrases, a paraphrase cannot be
+    provenance-checked afterwards, so an observation's content must not
+    reach it at all.
+    """
+    if not state.rounds:
+        return ""
+    lines: list[str] = []
+    if state.initial_context:
+        lines.append(f"**Initial Context:** {state.initial_context}")
+        lines.append("")
+    for r in state.rounds:
+        lines.append(f"**Q{r.round_number}:** {r.question}")
+        if r.user_response:
+            lines.append(f"**A{r.round_number}:** {extraction_safe_answer(r.user_response)}")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -1530,7 +1563,7 @@ class GenerateSeedHandler:
                         )
                     )
 
-            transcript = _format_interview_transcript(interview_state)
+            transcript = _format_extraction_transcript(interview_state)
             distillation = build_requirement_distillation(interview_state)
             from ouroboros.core.requirement_candidate import evaluate_promotion
 

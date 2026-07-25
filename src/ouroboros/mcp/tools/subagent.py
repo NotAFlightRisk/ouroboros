@@ -1204,33 +1204,28 @@ def _plugin_advisory_contract_section(
         # contracts are excluded WHOLE (round-11): registration skips them
         # too, so nothing enforced was ever torn.
         lane_contract = declared_lane_contract(lane)
-        if isinstance(lane_contract, Mapping):
-            contract_id = str(lane_contract.get("contract_id") or "unversioned")
-            if _enforceable_lane_contract(lane_contract):
-                contract_blocks.append(
-                    f"{lane_id} answer contract ({contract_id}, complete — fill this "
-                    "form exactly; it is validated server-side at re-entry):\n"
-                    + (_canonical_contract_json(lane_contract) or "{}")
-                )
-            elif lane_id == "data_context":
-                # The enforced form is DELIVERED here too (round-58): the
-                # host-driven path was fixed in round 57 and this one kept a
-                # summary, so a plugin child following it stayed partial.
-                # Both transports render the same contract.
-                contract_blocks.append(
-                    f"{lane_id} answer contract ({contract_id}): the declared "
-                    "form could not be delivered whole (oversized or invalid). "
-                    "The PUBLISHED contract below is what re-entry enforces in "
-                    "its place — fill this form exactly:\n"
-                    + (_canonical_contract_json(_data_context_answer_contract()) or "{}")
-                )
-            else:
-                contract_blocks.append(
-                    f"{lane_id} answer contract ({contract_id}): OMITTED — it "
-                    "exceeds the whole-form delivery budget or carries an "
-                    "invalid schema, and is therefore NOT enforced at "
-                    "re-entry; return the generic output shape for this lane."
-                )
+        declared_mapping = lane_contract if isinstance(lane_contract, Mapping) else None
+        # The plugin child sees what re-entry enforces, through the same
+        # decision as every other surface (round-75). Run even with NO
+        # declaration: an undeclared data lane is bound to the canonical
+        # contract at registration, and gating this block on a declaration
+        # was the same parity gap round 74 closed on payload.context.
+        plugin_enforced = effective_lane_contract(lane_id, declared_mapping)
+        if plugin_enforced is not None:
+            enforced_id = str(plugin_enforced.get("contract_id") or "unversioned")
+            contract_blocks.append(
+                f"{lane_id} answer contract ({enforced_id}, complete — fill this "
+                "form exactly; it is validated server-side at re-entry):\n"
+                + (_canonical_contract_json(plugin_enforced) or "{}")
+            )
+        elif declared_mapping:
+            contract_id = str(declared_mapping.get("contract_id") or "unversioned")
+            contract_blocks.append(
+                f"{lane_id} answer contract ({contract_id}): OMITTED — it "
+                "exceeds the whole-form delivery budget or carries an "
+                "invalid schema, and is therefore NOT enforced at "
+                "re-entry; return the generic output shape for this lane."
+            )
         if lane_id == "data_context":
             data_policy = lane.get("data_policy")
             known_data_tools = lane.get("known_data_tools")
@@ -1555,10 +1550,21 @@ def build_interview_question_advisory_subagents(
             # shape — instead the child is told the schema is unenforced but
             # the data policy still binds (registration keeps a minimal
             # object contract, so the boundary scan stays active).
-            if isinstance(lane_answer_contract, Mapping) and _enforceable_lane_contract(
-                lane_answer_contract
+            declared_contract = (
+                lane_answer_contract if isinstance(lane_answer_contract, Mapping) else None
+            )
+            enforced_contract = effective_lane_contract(lane_id, declared_contract)
+            # The prompt renders what re-entry will ENFORCE, decided by the
+            # same function registration and publication use (round-75). This
+            # branch used to render the DECLARED contract when it was
+            # enforceable — so a data lane declaring some other enforceable
+            # contract showed the child that weaker form while re-entry
+            # enforced the canonical schema, and the probe stayed partial.
+            if enforced_contract is not None and (
+                declared_contract == enforced_contract
+                or _is_canonical_data_declaration(declared_contract)
             ):
-                answer_contract_json = _canonical_contract_json(lane_answer_contract) or "{}"
+                answer_contract_json = _canonical_contract_json(enforced_contract) or "{}"
                 contract_block = f"## Answer Contract\n```json\n{answer_contract_json}\n```\n"
                 output_rule = (
                     "For this lane the generic Output section below is superseded: "
@@ -1578,14 +1584,13 @@ def build_interview_question_advisory_subagents(
                 # summary of it omitted required fields, so a child following
                 # the fallback was rejected. Prose about a schema drifts from
                 # the schema; the schema does not drift from itself.
-                published = _data_context_answer_contract()
                 contract_block = (
                     "## Answer Contract\n"
-                    "The declared data answer contract could not be delivered "
-                    "whole (oversized or invalid). The PUBLISHED contract below "
-                    "is what re-entry enforces in its place — fill this form "
-                    "exactly:\n"
-                    f"```json\n{_canonical_contract_json(published) or '{}'}\n```\n"
+                    "The declared data answer contract is not what re-entry "
+                    "enforces (absent, oversized, invalid, or naming another "
+                    "form). The contract below is what re-entry enforces in "
+                    "its place — fill this form exactly:\n"
+                    f"```json\n{_canonical_contract_json(enforced_contract) or '{}'}\n```\n"
                 )
                 output_rule = (
                     "Return EXACTLY one JSON object matching the contract "
@@ -1645,9 +1650,15 @@ def build_interview_question_advisory_subagents(
         # (round-11): registration skips them too, so the lane falls back to
         # the generic shape consistently on both sides.
         if lane_id != "data_context" and isinstance(lane_answer_contract, Mapping):
-            if _enforceable_lane_contract(lane_answer_contract):
+            # Rendered from the ENFORCED contract (round-75): an additive lane
+            # declaring the reserved data contract id is bound to the
+            # canonical schema at registration (round-70), and showing the
+            # child its weaker declaration left it submitting a form re-entry
+            # rejects.
+            generic_enforced = effective_lane_contract(lane_id, lane_answer_contract)
+            if generic_enforced is not None:
                 lane_contract_json = _bounded_json(
-                    lane_answer_contract,
+                    generic_enforced,
                     _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
                 )
                 contract_extra = (

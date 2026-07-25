@@ -851,7 +851,14 @@ class TestBuildInterviewQuestionAdvisorySubagents:
         # output shape for this lane.
         assert "## Answer Contract" in payload.prompt
         assert "data_evidence_answer.v1" in payload.prompt
-        assert "superseded" in payload.prompt
+        # This declaration is degenerate ({"type": "object"}), so the prompt
+        # takes the substituted-contract wording (round-75): the child is told
+        # the declared form is not what re-entry enforces and is given the
+        # canonical form to fill exactly. The property that matters is that
+        # the ENFORCED schema ships whole.
+        assert "not what re-entry enforces" in payload.prompt
+        assert "fill this form exactly" in payload.prompt
+        assert '"aggregation"' in payload.prompt
 
     def test_data_context_real_contract_ships_untruncated_in_prompt(self) -> None:
         """The real metadata lane's contract must fit whole in the prompt."""

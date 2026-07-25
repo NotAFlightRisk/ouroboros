@@ -15,9 +15,12 @@ What this module owns:
 * the fallback schema used when a lane's declared contract cannot be enforced.
 
 What it deliberately does NOT own: transport (payload building, registry
-persistence, correlation) and the contract's published JSON, which stays in
-``orchestrator.capabilities.interview_schemas`` as capability metadata. This
-module is the single place where that published form is interpreted.
+persistence, correlation). The contract's published JSON and its boundary
+patterns are DEFINED here and re-exported by
+``orchestrator.capabilities.interview_schemas`` for capability metadata
+(round-75: this docstring used to claim the opposite ownership, and the
+pattern helpers below imported their own definitions back through that
+re-export).
 """
 
 from __future__ import annotations
@@ -666,20 +669,6 @@ _DATA_EVIDENCE_CONTRACT_ID = CONTRACT_VERSION
 
 @lru_cache(maxsize=1)
 def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
-    # Function-level import: subagent.py is imported by orchestrator-side
-    # modules, so the canonical pattern strings are pulled lazily.
-    from ouroboros.orchestrator.capabilities.interview_schemas import (
-        DATA_EVIDENCE_AUTH_HEADER_PATTERN,
-        DATA_EVIDENCE_AWS_KEY_PATTERN,
-        DATA_EVIDENCE_CREDENTIAL_ASSIGNMENT_PATTERN,
-        DATA_EVIDENCE_EMAIL_PATTERN,
-        DATA_EVIDENCE_PASSWORD_PATTERN,
-        DATA_EVIDENCE_PHONE_PATTERN,
-        DATA_EVIDENCE_SECRET_PATTERN,
-        DATA_EVIDENCE_SSN_PATTERN,
-        DATA_EVIDENCE_URI_USERINFO_PATTERN,
-    )
-
     return (
         ("email-shaped (PII)", re.compile(DATA_EVIDENCE_EMAIL_PATTERN, re.IGNORECASE)),
         ("credential-shaped (secret)", re.compile(DATA_EVIDENCE_SECRET_PATTERN, re.IGNORECASE)),
@@ -709,10 +698,6 @@ def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...
 
 @lru_cache(maxsize=1)
 def _mutating_tool_verbs() -> frozenset[str]:
-    from ouroboros.orchestrator.capabilities.interview_schemas import (
-        _data_context_lane_policy,
-    )
-
     return frozenset(
         str(word).lower() for word in _data_context_lane_policy()["forbidden_operation_patterns"]
     )
@@ -1396,10 +1381,6 @@ def _data_evidence_fallback_schema() -> dict[str, Any]:
     published ``$defs`` and closes the object, so a degraded contract loses
     the field-level descriptions and nothing else.
     """
-    from ouroboros.orchestrator.capabilities.interview_schemas import (
-        data_evidence_structural_schema,
-    )
-
     return data_evidence_structural_schema()
 
 
@@ -1537,10 +1518,6 @@ def _vendor_secret_prefix() -> re.Pattern[str]:
     """Vendor token prefixes, from the SAME published vocabulary the content
     scan uses (round-42): two copies drifted, and the copy that knew the
     standard Slack forms was not the one guarding persisted content."""
-    from ouroboros.orchestrator.capabilities.interview_schemas import (
-        DATA_EVIDENCE_VENDOR_TOKEN_PREFIX,
-    )
-
     # Recognized at the START or after any separator (round-43 probes:
     # warehouse_xoxb-…, tool_ghp_…, reader_AKIA…): a vendor token does not
     # stop being one because a word was glued in front of it.
