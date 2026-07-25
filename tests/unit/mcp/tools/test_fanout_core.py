@@ -5069,7 +5069,7 @@ def test_forbidden_content_classes_are_unrepresentable_not_filtered() -> None:
     # And the legitimate uses those 42 rounds kept threatening stay valid.
     for aggregate in (
         {"number": 42, "unit": "accounts"},
-        {"number": 78.5, "unit": "%", "dimension": "plan=free"},
+        {"number": 78.5, "unit": "%", "dimension": "plan=growth"},
         {"number": 240, "unit": "ms"},
         {"number": 12400, "unit": "users"},
     ):
@@ -5082,7 +5082,7 @@ def test_forbidden_content_classes_are_unrepresentable_not_filtered() -> None:
                     "operation": "read",
                     "metric": "active_users",
                     "aggregation": "count",
-                    "grouping": ["plan"],
+                    "filters": ["plan=growth"],
                 },
             )
         ]
@@ -5306,7 +5306,7 @@ def test_round44_ownership_and_evidence_invariants(tmp_path: Any) -> None:
         _typed_evidence(value={"number": 42, "unit": "usd", "dimension": "plan=growth"})
     ]
     assert any(
-        "did not group by" in error
+        "did not filter on" in error
         for error in _data_evidence_boundary_violations(mismatched, policy)
     )
     assert _data_evidence_boundary_violations(_minimal_data_output(), policy) == []
@@ -5348,27 +5348,43 @@ def test_round45_field_grammars_close_their_classes() -> None:
 
     # B3 — the value no longer repeats the request's aggregation, so the
     # contradiction has no field; the scope stays bound to what was grouped.
-    ungrouped = _minimal_data_output()
-    ungrouped["evidence"] = [
+    unfiltered = _minimal_data_output()
+    unfiltered["evidence"] = [
         _typed_evidence(value={"number": 42, "unit": "accounts", "dimension": "plan=growth"})
     ]
     assert any(
-        "did not group by" in error
-        for error in _data_evidence_boundary_violations(ungrouped, policy)
+        "did not filter on" in error
+        for error in _data_evidence_boundary_violations(unfiltered, policy)
     )
+    # Round-46: executed evidence is one number, so its request narrows with
+    # filters rather than grouping.
     grouped = _minimal_data_output()
     grouped["evidence"] = [
+        _typed_evidence(
+            request={
+                "operation": "read",
+                "metric": "active_users",
+                "aggregation": "count",
+                "grouping": ["plan"],
+            }
+        )
+    ]
+    assert any(
+        "may not group" in error for error in _data_evidence_boundary_violations(grouped, policy)
+    )
+    scoped = _minimal_data_output()
+    scoped["evidence"] = [
         _typed_evidence(
             value={"number": 42, "unit": "accounts", "dimension": "plan=growth"},
             request={
                 "operation": "read",
                 "metric": "active_users",
                 "aggregation": "count",
-                "grouping": ["plan"],
+                "filters": ["plan=growth"],
             },
         )
     ]
-    assert _data_evidence_boundary_violations(grouped, policy) == []
+    assert _data_evidence_boundary_violations(scoped, policy) == []
 
     # B4 — the degraded form IS the published schema: every required field and
     # every conditional invariant survives an unenforceable declared contract.
@@ -5376,3 +5392,102 @@ def test_round45_field_grammars_close_their_classes() -> None:
         data_evidence_structural_schema()
         == (_data_context_answer_contract()["response_model_schema"])
     )
+
+
+def test_round46_prose_is_not_durable_and_scope_binds_to_filters(tmp_path: Any) -> None:
+    """Round-46: the PII guarantee becomes true by removing what it covered.
+
+    ``pii_scrub_required`` cannot be enforced over a name and a street address
+    — no pattern recognizes them — so the advisory prose the guarantee covered
+    no longer enters durable state. The host receives it in the response it
+    submitted; the record keeps the typed facts.
+    """
+    import json as json_module
+    import os
+    import stat
+
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    lanes = [dict(lane) for lane in advisory["lanes"]]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-prose", lanes=lanes
+    )
+    assert fanout_id is not None
+
+    data_output = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Alice Smith at 12 Main Street is the top account.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            _typed_evidence(
+                request={
+                    "operation": "read",
+                    "metric": "active_users",
+                    "aggregation": "count",
+                    "filters": ["plan=growth"],
+                },
+                value={"number": 42, "unit": "accounts", "dimension": "plan=growth"},
+            )
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Bob Jones at 34 Oak Ave was excluded."],
+    }
+    results = [
+        {"key": lane, "content": {"lane_id": lane, "finding": "ok"}}
+        for lane in ("code_context", "web_context", "ambiguity_contrarian", "answer_simplifier")
+    ]
+    results.append({"key": "data_context", "content": data_output})
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-prose",
+        correlation_key="context.lane_id",
+        results=results,
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    # The host still receives the advisory prose it submitted.
+    assert "Alice Smith" in json_module.dumps(out)
+
+    record_path = tmp_path / f"{fanout_id}.json"
+    on_disk = record_path.read_text()
+    assert "Alice Smith" not in on_disk
+    assert "Oak Ave" not in on_disk
+    # The typed facts — what the guarantee can actually cover — are retained.
+    assert '"number": 42' in on_disk
+    # Replay serves the durable form, so the prose cannot re-enter later.
+    replay = submit_fanout_results(
+        registry,
+        session_id="sess-prose",
+        correlation_key="context.lane_id",
+        results=[],
+        fanout_id=fanout_id,
+    )
+    assert replay["status"] == "already_complete"
+    assert "Alice Smith" not in json_module.dumps(replay)
+
+    # Owner-only permissions on the record and its directory.
+    assert stat.S_IMODE(os.stat(record_path).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(tmp_path).st_mode) == 0o700
+
+
+def test_round46_filter_operators_are_all_parsed() -> None:
+    """Identity scope is parsed on every operator the grammar accepts."""
+    from ouroboros.contracts.data_evidence import _read_request_shape_problems
+
+    for scoped in ("tenant_id=847291", "tenant_id>847291", "org_uuid<ffffffff", "profile_key!=abc"):
+        assert _read_request_shape_problems(
+            {"operation": "read", "metric": "m", "aggregation": "count", "filters": [scoped]}
+        ), scoped
+    for category in ("plan=growth", "created_at>2026-01-01", "region!=kr"):
+        assert (
+            _read_request_shape_problems(
+                {"operation": "read", "metric": "m", "aggregation": "count", "filters": [category]}
+            )
+            == []
+        ), category

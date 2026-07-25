@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 import hashlib
@@ -56,6 +56,7 @@ from ouroboros.contracts.data_evidence import (
     _DATA_EVIDENCE_CONTRACT_ID,
     _data_evidence_boundary_violations,
     _data_evidence_fallback_schema,
+    redact_prose_for_persistence,
 )
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.core.types import Result
@@ -3208,7 +3209,7 @@ class FanoutRegistry:
         target = self._path(record.fanout_id)
         tmp_path = target.with_name(f".{target.name}.tmp-{uuid4().hex}")
         try:
-            self._dir.mkdir(parents=True, exist_ok=True)
+            self._dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             tmp_path.write_text(
                 # allow_nan=False: NaN/Infinity are not JSON. A record that
                 # would serialize to a non-standard document fails the write
@@ -3217,6 +3218,14 @@ class FanoutRegistry:
                 json.dumps(record.to_dict(), ensure_ascii=False, allow_nan=False),
                 encoding="utf-8",
             )
+            # Owner-only, set BEFORE the rename so the record is never briefly
+            # world-readable (round-44 warning: the default 022 umask left
+            # child findings at 0644 for the whole retention window). mkdir's
+            # mode is ignored when the directory already exists, so the
+            # directory is chmod'd explicitly too.
+            os.chmod(tmp_path, 0o600)
+            with suppress(OSError):
+                os.chmod(self._dir, 0o700)
             os.replace(tmp_path, target)
         # UnicodeError: json.dumps happily escapes a lone surrogate, but
         # utf-8 encoding at write time raises UnicodeEncodeError — that is a
@@ -4123,6 +4132,26 @@ def register_question_advisory_fanout_from_lanes(
     )
 
 
+def _durable_results(contracts: Mapping[str, Any], provided: Mapping[str, Any]) -> dict[str, Any]:
+    """Lane results as they are STORED — data-lane prose is not retained.
+
+    The response returns what the host submitted; the record keeps the typed
+    facts. See ``redact_prose_for_persistence`` for why the prose cannot stay.
+    """
+    stored: dict[str, Any] = {}
+    for lane_id, output in provided.items():
+        contract = contracts.get(lane_id)
+        contract_id = (
+            str(contract.get("contract_id") or "") if isinstance(contract, Mapping) else ""
+        )
+        stored[lane_id] = (
+            redact_prose_for_persistence(output)
+            if contract_id == _DATA_EVIDENCE_CONTRACT_ID
+            else output
+        )
+    return stored
+
+
 def submit_fanout_results(
     registry: FanoutRegistry,
     *,
@@ -4442,6 +4471,7 @@ def _submit_fanout_results_locked(
     # open so a corrected retry can still land, and the rejected content must
     # never persist as an accepted result.
     completion_extra: dict[str, Any] = {}
+    durable_outcome: dict[str, Any] | None = None
     if record.kind == FANOUT_KIND_LATERAL_PERSONA_PANEL:
         entries = record.synthesizer_input.get("entries") or []
         outcome: dict[str, Any] = continue_interview_after_lateral_persona_synthesis(
@@ -4499,6 +4529,16 @@ def _submit_fanout_results_locked(
             if lane_id in provided
         ]
         outcome = _fanout_identity_synthesis(aggregated)
+        # The same synthesis over the DURABLE (prose-free) outputs — the host
+        # gets the full form in the response, the record keeps this one.
+        durable_provided = _durable_results(contracts, provided)
+        durable_outcome = _fanout_identity_synthesis(
+            [
+                {"lane_id": lane_id, "output": durable_provided[lane_id]}
+                for lane_id in lane_ids
+                if lane_id in durable_provided
+            ]
+        )
         ready = all(key in provided for key in record.required_keys)
         completion_extra["contract_violations"] = contract_violations
     else:
@@ -4514,7 +4554,9 @@ def _submit_fanout_results_locked(
         retained = {
             key: value for key, value in provided.items() if key not in set(rejected_present)
         }
-        persisted = registry.save(replace(record, received_results=retained))
+        persisted = registry.save(
+            replace(record, received_results=_durable_results(contracts, retained))
+        )
         return {
             "status": "partial",
             "fanout_id": fanout_id,
@@ -4549,15 +4591,21 @@ def _submit_fanout_results_locked(
     # ``unexpected_keys`` is per-call rejection feedback, not part of the
     # outcome: it is stripped from the persisted terminal response so even a
     # redacted trace of rejected keys never enters durable state.
+    # The synthesis carries the submitted outputs back to the host, so the
+    # PERSISTED copy is rebuilt from the durable (prose-free) results
+    # (round-46): the response the host receives is complete, while the record
+    # and every later replay of it hold only the typed facts.
     terminal_snapshot = {
         key: value
         for key, value in completion.items()
         if key not in ("unexpected_keys", "malformed_keys")
     }
+    if durable_outcome is not None:
+        terminal_snapshot["result"] = durable_outcome
     terminal_persisted = registry.save(
         replace(
             record,
-            received_results=provided,
+            received_results=_durable_results(contracts, provided),
             completed=True,
             terminal_response=terminal_snapshot,
         )

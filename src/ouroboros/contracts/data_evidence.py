@@ -243,6 +243,45 @@ def _parseable_timestamp(value: str) -> bool:
     return True
 
 
+#: Fields of ``data_evidence_answer.v1`` that are prose written for a human.
+#: They carry no data — the typed evidence does — and the policy's
+#: ``pii_scrub_required`` cannot be enforced over them: a name and a street
+#: address are PII that no pattern recognizes, and the alternative to
+#: recognizing them is not storing them (round-46).
+DATA_EVIDENCE_PROSE_FIELDS = ("finding", "caveats")
+DATA_EVIDENCE_PROPOSAL_PROSE_FIELDS = ("expected_decision",)
+
+
+def redact_prose_for_persistence(output: Any) -> Any:
+    """Return a data-lane output with its human-facing prose removed.
+
+    The host receives the prose in the response it submitted; the durable
+    record keeps only the typed facts. The registry exists for correlation,
+    completion, and replay of what was MEASURED — it is not the host's memory
+    of advisory sentences, and a durable copy of unconfirmed prose is exactly
+    the thing the policy claims to scrub and cannot.
+    """
+    if not isinstance(output, Mapping):
+        return output
+    redacted = {
+        key: value for key, value in output.items() if key not in DATA_EVIDENCE_PROSE_FIELDS
+    }
+    proposals = redacted.get("proposed_queries")
+    if isinstance(proposals, list):
+        redacted["proposed_queries"] = [
+            {
+                key: value
+                for key, value in item.items()
+                if key not in DATA_EVIDENCE_PROPOSAL_PROSE_FIELDS
+            }
+            if isinstance(item, Mapping)
+            else item
+            for item in proposals
+        ]
+    redacted["prose_retained"] = False
+    return redacted
+
+
 def _data_evidence_boundary_violations(
     output: Mapping[str, Any],
     policy: Mapping[str, Any] | None = None,
@@ -366,7 +405,7 @@ def _data_evidence_boundary_violations(
         )
         errors.extend(
             f"evidence[{index}].request: {problem}"
-            for problem in _read_request_shape_problems(item.get("request"))
+            for problem in _read_request_shape_problems(item.get("request"), executed=True)
         )
         # The value states only the number, its unit, and its scope — the
         # aggregation lives in the request alone (round-45), so "a count
@@ -376,15 +415,18 @@ def _data_evidence_boundary_violations(
         executed, reported = item.get("request"), item.get("value")
         if isinstance(executed, Mapping) and isinstance(reported, Mapping):
             dimension = reported.get("dimension")
-            grouping = executed.get("grouping")
             if isinstance(dimension, str) and "=" in dimension:
-                scoped_key = dimension.split("=", 1)[0]
-                declared = grouping if isinstance(grouping, list) else []
-                if scoped_key not in declared:
+                scoped = dimension.split("=", 1)[0]
+                filters = executed.get("filters")
+                applied = {
+                    text[: match.start()]
+                    for text in (filters if isinstance(filters, list) else [])
+                    if isinstance(text, str) and (match := _FILTER_OPERATOR.search(text))
+                }
+                if scoped not in applied:
                     errors.append(
                         f"evidence[{index}].value.dimension: scopes by "
-                        f"{scoped_key!r}, which the executed request did not "
-                        "group by"
+                        f"{scoped!r}, which the executed request did not filter on"
                     )
         # Evidence exists only for a SUCCEEDED execution (round-42): the
         # outcome is declared, so a failed lookup is a located violation
@@ -542,7 +584,7 @@ def _aggregate_shape_problems(value: Any, allowed_units: Any = None) -> list[str
     return problems
 
 
-def _read_request_shape_problems(request: Any) -> list[str]:
+def _read_request_shape_problems(request: Any, *, executed: bool = False) -> list[str]:
     """Whether a read request is the typed structure the contract declares.
 
     The lane names WHAT to measure; the parent session builds and runs the
@@ -591,6 +633,16 @@ def _read_request_shape_problems(request: Any) -> list[str]:
     unknown = set(request) - {"operation", "metric", "aggregation", "filters", "grouping"}
     if unknown:
         problems.append("carries fields outside the read-request shape")
+    if executed and request.get("grouping"):
+        # A grouped query returns one row per group; an evidence item carries
+        # ONE number (round-46). The two cannot describe each other — a single
+        # value cannot say which group it came from, and a second grouping key
+        # is not expressible at all. Per-category evidence is one item per
+        # category, each narrowed by a filter.
+        problems.append(
+            "executed evidence reports a single number, so its request may not "
+            "group; narrow with filters and report one item per category"
+        )
     return problems
 
 
@@ -699,10 +751,19 @@ def _entity_key(key: str) -> bool:
     return any(token in _IDENTITY_KEYS for token in re.split(r"[-_.]", lowered) if token)
 
 
+# The public filter grammar accepts <, >, ! and = in one- or two-character
+# combinations, so identity-scope parsing splits on the OPERATOR rather than
+# on "=" alone (round-46 warning: tenant_id=847291 was rejected while
+# tenant_id>847291 walked through the same check).
+_FILTER_OPERATOR = re.compile(r"[=<>!]{1,2}")
+
+
 def _identity_scope_problem(text: str, label: str) -> str | None:
-    """Whether ``key=value`` scopes an aggregate to an identified entity."""
-    key, _, value = text.partition("=")
-    if not _:
+    """Whether ``key<op>value`` scopes an aggregate to an identified entity."""
+    match = _FILTER_OPERATOR.search(text)
+    if match:
+        key, value = text[: match.start()], text[match.end() :]
+    else:
         key, value = text, ""
     if _entity_key(key.strip()):
         return f"{label} keys an entity ({key.strip()!r}); aggregate by category instead"
