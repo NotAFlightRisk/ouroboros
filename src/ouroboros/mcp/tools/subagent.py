@@ -1187,7 +1187,7 @@ def _plugin_advisory_contract_section(
         # the promised v1 path unsatisfiable for the plugin child. Oversized
         # contracts are excluded WHOLE (round-11): registration skips them
         # too, so nothing enforced was ever torn.
-        lane_contract = lane.get("answer_contract")
+        lane_contract = declared_lane_contract(lane)
         if isinstance(lane_contract, Mapping):
             contract_id = str(lane_contract.get("contract_id") or "unversioned")
             if _enforceable_lane_contract(lane_contract):
@@ -1465,7 +1465,7 @@ def build_interview_question_advisory_subagents(
         purpose = str(raw_lane.get("purpose") or "Help answer the interview question.").strip()
         required = bool(raw_lane.get("required"))
         data_policy = raw_lane.get("data_policy")
-        lane_answer_contract = raw_lane.get("answer_contract")
+        lane_answer_contract = declared_lane_contract(raw_lane)
 
         if lane_id == "code_context":
             lane_task = (
@@ -1681,7 +1681,7 @@ forwarding anything back to ouroboros_interview."""
             # The SAME enforceability decision the prompt and registration
             # apply (round-38): the machine-readable payload context may not
             # carry a full form that re-entry will not enforce.
-            lane_context["answer_contract"] = published_lane_contract(lane_answer_contract)
+            lane_context.update(published_lane_contract_fields(lane_answer_contract))
         raw_lane_known_tools = raw_lane.get("known_data_tools")
         if isinstance(raw_lane_known_tools, (list, tuple)) and raw_lane_known_tools:
             lane_context["known_data_tools"] = [str(tool) for tool in raw_lane_known_tools]
@@ -3477,41 +3477,65 @@ def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
     return _schema_local_refs_resolve(schema)
 
 
-def published_lane_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
-    """PUBLIC-metadata form of a lane answer contract — advertised IFF enforced.
+#: Lane field carrying a declared-but-unenforceable contract. It sits
+#: OUTSIDE ``answer_contract`` (round-39) because the public v1 lane schema
+#: requires ``answer_contract`` to carry a ``response_model_schema`` — a
+#: marker in that slot would be an invalid lane, breaking the additive
+#: compatibility promise it was meant to keep honest. A lane with no
+#: enforceable contract simply carries no ``answer_contract``, plus this
+#: sibling saying why.
+UNENFORCED_CONTRACT_FIELD = "answer_contract_unenforced"
+
+
+def published_lane_contract_fields(contract: Mapping[str, Any]) -> dict[str, Any]:
+    """PUBLIC lane fields for a declared contract — advertised IFF enforced.
 
     The enforceability decision is made once and must reach every public
     surface identically (round-38 probe: an oversized contract was correctly
     omitted from the child prompt and from registry enforcement, yet its full
     form survived under ``payload.context.answer_contract``, so a host reading
-    the payload would follow a form re-entry silently ignores). An
-    unenforceable contract is published as an explicit non-enforced marker
-    carrying only its id and the reason.
+    the payload would follow a form re-entry silently ignores).
     """
     if _enforceable_lane_contract(contract):
-        return dict(contract)
+        return {"answer_contract": dict(contract)}
     return {
-        "contract_id": str(contract.get("contract_id") or "unversioned"),
-        "enforced": False,
-        "omitted_reason": (
-            "exceeds the whole-form delivery budget or carries an invalid "
-            "schema; it is NOT enforced at re-entry"
-        ),
+        UNENFORCED_CONTRACT_FIELD: {
+            "contract_id": str(contract.get("contract_id") or "unversioned"),
+            "enforced": False,
+            "reason": (
+                "exceeds the whole-form delivery budget or carries an invalid "
+                "schema; it is NOT enforced at re-entry"
+            ),
+        }
     }
 
 
 def lanes_with_published_contracts(lanes: Iterable[Any]) -> list[dict[str, Any]]:
-    """Copy lanes with every ``answer_contract`` in its publishable form."""
+    """Copy lanes with every declared contract in its publishable form."""
     published: list[dict[str, Any]] = []
     for lane in lanes:
         if not isinstance(lane, Mapping):
             continue
         lane_copy = dict(lane)
-        contract = lane_copy.get("answer_contract")
+        contract = lane_copy.pop("answer_contract", None)
         if isinstance(contract, Mapping):
-            lane_copy["answer_contract"] = published_lane_contract(contract)
+            lane_copy.update(published_lane_contract_fields(contract))
         published.append(lane_copy)
     return published
+
+
+def declared_lane_contract(lane: Mapping[str, Any]) -> Any:
+    """The contract a lane DECLARES, enforceable or not.
+
+    Registration and prompt rendering both need the declaration itself — the
+    data lane's fail-closed minimal contract and the child's explicit
+    "not enforced" notice depend on knowing a contract was declared at all —
+    so they read through the publication split.
+    """
+    contract = lane.get("answer_contract")
+    if isinstance(contract, Mapping):
+        return contract
+    return lane.get(UNENFORCED_CONTRACT_FIELD)
 
 
 def _declares_object_root(
@@ -3814,97 +3838,81 @@ def _blank_paren_content(text: str) -> str:
 _READ_ONLY_SQL_HEADS = frozenset(
     {"select", "with", "values", "table", "show", "describe", "desc", "explain"}
 )
-# The recognized SQL statement-head vocabulary across the mainstream
-# dialects. Membership is what makes a string a STATEMENT rather than prose:
-# a proposal whose first word is not a statement head is natural language or
-# another dialect and stays under the confirming human's gate, which is the
-# structural guarantee this lint is defense-in-depth for.
-_SQL_STATEMENT_HEADS = _READ_ONLY_SQL_HEADS | frozenset(
+# Statement heads that never open ordinary English prose. Their presence IS
+# the classification — no clause-shape corroboration (round-39: requiring a
+# FROM/INTO/TABLE marker let ``VACUUM users``, ``REINDEX users``, ``EXEC
+# dangerous_proc``, and ``COPY users TO '/tmp/users.csv'`` through, because a
+# clause heuristic is exactly the incomplete thing this classification
+# replaced).
+_UNAMBIGUOUS_SQL_HEADS = frozenset(
     {
         "insert",
         "update",
         "delete",
         "merge",
         "upsert",
-        "replace",
         "truncate",
         "drop",
-        "create",
         "alter",
         "rename",
-        "comment",
         "grant",
         "revoke",
         "deny",
+        "unload",
+        "exec",
+        "execute",
+        "pragma",
+        "savepoint",
+        "deallocate",
+        "checkpoint",
+        "discard",
+        "vacuum",
+        "reindex",
+        "optimize",
+        "cluster",
+        "detach",
+        "commit",
+        "rollback",
+    }
+)
+# Heads that are ALSO ordinary English verbs. Classifying these on the head
+# alone would false-reject the natural-language proposals the lane exists to
+# hand a human ("Load the dashboard from Metabase"), so they fail closed
+# UNLESS the text carries an explicit prose signal — a determiner or pronoun,
+# which statement syntax never contains.
+_AMBIGUOUS_SQL_HEADS = frozenset(
+    {
         "copy",
         "load",
         "import",
         "export",
-        "unload",
         "backup",
         "restore",
         "call",
-        "exec",
-        "execute",
         "do",
         "begin",
         "start",
-        "commit",
-        "rollback",
-        "savepoint",
         "set",
         "reset",
         "use",
         "attach",
-        "detach",
-        "pragma",
-        "vacuum",
-        "analyze",
-        "optimize",
-        "cluster",
-        "reindex",
-        "refresh",
         "lock",
         "unlock",
         "install",
         "kill",
         "shutdown",
         "prepare",
-        "deallocate",
         "declare",
-        "checkpoint",
-        "discard",
+        "create",
+        "comment",
+        "replace",
+        "refresh",
+        "analyze",
     }
 )
-# Clause words that only appear in statement syntax, and determiners that
-# only appear in prose. Together they keep an English sentence opening with
-# a statement word ("Load the dashboard from Metabase", "Call the analytics
-# API") out of the SQL classification — a false rejection would block the
-# natural-language proposals the lane is designed to hand a human.
-_SQL_CLAUSE_MARKER = re.compile(
-    r"\b(from|into|table|values|set|where|program|join|database|schema)\b", re.IGNORECASE
-)
-_PROSE_DETERMINERS = frozenset(
-    {
-        "the",
-        "a",
-        "an",
-        "our",
-        "my",
-        "your",
-        "their",
-        "its",
-        "this",
-        "that",
-        "these",
-        "those",
-        "all",
-        "any",
-        "some",
-        "each",
-        "every",
-        "up",
-    }
+_PROSE_SIGNAL = re.compile(
+    r"\b(the|a|an|our|my|your|their|its|this|that|these|those|please|we|us|i)\b",
+    re.IGNORECASE,
 )
 
 
@@ -3912,20 +3920,22 @@ def _non_read_only_statement_head(query: str) -> str | None:
     """The statement head of a recognized SQL statement that is not read-only.
 
     Returns ``None`` when the text is read-only SQL or is not a recognized
-    SQL statement at all (prose, another dialect).
+    SQL statement at all (prose, another dialect) — those stay under the
+    confirming human's gate, which is the structural guarantee this lint is
+    defense-in-depth for.
     """
     text = _strip_sql_comments(query).strip()
-    match = re.match(r"([A-Za-z][A-Za-z_]*)\s+(\S+)", text)
+    match = re.match(r"([A-Za-z][A-Za-z_]*)\b", text)
     if not match:
         return None
     head = match.group(1).lower()
-    if head in _READ_ONLY_SQL_HEADS or head not in _SQL_STATEMENT_HEADS:
+    if head in _READ_ONLY_SQL_HEADS:
         return None
-    if match.group(2).strip("\"'`").lower() in _PROSE_DETERMINERS:
-        return None
-    if not _SQL_CLAUSE_MARKER.search(text):
-        return None
-    return head
+    if head in _UNAMBIGUOUS_SQL_HEADS:
+        return head
+    if head in _AMBIGUOUS_SQL_HEADS and not _PROSE_SIGNAL.search(text):
+        return head
+    return None
 
 
 def _call_argument_spans(text: str, name_pattern: str) -> list[tuple[int, int]]:
@@ -4970,7 +4980,7 @@ def register_question_advisory_fanout_from_lanes(
         # submitted output against it BEFORE synthesis — a data lane result
         # is otherwise arbitrary content flowing toward user confirmation and
         # persisted interview state.
-        answer_contract = lane.get("answer_contract")
+        answer_contract = declared_lane_contract(lane)
         if isinstance(answer_contract, Mapping):
             # Enforced IFF deliverable whole (round-11): an oversized
             # contract is skipped here so re-entry never validates against a

