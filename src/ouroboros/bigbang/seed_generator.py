@@ -686,7 +686,17 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
         Returns:
             Formatted context string.
         """
-        parts = [f"Initial Context: {prompt_safe_initial_context(state)}"]
+        # The oversized-context path substitutes the user's SUMMARY ANSWER for
+        # the initial context, and that answer can lead with an observation
+        # marker — it bypassed the withholding entirely and, because the
+        # summary round is skipped below, never set the question taint
+        # (round-81). The same marker rule applies here, and a withheld
+        # summary taints every question: they were all generated with the
+        # observation in play.
+        raw_context = prompt_safe_initial_context(state)
+        safe_context = extraction_safe_answer(raw_context)
+        observation_seen = safe_context != raw_context
+        parts = [f"Initial Context: {safe_context}"]
 
         # Brownfield priming: carry the auto-explore codebase summary and the
         # referenced paths into the extraction context so the seed architect
@@ -703,7 +713,6 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
             if rendered_paths:
                 parts.append(f"\nCodebase Paths: {rendered_paths}")
 
-        observation_seen = False
         for round_data in state.rounds:
             if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
                 continue

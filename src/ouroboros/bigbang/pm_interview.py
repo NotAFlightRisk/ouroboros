@@ -1239,9 +1239,12 @@ class PMInterviewEngine:
         Returns:
             Formatted context string.
         """
-        parts = [f"Initial Context: {prompt_safe_initial_context(state)}"]
+        # Same summary-answer sanitization as the dev Seed path (round-81).
+        raw_context = prompt_safe_initial_context(state)
+        safe_context = extraction_safe_answer(raw_context)
+        observation_seen = safe_context != raw_context
+        parts = [f"Initial Context: {safe_context}"]
 
-        observation_seen = False
         for round_data in state.rounds:
             if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
                 continue

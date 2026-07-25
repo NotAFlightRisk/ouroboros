@@ -625,3 +625,66 @@ def test_round80_observation_free_interviews_keep_every_question() -> None:
 
     assert QUESTION_WITHHELD_NOTE not in context
     assert "What is the acceptance bar?" in context
+
+
+def test_round81_summary_answers_cannot_bypass_the_withholding() -> None:
+    """The oversized-context path substitutes the summary ANSWER for the
+    initial context — the fourth entrance to the extraction contexts.
+
+    The reviewer's probe: a summary answer leading with [from-data] reached
+    both the Seed and PM extraction contexts verbatim, and — because the
+    summary round is skipped in the loop — never set the question taint.
+    """
+    from ouroboros.bigbang.interview import (
+        INITIAL_CONTEXT_SUMMARY_QUESTION,
+        MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
+    )
+    from ouroboros.bigbang.pm_interview import PMInterviewEngine
+    from ouroboros.bigbang.seed_generator import SeedGenerator
+    from ouroboros.core.requirement_candidate import (
+        OBSERVATION_WITHHELD_NOTE,
+        QUESTION_WITHHELD_NOTE,
+    )
+
+    state = InterviewState(
+        interview_id="iv_81",
+        # Oversized, so prompt_safe_initial_context falls through to the
+        # summary answer.
+        initial_context="x" * (MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS + 1),
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response=("[from-data] Confirmed: 42 enterprise accounts require SSO today."),
+            ),
+            InterviewRound(
+                round_number=2,
+                question="Given the 42 enterprise accounts, what tier is needed?",
+                user_response="Enterprise tier must include SSO.",
+            ),
+        ],
+    )
+
+    dev = SeedGenerator.__new__(SeedGenerator)._build_interview_context(state)
+    pm = PMInterviewEngine.__new__(PMInterviewEngine)._build_interview_context(state)
+
+    for label, context in (("dev", dev), ("pm", pm)):
+        assert "42 enterprise accounts" not in context, label
+        assert OBSERVATION_WITHHELD_NOTE in context, label
+        # The summary was the observation, so every question is tainted.
+        assert QUESTION_WITHHELD_NOTE in context, label
+        assert "Enterprise tier must include SSO." in context, label
+
+
+def test_round81_plugin_initial_context_is_sanitized() -> None:
+    """The plugin transcript's own header applies the same rule."""
+    from ouroboros.core.requirement_candidate import OBSERVATION_WITHHELD_NOTE
+    from ouroboros.mcp.tools.authoring_handlers import _format_extraction_transcript
+
+    state = _state_with_answer("Enterprise tier must include SSO.")
+    state.initial_context = "[from-data] 42 enterprise accounts require SSO."
+
+    transcript = _format_extraction_transcript(state)
+
+    assert "42 enterprise accounts" not in transcript
+    assert OBSERVATION_WITHHELD_NOTE in transcript

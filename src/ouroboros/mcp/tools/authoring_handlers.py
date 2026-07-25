@@ -1289,10 +1289,15 @@ def _format_extraction_transcript(state: InterviewState) -> str:
     if not state.rounds:
         return ""
     lines: list[str] = []
-    if state.initial_context:
-        lines.append(f"**Initial Context:** {state.initial_context}")
-        lines.append("")
     observation_seen = False
+    if state.initial_context:
+        # The initial context itself can lead with an observation marker
+        # (round-81) — the same rule every answer gets, and a withheld one
+        # taints every question.
+        safe_context = extraction_safe_answer(state.initial_context)
+        observation_seen = safe_context != state.initial_context
+        lines.append(f"**Initial Context:** {safe_context}")
+        lines.append("")
     for r in state.rounds:
         # Question withholding by taint provenance (round-80), answers by
         # marker (round-74) — see extraction_safe_question.

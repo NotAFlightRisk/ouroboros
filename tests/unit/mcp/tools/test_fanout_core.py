@@ -8420,3 +8420,44 @@ def test_round80_compact_date_partitions_complete_end_to_end(tmp_path: Any) -> N
     assert _identity_scope_problem("user_id=202607", "filters[0]") is not None
     assert _identity_scope_problem("cohort=999999", "filters[0]") is not None
     assert _identity_scope_problem("day=20260231", "filters[0]") is not None
+
+
+def test_round81_letter_hex_scope_values_are_refused_by_the_grammar(tmp_path: Any) -> None:
+    """release=deadbeef: advertised and enforced now agree — by refusal.
+
+    The validator has always read a letter-bearing 8+ hex value as an opaque
+    identifier; the published grammar admitted it, so a schema-valid answer
+    left a required lane partial. The refusal lives in the shared grammar
+    string now, and calendar partitions (digits only) stay admitted.
+    """
+    from ouroboros.contracts.data_evidence import (
+        _READ_REQUEST_FILTER,
+        _data_context_answer_contract,
+    )
+
+    published = _data_context_answer_contract()["response_model_schema"]["$defs"]["read_request"][
+        "properties"
+    ]["filters"]["items"]["pattern"]
+    assert published == _READ_REQUEST_FILTER.pattern
+
+    for refused in ("release=deadbeef", "segment=a1b2c3d4e5"):
+        assert not _READ_REQUEST_FILTER.match(refused), refused
+    for admitted in ("month=202607", "date=20260725", "cohort=enterprise", "build=v2_1"):
+        assert _READ_REQUEST_FILTER.match(admitted), admitted
+
+    # And an admitted scope still completes end-to-end.
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-81",
+        lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+    )
+    assert fanout_id is not None
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-81",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": _round77_answer("logins", ["build=v2_1"])}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete", out.get("contract_violations")

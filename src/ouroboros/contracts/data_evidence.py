@@ -343,7 +343,7 @@ def _data_context_answer_contract() -> dict[str, Any]:
                     "dimension": {
                         "type": "string",
                         "maxLength": 48,
-                        "pattern": "^[a-z][a-z0-9_]{0,23}=[a-z0-9][a-z0-9_.-]{0,21}$",
+                        "pattern": DIMENSION_TOKEN_PATTERN,
                     },
                 },
             },
@@ -391,7 +391,7 @@ def _data_context_answer_contract() -> dict[str, Any]:
                         "items": {
                             "type": "string",
                             "maxLength": 48,
-                            "pattern": "^[a-z][a-z0-9_]{0,23}(=|!=|<|>|<=|>=)[a-z0-9][a-z0-9_.:+-]{0,21}$",
+                            "pattern": FILTER_TOKEN_PATTERN,
                         },
                     },
                     "grouping": {
@@ -1454,13 +1454,32 @@ def _data_evidence_fallback_schema() -> dict[str, Any]:
 _AGGREGATE_UNIT = re.compile(r"^[a-z%][a-z_/%]{0,23}$")
 
 
-_AGGREGATE_DIMENSION = re.compile(r"^[a-z][a-z0-9_]{0,23}=[A-Za-z0-9_.-]{1,22}$")
+#: Scope-value fragment shared by the filter and dimension grammars
+#: (round-81): a letter-bearing pure-hex run of 8+ characters is an opaque
+#: identifier by shape (deadbeef, a1b2c3d4e5), and the validator has always
+#: rejected it — but the PUBLISHED grammars admitted it, so release=deadbeef
+#: was schema-valid yet left a required lane partial. The refusal lives in
+#: the grammar now, and the enforcement compiles from the same string, so
+#: the two surfaces cannot disagree. Pure digit runs are NOT refused here:
+#: calendar-valid partitions (month=202607) are admitted and the round-80
+#: calendar rule handles the rest.
+_HEX_ID_VALUE_EXCLUSION = r"(?!(?=[0-9a-f]{8,}(?:$|[_.:+-]))[0-9]*[a-f])"
+FILTER_TOKEN_PATTERN = (
+    r"^[a-z][a-z0-9_]{0,23}(=|!=|<|>|<=|>=)"
+    + _HEX_ID_VALUE_EXCLUSION
+    + r"[a-z0-9][a-z0-9_.:+-]{0,21}$"
+)
+DIMENSION_TOKEN_PATTERN = (
+    r"^[a-z][a-z0-9_]{0,23}=" + _HEX_ID_VALUE_EXCLUSION + r"[a-z0-9][a-z0-9_.-]{0,21}$"
+)
+
+_AGGREGATE_DIMENSION = re.compile(DIMENSION_TOKEN_PATTERN)
 
 
 # _READ_REQUEST_METRIC is compiled below, after METRIC_TOKEN_PATTERN.
 
 
-_READ_REQUEST_FILTER = re.compile(r"^[a-z][a-z0-9_]{0,23}[=<>!]{1,2}[A-Za-z0-9_.:+-]{1,22}$")
+_READ_REQUEST_FILTER = re.compile(FILTER_TOKEN_PATTERN)
 
 
 _READ_REQUEST_GROUPING = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
