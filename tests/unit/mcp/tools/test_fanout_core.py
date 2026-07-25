@@ -34,6 +34,7 @@ from ouroboros.mcp.tools.subagent import (
     FanoutRecord,
     FanoutRegistry,
     RecordWrite,
+    canonical_data_lane_contract,
     build_fanout_subagents,
     build_interview_question_advisory_subagents,
     build_subagent_payload,
@@ -7826,3 +7827,74 @@ def test_round71_legacy_data_lane_without_a_contract_is_not_fail_open(tmp_path: 
         serialized = json.dumps(out, ensure_ascii=False, default=str)
         assert "alice@example.com" not in serialized, label
         assert not registry.load(fanout_id).received_results, label
+
+
+# --------------------------------------------------------------------------- #
+# round-71 — the invariant itself, not one instance of it
+# --------------------------------------------------------------------------- #
+
+
+_CONTRACT_DECLARATIONS: list[tuple[str, Any]] = [
+    ("absent", None),
+    ("empty", {}),
+    ("reserved id, weak schema", dict(_WEAK_DATA_DECLARATION)),
+    ("reserved id, canonical", None),  # filled in below
+    (
+        "foreign id, enforceable",
+        {
+            "contract_id": "future_additive.v1",
+            "response_model_schema": {"type": "object", "properties": {"note": {"type": "string"}}},
+        },
+    ),
+    (
+        "foreign id, broken $ref",
+        {
+            "contract_id": "future_ref.v1",
+            "response_model_schema": {
+                "type": "object",
+                "properties": {"payload": {"$ref": "#/$defs/missing_definition"}},
+            },
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize("lane_id", ["data_context", "extra_metrics_lane", "code_context"])
+@pytest.mark.parametrize(("label", "declared"), _CONTRACT_DECLARATIONS)
+def test_round71_registration_and_publication_never_disagree(
+    lane_id: str,
+    label: str,
+    declared: Any,
+) -> None:
+    """Every surface that resolves a lane contract must resolve it the same.
+
+    Rounds 67, 70 and 71 were one decision reaching three surfaces, one round
+    each, because the consistency check was written over the instance being
+    fixed rather than over the invariant. This is the invariant: for every
+    lane id and every declaration a caller can write, what is published is
+    what is bound.
+    """
+    from ouroboros.mcp.tools.subagent import (
+        UNENFORCED_CONTRACT_FIELD,
+        effective_lane_contract,
+        published_lane_contract_fields,
+    )
+
+    if label == "reserved id, canonical":
+        declared = canonical_data_lane_contract()
+
+    bound = effective_lane_contract(lane_id, declared)
+    published = published_lane_contract_fields(declared or {}, lane_id)
+
+    if bound is None:
+        # Nothing is enforced, and the metadata must say exactly that rather
+        # than advertise a form re-entry ignores.
+        assert "answer_contract" not in published, (lane_id, label)
+        assert UNENFORCED_CONTRACT_FIELD in published, (lane_id, label)
+    else:
+        assert published.get("answer_contract") == bound, (lane_id, label)
+        assert UNENFORCED_CONTRACT_FIELD not in published, (lane_id, label)
+
+    # And the data lane is bound whatever it declared.
+    if lane_id == "data_context":
+        assert bound == canonical_data_lane_contract(), label
