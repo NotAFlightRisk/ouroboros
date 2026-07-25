@@ -659,6 +659,16 @@ def _data_context_answer_contract() -> dict[str, Any]:
                     "type": "object",
                     "additionalProperties": False,
                     "required": ["tool_name", "request", "source_class"],
+                    "allOf": [
+                        {
+                            # A proposal the user cannot judge is not a
+                            # proposal (round-48). Required as SUBMITTED;
+                            # absent in the retained state, where the whole
+                            # prose layer is deliberately gone.
+                            "if": {"not": {"required": ["decision_retained"]}},
+                            "then": {"required": ["expected_decision"]},
+                        }
+                    ],
                     # An unexecuted proposal is only useful if the parent
                     # session can actually run and judge it: empty tool,
                     # request, or decision fields are not a proposal.
@@ -670,6 +680,7 @@ def _data_context_answer_contract() -> dict[str, Any]:
                         },
                         "request": {"$ref": "#/$defs/read_request"},
                         "expected_decision": {"type": "string", "minLength": 1, "maxLength": 300},
+                        "decision_retained": {"const": False},
                         "source_class": {
                             "enum": [
                                 "metered",
@@ -693,6 +704,11 @@ def _data_context_answer_contract() -> dict[str, Any]:
         },
         "$defs": {
             "aggregation_kind": {
+                # Each kind names ONE measurement. ratio/share/duration were
+                # under-specified (no numerator, denominator, or unit basis),
+                # so two identical requests could mean different things — a
+                # share is reported as its numerator and its total, which is
+                # also what makes it auditable.
                 "enum": [
                     "count",
                     "distinct_count",
@@ -702,9 +718,6 @@ def _data_context_answer_contract() -> dict[str, Any]:
                     "percentile",
                     "min",
                     "max",
-                    "ratio",
-                    "share",
-                    "duration",
                 ]
             },
             "aggregate": {
@@ -731,6 +744,12 @@ def _data_context_answer_contract() -> dict[str, Any]:
                 },
             },
             "read_request": {
+                "allOf": [
+                    {
+                        "if": {"properties": {"aggregation": {"const": "percentile"}}},
+                        "then": {"required": ["percentile"]},
+                    }
+                ],
                 # A read request is a STRUCTURE, not a query string. The lane
                 # names what to measure; the parent session builds and runs the
                 # actual query after user confirmation. Mutating statements,
@@ -747,13 +766,16 @@ def _data_context_answer_contract() -> dict[str, Any]:
                         "pattern": "^[A-Za-z][A-Za-z0-9_.*-]{0,63}$",
                     },
                     "aggregation": {"$ref": "#/$defs/aggregation_kind"},
+                    # Required when aggregation is percentile: p95 and p50 are
+                    # different measurements and must not share a request form.
+                    "percentile": {"type": "integer", "minimum": 1, "maximum": 99},
                     "filters": {
                         "type": "array",
                         "maxItems": 5,
                         "items": {
                             "type": "string",
                             "maxLength": 48,
-                            "pattern": "^[a-z][a-z0-9_]{0,23}[=<>!]{1,2}[A-Za-z0-9_.:+-]{1,22}$",
+                            "pattern": "^[a-z][a-z0-9_]{0,23}(=|!=|<|>|<=|>=)[A-Za-z0-9_.:+-]{1,22}$",
                         },
                     },
                     "grouping": {

@@ -5496,3 +5496,98 @@ def test_round46_filter_operators_are_all_parsed() -> None:
             )
             == []
         ), category
+
+
+def test_round48_request_fields_and_replay_consent(tmp_path: Any) -> None:
+    """Round-48: sensitive request fields, identity metrics, and honest replay."""
+    import json as json_module
+
+    from ouroboros.contracts.data_evidence import _read_request_shape_problems
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    # B1 — every parsed request field gets the credential classification.
+    for request in (
+        {"operation": "read", "metric": "u", "aggregation": "count", "grouping": ["password"]},
+        {
+            "operation": "read",
+            "metric": "u",
+            "aggregation": "count",
+            "filters": ["access_token!=huntertwo"],
+        },
+    ):
+        assert any("credential" in problem for problem in _read_request_shape_problems(request)), (
+            request
+        )
+
+    # B3 — an identity metric may be counted, never valued.
+    for metric in ("ssn", "phone_number", "email_address"):
+        assert _read_request_shape_problems(
+            {"operation": "read", "metric": metric, "aggregation": "max"}
+        ), metric
+        assert (
+            _read_request_shape_problems(
+                {"operation": "read", "metric": metric, "aggregation": "distinct_count"}
+            )
+            == []
+        ), metric
+
+    # B2 — a replayed data completion says it cannot be confirmed.
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    lanes = [dict(lane) for lane in advisory["lanes"]]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-consent", lanes=lanes
+    )
+    assert fanout_id is not None
+    results = [
+        {"key": lane, "content": {"lane_id": lane, "finding": "ok"}}
+        for lane in ("code_context", "web_context", "ambiguity_contrarian", "answer_simplifier")
+    ]
+    results.append(
+        {
+            "key": "data_context",
+            "content": {
+                "lane_id": "data_context",
+                "data_needed": True,
+                "finding": "Growth leads at 78%.",
+                "confidence": "reported_by_tool",
+                "evidence": [
+                    _typed_evidence(
+                        request={
+                            "operation": "read",
+                            "metric": "active_users",
+                            "aggregation": "count",
+                            "filters": ["plan=growth"],
+                        },
+                        value={"number": 42, "unit": "accounts", "dimension": "plan=growth"},
+                    )
+                ],
+                "proposed_queries": [],
+                "requires_user_confirmation": True,
+                "caveats": ["Point-in-time."],
+            },
+        }
+    )
+    assert (
+        submit_fanout_results(
+            registry,
+            session_id="sess-consent",
+            correlation_key="context.lane_id",
+            results=results,
+            fanout_id=fanout_id,
+        )["status"]
+        == "complete"
+    )
+    replay = submit_fanout_results(
+        registry,
+        session_id="sess-consent",
+        correlation_key="context.lane_id",
+        results=[],
+        fanout_id=fanout_id,
+    )
+    assert replay["status"] == "already_complete"
+    assert replay["consent_status"] == "not_confirmable_prose_not_retained"
+    assert "re-run" in replay["consent_note"]
+    assert "Growth leads" not in json_module.dumps(replay)

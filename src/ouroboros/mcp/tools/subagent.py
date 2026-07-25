@@ -1210,10 +1210,11 @@ def _plugin_advisory_contract_section(
             elif lane_id == "data_context":
                 contract_blocks.append(
                     f"{lane_id} answer contract ({contract_id}): full form "
-                    "OMITTED (oversized or invalid) — its schema is not "
-                    "enforced, but the data_policy above still binds and IS "
-                    "enforced at re-entry: return one JSON object with "
-                    "aggregates-only, PII-scrubbed evidence and "
+                    "OMITTED (oversized or invalid). The PUBLISHED "
+                    "data_evidence_answer.v1 contract is enforced at re-entry "
+                    "in its place, and the data_policy above binds: return one "
+                    "JSON object with typed evidence (a number with a unit), "
+                    "typed proposed_queries, and "
                     "requires_user_confirmation: true."
                 )
             else:
@@ -4291,6 +4292,25 @@ def _submit_fanout_results_locked(
         replay: dict[str, Any] = (
             dict(record.terminal_response) if record.terminal_response is not None else {}
         )
+        # A replayed data completion is NOT confirmable (round-48): the
+        # advisory narrative the user would consent to was delivered once and
+        # is deliberately not durable, so the replay carries the measurements
+        # and says plainly that consent must be re-obtained by re-running the
+        # fan-out. Silently returning a consent-shaped payload without its
+        # consent context would be the worse failure.
+        data_lane_replayed = any(
+            isinstance(contract, Mapping)
+            and str(contract.get("contract_id") or "") == _DATA_EVIDENCE_CONTRACT_ID
+            for contract in (record.synthesizer_input.get("lane_answer_contracts") or {}).values()
+        )
+        if data_lane_replayed:
+            replay["consent_status"] = "not_confirmable_prose_not_retained"
+            replay["consent_note"] = (
+                "This replay carries the measurements only. The advisory "
+                "narrative a user confirms is not retained in durable state, "
+                "so a data-derived answer may not be forwarded from a replay — "
+                "re-run the advisory fan-out to obtain it."
+            )
         replay.update(
             {
                 "status": "already_complete",

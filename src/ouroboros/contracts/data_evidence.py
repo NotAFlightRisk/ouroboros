@@ -273,9 +273,12 @@ def redact_prose_for_persistence(output: Any) -> Any:
     if isinstance(proposals, list):
         redacted["proposed_queries"] = [
             {
-                key: value
-                for key, value in item.items()
-                if key not in DATA_EVIDENCE_PROPOSAL_PROSE_FIELDS
+                **{
+                    key: value
+                    for key, value in item.items()
+                    if key not in DATA_EVIDENCE_PROPOSAL_PROSE_FIELDS
+                },
+                "decision_retained": False,
             }
             if isinstance(item, Mapping)
             else item
@@ -617,6 +620,14 @@ def _read_request_shape_problems(request: Any, *, executed: bool = False) -> lis
         # A metric names what is measured; a credential-shaped name is the
         # leak wearing that field (round-45 probe: password_swordfish).
         problems.append("metric is credential-shaped; name the measurement instead")
+    elif _entity_key(metric) and request.get("aggregation") not in _CARDINAL_AGGREGATIONS:
+        # Counting identities yields a cardinality; taking their min/max/median
+        # yields an identity (round-48 probe: max(ssn)). The typed form makes
+        # that decidable per field instead of per SQL projection.
+        problems.append(
+            "an identity metric may only be counted; a value-returning "
+            "aggregation over it reports the identity itself"
+        )
     if request.get("aggregation") not in _AGGREGATION_KINDS:
         problems.append("aggregation is not one of the declared kinds")
     for list_field, pattern, limit in (
@@ -762,6 +773,12 @@ def _entity_key(key: str) -> bool:
 _FILTER_OPERATOR = re.compile(r"[=<>!]{1,2}")
 
 
+#: Aggregations that reduce their input to a cardinality. Every other kind
+#: returns one of the input VALUES, which is why an identity metric may only
+#: be counted.
+_CARDINAL_AGGREGATIONS = frozenset({"count", "distinct_count"})
+
+
 def _identity_scope_problem(text: str, label: str) -> str | None:
     """Whether ``key<op>value`` scopes an aggregate to an identified entity."""
     match = _FILTER_OPERATOR.search(text)
@@ -769,9 +786,15 @@ def _identity_scope_problem(text: str, label: str) -> str | None:
         key, value = text[: match.start()], text[match.end() :]
     else:
         key, value = text, ""
-    if _entity_key(key.strip()):
-        return f"{label} keys an entity ({key.strip()!r}); aggregate by category instead"
-    if value and _OPAQUE_ENTITY_VALUE.match(value.strip()):
+    key, value = key.strip(), value.strip()
+    if _entity_key(key):
+        return f"{label} keys an entity ({key!r}); aggregate by category instead"
+    # Round-48: grouping=["password"], filters=["access_token!=huntertwo"] —
+    # the parsed key and the compared value are identifiers too, so they get
+    # the same credential classification every other identifier field has.
+    if _identifier_looks_secret(key) or (value and _identifier_looks_secret(value)):
+        return f"{label} names or compares a credential; it may not ride a data request"
+    if value and _OPAQUE_ENTITY_VALUE.match(value):
         return f"{label} scopes to an opaque entity identifier; aggregate by category instead"
     return None
 
