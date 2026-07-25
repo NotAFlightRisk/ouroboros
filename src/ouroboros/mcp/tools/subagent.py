@@ -56,6 +56,8 @@ from ouroboros.contracts.data_evidence import (
     _DATA_EVIDENCE_CONTRACT_ID,
     _data_evidence_boundary_violations,
     _data_evidence_fallback_schema,
+    _identifier_carries_payload,
+    _identifier_looks_secret,
     data_evidence_retained_schema,
     redact_prose_for_persistence,
 )
@@ -3767,7 +3769,14 @@ def _reportable_unexpected_key(key: str) -> str:
     host needs to recognize its own mistake); anything else could be PII or a
     secret masquerading as a key, so only a digest is reported.
     """
-    if _LANE_KEY_SHAPE.match(key):
+    # Lane-id shape is not enough (round-54: a GitHub token matches it): the
+    # same classifiers every other identifier field gets are applied before a
+    # key is echoed back into a response.
+    if (
+        _LANE_KEY_SHAPE.match(key)
+        and not _identifier_looks_secret(key)
+        and not _identifier_carries_payload(key)
+    ):
         return key
     return _redacted_segment(key)
 

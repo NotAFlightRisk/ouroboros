@@ -1584,7 +1584,7 @@ def _typed_evidence(**overrides: Any) -> dict[str, Any]:
     item: dict[str, Any] = {
         "source": "warehouse",
         "request": {"operation": "read", "metric": "active_users", "aggregation": "count"},
-        "value": {"number": 42, "unit": "accounts"},
+        "value": {"number": 42},
         "observed_at": "2026-07-23T09:00:00Z",
         "execution_status": "succeeded",
     }
@@ -5086,10 +5086,10 @@ def test_forbidden_content_classes_are_unrepresentable_not_filtered() -> None:
     for aggregate in (
         # Round-52: evidence reports a cardinality, so the number is a whole
         # non-negative count of rows.
-        {"number": 42, "unit": "accounts"},
-        {"number": 0, "unit": "accounts"},
-        {"number": 240, "unit": "rows"},
-        {"number": 12400, "unit": "users"},
+        {"number": 42},
+        {"number": 0},
+        {"number": 240},
+        {"number": 12400},
     ):
         valid = _minimal_data_output()
         # A scope may only name a dimension the request grouped by (round-45).
@@ -5147,7 +5147,7 @@ def test_round43_durable_boundary_invariants(tmp_path: Any) -> None:
     )
 
     # B2 — the typed grammar no longer admits identity-scoped evidence.
-    assert _aggregate_shape_problems({"number": 1, "unit": "rows", "dimension": "user_id=847291"})
+    assert _aggregate_shape_problems({"number": 1, "dimension": "user_id=847291"})
     assert _read_request_shape_problems(
         {"operation": "read", "metric": "events", "aggregation": "count", "grouping": ["user_id"]}
     )
@@ -5160,7 +5160,7 @@ def test_round43_durable_boundary_invariants(tmp_path: Any) -> None:
         }
     )
     # Category scopes and category groupings stay valid.
-    assert _aggregate_shape_problems({"number": 78, "unit": "%", "dimension": "plan=growth"}) == []
+    assert _aggregate_shape_problems({"number": 78, "dimension": "plan=growth"}) == []
     assert (
         _read_request_shape_problems(
             {
@@ -5187,7 +5187,7 @@ def test_round43_durable_boundary_invariants(tmp_path: Any) -> None:
     # B4 — a measurement is finite; 1e400 is not.
     # Round-52: a cardinality is a whole, non-negative number of rows, and an
     # infinity fails that before finiteness is reached.
-    assert _aggregate_shape_problems({"number": float("1e400"), "unit": "rows"})
+    assert _aggregate_shape_problems({"number": float("1e400")})
 
     # B5 — the advertised policy is persisted and its caps are enforced.
     registry = FanoutRegistry(tmp_path)
@@ -5288,7 +5288,7 @@ def test_round44_ownership_and_evidence_invariants(tmp_path: Any) -> None:
     worn_unit = _minimal_data_output()
     worn_unit["evidence"] = [_typed_evidence(value={"number": 1012345678, "unit": "phone"})]
     assert any(
-        "not one of the units" in error
+        "outside the aggregate shape" in error
         for error in _data_evidence_boundary_violations(worn_unit, policy)
     )
 
@@ -5320,9 +5320,7 @@ def test_round44_ownership_and_evidence_invariants(tmp_path: Any) -> None:
     # Follow-up — the value no longer repeats the request's aggregation, so
     # that contradiction is unrepresentable; what stays bindable is the scope.
     mismatched = _minimal_data_output()
-    mismatched["evidence"] = [
-        _typed_evidence(value={"number": 42, "unit": "usd", "dimension": "plan=growth"})
-    ]
+    mismatched["evidence"] = [_typed_evidence(value={"number": 42, "dimension": "plan=growth"})]
     assert any(
         "did not apply" in error for error in _data_evidence_boundary_violations(mismatched, policy)
     )
@@ -5366,9 +5364,7 @@ def test_round45_field_grammars_close_their_classes() -> None:
     # B3 — the value no longer repeats the request's aggregation, so the
     # contradiction has no field; the scope stays bound to what was grouped.
     unfiltered = _minimal_data_output()
-    unfiltered["evidence"] = [
-        _typed_evidence(value={"number": 42, "unit": "accounts", "dimension": "plan=growth"})
-    ]
+    unfiltered["evidence"] = [_typed_evidence(value={"number": 42, "dimension": "plan=growth"})]
     assert any(
         "did not apply" in error for error in _data_evidence_boundary_violations(unfiltered, policy)
     )
@@ -5391,7 +5387,7 @@ def test_round45_field_grammars_close_their_classes() -> None:
     scoped = _minimal_data_output()
     scoped["evidence"] = [
         _typed_evidence(
-            value={"number": 42, "unit": "accounts", "dimension": "plan=growth"},
+            value={"number": 42, "dimension": "plan=growth"},
             request={
                 "operation": "read",
                 "metric": "active_users",
@@ -5447,7 +5443,7 @@ def test_round46_prose_is_not_durable_and_scope_binds_to_filters(tmp_path: Any) 
                     "aggregation": "count",
                     "filters": ["plan=growth"],
                 },
-                value={"number": 42, "unit": "accounts", "dimension": "plan=growth"},
+                value={"number": 42, "dimension": "plan=growth"},
             )
         ],
         "proposed_queries": [],
@@ -5533,7 +5529,7 @@ def test_round48_request_fields_and_replay_consent(tmp_path: Any) -> None:
     # B3 — an identity metric may be counted, never valued.
     for metric in ("ssn", "phone_number", "email_address"):
         assert _read_request_shape_problems(
-            {"operation": "read", "metric": metric, "aggregation": "max"}
+            {"operation": "read", "metric": metric, "aggregation": "max"}, executed=True
         ), metric
         assert (
             _read_request_shape_problems(
@@ -5572,7 +5568,7 @@ def test_round48_request_fields_and_replay_consent(tmp_path: Any) -> None:
                             "aggregation": "count",
                             "filters": ["plan=growth"],
                         },
-                        value={"number": 42, "unit": "accounts", "dimension": "plan=growth"},
+                        value={"number": 42, "dimension": "plan=growth"},
                     )
                 ],
                 "proposed_queries": [],
@@ -5634,7 +5630,7 @@ def test_round49_retained_state_is_server_owned(tmp_path: Any) -> None:
                     "aggregation": "count",
                     "filters": ["plan=growth"],
                 },
-                value={"number": 42, "unit": "accounts", "dimension": "plan=growth"},
+                value={"number": 42, "dimension": "plan=growth"},
             )
         ],
         "proposed_queries": [],
@@ -5789,7 +5785,7 @@ def test_round50_lifecycle_is_provenance_and_scopes_are_keys(tmp_path: Any) -> N
                     "aggregation": "count",
                     "filters": ["street=123_main_st"],
                 },
-                value={"number": 42, "unit": "accounts", "dimension": "street=123_main_st"},
+                value={"number": 42, "dimension": "street=123_main_st"},
             )
         ],
         "proposed_queries": [],
@@ -5876,7 +5872,7 @@ def test_round51_value_returning_aggregations_cannot_carry_a_number(tmp_path: An
                     "metric": "credit_card_number",
                     "aggregation": "max",
                 },
-                value={"number": card_number, "unit": "count"},
+                value={"number": card_number},
             )
         ],
         "proposed_queries": [],
@@ -5911,7 +5907,7 @@ def test_round51_value_returning_aggregations_cannot_carry_a_number(tmp_path: An
                     "aggregation": "distinct_count",
                     "filters": ["plan=growth"],
                 },
-                value={"number": 4200, "unit": "users", "dimension": "plan=growth"},
+                value={"number": 4200, "dimension": "plan=growth"},
             )
         ],
     }
@@ -5989,7 +5985,7 @@ def test_round52_cardinalities_only_and_transportable_content(tmp_path: Any) -> 
                         "metric": "credit_card_number",
                         "aggregation": aggregation,
                     },
-                    value={"number": number, "unit": "count"},
+                    value={"number": number},
                 )
             ],
             "proposed_queries": [],
@@ -6010,9 +6006,9 @@ def test_round52_cardinalities_only_and_transportable_content(tmp_path: Any) -> 
         )
 
     # Warning — a cardinality is a whole, non-negative number of rows.
-    assert _aggregate_shape_problems({"number": -1.5, "unit": "count"})
-    assert _aggregate_shape_problems({"number": -3, "unit": "count"})
-    assert _aggregate_shape_problems({"number": 4200, "unit": "users"}) == []
+    assert _aggregate_shape_problems({"number": -1.5})
+    assert _aggregate_shape_problems({"number": -3})
+    assert _aggregate_shape_problems({"number": 4200}) == []
 
     # B2 — content that cannot cross the transport is malformed at the door,
     # so no outcome is built around it and no response fails to serialize.
@@ -6049,7 +6045,7 @@ def test_round53_identifier_payloads_and_countable_units(tmp_path: Any) -> None:
 
     policy = _data_context_lane_policy()
 
-    def _output(source: str = "clickhouse_query", unit: str = "users") -> dict[str, Any]:
+    def _output(source: str = "clickhouse_query", unit: str | None = None) -> dict[str, Any]:
         return {
             "lane_id": "data_context",
             "data_needed": True,
@@ -6063,7 +6059,7 @@ def test_round53_identifier_payloads_and_countable_units(tmp_path: Any) -> None:
                         "metric": "active_users",
                         "aggregation": "count",
                     },
-                    value={"number": 42, "unit": unit},
+                    value={"number": 42, **({"unit": unit} if unit else {})},
                 )
             ],
             "proposed_queries": [],
@@ -6082,11 +6078,12 @@ def test_round53_identifier_payloads_and_countable_units(tmp_path: Any) -> None:
     for source in ("metabase.card.4471", "s3_logs_20260725", "clickhouse_query"):
         assert _data_evidence_boundary_violations(_output(source=source), policy) == [], source
 
-    # Warning — a cardinality is counted in countable things.
-    for unit in ("ms", "bytes", "%"):
-        assert _data_evidence_boundary_violations(_output(unit=unit), policy) != [], unit
-    for unit in ("users", "rows", "events"):
-        assert _data_evidence_boundary_violations(_output(unit=unit), policy) == [], unit
+    # Round-54: the unit field is gone entirely, so a cardinality can no
+    # longer be reported in a duration.
+    assert any(
+        "outside the aggregate shape" in error
+        for error in _data_evidence_boundary_violations(_output(unit="ms"), policy)
+    )
 
     # End to end: the rejected payload reaches neither response nor record.
     advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
@@ -6112,3 +6109,90 @@ def test_round53_identifier_payloads_and_countable_units(tmp_path: Any) -> None:
     assert [item["lane_id"] for item in out["contract_violations"]] == ["data_context"]
     assert "4111111111111111" not in json_module.dumps(out)
     assert "4111111111111111" not in (tmp_path / f"{fanout_id}.json").read_text()
+
+
+def test_round54_durable_record_holds_only_provable_parts(tmp_path: Any) -> None:
+    """Child-authored identifiers are delivered, not retained; categories work."""
+    import json as json_module
+
+    from ouroboros.contracts.data_evidence import (
+        _read_request_shape_problems,
+        redact_prose_for_persistence,
+    )
+    from ouroboros.mcp.tools.subagent import _reportable_unexpected_key
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    submitted = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Growth leads.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            _typed_evidence(
+                source="alice.smith",
+                request={
+                    "operation": "read",
+                    "metric": "alice_smith",
+                    "aggregation": "count",
+                    "filters": ["plan=growth"],
+                },
+                value={"number": 42, "dimension": "plan=growth"},
+            )
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time."],
+    }
+    # B1 — nothing a child wrote as an identifier survives into the record.
+    retained = redact_prose_for_persistence(submitted)
+    assert "alice" not in json_module.dumps(retained)
+    assert "source" not in retained["evidence"][0]
+    assert "metric" not in retained["evidence"][0]["request"]
+    # What the server can vouch for stays.
+    assert retained["evidence"][0]["value"]["number"] == 42
+    assert retained["evidence"][0]["request"]["filters"] == ["plan"]
+
+    # B3 — a lane-id-shaped key that is credential- or payload-shaped is not
+    # echoed back into a response.
+    for key in ("ghp_abcdefghijklmnopqrstuvwxyz1234567890", "metrics_4111111111111111"):
+        assert _reportable_unexpected_key(key).startswith("<redacted-key"), key
+    assert _reportable_unexpected_key("code_context") == "code_context"
+
+    # Warning — legitimate category scopes are attainable again.
+    for scope in ("year=2026", "customer_segment=enterprise", "account_tier=growth"):
+        assert (
+            _read_request_shape_problems(
+                {"operation": "read", "metric": "u", "aggregation": "count", "filters": [scope]}
+            )
+            == []
+        ), scope
+    for scope in ("user_id=847291", "email_address=x", "tenant_id>847291"):
+        assert _read_request_shape_problems(
+            {"operation": "read", "metric": "u", "aggregation": "count", "filters": [scope]}
+        ), scope
+
+    # End to end: the submitted identifiers reach the host, not the disk.
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-54", lanes=[dict(lane) for lane in advisory["lanes"]]
+    )
+    assert fanout_id is not None
+    results = [
+        {"key": lane, "content": {"lane_id": lane, "finding": "ok"}}
+        for lane in ("code_context", "web_context", "ambiguity_contrarian", "answer_simplifier")
+    ]
+    results.append({"key": "data_context", "content": submitted})
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-54",
+        correlation_key="context.lane_id",
+        results=results,
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    assert out["contract_violations"] == []
+    assert "alice" in json_module.dumps(out)
+    assert "alice" not in (tmp_path / f"{fanout_id}.json").read_text()

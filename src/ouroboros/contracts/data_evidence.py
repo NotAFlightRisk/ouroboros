@@ -323,17 +323,12 @@ def _data_context_answer_contract() -> dict[str, Any]:
                 # something a text classifier must recognize and reject.
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["number", "unit"],
+                "required": ["number"],
                 "properties": {
                     # A cardinality is a whole number of rows. Bound here
                     # rather than left to "is finite" (round-52: a count of
                     # -1.5 validated), since evidence only ever reports one.
                     "number": {"type": "integer", "minimum": 0},
-                    "unit": {
-                        "type": "string",
-                        "maxLength": 24,
-                        "pattern": "^[a-z%][a-z_/%]{0,23}$",
-                    },
                     "dimension": {
                         "type": "string",
                         "maxLength": 48,
@@ -517,6 +512,12 @@ def data_evidence_retained_schema() -> dict[str, Any]:
     ]
     key_only = {"type": "string", "maxLength": 24, "pattern": "^[a-z][a-z0-9_]{0,23}$"}
     defs = schema["$defs"]
+    for def_name in ("read_request",):
+        defs[def_name]["required"] = [key for key in defs[def_name]["required"] if key != "metric"]
+    evidence_items = schema["properties"]["evidence"]["items"]
+    evidence_items["required"] = [key for key in evidence_items["required"] if key != "source"]
+    proposal_items = schema["properties"]["proposed_queries"]["items"]
+    proposal_items["required"] = [key for key in proposal_items["required"] if key != "tool_name"]
     defs["aggregate"]["properties"]["dimension"] = key_only
     defs["read_request"]["properties"]["filters"] = {
         "type": "array",
@@ -615,25 +616,6 @@ def _data_context_lane_policy() -> dict[str, Any]:
             # phone digits as the number, "phone" as the unit). Hosts that
             # need another unit extend this list; the engine enforces
             # whatever the snapshot declares.
-            # Executed evidence reports a cardinality, so its unit names what
-            # was counted. Time, size, and ratio units describe measurements
-            # the evidence path no longer carries (round-53: count(active_users)
-            # reported as 42 ms), and stay available to proposals.
-            "countable_units": [
-                "accounts",
-                "users",
-                "sessions",
-                "events",
-                "requests",
-                "calls",
-                "queries",
-                "rows",
-                "records",
-                "items",
-                "orders",
-                "messages",
-                "errors",
-            ],
             "allowed_units": [
                 "accounts",
                 "users",
@@ -891,6 +873,9 @@ def _parseable_timestamp(value: str) -> bool:
 #: recognizing them is not storing them (round-46).
 DATA_EVIDENCE_PROSE_FIELDS = ("finding", "caveats")
 DATA_EVIDENCE_PROPOSAL_PROSE_FIELDS = ("expected_decision",)
+#: Child-authored identifier fields. Nothing can prove one of these is not a
+#: person's name, so they are delivered and not retained (round-54).
+DATA_EVIDENCE_IDENTIFIER_FIELDS = ("source", "tool_name", "metric")
 
 
 def redact_prose_for_persistence(output: Any) -> Any:
@@ -942,13 +927,27 @@ def _predicate_key(text: str) -> str:
 
 
 def _scope_keys_only(item: Any) -> Any:
-    """Drop category VALUES from a retained evidence item or proposal."""
+    """Reduce a retained evidence item or proposal to its provable parts.
+
+    Category values, the tool name, and the metric are all written by the
+    child, so none of them can be shown to be free of a person's name
+    (round-54: source="alice.smith", metric="alice_smith"). They are delivered
+    in the response — where the confirming human reads them — and are not
+    retained. What stays is what the server can vouch for: the operation, the
+    aggregation, the scope KEYS, the count, and the timestamps.
+    """
     if not isinstance(item, Mapping):
         return item
-    reduced = dict(item)
+    reduced = {
+        key: value for key, value in item.items() if key not in DATA_EVIDENCE_IDENTIFIER_FIELDS
+    }
     request = reduced.get("request")
     if isinstance(request, Mapping):
-        request = dict(request)
+        request = {
+            key: value
+            for key, value in request.items()
+            if key not in DATA_EVIDENCE_IDENTIFIER_FIELDS
+        }
         filters = request.get("filters")
         if isinstance(filters, list):
             request["filters"] = [
@@ -1054,11 +1053,6 @@ def _data_evidence_boundary_violations(
     # snapshot (round-43): a limit that only the prompt knows about is a
     # suggestion, and max_evidence_chars had never been applied.
     evidence_policy = (policy or {}).get("evidence_policy")
-    # Executed evidence is a cardinality, so it is counted in countable
-    # things; the wider unit vocabulary belongs to proposals (round-53).
-    countable_units = (
-        evidence_policy.get("countable_units") if isinstance(evidence_policy, Mapping) else None
-    )
     if isinstance(evidence_policy, Mapping) and isinstance(evidence_items, list):
         max_items = evidence_policy.get("max_evidence_items")
         if isinstance(max_items, int) and len(evidence_items) > max_items:
@@ -1086,9 +1080,7 @@ def _data_evidence_boundary_violations(
         # missing or unenforceable.
         errors.extend(
             f"evidence[{index}].value: {problem}"
-            for problem in _aggregate_shape_problems(
-                item.get("value"), countable_units, retained=retained
-            )
+            for problem in _aggregate_shape_problems(item.get("value"), retained=retained)
         )
         errors.extend(
             f"evidence[{index}].request: {problem}"
@@ -1139,6 +1131,8 @@ def _data_evidence_boundary_violations(
         # two identifier rules still apply: a mutating tool name is a
         # read-only violation, and a credential-shaped name is the leak.
         source = item.get("source")
+        if retained and source is not None:
+            errors.append(f"evidence[{index}].source: a retained item does not carry a source")
         if isinstance(source, str) and not _SAFE_IDENTIFIER_SYNTAX.match(source):
             errors.append(
                 f"evidence[{index}].source: must be the executed tool's identifier, not prose"
@@ -1244,18 +1238,17 @@ def _data_evidence_boundary_violations(
     return errors
 
 
-def _aggregate_shape_problems(
-    value: Any, allowed_units: Any = None, *, retained: bool = False
-) -> list[str]:
+def _aggregate_shape_problems(value: Any, *, retained: bool = False) -> list[str]:
     """Whether an evidence value is a typed aggregate.
 
-    An aggregate is a NUMBER with a unit. Enforcing that here — not only in
-    the JSON Schema — keeps the guarantee for records whose persisted contract
-    is missing or unenforceable, and makes the pre-typed free-text form fail
-    closed instead of silently reopening the old path.
+    An aggregate is a COUNT of rows, optionally scoped to one category. The
+    unit is gone (round-54): it repeated what the request already measured, so
+    ``count(active_users)`` could be reported in ``errors`` and both halves
+    validated independently. What was counted is the request's metric; there
+    is now one place that says it.
     """
     if not isinstance(value, Mapping):
-        return ["must be a typed aggregate object ({number, unit[, dimension]}), not free text"]
+        return ["must be a typed aggregate object ({number[, dimension]}), not free text"]
     problems: list[str] = []
     number = value.get("number")
     if isinstance(number, bool) or not isinstance(number, (int, float)):
@@ -1270,14 +1263,6 @@ def _aggregate_shape_problems(
         # response AND the persisted record (round-43). A measurement is
         # finite by definition.
         problems.append("number must be finite")
-    unit = value.get("unit")
-    if not isinstance(unit, str) or not _AGGREGATE_UNIT.match(unit):
-        problems.append("unit must be a short lowercase unit token")
-    elif isinstance(allowed_units, (list, tuple)) and unit not in allowed_units:
-        # Declared vocabulary, enforced from the persisted policy snapshot
-        # (round-44): "is this one of the declared units" is decidable, so an
-        # identity attribute cannot be worn as a unit.
-        problems.append("unit is not one of the units the data policy declares")
     dimension = value.get("dimension")
     scope_grammar = _RETAINED_SCOPE_KEY if retained else _AGGREGATE_DIMENSION
     if dimension is not None and (
@@ -1316,7 +1301,14 @@ def _read_request_shape_problems(
     if request.get("operation") != "read":
         problems.append("operation must be 'read'")
     metric = request.get("metric")
-    if not isinstance(metric, str) or not _READ_REQUEST_METRIC.match(metric):
+    if retained:
+        # The retained form carries no child-authored identifier (round-54),
+        # so requiring one here would reject the server's own durable shape —
+        # the same category error as validating it against the submission
+        # schema.
+        if metric is not None:
+            problems.append("a retained request does not carry a metric")
+    elif not isinstance(metric, str) or not _READ_REQUEST_METRIC.match(metric):
         problems.append("metric must be a bounded identifier")
     elif _identifier_carries_payload(metric):
         problems.append("metric carries an identifier-length digit run")
@@ -1477,8 +1469,12 @@ _IDENTITY_KEYS = frozenset(
 # A category VALUE is a label ("growth", "kr", "2026-01"); an opaque entity
 # identifier is a bare number or a UUID/hash. Scoping an aggregate to one of
 # those makes it a single-entity row however the key is spelled.
+# A bare number is an entity id only when it is long enough to be one: a year
+# or a small bucket is a category (round-54: year=2026 was refused). Six
+# digits is the shortest plausible account/customer id and leaves four-digit
+# years and three-digit buckets usable.
 _OPAQUE_ENTITY_VALUE = re.compile(
-    r"^(?:\d{3,}|[0-9a-fA-F]{8,}|[0-9a-fA-F-]{16,})$",
+    r"^(?:\d{6,}|[0-9a-fA-F]{8,}|[0-9a-fA-F-]{16,})$",
 )
 
 
@@ -1493,7 +1489,12 @@ def _entity_key(key: str) -> bool:
     lowered = key.lower()
     if lowered in _IDENTITY_KEYS or _ENTITY_KEY_SUFFIX.search(lowered):
         return True
-    return any(token in _IDENTITY_KEYS for token in re.split(r"[-_.]", lowered) if token)
+    # English compounds put the HEAD last, so customer_segment is a segment
+    # and account_tier is a tier — both categories — while email_address is an
+    # address (round-54: the per-token rule refused legitimate scopes). The
+    # head is what the key names; a modifier only says which kind.
+    tokens = [token for token in re.split(r"[-_.]", lowered) if token]
+    return bool(tokens) and tokens[-1] in _IDENTITY_KEYS
 
 
 # The public filter grammar accepts <, >, ! and = in one- or two-character
