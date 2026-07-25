@@ -1212,14 +1212,16 @@ def _plugin_advisory_contract_section(
                     + (_canonical_contract_json(lane_contract) or "{}")
                 )
             elif lane_id == "data_context":
+                # The enforced form is DELIVERED here too (round-58): the
+                # host-driven path was fixed in round 57 and this one kept a
+                # summary, so a plugin child following it stayed partial.
+                # Both transports render the same contract.
                 contract_blocks.append(
-                    f"{lane_id} answer contract ({contract_id}): full form "
-                    "OMITTED (oversized or invalid). The PUBLISHED "
-                    "data_evidence_answer.v1 contract is enforced at re-entry "
-                    "in its place, and the data_policy above binds: return one "
-                    "JSON object with typed evidence (a count of rows), "
-                    "typed proposed_queries, and "
-                    "requires_user_confirmation: true."
+                    f"{lane_id} answer contract ({contract_id}): the declared "
+                    "form could not be delivered whole (oversized or invalid). "
+                    "The PUBLISHED contract below is what re-entry enforces in "
+                    "its place — fill this form exactly:\n"
+                    + (_canonical_contract_json(_data_context_answer_contract()) or "{}")
                 )
             else:
                 contract_blocks.append(
@@ -4222,6 +4224,23 @@ def _carries_redacted_data(
     return False
 
 
+def _unretained_keys(
+    contracts: Mapping[str, Any], provided: Mapping[str, Any]
+) -> frozenset[str]:
+    """Lanes whose content will NOT survive this write.
+
+    Computed from what will be STORED, not from what was submitted: at
+    accumulation time the submitted content is still intact, and reporting it
+    as received is a claim the next call cannot honour (round-58).
+    """
+    stored = _durable_results(contracts, provided)
+    return frozenset(
+        key
+        for key, value in stored.items()
+        if isinstance(value, Mapping) and value.get("content_retained") is False
+    )
+
+
 def _durable_results(contracts: Mapping[str, Any], provided: Mapping[str, Any]) -> dict[str, Any]:
     """Lane results as they are STORED — data-lane prose is not retained.
 
@@ -4375,6 +4394,11 @@ def _submit_fanout_results_locked(
         # to submit it again, and `already_complete` was closing that door
         # too. Terminal immutability is preserved for everything the record
         # actually holds — this admits only what it never held.
+        #
+        # The resubmission goes through the SAME door as a first submission
+        # (round-58): echoing it ahead of contract, malformed-content, and
+        # transport checks made this path a validation bypass, which is worse
+        # than the dead end it replaced.
         resubmittable = {
             str(result.get("key"))
             for result in results
@@ -4384,19 +4408,52 @@ def _submit_fanout_results_locked(
             and record.received_results[str(result.get("key"))].get("content_retained") is False
         }
         if resubmittable:
-            replay["status"] = "already_complete"
-            replay["resubmitted_keys"] = sorted(resubmittable)
-            replay["resubmitted_results"] = {
-                str(result.get("key")): result.get("content")
-                for result in results
-                if isinstance(result, Mapping) and str(result.get("key")) in resubmittable
-            }
-            replay["resubmission_note"] = (
-                "These lanes' content was delivered once and is not retained, "
-                "so the record could not replay it. The values you just sent "
-                "are returned here unchanged; nothing was added to durable "
-                "state."
+            resent: dict[str, Any] = {}
+            rejected: list[str] = []
+            for result in results:
+                if not isinstance(result, Mapping):
+                    continue
+                key = str(result.get("key"))
+                if key not in resubmittable:
+                    continue
+                content = result.get("content")
+                if (
+                    content is None
+                    or (isinstance(content, str) and not content.strip())
+                    or not isinstance(content, (str, Mapping))
+                    or (isinstance(content, Mapping) and not content)
+                    or not _is_transportable(content)
+                ):
+                    rejected.append(key)
+                    continue
+                resent[key] = content
+            raw_contracts_replay = record.synthesizer_input.get("lane_answer_contracts")
+            replay_contracts = (
+                raw_contracts_replay if isinstance(raw_contracts_replay, Mapping) else {}
             )
+            raw_policies_replay = record.synthesizer_input.get("lane_data_policies")
+            replay_policies = (
+                raw_policies_replay if isinstance(raw_policies_replay, Mapping) else {}
+            )
+            violations = _lane_answer_contract_violations(
+                replay_contracts, resent, replay_policies
+            )
+            for violation in violations:
+                resent.pop(violation["lane_id"], None)
+            if resent or rejected or violations:
+                replay["resubmitted_keys"] = sorted(resent)
+                replay["resubmitted_results"] = resent
+                if rejected:
+                    replay["resubmission_malformed_keys"] = sorted(rejected)
+                if violations:
+                    replay["resubmission_contract_violations"] = violations
+                replay["resubmission_note"] = (
+                    "These lanes' content was delivered once and is not "
+                    "retained, so the record could not replay it. What you "
+                    "just sent was validated exactly as a first submission "
+                    "and the conforming lanes are returned unchanged; nothing "
+                    "was added to durable state."
+                )
         # A replayed data completion is NOT confirmable (round-48): the
         # advisory narrative the user would consent to was delivered once and
         # is deliberately not durable, so the replay carries the measurements
@@ -4588,7 +4645,14 @@ def _submit_fanout_results_locked(
             "kind": record.kind,
             "missing_keys": missing_keys,
             "missing_required_keys": missing_required,
-            "received_keys": sorted(provided),
+            "received_keys": sorted(
+                key for key in provided if key not in _unretained_keys(contracts, provided)
+            ),
+            # Reported separately, because saying "accumulated" about content
+            # the next call will not find is a lie the host acts on
+            # (round-58): these lanes must be sent again in the finalizing
+            # call.
+            "not_retained_keys": sorted(_unretained_keys(contracts, provided)),
             "expected_keys": list(record.expected_keys),
             "contract_violations": contract_violations,
             "unexpected_keys": unexpected_keys,
@@ -4610,7 +4674,14 @@ def _submit_fanout_results_locked(
             "kind": record.kind,
             "missing_keys": missing_keys,
             "missing_required_keys": missing_required,
-            "received_keys": sorted(provided),
+            "received_keys": sorted(
+                key for key in provided if key not in _unretained_keys(contracts, provided)
+            ),
+            # Reported separately, because saying "accumulated" about content
+            # the next call will not find is a lie the host acts on
+            # (round-58): these lanes must be sent again in the finalizing
+            # call.
+            "not_retained_keys": sorted(_unretained_keys(contracts, provided)),
             "expected_keys": list(record.expected_keys),
             "contract_violations": contract_violations,
             "unexpected_keys": unexpected_keys,

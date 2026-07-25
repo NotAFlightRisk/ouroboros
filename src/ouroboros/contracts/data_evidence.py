@@ -575,9 +575,15 @@ def _data_context_lane_policy() -> dict[str, Any]:
         "evidence_policy": {
             "max_evidence_items": 5,
             "max_evidence_chars": 2000,
-            "aggregates_only": True,
-            "raw_rows_allowed": False,
-            "pii_scrub_required": True,
+            # INSTRUCTIONS to the lane. These describe how the child must
+            # behave; they are not claims about what the engine can verify
+            # (round-58). Keeping them in the guarantee position advertised a
+            # PII guarantee the engine cannot make about a well-formed number.
+            "lane_instructions": {
+                "aggregates_only": True,
+                "raw_rows_allowed": False,
+                "pii_scrub_required": True,
+            },
             # How the policy above is ENFORCED rather than merely asserted:
             # evidence values and proposed lookups are typed structures in
             # data_evidence_answer.v1, so raw rows, PII values, credentials,

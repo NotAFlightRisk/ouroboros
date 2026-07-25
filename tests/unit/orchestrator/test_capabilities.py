@@ -4991,9 +4991,14 @@ def test_question_advisory_data_context_lane_ships_read_only_proposer_policy() -
     assert "save" in policy["forbidden_operation_patterns"]
 
     evidence = policy["evidence_policy"]
-    assert evidence["aggregates_only"] is True
-    assert evidence["raw_rows_allowed"] is False
-    assert evidence["pii_scrub_required"] is True
+    # Round-58: instructions to the lane are separated from what the engine
+    # establishes, because a PII guarantee over a well-formed number is not
+    # something the engine can make.
+    assert evidence["lane_instructions"]["aggregates_only"] is True
+    assert evidence["lane_instructions"]["raw_rows_allowed"] is False
+    assert evidence["lane_instructions"]["pii_scrub_required"] is True
+    assert evidence["engine_enforced"]["durable_state"] == "no child-authored field is retained"
+    assert "not_adjudicated" in evidence["engine_enforced"]
     assert evidence["max_evidence_items"] == 5
     assert evidence["max_evidence_chars"] == 2000
 

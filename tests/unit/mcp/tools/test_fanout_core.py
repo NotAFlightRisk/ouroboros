@@ -6455,3 +6455,173 @@ def test_round57_delivery_is_not_recovery_but_is_not_a_dead_end(tmp_path: Any) -
     assert resent["resubmitted_keys"] == ["data_context"]
     assert '"number": 42' in json_module.dumps(resent)
     assert '"number": 42' not in (tmp_path / f"{fanout_id}.json").read_text()
+
+
+def test_round58_resubmission_uses_the_same_door(tmp_path: Any) -> None:
+    """A completed fan-out validates a resend exactly as a first submission."""
+    import json as json_module
+
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-58", lanes=[dict(lane) for lane in advisory["lanes"]]
+    )
+    assert fanout_id is not None
+    conforming = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Growth leads.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            _typed_evidence(
+                request={
+                    "operation": "read",
+                    "metric": "active_users",
+                    "aggregation": "count",
+                    "filters": ["plan=growth"],
+                },
+                value={"number": 42, "dimension": "plan=growth"},
+            )
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time."],
+    }
+    results = [
+        {"key": lane, "content": {"lane_id": lane, "finding": "ok"}}
+        for lane in ("code_context", "web_context", "ambiguity_contrarian", "answer_simplifier")
+    ]
+    results.append({"key": "data_context", "content": conforming})
+    assert (
+        submit_fanout_results(
+            registry,
+            session_id="sess-58",
+            correlation_key="context.lane_id",
+            results=results,
+            fanout_id=fanout_id,
+        )["status"]
+        == "complete"
+    )
+
+    # A resend carrying what a first submission would refuse is refused here.
+    hostile = {
+        **conforming,
+        "requires_user_confirmation": False,
+        "finding": "alice@example.com rows: a,b,c / d,e,f",
+    }
+    refused = submit_fanout_results(
+        registry,
+        session_id="sess-58",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": hostile}],
+        fanout_id=fanout_id,
+    )
+    assert refused["resubmitted_keys"] == []
+    assert refused["resubmission_contract_violations"]
+    assert "alice@example.com" not in json_module.dumps(refused)
+
+    # A conforming resend still comes back unchanged.
+    accepted = submit_fanout_results(
+        registry,
+        session_id="sess-58",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": conforming}],
+        fanout_id=fanout_id,
+    )
+    assert accepted["resubmitted_keys"] == ["data_context"]
+    assert '"number": 42' in json_module.dumps(accepted)
+
+
+def test_round58_accumulation_reports_what_it_keeps(tmp_path: Any) -> None:
+    """finalize=false must not call a discarded lane 'received'."""
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-58b", lanes=[dict(lane) for lane in advisory["lanes"]]
+    )
+    assert fanout_id is not None
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-58b",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "code_context", "content": {"lane_id": "code_context", "finding": "ok"}},
+            {
+                "key": "data_context",
+                "content": {
+                    "lane_id": "data_context",
+                    "data_needed": True,
+                    "finding": "Growth leads.",
+                    "confidence": "reported_by_tool",
+                    "evidence": [_typed_evidence()],
+                    "proposed_queries": [],
+                    "requires_user_confirmation": True,
+                    "caveats": ["Point-in-time."],
+                },
+            },
+        ],
+        fanout_id=fanout_id,
+        finalize=False,
+    )
+    assert out["status"] == "accumulated"
+    assert out["received_keys"] == ["code_context"]
+    assert out["not_retained_keys"] == ["data_context"]
+
+
+def test_round58_both_transports_deliver_the_enforced_fallback() -> None:
+    """Neither transport may summarize a contract it enforces."""
+    from ouroboros.mcp.tools.subagent import _plugin_advisory_contract_section
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    oversized = {
+        "contract_id": "data_evidence_answer.v1",
+        "response_model_schema": {
+            "type": "object",
+            "properties": {
+                f"field_{index}": {"type": "string", "description": "x" * 300}
+                for index in range(80)
+            },
+        },
+    }
+    lanes = [dict(lane) for lane in advisory["lanes"]]
+    for lane in lanes:
+        if lane["lane_id"] == "data_context":
+            lane["answer_contract"] = oversized
+
+    host_prompt = next(
+        payload.prompt
+        for payload in build_interview_question_advisory_subagents(
+            {
+                "session_id": "sess-fb",
+                "question_identity": "interview-question:0123456789abcdef",
+                "question": "Which plan tier do most active users hit?",
+                "lanes": lanes,
+            }
+        )
+        if payload.context["lane_id"] == "data_context"
+    )
+    plugin_section = _plugin_advisory_contract_section("fanout-1", {**advisory, "lanes": lanes})
+
+    required = (
+        "data_needed",
+        "finding",
+        "confidence",
+        "observed_at",
+        "execution_status",
+        "caveats",
+        "source_class",
+    )
+    for rendered, name in ((host_prompt, "host"), (plugin_section, "plugin")):
+        for field in required:
+            assert field in rendered, f"{name} fallback omits {field}"

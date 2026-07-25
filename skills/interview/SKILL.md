@@ -289,7 +289,9 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
    - **Submit the data lane in the same call you finalize.** A data result
      sent in an earlier `finalize: false` call is not carried forward: the
-     server kept only a summary of it, so the lane is reported under
+     server kept only a summary of it. The accumulating response says so —
+     such a lane appears under `not_retained_keys` rather than
+     `received_keys` — and the closing call reports it under
      `missing_optional_keys` until you resend it. Submitting every lane in one
      call is the normal path and never hits this.
    - **A replayed `already_complete` does not return the data content.** It
