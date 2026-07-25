@@ -50,6 +50,10 @@ from ouroboros.bigbang.requirement_distillation import (
 )
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
+from ouroboros.contracts.data_evidence import (
+    _identifier_looks_secret,
+    _mutating_tool_verb,
+)
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.types import Result
@@ -62,8 +66,6 @@ from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
     SubagentDispatchMode,
-    _identifier_looks_secret,
-    _mutating_tool_verb,
     build_generate_seed_subagent,
     build_interview_question_advisory_subagents,
     build_interview_subagent,

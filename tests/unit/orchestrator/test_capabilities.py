@@ -5094,12 +5094,7 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
                     "aggregation": "distinct_count",
                     "grouping": ["plan_tier"],
                 },
-                "value": {
-                    "aggregation": "share",
-                    "number": 78,
-                    "unit": "%",
-                    "dimension": "plan=free",
-                },
+                "value": {"number": 78, "unit": "%", "dimension": "plan=free"},
                 "observed_at": "2026-07-22T02:00:00+09:00",
                 "execution_status": "succeeded",
             }
@@ -5160,10 +5155,10 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
     # The typed shape is enforced field by field, so a malformed aggregate is
     # rejected as precisely as a free-text one.
     for malformed in (
-        {"aggregation": "count", "number": "many", "unit": "accounts"},
-        {"aggregation": "roster", "number": 42, "unit": "accounts"},
-        {"aggregation": "count", "number": 42, "unit": "Alice Kim 010-1234-5678"},
-        {"aggregation": "count", "number": 42},
+        {"number": "many", "unit": "accounts"},
+        {"number": 42, "unit": "Alice Kim 010-1234-5678"},
+        {"number": 42},
+        {"number": 42, "unit": "accounts", "aggregation": "count"},
     ):
         assert list(
             validator.iter_errors(

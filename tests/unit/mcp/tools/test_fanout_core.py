@@ -1153,7 +1153,7 @@ def test_row_shaped_evidence_value_is_rejected_at_reentry(tmp_path: Any) -> None
 
 def test_impossible_calendar_date_is_rejected_at_reentry(tmp_path: Any) -> None:
     """A range regex cannot see February 31st; parsing can (round-4 warning)."""
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     impossible = {
         "lane_id": "data_context",
@@ -1182,7 +1182,7 @@ def test_boundary_scan_allows_hyphenated_vocabulary() -> None:
     ``token-counts`` / ``secret-santa`` previously matched the credential
     pattern; a credential suffix must carry digits.
     """
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     clean = {
         "lane_id": "data_context",
@@ -1380,7 +1380,7 @@ def test_mutation_claims_have_no_field_to_live_in() -> None:
     request at all, and the mutating-tool identifier rule still guards the
     name of the executed tool.
     """
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     mutating_tool = _minimal_data_output()
     mutating_tool["evidence"] = [_typed_evidence(source="delete_customers_tool")]
@@ -1575,7 +1575,7 @@ def _typed_evidence(**overrides: Any) -> dict[str, Any]:
     item: dict[str, Any] = {
         "source": "warehouse",
         "request": {"operation": "read", "metric": "active_users", "aggregation": "count"},
-        "value": {"aggregation": "count", "number": 42, "unit": "accounts"},
+        "value": {"number": 42, "unit": "accounts"},
         "observed_at": "2026-07-23T09:00:00Z",
         "execution_status": "succeeded",
     }
@@ -1608,7 +1608,7 @@ def test_standard_credential_and_pii_forms_are_rejected() -> None:
     ``Authorization: Bearer ...``, password assignments, AWS-style keys, and
     parenthesized US phone numbers previously evaded the denylist.
     """
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     for probe in (
         "Authorization: Bearer abcdef123456",
@@ -1772,7 +1772,7 @@ def test_finalize_false_preserves_late_optional_results(tmp_path: Any) -> None:
 
 def test_round7_evidence_boundary_variants_are_rejected() -> None:
     """Bot-review round-7 probes: remaining prohibited-content variants."""
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     for probe in (
         "Alice Kim, premium, 1; Bob Lee, free, 2",
@@ -1823,7 +1823,7 @@ def test_mutating_tool_identifier_in_proposal_is_rejected() -> None:
     with an innocuous query completed with no violations. Mutating verbs in
     the tool identifier are now rejected; legitimate read-tool names pass.
     """
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     def proposal(tool_name: str) -> dict[str, Any]:
         return {
@@ -1932,25 +1932,34 @@ def test_unknown_lane_answer_contract_reaches_the_child_prompt() -> None:
     assert "generic Output section below is superseded" in prompt
 
 
-def test_executed_evidence_source_identifier_is_checked(tmp_path: Any) -> None:
-    """Executed evidence gets the same tool-identifier check as proposals.
+def test_executed_source_is_a_tool_identifier(tmp_path: Any) -> None:
+    """``source`` names the executed TOOL, so prose cannot live there.
 
-    Bot-review round-9 probe (PR #1703): ``source="delete_database"`` on an
-    executed evidence item completed and persisted. Identifier-shaped
-    sources are now verb-checked; prose sources stay exempt from token
-    matching so "call center logs" is not a false positive.
+    Rounds 9 and 11 probed ``delete_database`` and ``delete_database tool``;
+    round 45 probed ``delete database tool``, whose bare words evaded the
+    compound-token rule. The field's grammar is the fix: an identifier has one
+    token, so the mutating-verb check over it is total instead of partial.
     """
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
-    mutating_source = _minimal_data_output("78% of MAU are on the free tier")
-    mutating_source["evidence"][0]["source"] = "delete_database"
-    errors = _data_evidence_boundary_violations(mutating_source)
-    assert any("mutating tool" in error for error in errors)
+    for prose in ("delete database tool", "call center logs", "external metered warehouse"):
+        output = _minimal_data_output()
+        output["evidence"][0]["source"] = prose
+        assert any(
+            "identifier, not prose" in error for error in _data_evidence_boundary_violations(output)
+        ), prose
 
-    for prose_source in ("call center logs", "external metered warehouse", "update stream digest"):
-        clean = _minimal_data_output("78% of MAU are on the free tier")
-        clean["evidence"][0]["source"] = prose_source
-        assert _data_evidence_boundary_violations(clean) == [], prose_source
+    for mutating in ("delete_database", "DropTables", "purge_rows.v2"):
+        output = _minimal_data_output()
+        output["evidence"][0]["source"] = mutating
+        assert any(
+            "mutating tool" in error for error in _data_evidence_boundary_violations(output)
+        ), mutating
+
+    for clean in ("clickhouse_query", "metabase.card.4471", "warehouse"):
+        output = _minimal_data_output()
+        output["evidence"][0]["source"] = clean
+        assert _data_evidence_boundary_violations(output) == [], clean
 
 
 def test_plugin_recipe_renders_every_lane_contract() -> None:
@@ -1999,7 +2008,7 @@ def test_rows_smuggled_through_prose_fields_are_rejected() -> None:
     check: newlines stay legal in prose, and comma lists stay legal in
     query text.
     """
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     rows_in_finding = _minimal_data_output("78% of MAU are on the free tier")
     rows_in_finding["finding"] = 'Sample: [{"name": "Alice Kim", "tier": "premium"}]'
@@ -2074,27 +2083,6 @@ def test_mutating_known_data_tool_hint_is_rejected_before_dispatch(monkeypatch: 
     )
     lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
     assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query", "metabase_card"]
-
-
-def test_mutating_source_detection_survives_surrounding_prose() -> None:
-    """Whitespace must not disable executed-tool identity checks (round-11).
-
-    ``source="delete_database tool"`` previously bypassed the identifier
-    check via its space. Compound identifiers are now detected per token;
-    bare English words in prose stay exempt.
-    """
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
-
-    for probe in ("delete_database tool", "backup DropTables job", "delete_database"):
-        output = _minimal_data_output("78% of MAU are on the free tier")
-        output["evidence"][0]["source"] = probe
-        errors = _data_evidence_boundary_violations(output)
-        assert any("mutating tool" in error for error in errors), probe
-
-    for clean in ("call center logs", "external metered warehouse", "update stream digest"):
-        output = _minimal_data_output("78% of MAU are on the free tier")
-        output["evidence"][0]["source"] = clean
-        assert _data_evidence_boundary_violations(output) == [], clean
 
 
 def test_oversized_lane_contract_is_rejected_whole(tmp_path: Any) -> None:
@@ -3735,7 +3723,7 @@ def test_ref_sibling_with_object_forcing_allof_is_enforceable(tmp_path: Any) -> 
 
 def test_identifier_fields_are_exempt_from_credential_scan() -> None:
     """A tool named token_usage_v2 is not a secret (round-29 warning)."""
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     output = _minimal_data_output("premium plans average 12,400 tokens/day")
     output["evidence"][0]["source"] = "token_usage_v2"
@@ -3761,7 +3749,7 @@ def test_plugin_child_prompt_carries_from_data_glossary() -> None:
 
 def test_credential_wearing_identifier_field_is_rejected() -> None:
     """The identifier exemption requires identifier SYNTAX (round-30 probe)."""
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     source_leak = _minimal_data_output("78% of MAU are on the free tier")
     source_leak["evidence"][0]["source"] = "token=sk-live-123"
@@ -3875,7 +3863,7 @@ def test_known_lane_contract_reaches_its_child_prompt(tmp_path: Any) -> None:
 
 def test_standalone_secret_identifiers_are_not_exempt() -> None:
     """A secret that IS an identifier keeps full scanning (round-31)."""
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     for secret_name in ("ghp_abcdef123456", "sk_live_123456", "token_abcdef123456"):
         output = _minimal_data_output("78% of MAU are on the free tier")
@@ -3907,7 +3895,7 @@ def test_root_recursive_ref_is_declared_unsupported() -> None:
 
 def test_word_laundered_credential_identifier_is_rejected() -> None:
     """A word segment cannot launder gibberish segments (round-32 probe)."""
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     leak = _minimal_data_output("78% of MAU are on the free tier")
     leak["evidence"][0]["source"] = "api_key_prod_123abc"
@@ -3928,7 +3916,7 @@ def test_noop_caveat_is_not_a_failure_and_timeouts_reject(tmp_path: Any) -> None
     no-op's caveat narrating that no lookup was needed stays valid — the
     failed-lookup contradiction requires executed evidence to exist.
     """
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     timeout_evidence = _minimal_data_output("upstream timeout; 3 attempts")
     errors = _data_evidence_boundary_violations(timeout_evidence)
@@ -3967,7 +3955,7 @@ def test_dynamic_ref_cycles_are_rejected() -> None:
 
 def test_alphabetic_credential_identifier_is_rejected() -> None:
     """Secret-marker words mark alphabetic credentials (round-33)."""
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     leak = _minimal_data_output("78% of MAU are on the free tier")
     leak["evidence"][0]["source"] = "api_key_live_supersecret"
@@ -4041,7 +4029,7 @@ def test_allof_routed_ref_cycle_is_rejected() -> None:
 
 def test_alphabetic_credential_assignment_is_rejected() -> None:
     """api_key=supersecret is a secret, digits or not (round-34 probe)."""
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     probe = _minimal_data_output("42 accounts; api_key=supersecret")
     errors = _data_evidence_boundary_violations(probe)
@@ -4053,7 +4041,7 @@ def test_alphabetic_credential_assignment_is_rejected() -> None:
 
 def test_hyphenated_identity_rows_are_rejected() -> None:
     """user-123 style ids mark identity rows (round-34 probe)."""
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     probe = _minimal_data_output("user-123 premium 34, user-456 free 12")
     errors = _data_evidence_boundary_violations(probe)
@@ -4334,7 +4322,7 @@ def test_non_object_non_text_content_is_malformed(tmp_path: Any) -> None:
 
 def test_alphabetic_bearer_assignment_is_rejected() -> None:
     """A bearer ASSIGNMENT is a secret regardless of alphabet (round-35)."""
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     leaked = _minimal_data_output("access via bearer=abcdefghijklmno for 3 accounts")
     assert any("secret" in error for error in _data_evidence_boundary_violations(leaked))
@@ -4403,7 +4391,7 @@ def test_credential_prefixed_opaque_identifier_is_rejected() -> None:
     suffix is non-hex; the rule is now inverted — every suffix token must be
     a recognizable word or tag for the identifier to stay exempt.
     """
-    from ouroboros.mcp.tools.subagent import (
+    from ouroboros.contracts.data_evidence import (
         _data_evidence_boundary_violations,
         _identifier_looks_secret,
     )
@@ -4475,7 +4463,7 @@ def test_destructive_tool_hints_are_filtered(monkeypatch: Any) -> None:
 def test_long_alphabetic_credential_suffixes_fail_closed(monkeypatch: Any) -> None:
     """A 13+-char alphabetic run after a credential prefix is opaque
     (round-37 probes: api_key_abcdefghijklmnop, bearer_abcdefghijklmnop)."""
-    from ouroboros.mcp.tools.subagent import _identifier_looks_secret
+    from ouroboros.contracts.data_evidence import _identifier_looks_secret
 
     assert _identifier_looks_secret("api_key_abcdefghijklmnop")
     assert _identifier_looks_secret("bearer_abcdefghijklmnop")
@@ -4540,7 +4528,7 @@ def test_credential_word_marks_identifier_from_any_position() -> None:
     led the name; the classifier now looks for the credential word at ANY
     token position and applies the same fail-closed suffix rule.
     """
-    from ouroboros.mcp.tools.subagent import (
+    from ouroboros.contracts.data_evidence import (
         _data_evidence_boundary_violations,
         _identifier_looks_secret,
     )
@@ -4667,7 +4655,7 @@ def test_compound_credential_assignments_are_rejected() -> None:
     position-independent vocabulary the identifier classifier uses now applies
     to the assignment shape.
     """
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     for value in (
         "client_secret=abcdefghijk 42 users",
@@ -4778,7 +4766,7 @@ def test_error_shaped_finding_is_not_evidence() -> None:
     The condition matches the caveats rule: the contradiction requires
     evidence to exist, so a no-op legitimately narrates why nothing ran.
     """
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     for finding in (
         "The query failed because access was denied to the analytics dataset.",
@@ -4822,7 +4810,7 @@ def test_credential_identifier_exemption_is_position_scoped() -> None:
     last, so a qualifier before it (refresh_token, access_key, private_key)
     names a credential.
     """
-    from ouroboros.mcp.tools.subagent import (
+    from ouroboros.contracts.data_evidence import (
         _data_evidence_boundary_violations,
         _identifier_looks_secret,
     )
@@ -4865,7 +4853,7 @@ def test_uri_userinfo_credentials_are_rejected() -> None:
     Round-41 probe: ``endpoint=https://alice:swordfish@localhost:8443``
     contains no credential WORD, so every word-anchored pattern missed it.
     """
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     for value in (
         "count=1; endpoint=https://alice:swordfish@localhost:8443",
@@ -4924,7 +4912,7 @@ def test_vendor_token_prefixes_are_one_vocabulary() -> None:
     Round-42 probe: ``xoxb-123456789-abcdefghij`` passed the CONTENT scan
     because it knew ``xox`` while the identifier classifier knew ``xox[a-z]``.
     """
-    from ouroboros.mcp.tools.subagent import (
+    from ouroboros.contracts.data_evidence import (
         _data_evidence_boundary_violations,
         _identifier_looks_secret,
     )
@@ -4950,7 +4938,7 @@ def test_repeated_identity_tokens_are_rows_in_any_prose_field() -> None:
     " / " to evade the comma and semicolon row forms. Repetition of the
     identity token is the row signature and is delimiter-independent.
     """
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     for rows in (
         "user-123 has 12 seats / user-456 has 13 seats",
@@ -4988,7 +4976,7 @@ def test_evidence_requires_a_succeeded_execution() -> None:
     aggregate, so a failure narrative has no field to occupy. The vocabulary
     scan survives only over the advisory prose the human reads.
     """
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     for status in ("failed", "timeout", "partial"):
         failed = _minimal_data_output("42 active users")
@@ -5031,7 +5019,7 @@ def test_forbidden_content_classes_are_unrepresentable_not_filtered() -> None:
     classes are rejected by SHAPE, in one rule, regardless of which wording,
     delimiter, dialect, or alphabet a future probe picks.
     """
-    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
 
     probes = [
         # credentials (rounds 6, 31-42)
@@ -5080,20 +5068,21 @@ def test_forbidden_content_classes_are_unrepresentable_not_filtered() -> None:
 
     # And the legitimate uses those 42 rounds kept threatening stay valid.
     for aggregate in (
-        {"aggregation": "count", "number": 42, "unit": "accounts"},
-        {"aggregation": "share", "number": 78.5, "unit": "%", "dimension": "plan=free"},
-        {"aggregation": "avg", "number": 240, "unit": "ms"},
-        {"aggregation": "distinct_count", "number": 12400, "unit": "users"},
+        {"number": 42, "unit": "accounts"},
+        {"number": 78.5, "unit": "%", "dimension": "plan=free"},
+        {"number": 240, "unit": "ms"},
+        {"number": 12400, "unit": "users"},
     ):
         valid = _minimal_data_output()
-        # The request must report the SAME measurement it ran (round-44).
+        # A scope may only name a dimension the request grouped by (round-45).
         valid["evidence"] = [
             _typed_evidence(
                 value=aggregate,
                 request={
                     "operation": "read",
                     "metric": "active_users",
-                    "aggregation": aggregate["aggregation"],
+                    "aggregation": "count",
+                    "grouping": ["plan"],
                 },
             )
         ]
@@ -5123,7 +5112,7 @@ def test_forbidden_content_classes_are_unrepresentable_not_filtered() -> None:
 
 def test_round43_durable_boundary_invariants(tmp_path: Any) -> None:
     """Round-43's five probes, each closed by a decidable invariant."""
-    from ouroboros.mcp.tools.subagent import (
+    from ouroboros.contracts.data_evidence import (
         _aggregate_shape_problems,
         _data_evidence_boundary_violations,
         _identifier_looks_secret,
@@ -5140,9 +5129,7 @@ def test_round43_durable_boundary_invariants(tmp_path: Any) -> None:
     )
 
     # B2 — the typed grammar no longer admits identity-scoped evidence.
-    assert _aggregate_shape_problems(
-        {"aggregation": "count", "number": 1, "unit": "rows", "dimension": "user_id=847291"}
-    )
+    assert _aggregate_shape_problems({"number": 1, "unit": "rows", "dimension": "user_id=847291"})
     assert _read_request_shape_problems(
         {"operation": "read", "metric": "events", "aggregation": "count", "grouping": ["user_id"]}
     )
@@ -5155,12 +5142,7 @@ def test_round43_durable_boundary_invariants(tmp_path: Any) -> None:
         }
     )
     # Category scopes and category groupings stay valid.
-    assert (
-        _aggregate_shape_problems(
-            {"aggregation": "share", "number": 78, "unit": "%", "dimension": "plan=growth"}
-        )
-        == []
-    )
+    assert _aggregate_shape_problems({"number": 78, "unit": "%", "dimension": "plan=growth"}) == []
     assert (
         _read_request_shape_problems(
             {
@@ -5185,9 +5167,9 @@ def test_round43_durable_boundary_invariants(tmp_path: Any) -> None:
         assert not _identifier_looks_secret(value), value
 
     # B4 — a measurement is finite; 1e400 is not.
-    assert _aggregate_shape_problems(
-        {"aggregation": "count", "number": float("1e400"), "unit": "rows"}
-    ) == ["number must be finite"]
+    assert _aggregate_shape_problems({"number": float("1e400"), "unit": "rows"}) == [
+        "number must be finite"
+    ]
 
     # B5 — the advertised policy is persisted and its caps are enforced.
     registry = FanoutRegistry(tmp_path)
@@ -5241,7 +5223,7 @@ def test_round44_ownership_and_evidence_invariants(tmp_path: Any) -> None:
 
     from jsonschema import Draft202012Validator
 
-    from ouroboros.mcp.tools.subagent import (
+    from ouroboros.contracts.data_evidence import (
         _data_evidence_boundary_violations,
         _data_evidence_fallback_schema,
     )
@@ -5286,9 +5268,7 @@ def test_round44_ownership_and_evidence_invariants(tmp_path: Any) -> None:
         for error in _data_evidence_boundary_violations(laid_out, policy)
     )
     worn_unit = _minimal_data_output()
-    worn_unit["evidence"] = [
-        _typed_evidence(value={"aggregation": "count", "number": 1012345678, "unit": "phone"})
-    ]
+    worn_unit["evidence"] = [_typed_evidence(value={"number": 1012345678, "unit": "phone"})]
     assert any(
         "not one of the units" in error
         for error in _data_evidence_boundary_violations(worn_unit, policy)
@@ -5319,13 +5299,80 @@ def test_round44_ownership_and_evidence_invariants(tmp_path: Any) -> None:
         == []
     )
 
-    # Follow-up — evidence must report the measurement it ran.
+    # Follow-up — the value no longer repeats the request's aggregation, so
+    # that contradiction is unrepresentable; what stays bindable is the scope.
     mismatched = _minimal_data_output()
     mismatched["evidence"] = [
-        _typed_evidence(value={"aggregation": "avg", "number": 42, "unit": "usd"})
+        _typed_evidence(value={"number": 42, "unit": "usd", "dimension": "plan=growth"})
     ]
     assert any(
-        "does not match the executed request" in error
+        "did not group by" in error
         for error in _data_evidence_boundary_violations(mismatched, policy)
     )
     assert _data_evidence_boundary_violations(_minimal_data_output(), policy) == []
+
+
+def test_round45_field_grammars_close_their_classes() -> None:
+    """Round-45's blockers, each closed by removing a field's freedom."""
+    from ouroboros.contracts.data_evidence import (
+        _data_evidence_boundary_violations,
+        _read_request_shape_problems,
+    )
+    from ouroboros.orchestrator.capabilities.interview_schemas import (
+        _data_context_answer_contract,
+        _data_context_lane_policy,
+        data_evidence_structural_schema,
+    )
+
+    policy = _data_context_lane_policy()
+
+    # B2 — identity words are matched per token, and a metric is a
+    # measurement name rather than somewhere a credential can sit.
+    assert _read_request_shape_problems(
+        {"operation": "read", "metric": "m", "aggregation": "count", "grouping": ["email_address"]}
+    )
+    assert _read_request_shape_problems(
+        {"operation": "read", "metric": "password_swordfish", "aggregation": "count"}
+    )
+    assert (
+        _read_request_shape_problems(
+            {
+                "operation": "read",
+                "metric": "active_users",
+                "aggregation": "count",
+                "grouping": ["plan_tier", "created_month"],
+            }
+        )
+        == []
+    )
+
+    # B3 — the value no longer repeats the request's aggregation, so the
+    # contradiction has no field; the scope stays bound to what was grouped.
+    ungrouped = _minimal_data_output()
+    ungrouped["evidence"] = [
+        _typed_evidence(value={"number": 42, "unit": "accounts", "dimension": "plan=growth"})
+    ]
+    assert any(
+        "did not group by" in error
+        for error in _data_evidence_boundary_violations(ungrouped, policy)
+    )
+    grouped = _minimal_data_output()
+    grouped["evidence"] = [
+        _typed_evidence(
+            value={"number": 42, "unit": "accounts", "dimension": "plan=growth"},
+            request={
+                "operation": "read",
+                "metric": "active_users",
+                "aggregation": "count",
+                "grouping": ["plan"],
+            },
+        )
+    ]
+    assert _data_evidence_boundary_violations(grouped, policy) == []
+
+    # B4 — the degraded form IS the published schema: every required field and
+    # every conditional invariant survives an unenforceable declared contract.
+    assert (
+        data_evidence_structural_schema()
+        == (_data_context_answer_contract()["response_model_schema"])
+    )

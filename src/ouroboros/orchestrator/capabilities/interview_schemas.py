@@ -619,7 +619,11 @@ def _data_context_answer_contract() -> dict[str, Any]:
                         "execution_status": {
                             "const": "succeeded",
                         },
-                        "source": {"type": "string", "minLength": 1, "maxLength": 120},
+                        "source": {
+                            "type": "string",
+                            "maxLength": 120,
+                            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,119}$",
+                        },
                         "request": {"$ref": "#/$defs/read_request"},
                         "value": {"$ref": "#/$defs/aggregate"},
                         "observed_at": {
@@ -650,7 +654,11 @@ def _data_context_answer_contract() -> dict[str, Any]:
                     # session can actually run and judge it: empty tool,
                     # request, or decision fields are not a proposal.
                     "properties": {
-                        "tool_name": {"type": "string", "minLength": 1, "maxLength": 120},
+                        "tool_name": {
+                            "type": "string",
+                            "maxLength": 120,
+                            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,119}$",
+                        },
                         "request": {"$ref": "#/$defs/read_request"},
                         "expected_decision": {"type": "string", "minLength": 1, "maxLength": 300},
                         "source_class": {
@@ -695,9 +703,8 @@ def _data_context_answer_contract() -> dict[str, Any]:
                 # something a text classifier must recognize and reject.
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["aggregation", "number", "unit"],
+                "required": ["number", "unit"],
                 "properties": {
-                    "aggregation": {"$ref": "#/$defs/aggregation_kind"},
                     "number": {"type": "number"},
                     "unit": {
                         "type": "string",
@@ -830,34 +837,17 @@ def _data_context_answer_contract() -> dict[str, Any]:
 
 
 def data_evidence_structural_schema() -> dict[str, Any]:
-    """The data answer contract's STRUCTURE, without prose or descriptions.
+    """The data answer contract's schema, used when a lane's DECLARED contract
+    cannot be enforced.
 
-    Re-entry validates against this when a lane's declared contract cannot be
-    enforced. It is the same object shape and the same ``$defs`` the published
-    contract uses — a degraded contract must not become a permissive one.
+    It is the published schema itself. The fallback is never delivered to a
+    child, so it carries no prompt budget and there is no reason for it to
+    drop a single required field or conditional (round-45: a trimmed copy let
+    a required lane terminalize without data_needed, confidence, evidence, or
+    no-op consistency). What a degraded contract loses is the DECLARED form's
+    own field grammar — never the invariants this contract states.
     """
-    full = _data_context_answer_contract()["response_model_schema"]
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["lane_id", "finding", "requires_user_confirmation"],
-        "properties": {
-            key: value
-            for key, value in full["properties"].items()
-            if key
-            in {
-                "lane_id",
-                "data_needed",
-                "finding",
-                "confidence",
-                "evidence",
-                "proposed_queries",
-                "requires_user_confirmation",
-                "caveats",
-            }
-        },
-        "$defs": full["$defs"],
-    }
+    return _data_context_answer_contract()["response_model_schema"]
 
 
 def _data_context_lane_policy() -> dict[str, Any]:
