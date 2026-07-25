@@ -5827,3 +5827,124 @@ def test_round50_lifecycle_is_provenance_and_scopes_are_keys(tmp_path: Any) -> N
     )
     assert generic_out["status"] == "complete"
     assert "consent_status" not in generic_out
+
+
+def test_round51_value_returning_aggregations_cannot_carry_a_number(tmp_path: Any) -> None:
+    """A number reaches durable state only through an aggregation that reduces.
+
+    Round-51 probe: ``max(credit_card_number)`` returns the card number, and no
+    vocabulary of column names can decide which columns identify. What IS
+    decidable is whether an aggregation returns one of its inputs, so executed
+    evidence is restricted to the reducing kinds. Proposals may still request
+    the others — they carry no value.
+    """
+    import json as json_module
+
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    lanes = [dict(lane) for lane in advisory["lanes"]]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-51", lanes=lanes
+    )
+    assert fanout_id is not None
+
+    card_number = 4111111111111111
+    leaking = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Highest stored value.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            _typed_evidence(
+                request={
+                    "operation": "read",
+                    "metric": "credit_card_number",
+                    "aggregation": "max",
+                },
+                value={"number": card_number, "unit": "count"},
+            )
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time."],
+    }
+    results = [
+        {"key": lane, "content": {"lane_id": lane, "finding": "ok"}}
+        for lane in ("code_context", "web_context", "ambiguity_contrarian", "answer_simplifier")
+    ]
+    results.append({"key": "data_context", "content": leaking})
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-51",
+        correlation_key="context.lane_id",
+        results=results,
+        fanout_id=fanout_id,
+    )
+    assert [item["lane_id"] for item in out["contract_violations"]] == ["data_context"]
+    # The rejected number appears in neither the response nor the record.
+    assert str(card_number) not in json_module.dumps(out)
+    assert str(card_number) not in (tmp_path / f"{fanout_id}.json").read_text()
+
+    # The reducing kinds still work end to end.
+    accepted = {
+        **leaking,
+        "evidence": [
+            _typed_evidence(
+                request={
+                    "operation": "read",
+                    "metric": "active_users",
+                    "aggregation": "distinct_count",
+                    "filters": ["plan=growth"],
+                },
+                value={"number": 4200, "unit": "users", "dimension": "plan=growth"},
+            )
+        ],
+    }
+    clean_registry = FanoutRegistry(tmp_path / "clean")
+    clean_id = register_question_advisory_fanout_from_lanes(
+        clean_registry, session_id="sess-51b", lanes=lanes
+    )
+    assert clean_id is not None
+    clean_results = [
+        {"key": lane, "content": {"lane_id": lane, "finding": "ok"}}
+        for lane in ("code_context", "web_context", "ambiguity_contrarian", "answer_simplifier")
+    ]
+    clean_results.append({"key": "data_context", "content": accepted})
+    clean = submit_fanout_results(
+        clean_registry,
+        session_id="sess-51b",
+        correlation_key="context.lane_id",
+        results=clean_results,
+        fanout_id=clean_id,
+    )
+    assert clean["status"] == "complete"
+    assert clean["contract_violations"] == []
+
+    # A percentile stays requestable as a PROPOSAL, which carries no number.
+    proposing = {
+        **accepted,
+        "confidence": "inferred",
+        "evidence": [],
+        "caveats": ["Point-in-time."],
+        "proposed_queries": [
+            {
+                "tool_name": "warehouse",
+                "request": {
+                    "operation": "read",
+                    "metric": "latency",
+                    "aggregation": "percentile",
+                    "percentile": 95,
+                },
+                "expected_decision": "Whether the p95 breaches the target.",
+                "source_class": "metered",
+            }
+        ],
+    }
+    from ouroboros.contracts.data_evidence import _data_evidence_boundary_violations
+    from ouroboros.orchestrator.capabilities.interview_schemas import _data_context_lane_policy
+
+    assert _data_evidence_boundary_violations(proposing, _data_context_lane_policy()) == []

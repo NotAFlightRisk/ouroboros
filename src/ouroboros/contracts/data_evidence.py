@@ -212,10 +212,25 @@ def _data_context_answer_contract() -> dict[str, Any]:
                         # which group it came from (round-46). Per-category
                         # evidence is one item per category, narrowed by a
                         # filter; grouping stays available on proposals.
+                        # Executed evidence carries a NUMBER into durable
+                        # state, so its aggregation must provably not be one
+                        # of the inputs (round-51: max(credit_card_number)
+                        # returns the card number, and no vocabulary of
+                        # column names can decide which columns identify).
+                        # count/distinct_count reduce to a cardinality and
+                        # sum/avg to a derived total; min/max/median/
+                        # percentile return an input verbatim, so they are
+                        # requestable as PROPOSALS — which carry no value —
+                        # but not reportable as evidence.
                         "request": {
                             "allOf": [
                                 {"$ref": "#/$defs/read_request"},
                                 {"not": {"required": ["grouping"]}},
+                                {
+                                    "properties": {
+                                        "aggregation": {"$ref": "#/$defs/reducing_aggregation"}
+                                    }
+                                },
                             ]
                         },
                         "value": {"$ref": "#/$defs/aggregate"},
@@ -273,6 +288,9 @@ def _data_context_answer_contract() -> dict[str, Any]:
             },
         },
         "$defs": {
+            "reducing_aggregation": {
+                "enum": ["count", "distinct_count", "sum", "avg"],
+            },
             "aggregation_kind": {
                 # Each kind names ONE measurement. ratio/share/duration were
                 # under-specified (no numerator, denominator, or unit basis),
@@ -1259,7 +1277,7 @@ def _read_request_shape_problems(
         # A metric names what is measured; a credential-shaped name is the
         # leak wearing that field (round-45 probe: password_swordfish).
         problems.append("metric is credential-shaped; name the measurement instead")
-    elif _entity_key(metric) and request.get("aggregation") not in _CARDINAL_AGGREGATIONS:
+    elif _entity_key(metric) and request.get("aggregation") not in _reducing_aggregations():
         # Counting identities yields a cardinality; taking their min/max/median
         # yields an identity (round-48 probe: max(ssn)). The typed form makes
         # that decidable per field instead of per SQL projection.
@@ -1296,6 +1314,12 @@ def _read_request_shape_problems(
     unknown = set(request) - _read_request_fields()
     if unknown:
         problems.append("carries fields outside the read-request shape")
+    if executed and request.get("aggregation") not in _reducing_aggregations():
+        problems.append(
+            "executed evidence may only report an aggregation that reduces "
+            "(count/distinct_count/sum/avg); a value-returning aggregation "
+            "reports one of the inputs verbatim"
+        )
     if executed and request.get("grouping"):
         # A grouped query returns one row per group; an evidence item carries
         # ONE number (round-46). The two cannot describe each other — a single
@@ -1435,7 +1459,15 @@ _FILTER_OPERATOR = re.compile(r"[=<>!]{1,2}")
 #: Aggregations that reduce their input to a cardinality. Every other kind
 #: returns one of the input VALUES, which is why an identity metric may only
 #: be counted.
-_CARDINAL_AGGREGATIONS = frozenset({"count", "distinct_count"})
+@lru_cache(maxsize=1)
+def _reducing_aggregations() -> frozenset[str]:
+    """Aggregations whose result is provably not one of the inputs.
+
+    Read from the schema (round-49 rule: one vocabulary). A value-returning
+    aggregation reports an input verbatim, which is why executed evidence may
+    not use one — the number would be whatever the column holds.
+    """
+    return frozenset(_schema_defs()["reducing_aggregation"]["enum"])
 
 
 def _identity_scope_problem(text: str, label: str) -> str | None:
