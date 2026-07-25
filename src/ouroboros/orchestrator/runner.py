@@ -45,6 +45,7 @@ from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.errors import ConfigError, OuroborosError, PersistenceError
 from ouroboros.core.execution_preferences import (
+    ResolvedExecutionPreferences,
     execution_preferences_from_contract,
     resolve_execution_preferences,
 )
@@ -610,7 +611,9 @@ CANCELLATION_CHECK_INTERVAL = 5
 # most this many same-seed executions.
 FRUGALITY_PROOF_SESSION_LOOKBACK = 1000
 FRUGALITY_PROOF_MAX_COHORT_RUNS = 50
-EXECUTION_CONTRACT_VERSION = 2
+EXECUTION_CONTRACT_VERSION = 4
+PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION = 2
+PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION = 3
 FRUGALITY_PROOF_PROTOCOL_VERSION = 1
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
@@ -798,6 +801,8 @@ class OrchestratorRunner:
         # var counts here.
         _model_pin_env = os.environ.get("OUROBOROS_EXECUTION_MODEL")
         _model_pin = _model_pin_env.strip() or None if _model_pin_env else None
+        self._model_routing_disabled = _model_routing_disabled
+        self._model_pin = _model_pin
         # Resume normally restores the run's persisted resolved router. These are
         # the existing user-facing controls that explicitly request a different
         # contract for this invocation, so only they may replace it.
@@ -828,6 +833,11 @@ class OrchestratorRunner:
             _economics_config = _economics_config.model_copy(
                 update={"tiers": _shipped_config.economics.tiers}
             )
+        # Keep the exact economics snapshot that produced the model router. The
+        # Routing B compatibility bridge rebuilds its immutable registry from
+        # this snapshot at the effect boundary, so a mutable/resumed router can
+        # never introduce an unconfigured model or cost.
+        self._route_economics = _economics_config
         _execution_config = _config.execution
         self._run_verify_commands = _execution_config.run_verify_commands
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
@@ -913,6 +923,28 @@ class OrchestratorRunner:
             self._model_router,
             child_tier=self._model_router.base_tier,
         )
+
+    def _authoritative_model_router(
+        self,
+        preferences: ResolvedExecutionPreferences,
+        *,
+        requested_model_tier: str | None,
+    ) -> ModelRouter | None:
+        """Rebuild current route policy without trusting a mutable/restored router."""
+
+        if self._model_routing_disabled:
+            return None
+        from ouroboros.orchestrator.model_routing import build_model_router
+
+        router = build_model_router(
+            self._route_economics,
+            runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            pinned_model=self._model_pin,
+            base_tier_override=requested_model_tier,
+        )
+        if router is not None and not preferences.child_model_lowering_enabled:
+            router = replace(router, child_tier=router.base_tier)
+        return router
 
     def _resolved_shadow_replay_enabled(self) -> bool:
         """Gate the expensive proof harness on explicit strict authorization."""
@@ -1032,6 +1064,13 @@ class OrchestratorRunner:
         """
         from ouroboros.orchestrator.effort_routing import assess_investment, resolve_execute_effort
         from ouroboros.orchestrator.model_routing import resolve_execute_model
+        from ouroboros.orchestrator.route_compat import (
+            admit_compat_route,
+            admitted_execute_model_kwargs,
+            build_route_compat_projection,
+            deserialize_route_compat_contract,
+            validate_compat_admission,
+        )
 
         investment_assessment = assess_investment(None)
         decision, kwargs = resolve_execute_effort(
@@ -1040,15 +1079,43 @@ class OrchestratorRunner:
             is_decomposed_child=False,
             investment_assessment=investment_assessment,
         )
-        model_decision, model_kwargs = resolve_execute_model(
+        initial_model_router = self._model_router
+        model_decision, legacy_model_kwargs = resolve_execute_model(
             self._adapter,
-            router=self._model_router,
+            router=initial_model_router,
             is_decomposed_child=False,
             decomposition_trustworthy=False,
         )
-        # Merge the model override; kwargs carry a parameter ONLY for runtimes that
-        # enforce it, so an advised runtime is never handed one.
-        kwargs = {**kwargs, **model_kwargs}
+        route_admission = None
+        if initial_model_router is not None:
+            admission_projection = build_route_compat_projection(
+                self._route_economics,
+                model_router=initial_model_router,
+                runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                effort=decision.level,
+            )
+            if isinstance(self._execution_contract, Mapping):
+                persisted_routing = self._execution_contract.get("model_routing")
+                if isinstance(persisted_routing, Mapping):
+                    recognized, persisted_projection = deserialize_route_compat_contract(
+                        persisted_routing.get("route_compat")
+                    )
+                    if recognized:
+                        admission_projection = persisted_projection
+            route_admission = admit_compat_route(
+                admission_projection,
+                model_decision=model_decision,
+                effort=decision.level,
+            )
+            if not route_admission.admitted:
+                raise OrchestratorError(
+                    message="Route admission blocked before provider dispatch",
+                    details={
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                        "reason": route_admission.reason,
+                        "call_site": "runner",
+                    },
+                )
         from ouroboros.events.base import BaseEvent
 
         try:
@@ -1134,7 +1201,95 @@ class OrchestratorRunner:
                     model_tier=model_decision.tier,
                     model_mode=model_decision.mode,
                 )
-        return kwargs
+
+        # All observability awaits are complete. Rebuild and admit from live
+        # routing state now, immediately before the caller enters execute_task.
+        live_model_router = self._model_router
+        if (initial_model_router is None) != (live_model_router is None):
+            raise OrchestratorError(
+                message="Route admission became stale before provider dispatch",
+                details={
+                    "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                    "reason": "model routing activation changed during pre-dispatch awaits",
+                    "call_site": "runner",
+                },
+            )
+        if live_model_router is None:
+            model_kwargs = legacy_model_kwargs
+        else:
+            live_model_decision, _live_legacy_model_kwargs = resolve_execute_model(
+                self._adapter,
+                router=live_model_router,
+                is_decomposed_child=False,
+                decomposition_trustworthy=False,
+            )
+            if live_model_decision != model_decision:
+                raise OrchestratorError(
+                    message="Route admission became stale before provider dispatch",
+                    details={
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                        "reason": "model routing policy changed during pre-dispatch awaits",
+                        "call_site": "runner",
+                    },
+                )
+            live_effort_decision, live_effort_kwargs = resolve_execute_effort(
+                self._adapter,
+                base_effort=self._reasoning_effort,
+                is_decomposed_child=False,
+                investment_assessment=investment_assessment,
+            )
+            if live_effort_decision != decision:
+                raise OrchestratorError(
+                    message="Route admission became stale before provider dispatch",
+                    details={
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                        "reason": "effort routing policy changed during pre-dispatch awaits",
+                        "call_site": "runner",
+                    },
+                )
+            live_projection = build_route_compat_projection(
+                self._route_economics,
+                model_router=live_model_router,
+                runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                effort=live_effort_decision.level,
+            )
+            assert route_admission is not None
+            if not validate_compat_admission(
+                live_projection,
+                route_admission,
+                model_decision=model_decision,
+                effort=live_effort_decision.level,
+            ):
+                raise OrchestratorError(
+                    message="Route admission became stale before provider dispatch",
+                    details={
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                        "reason": "live route compatibility changed",
+                        "call_site": "runner",
+                    },
+                )
+            model_kwargs = admitted_execute_model_kwargs(
+                route_admission,
+                model_decision=model_decision,
+                projection=live_projection,
+                effort=live_effort_decision.level,
+            )
+            if (
+                model_decision.is_enforced
+                and model_decision.model is not None
+                and model_kwargs.get("model") != model_decision.model
+            ):
+                raise OrchestratorError(
+                    message="Route admission could not authorize the provider model",
+                    details={
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                        "model_tier": model_decision.tier,
+                        "call_site": "runner",
+                    },
+                )
+        # Model kwargs are collapsed only after live admission above. Callers
+        # invoke execute_task on the next statement without another await.
+        return {**(live_effort_kwargs if live_model_router is not None else kwargs), **model_kwargs}
 
     async def _evaluate_frugality_proof(self, execution_id: str) -> None:
         """Run the deterministic frugality proof over a bounded same-seed cohort.
@@ -3586,9 +3741,25 @@ class OrchestratorRunner:
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
         from ouroboros.orchestrator.model_routing import serialize_model_router
+        from ouroboros.orchestrator.route_compat import (
+            build_route_compat_projection,
+            serialize_route_compat_contract,
+        )
 
         guidance_bundle = self._ensure_new_run_guidance()
         routing_contract = serialize_model_router(self._model_router)
+        routing_contract["requested_model_tier"] = self._requested_model_tier
+        # Effort routing is independent of model-tier routing. Persist it even
+        # when the optional model router is dormant so resume cannot silently
+        # adopt a different provider-effect policy.
+        routing_contract["reasoning_effort"] = self._reasoning_effort
+        route_projection = build_route_compat_projection(
+            self._route_economics,
+            model_router=self._model_router,
+            runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            effort=self._reasoning_effort,
+        )
+        routing_contract["route_compat"] = serialize_route_compat_contract(route_projection)
         routing_contract["constructor_model"] = self._constructor_model_contract()
         routing_contract["runtime_execution"] = self._runtime_execution_identity_contract()
         routing_contract["runtime_backend"] = self._runtime_backend_contract()
@@ -3895,13 +4066,20 @@ class OrchestratorRunner:
             not isinstance(raw_contract, Mapping)
             or isinstance(raw_version, bool)
             or not isinstance(raw_version, int)
-            or raw_version != EXECUTION_CONTRACT_VERSION
+            or raw_version
+            not in {
+                PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION,
+                PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION,
+                EXECUTION_CONTRACT_VERSION,
+            }
         ):
             raise OrchestratorError(
                 message="Cannot resume with an invalid execution contract",
                 details={"contract_version": raw_version},
             )
 
+        migrate_v2_contract = raw_version == PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION
+        migrate_v3_contract = raw_version == PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION
         raw_proof = raw_contract.get("frugality_proof")
         raw_routing = raw_contract.get("model_routing")
         raw_resume = raw_contract.get("resume")
@@ -3920,6 +4098,24 @@ class OrchestratorRunner:
                 },
             )
 
+        # Version 2 predates effort/Route B fields; version 3 predates the
+        # independent requested-tier field. Only those exact shapes migrate.
+        # A malformed current contract must never fall through either path.
+        if migrate_v2_contract and (
+            "reasoning_effort" in raw_routing
+            or "route_compat" in raw_routing
+            or "requested_model_tier" in raw_routing
+        ):
+            raise OrchestratorError(
+                message="Cannot resume with an invalid execution contract",
+                details={"invalid": "version 2 routing extension"},
+            )
+        if migrate_v3_contract and "requested_model_tier" in raw_routing:
+            raise OrchestratorError(
+                message="Cannot resume with an invalid execution contract",
+                details={"invalid": "version 3 routing extension"},
+            )
+
         self._restore_guidance_contract(raw_contract)
 
         protocol_version = raw_proof.get("protocol_version")
@@ -3932,6 +4128,10 @@ class OrchestratorRunner:
         persisted_runtime_backend = raw_routing.get("runtime_backend")
         persisted_llm_backend = raw_routing.get("llm_backend")
         persisted_permission_mode = raw_routing.get("permission_mode")
+        persisted_requested_model_tier = raw_routing.get("requested_model_tier")
+        persisted_reasoning_effort = (
+            self._reasoning_effort if migrate_v2_contract else raw_routing.get("reasoning_effort")
+        )
         persisted_resume_workspace = raw_resume.get("workspace")
         valid_seed_fingerprint = (
             isinstance(persisted_seed_fingerprint, str)
@@ -3956,6 +4156,21 @@ class OrchestratorRunner:
             or not isinstance(persisted_llm_backend, str)
             or not persisted_llm_backend.strip()
             or not self._valid_permission_mode_contract(persisted_permission_mode)
+            or (
+                not migrate_v2_contract
+                and (
+                    "reasoning_effort" not in raw_routing
+                    or persisted_reasoning_effort not in {None, "low", "medium", "high", "xhigh"}
+                )
+            )
+            or (
+                not (migrate_v2_contract or migrate_v3_contract)
+                and (
+                    "requested_model_tier" not in raw_routing
+                    or persisted_requested_model_tier
+                    not in {None, "frugal", "standard", "frontier"}
+                )
+            )
             or not isinstance(persisted_resume_workspace, Mapping)
         ):
             raise OrchestratorError(
@@ -4090,6 +4305,15 @@ class OrchestratorRunner:
                 message="Cannot resume with an invalid execution contract",
                 details={"invalid": "model_routing"},
             )
+        if (
+            not (migrate_v2_contract or migrate_v3_contract)
+            and restored_router is None
+            and persisted_requested_model_tier is not None
+        ):
+            raise OrchestratorError(
+                message="Cannot resume with an invalid execution contract",
+                details={"invalid": "requested_model_tier"},
+            )
 
         if (
             restored_router is not None
@@ -4100,6 +4324,88 @@ class OrchestratorRunner:
                 details={
                     "persisted_runtime_backend": restored_router.runtime_backend,
                     "execution_runtime_backend": persisted_runtime_backend,
+                },
+            )
+        if migrate_v2_contract or migrate_v3_contract:
+            persisted_requested_model_tier = (
+                restored_router.base_tier if restored_router is not None else None
+            )
+        authoritative_router = self._authoritative_model_router(
+            persisted_preferences,
+            requested_model_tier=persisted_requested_model_tier,
+        )
+        if (
+            not self._model_routing_override_explicit
+            and restored_router is not None
+            and restored_router != authoritative_router
+        ):
+            raise OrchestratorError(
+                message="Cannot resume with a changed model-routing policy",
+                details={
+                    "runtime_backend": persisted_runtime_backend,
+                    "hint": "Restore the current route policy or start a new session.",
+                },
+            )
+        raw_route_compat = raw_routing.get("route_compat")
+        if migrate_v2_contract:
+            # The v2 router has already been compared with the router rebuilt
+            # from current config/backend/preferences. Its replacement v3
+            # contract below adds the independently derived Route B projection.
+            pass
+        elif raw_route_compat is None:
+            raise OrchestratorError(
+                message="Cannot resume without an explicit route compatibility contract",
+                details={"invalid": "route_compat", "reason": "missing"},
+            )
+        else:
+            from ouroboros.orchestrator.route_compat import (
+                deserialize_route_compat_contract,
+                validate_route_compat_projection,
+            )
+
+            route_compat_recognized, restored_projection = deserialize_route_compat_contract(
+                raw_route_compat
+            )
+            if not route_compat_recognized:
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid execution contract",
+                    details={"invalid": "route_compat"},
+                )
+            if restored_router is not None and restored_projection is None:
+                raise OrchestratorError(
+                    message="Cannot resume without an enabled route compatibility contract",
+                    details={"invalid": "route_compat", "reason": "dormant"},
+                )
+            if restored_router is None and restored_projection is not None:
+                raise OrchestratorError(
+                    message="Cannot resume with an enabled route compatibility contract",
+                    details={"invalid": "route_compat", "reason": "router_dormant"},
+                )
+            if (
+                restored_projection is not None
+                and not self._model_routing_override_explicit
+                and not validate_route_compat_projection(
+                    restored_projection,
+                    self._route_economics,
+                    model_router=authoritative_router,
+                    runtime_backend=persisted_runtime_backend,
+                    current_effort=self._reasoning_effort,
+                )
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with a changed route compatibility catalog",
+                    details={
+                        "runtime_backend": persisted_runtime_backend,
+                        "hint": "Restore the original route catalog or start a new session.",
+                    },
+                )
+        if not migrate_v2_contract and persisted_reasoning_effort != self._reasoning_effort:
+            raise OrchestratorError(
+                message="Cannot resume with a changed reasoning-effort contract",
+                details={
+                    "persisted_reasoning_effort": persisted_reasoning_effort,
+                    "current_reasoning_effort": self._reasoning_effort,
+                    "hint": "Restore the original reasoning effort or start a new session.",
                 },
             )
         constructor_model_value = persisted_constructor_model.get("model")
@@ -4151,6 +4457,17 @@ class OrchestratorRunner:
             return self._execution_contract != raw_contract
 
         self._model_router = restored_router
+        self._requested_model_tier = persisted_requested_model_tier
+        if migrate_v2_contract or migrate_v3_contract:
+            replacement = self._build_execution_contract(
+                seed=seed,
+                seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
+                authority_generation=authority_generation,
+            )
+            if authority_generation is None:
+                replacement["foundation_a_authority"] = dict(raw_contract["foundation_a_authority"])
+            self._execution_contract = replacement
+            return True
         # Preserve the exact persisted proof identity alongside the restored
         # router. Recomputing it from a resumed throwaway worktree would make the
         # same execution appear to be a different experiment.
@@ -4334,7 +4651,11 @@ class OrchestratorRunner:
             progress["runtime"] = runtime_handle.to_session_state_dict()
             progress["runtime_backend"] = runtime_handle.backend
             runtime_event_type = runtime_handle.metadata.get("runtime_event_type")
-            if isinstance(runtime_event_type, str) and runtime_event_type:
+            if (
+                "runtime_event_type" not in progress
+                and isinstance(runtime_event_type, str)
+                and runtime_event_type
+            ):
                 progress["runtime_event_type"] = runtime_event_type
             if runtime_handle.backend == "claude" and runtime_handle.native_session_id:
                 progress["agent_session_id"] = runtime_handle.native_session_id
@@ -4390,6 +4711,8 @@ class OrchestratorRunner:
     ):
         """Create an enriched tool-called event from a normalized runtime message."""
         projected = project_runtime_message(message)
+        if not projected.is_tool_call:
+            return None
         tool_name = projected.tool_name
         if tool_name is None:
             return None
@@ -7206,6 +7529,7 @@ class OrchestratorRunner:
             fat_harness_mode=self._fat_harness_mode,
             reasoning_effort=self._reasoning_effort,
             model_router=self._model_router,
+            route_economics=self._route_economics,
             run_verify_commands=self._run_verify_commands,
             verify_command_timeout_seconds=self._verify_command_timeout_seconds,
             ac_retry_attempts=self._ac_retry_attempts,

@@ -308,6 +308,13 @@ from ouroboros.orchestrator.rate_limit import (
     build_rate_limit_gate,
     estimate_runtime_request_tokens,
 )
+from ouroboros.orchestrator.route_compat import (
+    admit_compat_route,
+    admitted_execute_model_kwargs,
+    build_route_compat_projection,
+    serialize_route_compat_contract,
+    validate_compat_admission,
+)
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
 )
@@ -1567,6 +1574,7 @@ class ParallelACExecutor:
         atomic_verifier: Verifier | None = None,
         reasoning_effort: str | None = None,
         model_router: ModelRouter | None = None,
+        route_economics: Any | None = None,
         run_verify_commands: bool = True,
         verify_command_timeout_seconds: int = 600,
         ac_retry_attempts: int = 0,
@@ -1610,6 +1618,9 @@ class ParallelACExecutor:
                 low-level constructor default is 0 so direct/test callers keep
                 today's single-dispatch behavior; real run paths (CLI `ooo run`
                 via the runner) pass the config value (default 2).
+            route_economics: Optional economics snapshot used to project live
+                model/effort decisions into the Routing B Admission Kernel. The
+                bridge stays dormant for low-level callers that omit it.
         """
         if _foundation_a_internal_entry_roots is None:
             raise ValueError("execution authority internal entry roots are unavailable")
@@ -1651,6 +1662,10 @@ class ParallelACExecutor:
         # override → byte-identical to today's behavior), so laying the executor on
         # the model capability contract is safe by default.
         self._model_router = model_router
+        # Routing B compatibility is explicit at this constructor seam. The live
+        # runner supplies the resolved economics; direct/test callers retain the
+        # historical dispatch path until they opt into the bridge.
+        self._route_economics = route_economics
         # Opt-in shadow-replay baseline harness (frugality-proof AC5). Default OFF:
         # replaying a decomposed child at the parent tier doubles token cost, so
         # this is an experiment lever, never a production default. When on, a
@@ -4797,6 +4812,14 @@ class ParallelACExecutor:
                 semantic_ac_key=semantic_ac_key,
             )
             if atomic_result.error != _STALL_SENTINEL:
+                if atomic_result.outcome in {
+                    ACExecutionOutcome.BLOCKED,
+                    ACExecutionOutcome.INVALID,
+                }:
+                    # Admission/authority failures are terminal before recovery.
+                    # Bounce classification and alternate-harness redispatch are
+                    # provider effects too; neither may bypass a fail-closed route.
+                    return _finalize_node_result(atomic_result)
                 if not atomic_result.success:
                     (
                         bounce_result,
@@ -5886,6 +5909,24 @@ Respond with either ATOMIC or the structured JSON object only.
             node_identity=node_identity,
             retry_attempt=retry_attempt,
         )
+        initial_model_router = self._model_router
+        model_router_snapshot = (
+            None
+            if initial_model_router is None
+            else replace(
+                initial_model_router,
+                tier_models=dict(initial_model_router.tier_models),
+            )
+        )
+        route_compat_was_enabled = (
+            self._route_economics is not None and model_router_snapshot is not None
+        )
+        durable_route_projection = build_route_compat_projection(
+            self._route_economics,
+            model_router=model_router_snapshot,
+            runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            effort=None,
+        )
         capsule = compile_ac_execution_capsule(
             runtime_identity=runtime_identity,
             execution_id=execution_context_id,
@@ -5929,7 +5970,8 @@ Respond with either ATOMIC or the structured JSON object only.
                         "is_sub_ac": is_sub_ac,
                         "decomposition_trustworthy": decomposition_trustworthy,
                         "base_reasoning_effort": self._reasoning_effort,
-                        "model_routing": serialize_model_router(self._model_router),
+                        "model_routing": serialize_model_router(model_router_snapshot),
+                        "route_compat": serialize_route_compat_contract(durable_route_projection),
                         "execution_profile": (
                             self._execution_profile.model_dump(mode="json")
                             if self._execution_profile is not None
@@ -6131,7 +6173,7 @@ Respond with either ATOMIC or the structured JSON object only.
             )
         model_decision, execute_model_kwargs = resolve_execute_model(
             self._adapter,
-            router=self._model_router,
+            router=model_router_snapshot,
             is_decomposed_child=is_sub_ac,
             decomposition_trustworthy=decomposition_trustworthy,
             retry_attempt=retry_attempt,
@@ -6139,7 +6181,7 @@ Respond with either ATOMIC or the structured JSON object only.
         )
         initial_model_decision, _initial_model_kwargs = resolve_execute_model(
             self._adapter,
-            router=self._model_router,
+            router=model_router_snapshot,
             is_decomposed_child=is_sub_ac,
             decomposition_trustworthy=decomposition_trustworthy,
             retry_attempt=0,
@@ -6175,20 +6217,134 @@ Respond with either ATOMIC or the structured JSON object only.
                 decomposition_trustworthy=decomposition_trustworthy,
                 semantic_ac_key=semantic_ac_key,
                 base_model_tier=(
-                    self._model_router.base_tier if self._model_router is not None else None
+                    model_router_snapshot.base_tier if model_router_snapshot is not None else None
                 ),
                 escalation_retry_threshold=(
-                    self._model_router.escalation_retry_threshold
-                    if self._model_router is not None
+                    model_router_snapshot.escalation_retry_threshold
+                    if model_router_snapshot is not None
                     else None
                 ),
                 model_escalated=model_escalated,
             )
-        # Merge the model override into the effort kwargs. The merged dict flows
-        # through LeafDispatcher.stream → execute_task unchanged (LeafDispatcher
-        # itself is untouched); ``model`` is present ONLY for runtimes that enforce
-        # a per-call override, so an advised runtime is never handed one.
-        execute_effort_kwargs = {**execute_effort_kwargs, **execute_model_kwargs}
+        route_admission = None
+        if route_compat_was_enabled:
+            # Admission is derived from the same immutable catalog snapshot that
+            # was fingerprinted into the durable capsule above. Live state is
+            # independently rebuilt again at the provider boundary.
+            projection = (
+                None
+                if durable_route_projection is None
+                else replace(
+                    durable_route_projection,
+                    registry=replace(
+                        durable_route_projection.registry,
+                        candidates=tuple(
+                            replace(candidate, effort=effort_decision.level)
+                            for candidate in durable_route_projection.registry.candidates
+                        ),
+                    ),
+                    effort=effort_decision.level,
+                )
+            )
+            route_admission = admit_compat_route(
+                projection,
+                model_decision=model_decision,
+                effort=effort_decision.level,
+            )
+            if not route_admission.admitted:
+                duration = (datetime.now(UTC) - start_time).total_seconds()
+                reason = route_admission.reason
+                log.warning(
+                    "parallel_executor.ac.route_admission_blocked",
+                    ac_index=ac_index,
+                    runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                    reason=reason,
+                )
+                return ACExecutionResult(
+                    ac_index=ac_index,
+                    ac_content=ac_content,
+                    success=False,
+                    error=f"route admission blocked: {reason}",
+                    duration_seconds=duration,
+                    session_id=session_id,
+                    retry_attempt=retry_attempt,
+                    depth=depth,
+                    outcome=ACExecutionOutcome.BLOCKED,
+                )
+        if route_admission is None:
+            # Dormant compatibility preserves the legacy model kwarg exactly.
+            execute_effort_kwargs = {**execute_effort_kwargs, **execute_model_kwargs}
+
+        def _live_provider_kwargs() -> dict[str, Any] | None:
+            """Revalidate carried admission against live state at provider entry."""
+
+            if route_admission is None:
+                return dict(execute_effort_kwargs)
+            live_model_decision, _live_model_kwargs = resolve_execute_model(
+                self._adapter,
+                router=self._model_router,
+                is_decomposed_child=is_sub_ac,
+                decomposition_trustworthy=decomposition_trustworthy,
+                retry_attempt=retry_attempt,
+                suggested_tier=suggested_tier,
+            )
+            if live_model_decision != model_decision:
+                return None
+            live_effort_decision, live_effort_kwargs = resolve_execute_effort(
+                self._adapter,
+                base_effort=self._reasoning_effort,
+                is_decomposed_child=is_sub_ac,
+                retry_attempt=retry_attempt,
+                investment_assessment=investment_assessment,
+            )
+            if live_effort_decision != effort_decision:
+                return None
+            live_projection = build_route_compat_projection(
+                self._route_economics,
+                model_router=self._model_router,
+                runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                effort=live_effort_decision.level,
+            )
+            if not validate_compat_admission(
+                live_projection,
+                route_admission,
+                model_decision=model_decision,
+                effort=live_effort_decision.level,
+            ):
+                return None
+            live_model_kwargs = admitted_execute_model_kwargs(
+                route_admission,
+                model_decision=model_decision,
+                projection=live_projection,
+                effort=live_effort_decision.level,
+            )
+            if (
+                model_decision.is_enforced
+                and model_decision.model is not None
+                and live_model_kwargs.get("model") != model_decision.model
+            ):
+                return None
+            return {**live_effort_kwargs, **live_model_kwargs}
+
+        def _route_drift_blocked_result() -> ACExecutionResult:
+            duration = (datetime.now(UTC) - start_time).total_seconds()
+            log.warning(
+                "parallel_executor.ac.route_admission_stale",
+                ac_index=ac_index,
+                runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            )
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=ac_content,
+                success=False,
+                messages=tuple(messages),
+                error="route admission blocked: live route state changed before provider entry",
+                duration_seconds=duration,
+                session_id=session_id,
+                retry_attempt=retry_attempt,
+                depth=depth,
+                outcome=ACExecutionOutcome.BLOCKED,
+            )
 
         # Runtime dispatch + streaming/heartbeat consumption. The dispatcher owns
         # the stall-scoped CancelScope and the per-message loop; it mutates
@@ -6283,6 +6439,28 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             sealed_dispatch_ids.add(dispatch_id_to_seal)
 
+        async def _terminalize_route_drift(dispatch_id_to_terminalize: str) -> ACExecutionResult:
+            """Close durable recovery state when live admission becomes stale."""
+
+            nonlocal clear_cached_runtime_handle
+            clear_cached_runtime_handle = True
+            await _seal_dispatch(
+                dispatch_id_to_terminalize,
+                reason="live route authority changed before provider entry",
+            )
+            await self._emit_ac_runtime_event(
+                event_type="execution.session.failed",
+                runtime_identity=runtime_identity,
+                ac_content=ac_content,
+                runtime_handle=dispatch_state.runtime_handle,
+                execution_id=execution_context_id,
+                session_id=dispatch_state.ac_session_id,
+                orchestrator_session_id=session_id,
+                success=False,
+                error="route admission blocked: live route state changed before provider entry",
+            )
+            return _route_drift_blocked_result()
+
         signal_target: SessionSignalTarget | None = None
         signal_target_registered = False
         try:
@@ -6307,6 +6485,9 @@ Respond with either ATOMIC or the structured JSON object only.
                 await self._session_signal_hub.register_replaying(signal_target)
                 signal_target_registered = True
 
+            provider_kwargs = _live_provider_kwargs()
+            if provider_kwargs is None:
+                return await _terminalize_route_drift(active_dispatch_id)
             _invoke_execution_authority_guard(self)
             await self._authority_leaf_dispatcher_stream(
                 self._authority_leaf_dispatcher,
@@ -6314,7 +6495,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 prompt=prompt,
                 tools=tools,
                 system_prompt=system_prompt,
-                execute_effort_kwargs=execute_effort_kwargs,
+                execute_effort_kwargs=provider_kwargs,
                 runtime_identity=runtime_identity,
                 execution_context_id=execution_context_id,
                 session_id=session_id,
@@ -6503,6 +6684,22 @@ Respond with either ATOMIC or the structured JSON object only.
                     )
                     inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
                     try:
+                        provider_kwargs = _live_provider_kwargs()
+                        if provider_kwargs is None:
+                            await self._event_store.append(
+                                create_session_signal_rejected_event(
+                                    queued_signal.signal,
+                                    rejection_code="route_admission_stale",
+                                    detail=(
+                                        "The live route authority changed before the runtime "
+                                        "follow-up provider boundary."
+                                    ),
+                                    effective_mode=queued_signal.effective_mode,
+                                    runtime_backend=signal_target.runtime_backend,
+                                    orchestrator_session_id=session_id,
+                                )
+                            )
+                            return await _terminalize_route_drift(follow_up_dispatch_id)
                         _invoke_execution_authority_guard(self)
                         await self._authority_leaf_dispatcher_stream(
                             self._authority_leaf_dispatcher,
@@ -6510,7 +6707,7 @@ Respond with either ATOMIC or the structured JSON object only.
                             prompt=(follow_up_prompt),
                             tools=[] if inform_mode else tools,
                             system_prompt=system_prompt,
-                            execute_effort_kwargs=execute_effort_kwargs,
+                            execute_effort_kwargs=provider_kwargs,
                             runtime_identity=runtime_identity,
                             execution_context_id=execution_context_id,
                             session_id=session_id,

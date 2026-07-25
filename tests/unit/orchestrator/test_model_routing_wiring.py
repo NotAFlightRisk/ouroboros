@@ -37,7 +37,7 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.model_routing import ModelRouter, build_model_router
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
-from ouroboros.orchestrator.runner import OrchestratorRunner
+from ouroboros.orchestrator.runner import OrchestratorError, OrchestratorRunner
 
 
 def _economics() -> EconomicsConfig:
@@ -402,6 +402,100 @@ class TestModelRoutedEvent:
         assert runtime.received_model == "sonnet-x"
         assert model_append_attempts >= 1
 
+    @pytest.mark.asyncio
+    async def test_dispatch_revalidates_after_telemetry_await(self) -> None:
+        """Route drift during the final durable event cannot reach the provider."""
+        store = AsyncMock()
+        events = []
+        runtime = _EnforcedModelRuntime()
+        router = _claude_router()
+
+        async def _append(event):
+            events.append(event)
+            if getattr(event, "type", None) == "execution.ac.attempt.dispatched":
+                router.tier_models["standard"] = "unconfigured-attacker-model"  # type: ignore[index]
+
+        store.append.side_effect = _append
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            model_router=router,
+            route_economics=_economics(),
+        )
+
+        result = await _run_one_ac(executor, is_sub_ac=False)
+
+        assert result.outcome.value == "blocked"
+        assert result.error is not None
+        assert "live route state changed" in result.error
+        assert runtime.received_model == "UNSET"
+        assert "execution.ac.dispatch.sealed" in {event.type for event in events}
+        assert "execution.session.failed" in {event.type for event in events}
+        assert executor._ac_runtime_handles == {}
+
+    @pytest.mark.asyncio
+    async def test_dispatch_recomputes_live_model_policy(self) -> None:
+        """A same-catalog policy replacement invalidates the carried admission."""
+        store = AsyncMock()
+        runtime = _EnforcedModelRuntime()
+        router = _claude_router()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            model_router=router,
+            route_economics=_economics(),
+        )
+
+        async def _append(event):
+            if getattr(event, "type", None) == "execution.ac.attempt.dispatched":
+                executor._model_router = replace(router, base_tier="frontier")
+
+        store.append.side_effect = _append
+
+        result = await _run_one_ac(executor, is_sub_ac=False)
+
+        assert result.outcome.value == "blocked"
+        assert runtime.received_model == "UNSET"
+
+    @pytest.mark.asyncio
+    async def test_capsule_economics_snapshot_survives_pre_admission_await(self) -> None:
+        store = AsyncMock()
+        runtime = _EnforcedModelRuntime()
+        router = _claude_router()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            model_router=router,
+            route_economics=_economics(),
+        )
+
+        async def _append(event):
+            if getattr(event, "type", None) == "execution.ac.capsule.compiled":
+                economics = _economics()
+                tiers = dict(economics.tiers)
+                tiers["standard"] = TierConfig(
+                    cost_factor=999,
+                    models=[ModelConfig(provider="anthropic", model="sonnet-x")],
+                )
+                executor._route_economics = EconomicsConfig(
+                    default_tier=economics.default_tier,
+                    escalation_threshold=economics.escalation_threshold,
+                    tiers=tiers,
+                )
+
+        store.append.side_effect = _append
+
+        result = await _run_one_ac(executor, is_sub_ac=False)
+
+        assert result.outcome.value == "blocked"
+        assert runtime.received_model == "UNSET"
+
 
 class TestRunnerRouterConstruction:
     def _adapter(self, backend: str = "claude") -> MagicMock:
@@ -432,6 +526,7 @@ class TestRunnerRouterConstruction:
         store = AsyncMock()
         runner = OrchestratorRunner(adapter, store, MagicMock())
         runner._model_router = _claude_router()
+        runner._route_economics = _economics()
 
         kwargs = await runner._route_call_effort(
             execution_id="exec_direct",
@@ -446,6 +541,149 @@ class TestRunnerRouterConstruction:
         assert routed[0].data["decomposition_trustworthy"] is False
         assert routed[0].data["child_downgrade_authorized"] is False
         assert routed[0].data["call_site"] == "runner"
+
+    @pytest.mark.asyncio
+    async def test_direct_runner_blocks_catalog_drift_before_provider_kwargs(self) -> None:
+        adapter = self._adapter("claude")
+        adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        runner = OrchestratorRunner(adapter, AsyncMock(), MagicMock())
+        runner._route_economics = _economics()
+        runner._model_router = _claude_router()
+        runner._model_router.tier_models["standard"] = "unconfigured-attacker-model"  # type: ignore[index]
+
+        with pytest.raises(OrchestratorError, match="Route admission blocked"):
+            await runner._route_call_effort(
+                execution_id="exec_direct",
+                session_id="sess_direct",
+            )
+
+    @pytest.mark.asyncio
+    async def test_direct_runner_revalidates_after_telemetry_await(self) -> None:
+        adapter = self._adapter("claude")
+        adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        store = AsyncMock()
+        runner = OrchestratorRunner(adapter, store, MagicMock())
+        runner._route_economics = _economics()
+        runner._model_router = _claude_router()
+
+        async def _append(_event):
+            assert runner._model_router is not None
+            runner._model_router.tier_models["standard"] = (  # type: ignore[index]
+                "unconfigured-attacker-model"
+            )
+
+        store.append.side_effect = _append
+
+        with pytest.raises(OrchestratorError, match="became stale"):
+            await runner._route_call_effort(
+                execution_id="exec_direct",
+                session_id="sess_direct",
+            )
+
+    @pytest.mark.asyncio
+    async def test_direct_runner_blocks_router_dormancy_during_telemetry(self) -> None:
+        adapter = self._adapter("claude")
+        adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        store = AsyncMock()
+        runner = OrchestratorRunner(adapter, store, MagicMock())
+        runner._route_economics = _economics()
+        runner._model_router = _claude_router()
+
+        async def _append(_event):
+            runner._model_router = None
+
+        store.append.side_effect = _append
+
+        with pytest.raises(OrchestratorError, match="became stale"):
+            await runner._route_call_effort(
+                execution_id="exec_direct",
+                session_id="sess_direct",
+            )
+
+    @pytest.mark.asyncio
+    async def test_direct_runner_binds_pre_await_economics_snapshot(self) -> None:
+        adapter = self._adapter("claude")
+        adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        store = AsyncMock()
+        runner = OrchestratorRunner(adapter, store, MagicMock())
+        runner._route_economics = _economics()
+        runner._model_router = _claude_router()
+
+        async def _append(_event):
+            economics = _economics()
+            tiers = dict(economics.tiers)
+            tiers["standard"] = TierConfig(
+                cost_factor=999,
+                models=[ModelConfig(provider="anthropic", model="sonnet-x")],
+            )
+            runner._route_economics = EconomicsConfig(
+                default_tier=economics.default_tier,
+                escalation_threshold=economics.escalation_threshold,
+                tiers=tiers,
+            )
+
+        store.append.side_effect = _append
+
+        with pytest.raises(OrchestratorError, match="became stale"):
+            await runner._route_call_effort(
+                execution_id="exec_direct",
+                session_id="sess_direct",
+            )
+
+    @pytest.mark.asyncio
+    async def test_advised_direct_runner_revalidates_cost_after_telemetry(self) -> None:
+        adapter = self._adapter("claude")
+        adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.IGNORED,
+        )
+        store = AsyncMock()
+        runner = OrchestratorRunner(adapter, store, MagicMock())
+        runner._route_economics = _economics()
+        runner._model_router = _claude_router()
+
+        async def _append(_event):
+            economics = _economics()
+            tiers = dict(economics.tiers)
+            tiers["standard"] = TierConfig(
+                cost_factor=999,
+                models=[ModelConfig(provider="anthropic", model="sonnet-x")],
+            )
+            runner._route_economics = EconomicsConfig(
+                default_tier=economics.default_tier,
+                escalation_threshold=economics.escalation_threshold,
+                tiers=tiers,
+            )
+
+        store.append.side_effect = _append
+
+        with pytest.raises(OrchestratorError, match="became stale"):
+            await runner._route_call_effort(
+                execution_id="exec_direct",
+                session_id="sess_direct",
+            )
 
     def test_execution_model_pin_env_keeps_router_none(
         self, monkeypatch: pytest.MonkeyPatch

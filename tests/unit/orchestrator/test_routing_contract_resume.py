@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import copy
+from dataclasses import replace
+import json
 from pathlib import Path
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.events.base import BaseEvent
@@ -24,6 +29,7 @@ from ouroboros.orchestrator.model_routing import (
 )
 from ouroboros.orchestrator.runner import (
     EXECUTION_CONTRACT_PROGRESS_KEY,
+    EXECUTION_CONTRACT_VERSION,
     FRUGALITY_PROOF_PROTOCOL_VERSION,
     OrchestratorError,
     OrchestratorRunner,
@@ -63,7 +69,7 @@ def _runner(
     )
 
 
-def _frontier_custom_router() -> ModelRouter:
+def _frontier_custom_router(*, base_tier: str = "frontier") -> ModelRouter:
     return ModelRouter(
         tier_models={
             "frugal": "custom-haiku",
@@ -72,9 +78,36 @@ def _frontier_custom_router() -> ModelRouter:
         },
         runtime_backend="claude",
         child_tier="frugal",
-        base_tier="frontier",
+        base_tier=base_tier,
         escalation_retry_threshold=7,
     )
+
+
+def _frontier_custom_economics() -> EconomicsConfig:
+    return EconomicsConfig(
+        default_tier="frugal",
+        escalation_threshold=7,
+        tiers={
+            "frugal": TierConfig(
+                cost_factor=1,
+                models=[ModelConfig(provider="anthropic", model="custom-haiku")],
+            ),
+            "standard": TierConfig(
+                cost_factor=10,
+                models=[ModelConfig(provider="anthropic", model="custom-sonnet")],
+            ),
+            "frontier": TierConfig(
+                cost_factor=30,
+                models=[ModelConfig(provider="anthropic", model="custom-opus")],
+            ),
+        },
+    )
+
+
+def _use_frontier_custom_routing(runner: OrchestratorRunner) -> None:
+    runner._route_economics = _frontier_custom_economics()
+    runner._model_router = _frontier_custom_router()
+    runner._requested_model_tier = "frontier"
 
 
 def _seed(*, goal: str = "Prove durable routing", criterion: str = "Routing survives") -> Seed:
@@ -119,6 +152,22 @@ def _clear_model_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_router_contract_round_trips_custom_frontier_policy() -> None:
     router = _frontier_custom_router()
+
+    recognized, restored = deserialize_model_router(serialize_model_router(router))
+
+    assert recognized is True
+    assert restored == router
+
+
+def test_router_contract_preserves_exact_model_whitespace() -> None:
+    router = _frontier_custom_router()
+    router = ModelRouter(
+        tier_models={**router.tier_models, "standard": " exact-model "},
+        runtime_backend=router.runtime_backend,
+        child_tier=router.child_tier,
+        base_tier=router.base_tier,
+        escalation_retry_threshold=router.escalation_retry_threshold,
+    )
 
     recognized, restored = deserialize_model_router(serialize_model_router(router))
 
@@ -175,17 +224,214 @@ def test_router_contract_rejects_semantically_invalid_ladder(router_payload: dic
 
 def test_resume_restores_persisted_custom_frontier_router() -> None:
     original = _runner()
-    original._model_router = _frontier_custom_router()
+    _use_frontier_custom_routing(original)
     persisted = original._build_execution_contract()
 
     resumed = _runner()
-    assert resumed._model_router is not None
-    assert resumed._model_router.base_tier == "standard"
+    resumed._route_economics = _frontier_custom_economics()
+    resumed._model_router = _frontier_custom_router()
+    resumed._requested_model_tier = "frontier"
 
     changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
     assert changed is False
     assert resumed._model_router == _frontier_custom_router()
+
+
+def test_resume_rejects_router_policy_that_validates_its_own_projection() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract())
+    routing = persisted["model_routing"]
+    router = routing["router"]
+    projection = routing["route_compat"]["projection"]
+    router["escalation_retry_threshold"] = 999
+    projection["escalation_retry_threshold"] = 999
+    routing_fingerprint = OrchestratorRunner._routing_fingerprint(routing)
+    persisted["frugality_proof"]["routing_fingerprint"] = routing_fingerprint
+
+    with pytest.raises(OrchestratorError, match="changed model-routing policy"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+def test_pre_admission_v2_contract_migrates_once_to_current_version() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
+    persisted["version"] = 2
+    routing = persisted["model_routing"]
+    del routing["reasoning_effort"]
+    del routing["route_compat"]
+    del routing["requested_model_tier"]
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    resumed = _runner()
+    changed = resumed._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+        seed=_seed(),
+    )
+
+    assert changed is True
+    assert resumed._execution_contract is not None
+    assert resumed._execution_contract["version"] == EXECUTION_CONTRACT_VERSION
+    assert "reasoning_effort" in resumed._execution_contract["model_routing"]
+    assert "route_compat" in resumed._execution_contract["model_routing"]
+
+
+def test_pre_requested_tier_v3_contract_migrates_once_to_current_version() -> None:
+    original = _runner(base_model_tier="frontier")
+    persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
+    persisted["version"] = 3
+    routing = persisted["model_routing"]
+    del routing["requested_model_tier"]
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    resumed = _runner()
+    changed = resumed._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+        seed=_seed(),
+    )
+
+    assert changed is True
+    assert resumed._execution_contract is not None
+    assert resumed._execution_contract["version"] == EXECUTION_CONTRACT_VERSION
+    assert resumed._execution_contract["model_routing"]["requested_model_tier"] == "frontier"
+
+
+def test_malformed_v3_contract_does_not_enter_requested_tier_migration() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract())
+    persisted["version"] = 3
+    routing = persisted["model_routing"]
+    del routing["requested_model_tier"]
+    del routing["reasoning_effort"]
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+@pytest.mark.parametrize("missing", ["reasoning_effort", "route_compat", "requested_model_tier"])
+def test_current_contract_missing_admission_field_is_not_treated_as_legacy(
+    missing: str,
+) -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract())
+    routing = persisted["model_routing"]
+    del routing[missing]
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+def test_unbounded_economics_contract_is_json_safe_and_round_trips() -> None:
+    huge = 10**5000
+    economics = _frontier_custom_economics()
+    tiers = dict(economics.tiers)
+    tiers["standard"] = tiers["standard"].model_copy(update={"cost_factor": huge})
+    economics = economics.model_copy(update={"tiers": tiers, "escalation_threshold": huge})
+    router = _frontier_custom_router()
+    router = ModelRouter(
+        tier_models=router.tier_models,
+        runtime_backend=router.runtime_backend,
+        child_tier=router.child_tier,
+        base_tier=router.base_tier,
+        escalation_retry_threshold=huge,
+    )
+    original = _runner()
+    original._route_economics = economics
+    original._model_router = router
+    original._requested_model_tier = "frontier"
+
+    persisted = original._build_execution_contract()
+    encoded = json.dumps(persisted, sort_keys=True)
+    assert isinstance(encoded, str)
+    routing = persisted["model_routing"]
+    assert routing["router"]["escalation_retry_threshold"] == "1" + "0" * 5000
+    projection = routing["route_compat"]["projection"]
+    assert projection["escalation_retry_threshold"] == "1" + "0" * 5000
+    assert projection["registry"]["candidates"][1]["cost_units"] == "1" + "0" * 5000
+
+    resumed = _runner()
+    resumed._route_economics = economics
+    resumed._model_router = router
+    resumed._requested_model_tier = "frontier"
+    assert (
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: json.loads(encoded)})
+        is False
+    )
+
+
+def test_contract_serialization_ignores_constrained_python_digit_limit() -> None:
+    if not hasattr(sys, "set_int_max_str_digits"):
+        pytest.skip("Python integer digit limits are unavailable")
+    previous_limit = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(640)
+        huge = 10**1000
+        economics = _frontier_custom_economics().model_copy(update={"escalation_threshold": huge})
+        tiers = dict(economics.tiers)
+        tiers["standard"] = tiers["standard"].model_copy(update={"cost_factor": huge})
+        economics = economics.model_copy(update={"tiers": tiers})
+        router = replace(_frontier_custom_router(), escalation_retry_threshold=huge)
+        runner = _runner()
+        runner._route_economics = economics
+        runner._model_router = router
+        runner._requested_model_tier = "frontier"
+
+        contract = runner._build_execution_contract()
+
+        assert json.dumps(contract, sort_keys=True)
+        assert contract["model_routing"]["router"]["escalation_retry_threshold"] == (
+            "1" + "0" * 1000
+        )
+    finally:
+        sys.set_int_max_str_digits(previous_limit)
+
+
+@pytest.mark.parametrize("requested_tier", ["frugal", "frontier"])
+def test_resume_without_argument_preserves_persisted_non_default_tier(
+    requested_tier: str,
+) -> None:
+    original = _runner(base_model_tier=requested_tier)
+    persisted = original._build_execution_contract()
+    assert persisted["model_routing"]["requested_model_tier"] == requested_tier
+
+    resumed = _runner()
+    changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+    assert changed is False
+    assert resumed._requested_model_tier == requested_tier
+    assert resumed._model_router is not None
+    assert resumed._model_router.base_tier == requested_tier
+
+
+@pytest.mark.parametrize(
+    ("persisted_effort", "current_effort"),
+    [("low", "high"), ("high", None), (None, "low")],
+)
+def test_resume_rejects_base_reasoning_effort_transition(
+    persisted_effort: str | None,
+    current_effort: str | None,
+) -> None:
+    original = _runner()
+    original._reasoning_effort = persisted_effort
+    persisted = original._build_execution_contract()
+    route_compat = persisted["model_routing"]["route_compat"]
+    assert route_compat["projection"]["effort"] == persisted_effort
+
+    resumed = _runner()
+    resumed._reasoning_effort = current_effort
+
+    with pytest.raises(OrchestratorError, match="changed route compatibility catalog"):
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
 def test_resume_restores_persisted_kill_switch() -> None:
@@ -201,18 +447,91 @@ def test_resume_restores_persisted_kill_switch() -> None:
     assert resumed._model_router is None
 
 
+def test_dormant_model_routing_still_rejects_reasoning_effort_drift() -> None:
+    original = _runner()
+    original._model_router = None
+    original._reasoning_effort = "low"
+    persisted = original._build_execution_contract()
+    routing = persisted["model_routing"]
+    assert routing["route_compat"] == {"version": 1, "enabled": False}
+    assert routing["reasoning_effort"] == "low"
+
+    resumed = _runner()
+    resumed._reasoning_effort = "high"
+
+    with pytest.raises(OrchestratorError, match="changed reasoning-effort contract"):
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
 def test_explicit_resume_tier_override_replaces_persisted_contract() -> None:
     original = _runner()
-    original._model_router = _frontier_custom_router()
+    _use_frontier_custom_routing(original)
     persisted = original._build_execution_contract()
 
     resumed = _runner(base_model_tier="standard")
+    resumed._route_economics = _frontier_custom_economics()
+    resumed._model_router = _frontier_custom_router(base_tier="standard")
     changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
     assert changed is True
     assert resumed._model_router is not None
     assert resumed._model_router.base_tier == "standard"
-    assert resumed._model_router.tier_models != _frontier_custom_router().tier_models
+    assert resumed._model_router.tier_models == _frontier_custom_router().tier_models
+
+
+def test_explicit_resume_tier_override_replaces_changed_catalog() -> None:
+    original = _runner()
+    _use_frontier_custom_routing(original)
+    persisted = original._build_execution_contract()
+
+    resumed = _runner(base_model_tier="standard")
+    changed_economics = _frontier_custom_economics()
+    tiers = dict(changed_economics.tiers)
+    tiers["standard"] = TierConfig(
+        cost_factor=999,
+        models=[ModelConfig(provider="anthropic", model="custom-sonnet")],
+    )
+    resumed._route_economics = EconomicsConfig(
+        default_tier=changed_economics.default_tier,
+        escalation_threshold=changed_economics.escalation_threshold,
+        tiers=tiers,
+    )
+    resumed._model_router = _frontier_custom_router(base_tier="standard")
+
+    changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+    assert changed is True
+    replacement = resumed._execution_contract
+    assert replacement is not None
+    projection = replacement["model_routing"]["route_compat"]["projection"]
+    assert projection["registry"]["candidates"][1]["cost_units"] == "999"
+
+
+def test_enabled_router_rejects_dormant_route_compat_on_resume() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract())
+    routing = persisted["model_routing"]
+    routing["route_compat"] = {"version": 1, "enabled": False}
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError, match="enabled route compatibility"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+def test_dormant_current_contract_requires_explicit_route_compat() -> None:
+    original = _runner()
+    original._model_router = None
+    persisted = copy.deepcopy(original._build_execution_contract())
+    routing = persisted["model_routing"]
+    del routing["route_compat"]
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError, match="explicit route compatibility"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
 def test_present_malformed_resume_contract_fails_closed() -> None:
