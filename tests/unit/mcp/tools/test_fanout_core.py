@@ -7583,3 +7583,154 @@ async def test_round69_unknown_fanout_id_survives_as_a_structured_status(
     assert payload.is_error is True
     assert payload.meta["status"] == "unknown_fanout_id"
     assert json.loads(payload.content[0].text)["status"] == "unknown_fanout_id"
+
+
+# --------------------------------------------------------------------------- #
+# round-70 — a reserved contract id means exactly one thing
+# --------------------------------------------------------------------------- #
+
+
+_RAW_PERSON_ROWS = {
+    "rows": [
+        {"name": "Alice Kim", "email": "alice@example.com", "phone": "010-1234-5678"},
+        {"name": "Bob Lee", "email": "bob@example.com", "phone": "010-8765-4321"},
+    ]
+}
+
+_WEAK_DATA_DECLARATION = {
+    "contract_id": "data_evidence_answer.v1",
+    "response_model_schema": {"type": "object"},
+}
+
+
+def test_round70_foreign_lane_cannot_borrow_the_data_contract_id(tmp_path: Any) -> None:
+    """The id carries its schema, whatever lane_id declares it.
+
+    Round 67 bound the canonical schema by LANE ID, but the boundary scan,
+    retained-state selection, prose redaction, and replay consent all key off
+    CONTRACT ID. So an additive lane under another lane_id could declare
+    `data_evidence_answer.v1` with `{"type": "object"}` and be treated as a
+    data lane everywhere except where its content was checked.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-70",
+        lanes=[
+            {
+                "lane_id": "extra_metrics_lane",
+                "capability": "call_mcp",
+                "required": True,
+                "answer_contract": dict(_WEAK_DATA_DECLARATION),
+            }
+        ],
+    )
+    assert fanout_id is not None
+
+    record = registry.load(fanout_id)
+    assert record is not None
+    bound = record.synthesizer_input["lane_answer_contracts"]["extra_metrics_lane"]
+    assert bound["response_model_schema"] != _WEAK_DATA_DECLARATION["response_model_schema"]
+    assert "$defs" in bound["response_model_schema"]
+
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-70",
+        correlation_key="context.lane_id",
+        results=[{"key": "extra_metrics_lane", "content": dict(_RAW_PERSON_ROWS)}],
+        fanout_id=fanout_id,
+    )
+
+    assert out["status"] == "partial"
+    assert out.get("contract_violations")
+    serialized = json.dumps(out, ensure_ascii=False, default=str)
+    assert "alice@example.com" not in serialized
+    assert "010-1234-5678" not in serialized
+    assert not registry.load(fanout_id).received_results
+
+
+def test_round70_a_legacy_record_cannot_enforce_less(tmp_path: Any) -> None:
+    """A record persisted before round-70 is normalized when it is read back.
+
+    Registration cannot be the only place this holds — an old record carrying
+    a weak contract under the reserved id is read on every submission.
+    """
+    registry = FanoutRegistry(tmp_path)
+    record = FanoutRecord(
+        fanout_id="legacy-70",
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="sess-70-legacy",
+        correlation_key="context.lane_id",
+        expected_keys=("extra_metrics_lane",),
+        required_keys=("extra_metrics_lane",),
+        synthesizer_input={
+            "lane_ids": ["extra_metrics_lane"],
+            # Persisted by an older version, before the id carried its schema.
+            "lane_answer_contracts": {"extra_metrics_lane": dict(_WEAK_DATA_DECLARATION)},
+        },
+    )
+    assert bool(registry.save(record))
+
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-70-legacy",
+        correlation_key="context.lane_id",
+        results=[{"key": "extra_metrics_lane", "content": dict(_RAW_PERSON_ROWS)}],
+        fanout_id="legacy-70",
+    )
+
+    assert out["status"] == "partial"
+    assert out.get("contract_violations")
+    assert "alice@example.com" not in json.dumps(out, ensure_ascii=False, default=str)
+
+
+def test_round70_an_unrelated_lane_contract_is_untouched(tmp_path: Any) -> None:
+    """Only the RESERVED id is normalized — additive lanes keep their own form."""
+    from ouroboros.mcp.tools.subagent import effective_lane_contract, loaded_lane_contracts
+
+    own = {
+        "contract_id": "code_facts.v3",
+        "response_model_schema": {"type": "object", "properties": {"note": {"type": "string"}}},
+    }
+    assert effective_lane_contract("code_context", own) == own
+    assert loaded_lane_contracts({"code_context": own})["code_context"] == own
+
+
+def test_round70_a_conforming_borrowed_lane_still_completes(tmp_path: Any) -> None:
+    """Binding the id must not block a lane that genuinely answers in its form."""
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-70-ok",
+        lanes=[
+            {
+                "lane_id": "extra_metrics_lane",
+                "capability": "call_mcp",
+                "required": True,
+                "answer_contract": dict(_WEAK_DATA_DECLARATION),
+            }
+        ],
+    )
+    assert fanout_id is not None
+
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-70-ok",
+        correlation_key="context.lane_id",
+        results=[
+            {
+                "key": "extra_metrics_lane",
+                "content": {
+                    "lane_id": "data_context",
+                    "data_needed": False,
+                    "finding": "This question does not depend on data evidence.",
+                    "confidence": "no_evidence",
+                    "evidence": [],
+                    "proposed_queries": [],
+                    "requires_user_confirmation": True,
+                },
+            }
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete", out.get("contract_violations")

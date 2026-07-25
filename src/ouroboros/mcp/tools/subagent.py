@@ -3613,9 +3613,42 @@ def effective_lane_contract(lane_id: str, declared: Any) -> dict[str, Any] | Non
     """
     if lane_id == "data_context":
         return canonical_data_lane_contract()
-    if isinstance(declared, Mapping) and _enforceable_lane_contract(declared):
-        return dict(declared)
+    if isinstance(declared, Mapping):
+        # A RESERVED contract id means exactly one thing (round-70). Round 67
+        # bound the canonical schema by lane id, but every downstream
+        # behaviour — the evidence boundary scan, retained-state selection,
+        # prose redaction on persistence, and replay consent — keys off
+        # contract_id instead. So an additive lane under any other lane_id
+        # could declare `data_evidence_answer.v1` with a schema of
+        # `{"type": "object"}` and be treated as a data lane everywhere
+        # EXCEPT where its content is checked: raw person rows completed with
+        # no violations. The id now carries its schema with it.
+        if str(declared.get("contract_id") or "") == _DATA_EVIDENCE_CONTRACT_ID:
+            return canonical_data_lane_contract()
+        if _enforceable_lane_contract(declared):
+            return dict(declared)
     return None
+
+
+def loaded_lane_contracts(raw: Any) -> dict[str, Any]:
+    """Persisted lane contracts, with reserved ids restored to canonical form.
+
+    Registration cannot be the only place this holds: a record persisted
+    before round-70 may carry a weak contract under the reserved id, and it
+    is read back on every submission, replay, and resubmission. Normalizing
+    on load means an old record cannot enforce less than a new one.
+    """
+    if not isinstance(raw, Mapping):
+        return {}
+    normalized: dict[str, Any] = {}
+    for lane_id, contract in raw.items():
+        if not isinstance(contract, Mapping):
+            continue
+        if str(contract.get("contract_id") or "") == _DATA_EVIDENCE_CONTRACT_ID:
+            normalized[str(lane_id)] = canonical_data_lane_contract()
+        else:
+            normalized[str(lane_id)] = dict(contract)
+    return normalized
 
 
 def declared_lane_contract(lane: Mapping[str, Any]) -> Any:
@@ -4589,7 +4622,9 @@ def _submit_fanout_results_locked(
         # let a generic lane's resend flip the whole response to confirmable
         # while the data lane stayed redacted. This is the same rule as
         # round-50 — what a value is, is decided outside the value.
-        replay_lane_contracts = record.synthesizer_input.get("lane_answer_contracts")
+        replay_lane_contracts = loaded_lane_contracts(
+            record.synthesizer_input.get("lane_answer_contracts")
+        )
         replay_lane_contracts = (
             replay_lane_contracts if isinstance(replay_lane_contracts, Mapping) else {}
         )
@@ -4630,16 +4665,10 @@ def _submit_fanout_results_locked(
                     rejected.append(key)
                     continue
                 resent[key] = content
-            _normalize_contracted_text(
-                resent,
+            replay_contracts = loaded_lane_contracts(
                 record.synthesizer_input.get("lane_answer_contracts")
-                if isinstance(record.synthesizer_input.get("lane_answer_contracts"), Mapping)
-                else {},
             )
-            raw_contracts_replay = record.synthesizer_input.get("lane_answer_contracts")
-            replay_contracts = (
-                raw_contracts_replay if isinstance(raw_contracts_replay, Mapping) else {}
-            )
+            _normalize_contracted_text(resent, replay_contracts)
             raw_policies_replay = record.synthesizer_input.get("lane_data_policies")
             replay_policies = (
                 raw_policies_replay if isinstance(raw_policies_replay, Mapping) else {}
@@ -4682,7 +4711,8 @@ def _submit_fanout_results_locked(
                 "will be unconfirmable again."
             )
         elif _carries_redacted_data(
-            record.received_results, record.synthesizer_input.get("lane_answer_contracts")
+            record.received_results,
+            loaded_lane_contracts(record.synthesizer_input.get("lane_answer_contracts")),
         ):
             replay["consent_status"] = "not_confirmable_prose_not_retained"
             replay["consent_note"] = (
@@ -4759,8 +4789,7 @@ def _submit_fanout_results_locked(
     # Contract validation happens at the door, BEFORE anything is merged or
     # persisted: a violating data-lane output (raw rows, PII-shaped evidence,
     # skipped confirmation) must never enter the durable record.
-    raw_contracts = record.synthesizer_input.get("lane_answer_contracts")
-    contracts = raw_contracts if isinstance(raw_contracts, Mapping) else {}
+    contracts = loaded_lane_contracts(record.synthesizer_input.get("lane_answer_contracts"))
     raw_policies = record.synthesizer_input.get("lane_data_policies")
     policies = raw_policies if isinstance(raw_policies, Mapping) else {}
     # The public tool accepts ``content`` as object OR text (round-25): a
