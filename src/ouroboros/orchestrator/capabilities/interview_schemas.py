@@ -829,6 +829,37 @@ def _data_context_answer_contract() -> dict[str, Any]:
     }
 
 
+def data_evidence_structural_schema() -> dict[str, Any]:
+    """The data answer contract's STRUCTURE, without prose or descriptions.
+
+    Re-entry validates against this when a lane's declared contract cannot be
+    enforced. It is the same object shape and the same ``$defs`` the published
+    contract uses — a degraded contract must not become a permissive one.
+    """
+    full = _data_context_answer_contract()["response_model_schema"]
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["lane_id", "finding", "requires_user_confirmation"],
+        "properties": {
+            key: value
+            for key, value in full["properties"].items()
+            if key
+            in {
+                "lane_id",
+                "data_needed",
+                "finding",
+                "confidence",
+                "evidence",
+                "proposed_queries",
+                "requires_user_confirmation",
+                "caveats",
+            }
+        },
+        "$defs": full["$defs"],
+    }
+
+
 def _data_context_lane_policy() -> dict[str, Any]:
     """Return the machine-readable data-access policy for the data_context lane.
 
@@ -892,6 +923,43 @@ def _data_context_lane_policy() -> dict[str, Any]:
             # occupy. Prose survives only in operator-facing narrative.
             "enforcement": "typed_contract_fields",
             "free_text_fields": ["finding", "caveats", "expected_decision"],
+            # A unit is a MEASUREMENT unit. Declaring the vocabulary makes
+            # "this unit is one of the declared kinds" a decidable claim, so
+            # an identity attribute cannot be worn as a unit (round-44 probe:
+            # phone digits as the number, "phone" as the unit). Hosts that
+            # need another unit extend this list; the engine enforces
+            # whatever the snapshot declares.
+            "allowed_units": [
+                "accounts",
+                "users",
+                "sessions",
+                "events",
+                "requests",
+                "calls",
+                "queries",
+                "rows",
+                "records",
+                "items",
+                "orders",
+                "messages",
+                "errors",
+                "ms",
+                "s",
+                "minutes",
+                "hours",
+                "days",
+                "weeks",
+                "months",
+                "bytes",
+                "kb",
+                "mb",
+                "gb",
+                "%",
+                "ratio",
+                "count",
+                "krw",
+                "usd",
+            ],
         },
     }
 

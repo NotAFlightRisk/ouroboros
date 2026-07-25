@@ -2011,9 +2011,24 @@ def test_rows_smuggled_through_prose_fields_are_rejected() -> None:
     errors = _data_evidence_boundary_violations(rows_in_caveat)
     assert any("caveats[0]" in error for error in errors)
 
-    # Prose with newlines and single commas per clause stays valid.
-    prose_finding = _minimal_data_output("78% of MAU are on the free tier")
-    prose_finding["finding"] = "Most usage is free-tier.\nPremium adoption is growing, slowly."
+    # Layout separators are what a record table needs, so the field refuses
+    # them — a line break or a spaced slash is a table, not a statement.
+    for layout in (
+        "Most usage is free-tier.\nPremium adoption is growing, slowly.",
+        "Alice Smith premium 12 seats / Bob Jones free 8 seats",
+        "free 42 | premium 18 | enterprise 3",
+    ):
+        laid_out = _minimal_data_output()
+        laid_out["finding"] = layout
+        assert any(
+            "record-layout separators" in error
+            for error in _data_evidence_boundary_violations(laid_out)
+        ), layout
+
+    # One advisory sentence, with commas, stays valid.
+    prose_finding = _minimal_data_output(
+        "Most usage is free-tier, and premium adoption is growing slowly."
+    )
     assert _data_evidence_boundary_violations(prose_finding) == []
 
     # Comma lists are legitimate query syntax.
@@ -5071,7 +5086,17 @@ def test_forbidden_content_classes_are_unrepresentable_not_filtered() -> None:
         {"aggregation": "distinct_count", "number": 12400, "unit": "users"},
     ):
         valid = _minimal_data_output()
-        valid["evidence"] = [_typed_evidence(value=aggregate)]
+        # The request must report the SAME measurement it ran (round-44).
+        valid["evidence"] = [
+            _typed_evidence(
+                value=aggregate,
+                request={
+                    "operation": "read",
+                    "metric": "active_users",
+                    "aggregation": aggregate["aggregation"],
+                },
+            )
+        ]
         assert _data_evidence_boundary_violations(valid) == [], aggregate
 
     for request in (
@@ -5208,3 +5233,99 @@ def test_round43_durable_boundary_invariants(tmp_path: Any) -> None:
         for violation in out["contract_violations"]
         for error in violation["errors"]
     )
+
+
+def test_round44_ownership_and_evidence_invariants(tmp_path: Any) -> None:
+    """Round-44's blockers, each closed by an existence claim."""
+    import json
+
+    from jsonschema import Draft202012Validator
+
+    from ouroboros.mcp.tools.subagent import (
+        _data_evidence_boundary_violations,
+        _data_evidence_fallback_schema,
+    )
+    from ouroboros.orchestrator.capabilities.interview_schemas import _data_context_lane_policy
+
+    policy = _data_context_lane_policy()
+
+    # B1 — a mismatch reply must not name what it expected, or the check
+    # becomes an oracle: session first, correlation key second, completion third.
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-secret",
+        lanes=[
+            {
+                "lane_id": "code_context",
+                "purpose": "p",
+                "capability": "inspect_code",
+                "required": True,
+            }
+        ],
+    )
+    assert fanout_id is not None
+    probe = submit_fanout_results(
+        registry,
+        session_id="guess",
+        correlation_key="guess",
+        results=[],
+        fanout_id=fanout_id,
+    )
+    assert probe["status"] == "correlation_mismatch"
+    assert "expected_session_id" not in probe
+    assert "expected_correlation_key" not in probe
+    assert "sess-secret" not in json.dumps(probe)
+    assert probe["mismatched_field"] == "session_id"
+
+    # B2 — a record table has no shape to take, and a unit is a declared
+    # measurement unit rather than any lowercase word.
+    laid_out = _minimal_data_output("Alice Smith premium 12 seats / Bob Jones free 8 seats")
+    assert any(
+        "record-layout separators" in error
+        for error in _data_evidence_boundary_violations(laid_out, policy)
+    )
+    worn_unit = _minimal_data_output()
+    worn_unit["evidence"] = [
+        _typed_evidence(value={"aggregation": "count", "number": 1012345678, "unit": "phone"})
+    ]
+    assert any(
+        "not one of the units" in error
+        for error in _data_evidence_boundary_violations(worn_unit, policy)
+    )
+
+    # B3 — the degraded contract keeps the structure; it is not a weaker form.
+    fallback = _data_evidence_fallback_schema()
+    Draft202012Validator.check_schema(fallback)
+    assert list(
+        Draft202012Validator(fallback).iter_errors(
+            {"requires_user_confirmation": True, "raw_rows": [{"name": "Alice", "acct": "847291"}]}
+        )
+    )
+    assert (
+        list(
+            Draft202012Validator(fallback).iter_errors(
+                {
+                    "lane_id": "data_context",
+                    "data_needed": False,
+                    "finding": "No data evidence is needed.",
+                    "confidence": "no_evidence",
+                    "evidence": [],
+                    "proposed_queries": [],
+                    "requires_user_confirmation": True,
+                }
+            )
+        )
+        == []
+    )
+
+    # Follow-up — evidence must report the measurement it ran.
+    mismatched = _minimal_data_output()
+    mismatched["evidence"] = [
+        _typed_evidence(value={"aggregation": "avg", "number": 42, "unit": "usd"})
+    ]
+    assert any(
+        "does not match the executed request" in error
+        for error in _data_evidence_boundary_violations(mismatched, policy)
+    )
+    assert _data_evidence_boundary_violations(_minimal_data_output(), policy) == []

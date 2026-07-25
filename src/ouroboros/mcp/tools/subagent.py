@@ -3907,6 +3907,30 @@ def _repeats_identity_tokens(text: str) -> bool:
     return any(len(numbers) >= 2 for numbers in by_label.values())
 
 
+# A persisted prose field is ONE advisory statement for the human, not a
+# layout. Restricting the field's GRAMMAR — no line breaks, no column pipes,
+# no spaced-slash separators, at most two sentences — removes the shapes a
+# record table needs, rather than trying to recognize the records themselves
+# (round-44 probe: "Alice Smith premium 12 seats / Bob Jones free 8 seats",
+# which carries no digits inside its identity tokens and so evaded the row
+# heuristics). This bounds the residual prose surface; it does not close it —
+# the data itself lives in the typed evidence, which is why the finding never
+# needs to enumerate anything.
+_PROSE_LAYOUT = re.compile(r"[\r\n|]|\s/\s|\s[•·]\s")
+
+
+def _prose_layout_problem(text: str) -> str | None:
+    if _PROSE_LAYOUT.search(text):
+        return (
+            "uses record-layout separators (line breaks, pipes, spaced "
+            "slashes); an advisory statement is one sentence, and the numbers "
+            "belong in typed evidence"
+        )
+    if len(re.findall(r"[.!?](?=\s|$)", text)) > 2:
+        return "is more than two sentences; state one advisory finding"
+    return None
+
+
 def _prose_contains_rows(text: str) -> bool:
     """Row-shaped content embedded in a prose field (not evidence.value)."""
     if _EMBEDDED_JSON_ROWS.search(text):
@@ -4024,6 +4048,9 @@ def _data_evidence_boundary_violations(
     # snapshot (round-43): a limit that only the prompt knows about is a
     # suggestion, and max_evidence_chars had never been applied.
     evidence_policy = (policy or {}).get("evidence_policy")
+    allowed_units = (
+        evidence_policy.get("allowed_units") if isinstance(evidence_policy, Mapping) else None
+    )
     if isinstance(evidence_policy, Mapping) and isinstance(evidence_items, list):
         max_items = evidence_policy.get("max_evidence_items")
         if isinstance(max_items, int) and len(evidence_items) > max_items:
@@ -4051,12 +4078,28 @@ def _data_evidence_boundary_violations(
         # missing or unenforceable.
         errors.extend(
             f"evidence[{index}].value: {problem}"
-            for problem in _aggregate_shape_problems(item.get("value"))
+            for problem in _aggregate_shape_problems(item.get("value"), allowed_units)
         )
         errors.extend(
             f"evidence[{index}].request: {problem}"
             for problem in _read_request_shape_problems(item.get("request"))
         )
+        # The request and its result must describe the SAME measurement
+        # (round-44): a count request reported as an avg is two unrelated
+        # facts stapled together, and nothing downstream can tell which one
+        # the user confirmed.
+        executed, reported = item.get("request"), item.get("value")
+        if (
+            isinstance(executed, Mapping)
+            and isinstance(reported, Mapping)
+            and executed.get("aggregation") in _AGGREGATION_KINDS
+            and reported.get("aggregation") in _AGGREGATION_KINDS
+            and executed.get("aggregation") != reported.get("aggregation")
+        ):
+            errors.append(
+                f"evidence[{index}]: the reported aggregation does not match "
+                "the executed request; evidence must report what it ran"
+            )
         # Evidence exists only for a SUCCEEDED execution (round-42): the
         # outcome is declared, so a failed lookup is a located violation
         # rather than a phrase some detector has to recognize.
@@ -4117,6 +4160,8 @@ def _data_evidence_boundary_violations(
                 f"proposed_queries[{index}].expected_decision: row-shaped "
                 "content is raw evidence and may not ride any persisted field"
             )
+        if isinstance(decision, str) and (problem := _prose_layout_problem(decision)):
+            errors.append(f"proposed_queries[{index}].expected_decision: {problem}")
 
     # Advisory prose for the human. It carries no data — the aggregates do —
     # so these checks are defense-in-depth, not the boundary.
@@ -4126,6 +4171,8 @@ def _data_evidence_boundary_violations(
             "finding: row-shaped (serialized-record) content is raw evidence "
             "and may not ride any persisted field; state aggregates only"
         )
+    if isinstance(finding, str) and (problem := _prose_layout_problem(finding)):
+        errors.append(f"finding: {problem}")
     if (
         isinstance(finding, str)
         and isinstance(evidence_items, list)
@@ -4145,6 +4192,8 @@ def _data_evidence_boundary_violations(
                 f"caveats[{index}]: row-shaped (serialized-record) content is "
                 "raw evidence and may not ride any persisted field"
             )
+        if problem := _prose_layout_problem(caveat):
+            errors.append(f"caveats[{index}]: {problem}")
         # A caveat admitting the call produced nothing contradicts EXECUTED
         # evidence it accompanies (rounds 31-32); a no-op legitimately
         # narrates that no lookup was needed.
@@ -4160,7 +4209,7 @@ def _data_evidence_boundary_violations(
     return errors
 
 
-def _aggregate_shape_problems(value: Any) -> list[str]:
+def _aggregate_shape_problems(value: Any, allowed_units: Any = None) -> list[str]:
     """Whether an evidence value is a typed aggregate.
 
     An aggregate is a NUMBER with a unit. Enforcing that here — not only in
@@ -4188,6 +4237,11 @@ def _aggregate_shape_problems(value: Any) -> list[str]:
     unit = value.get("unit")
     if not isinstance(unit, str) or not _AGGREGATE_UNIT.match(unit):
         problems.append("unit must be a short lowercase unit token")
+    elif isinstance(allowed_units, (list, tuple)) and unit not in allowed_units:
+        # Declared vocabulary, enforced from the persisted policy snapshot
+        # (round-44): "is this one of the declared units" is decidable, so an
+        # identity attribute cannot be worn as a unit.
+        problems.append("unit is not one of the units the data policy declares")
     dimension = value.get("dimension")
     if dimension is not None and (
         not isinstance(dimension, str) or not _AGGREGATE_DIMENSION.match(dimension)
@@ -4274,23 +4328,20 @@ _AGGREGATION_KINDS = frozenset(
 
 
 def _data_evidence_fallback_schema() -> dict[str, Any]:
-    """Minimal schema kept when the declared data contract is unenforceable.
+    """Structural schema kept when the DECLARED data contract is unenforceable.
 
-    It asserts the invariants that define the lane — confirmation is required
-    and evidence/proposals are typed objects — so a degraded contract cannot
-    become a weaker contract. The full form's field-level grammar is what is
-    lost, and the code-level checks in
-    ``_data_evidence_boundary_violations`` still cover it.
+    This form is never delivered to a child, so it carries no prompt budget
+    and there is no reason for it to be weaker than the real contract's
+    structure (round-44: a permissive fallback accepted
+    ``{requires_user_confirmation: true, raw_rows: [...]}``). It reuses the
+    published ``$defs`` and closes the object, so a degraded contract loses
+    the field-level descriptions and nothing else.
     """
-    return {
-        "type": "object",
-        "required": ["requires_user_confirmation"],
-        "properties": {
-            "requires_user_confirmation": {"const": True},
-            "evidence": {"type": "array", "items": {"type": "object"}},
-            "proposed_queries": {"type": "array", "items": {"type": "object"}},
-        },
-    }
+    from ouroboros.orchestrator.capabilities.interview_schemas import (
+        data_evidence_structural_schema,
+    )
+
+    return data_evidence_structural_schema()
 
 
 _AGGREGATE_UNIT = re.compile(r"^[a-z%][a-z_/%]{0,23}$")
@@ -4947,7 +4998,12 @@ def _submit_fanout_results_locked(
                 "session_id does not match the registered fan-out "
                 "(required — omitting it does not bypass the check)."
             ),
-            "expected_session_id": record.session_id,
+            # The registered values are NOT echoed (round-44): a mismatch
+            # reply that names what was expected turns the check into an
+            # oracle — one empty submission yields the session, a second
+            # yields the correlation key, and the third completes the fan-out
+            # from outside. A mismatch reports only that it mismatched.
+            "mismatched_field": "session_id",
         }
     if record.correlation_key and correlation_key != record.correlation_key:
         return {
@@ -4957,7 +5013,7 @@ def _submit_fanout_results_locked(
                 "correlation_key does not match the registered fan-out "
                 "(required — omitting it does not bypass the check)."
             ),
-            "expected_correlation_key": record.correlation_key,
+            "mismatched_field": "correlation_key",
         }
     if record.completed:
         replay: dict[str, Any] = (
