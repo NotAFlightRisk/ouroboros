@@ -61,6 +61,7 @@ from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.requirement_candidate import (
     classify_answer_provenance,
     extraction_safe_answer,
+    extraction_safe_question,
 )
 from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
@@ -1291,10 +1292,19 @@ def _format_extraction_transcript(state: InterviewState) -> str:
     if state.initial_context:
         lines.append(f"**Initial Context:** {state.initial_context}")
         lines.append("")
+    observation_seen = False
     for r in state.rounds:
-        lines.append(f"**Q{r.round_number}:** {r.question}")
+        # Question withholding by taint provenance (round-80), answers by
+        # marker (round-74) — see extraction_safe_question.
+        lines.append(
+            f"**Q{r.round_number}:** "
+            f"{extraction_safe_question(r.question, observation_seen=observation_seen)}"
+        )
         if r.user_response:
-            lines.append(f"**A{r.round_number}:** {extraction_safe_answer(r.user_response)}")
+            safe = extraction_safe_answer(r.user_response)
+            if safe != r.user_response:
+                observation_seen = True
+            lines.append(f"**A{r.round_number}:** {safe}")
         lines.append("")
     return "\n".join(lines).rstrip()
 

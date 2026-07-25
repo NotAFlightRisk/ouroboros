@@ -8382,3 +8382,41 @@ def test_round79_every_schema_valid_metric_is_attainable(tmp_path: Any) -> None:
             fanout_id=fanout_id,
         )
         assert out["status"] == "complete", (admitted, out.get("contract_violations"))
+
+
+def test_round80_compact_date_partitions_complete_end_to_end(tmp_path: Any) -> None:
+    """Calendar validity, not a key vocabulary, decides a digit partition.
+
+    month=202607 and date=20260725 validate against the published grammar but
+    were rejected as opaque entity identifiers — a required lane stayed
+    partial holding a schema-valid answer.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-80",
+        lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+    )
+    assert fanout_id is not None
+
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-80",
+        correlation_key="context.lane_id",
+        results=[
+            {
+                "key": "data_context",
+                "content": _round77_answer("logins", ["month=202607", "date=20260725"]),
+            }
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete", out.get("contract_violations")
+
+    # The narrowing is calendar-shaped, not a blanket digit pass: an entity
+    # key with a date-like value and a non-calendar digit run both still fail.
+    from ouroboros.contracts.data_evidence import _identity_scope_problem
+
+    assert _identity_scope_problem("user_id=202607", "filters[0]") is not None
+    assert _identity_scope_problem("cohort=999999", "filters[0]") is not None
+    assert _identity_scope_problem("day=20260231", "filters[0]") is not None

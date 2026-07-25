@@ -37,7 +37,10 @@ from ouroboros.bigbang.requirement_distillation import (
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.owner_only import write_owner_only
-from ouroboros.core.requirement_candidate import extraction_safe_answer
+from ouroboros.core.requirement_candidate import (
+    extraction_safe_answer,
+    extraction_safe_question,
+)
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     BrownfieldContext,
@@ -700,15 +703,23 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
             if rendered_paths:
                 parts.append(f"\nCodebase Paths: {rendered_paths}")
 
+        observation_seen = False
         for round_data in state.rounds:
             if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
                 continue
-            parts.append(f"\nQ: {round_data.question}")
+            # Questions generated after an observation entered the history
+            # may restate it (round-80), so they are withheld by taint
+            # provenance; answers are withheld by their marker (round-74).
+            # Either way an LLM paraphrase cannot be provenance-checked
+            # afterwards — the content is withheld at the input.
+            parts.append(
+                f"\nQ: {extraction_safe_question(round_data.question, observation_seen=observation_seen)}"
+            )
             if round_data.user_response:
-                # Observation-marked answers do not reach the extractor
-                # (round-74): an LLM paraphrase cannot be provenance-checked
-                # afterwards, so the content is withheld at the input.
-                parts.append(f"A: {extraction_safe_answer(round_data.user_response)}")
+                safe = extraction_safe_answer(round_data.user_response)
+                if safe != round_data.user_response:
+                    observation_seen = True
+                parts.append(f"A: {safe}")
 
         return "\n".join(parts)
 

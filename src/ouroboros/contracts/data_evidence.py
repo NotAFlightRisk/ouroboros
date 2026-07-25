@@ -1514,6 +1514,28 @@ _OPAQUE_ENTITY_VALUE = re.compile(
 )
 
 
+def _compact_date_partition(value: str) -> bool:
+    """Whether a digit run is a calendar-valid compact partition.
+
+    Warehouse partitions write months and days without separators —
+    month=202607, date=20260725 — and the opaque-entity rule read every
+    6+-digit run as an identifier, rejecting values the published grammar
+    admits (round-80). CALENDAR VALIDITY is the decidable line, not a key
+    vocabulary: 202607 is a month and 999999 is not, whatever the key says.
+    An entity-named key (user_id=202607) is still rejected by the key rule
+    before the value is consulted.
+    """
+    if re.fullmatch(r"(?:19|20)[0-9]{4}", value):
+        return 1 <= int(value[4:6]) <= 12
+    if re.fullmatch(r"(?:19|20)[0-9]{6}", value):
+        try:
+            datetime.strptime(value, "%Y%m%d")
+        except ValueError:
+            return False
+        return True
+    return False
+
+
 def _entity_key(key: str) -> bool:
     """Whether a grouping/filter/dimension key identifies an entity.
 
@@ -1574,7 +1596,7 @@ def _identity_scope_problem(text: str, label: str) -> str | None:
     # the same credential classification every other identifier field has.
     if _identifier_looks_secret(key) or (value and _identifier_looks_secret(value)):
         return f"{label} names or compares a credential; it may not ride a data request"
-    if value and _OPAQUE_ENTITY_VALUE.match(value):
+    if value and _OPAQUE_ENTITY_VALUE.match(value) and not _compact_date_partition(value):
         return f"{label} scopes to an opaque entity identifier; aggregate by category instead"
     return None
 

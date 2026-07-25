@@ -541,3 +541,87 @@ def test_round76_a_current_cache_is_still_reused() -> None:
     state.requirement_distillation = first
 
     assert build_requirement_distillation(state) is first
+
+
+def test_round80_questions_after_an_observation_are_withheld() -> None:
+    """The reviewer's probe: a later question restates the withheld observation.
+
+    The interviewer legitimately sees observations in conversational context,
+    so a question generated after one can carry it verbatim — and the
+    extractors derive requirements from the whole conversation. Taint
+    provenance is the decidable line: questions before the first observation
+    keep their interpretive value; every question after it is withheld.
+    """
+    from ouroboros.bigbang.seed_generator import SeedGenerator
+    from ouroboros.core.requirement_candidate import (
+        OBSERVATION_WITHHELD_NOTE,
+        QUESTION_WITHHELD_NOTE,
+    )
+
+    state = _state_with_answer("[from-data] 42 enterprise accounts require SSO.")
+    state.rounds[0].question = "What does the data show about SSO?"
+    state.rounds.append(
+        InterviewRound(
+            round_number=2,
+            question="Given that 42 enterprise accounts require SSO, what tier is needed?",
+            user_response="Enterprise tier must include SSO.",
+        )
+    )
+
+    generator = SeedGenerator.__new__(SeedGenerator)
+    context = generator._build_interview_context(state)
+
+    # The pre-observation question keeps its interpretive value.
+    assert "What does the data show about SSO?" in context
+    # The post-observation question — which restates the observation — is out.
+    assert "42 enterprise accounts" not in context
+    assert QUESTION_WITHHELD_NOTE in context
+    assert OBSERVATION_WITHHELD_NOTE in context
+    # The user's own decision survives verbatim.
+    assert "Enterprise tier must include SSO." in context
+
+
+def test_round80_pm_and_plugin_paths_withhold_tainted_questions() -> None:
+    """All three extraction surfaces apply the same taint rule."""
+    from ouroboros.bigbang.pm_interview import PMInterviewEngine
+    from ouroboros.core.requirement_candidate import QUESTION_WITHHELD_NOTE
+    from ouroboros.mcp.tools.authoring_handlers import _format_extraction_transcript
+
+    state = _state_with_answer("[from-research] The provider requires 3DS.")
+    state.rounds.append(
+        InterviewRound(
+            round_number=2,
+            question="Since the provider requires 3DS, how should checkout flow?",
+            user_response="Checkout must support 3DS redirects.",
+        )
+    )
+
+    pm_engine = PMInterviewEngine.__new__(PMInterviewEngine)
+    for label, transcript in (
+        ("pm", pm_engine._build_interview_context(state)),
+        ("plugin", _format_extraction_transcript(state)),
+    ):
+        assert "provider requires 3DS, how should checkout" not in transcript, label
+        assert QUESTION_WITHHELD_NOTE in transcript, label
+        assert "Checkout must support 3DS redirects." in transcript, label
+
+
+def test_round80_observation_free_interviews_keep_every_question() -> None:
+    """No observation, no taint — the interpretive context is untouched."""
+    from ouroboros.bigbang.seed_generator import SeedGenerator
+    from ouroboros.core.requirement_candidate import QUESTION_WITHHELD_NOTE
+
+    state = _state_with_answer("We must ship the reporting lane this quarter.")
+    state.rounds.append(
+        InterviewRound(
+            round_number=2,
+            question="What is the acceptance bar?",
+            user_response="All exports finish under a minute.",
+        )
+    )
+
+    generator = SeedGenerator.__new__(SeedGenerator)
+    context = generator._build_interview_context(state)
+
+    assert QUESTION_WITHHELD_NOTE not in context
+    assert "What is the acceptance bar?" in context

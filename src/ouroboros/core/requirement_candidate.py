@@ -72,6 +72,31 @@ OBSERVATION_WITHHELD_NOTE = (
 )
 
 
+#: What a withheld interviewer question is replaced with in extraction inputs.
+QUESTION_WITHHELD_NOTE = (
+    "[interviewer question withheld from requirement extraction: it was "
+    "generated after a data/research observation entered the conversation "
+    "and may restate it. Requirements derive from the user's answers.]"
+)
+
+
+def extraction_safe_question(question: str, *, observation_seen: bool) -> str:
+    """The form of an interviewer QUESTION that may enter requirement extraction.
+
+    Withholding answers was not enough (round-80): the interviewer legitimately
+    sees observations in conversational context, so a question generated AFTER
+    an observation entered the history can restate it verbatim — and the
+    extractors are told to derive requirements from the conversation. A
+    paraphrase in a question is as unmatchable as one in a Seed AC, so the
+    decidable line is taint provenance: a question generated BEFORE the first
+    observation cannot contain it and keeps its interpretive value; every
+    question after it is withheld.
+    """
+    if observation_seen:
+        return QUESTION_WITHHELD_NOTE
+    return question
+
+
 def extraction_safe_answer(answer: str) -> str:
     """The form of an answer that may enter requirement extraction.
 
