@@ -968,16 +968,71 @@ def _data_evidence_boundary_violations(
             return {**item, field: ""}
         return item
 
+    # Every SCHEMA-CONSTRAINED identifier field earns the same exemption
+    # (round-77): the scrub covered only source and tool_name, so a metric
+    # the published grammar allows — "token_usage_v2" — and a valid scope —
+    # "key_metrics_30d=active" — were rejected by the whole-JSON credential
+    # regexes, permanently blocking a required lane. The scan stays as
+    # defense-in-depth for everything else; these fields have their own
+    # field-aware guards (_identifier_looks_secret on the metric,
+    # _identity_scope_problem on every filter, grouping, and dimension), so
+    # blanking a value that PASSES those guards removes double-coverage,
+    # not protection.
+    def _blank_request_identifiers(item: Any) -> Any:
+        if not isinstance(item, Mapping):
+            return item
+        scrubbed_item = dict(item)
+        request = scrubbed_item.get("request")
+        if isinstance(request, Mapping):
+            scrubbed_request = dict(request)
+            metric = scrubbed_request.get("metric")
+            if (
+                isinstance(metric, str)
+                and _READ_REQUEST_METRIC.match(metric)
+                and not _identifier_carries_payload(metric)
+                and not _identifier_looks_secret(metric)
+            ):
+                scrubbed_request["metric"] = ""
+            for list_field, syntax in (
+                ("filters", _READ_REQUEST_FILTER),
+                ("grouping", _READ_REQUEST_GROUPING),
+            ):
+                values = scrubbed_request.get(list_field)
+                if isinstance(values, list):
+                    scrubbed_request[list_field] = [
+                        ""
+                        if (
+                            isinstance(entry, str)
+                            and syntax.match(entry)
+                            and _identity_scope_problem(entry, list_field) is None
+                        )
+                        else entry
+                        for entry in values
+                    ]
+            scrubbed_item["request"] = scrubbed_request
+        value = scrubbed_item.get("value")
+        if isinstance(value, Mapping):
+            dimension = value.get("dimension")
+            if (
+                isinstance(dimension, str)
+                and _AGGREGATE_DIMENSION.match(dimension)
+                and _identity_scope_problem(dimension, "dimension") is None
+            ):
+                scrubbed_item["value"] = {**value, "dimension": ""}
+        return scrubbed_item
+
     identifier_scrubbed = dict(output)
     raw_evidence = identifier_scrubbed.get("evidence")
     if isinstance(raw_evidence, list):
         identifier_scrubbed["evidence"] = [
-            _blank_if_identifier(item, "source") for item in raw_evidence
+            _blank_request_identifiers(_blank_if_identifier(item, "source"))
+            for item in raw_evidence
         ]
     raw_proposals = identifier_scrubbed.get("proposed_queries")
     if isinstance(raw_proposals, list):
         identifier_scrubbed["proposed_queries"] = [
-            _blank_if_identifier(item, "tool_name") for item in raw_proposals
+            _blank_request_identifiers(_blank_if_identifier(item, "tool_name"))
+            for item in raw_proposals
         ]
     try:
         serialized_sans_identifiers = json.dumps(

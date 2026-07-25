@@ -8122,3 +8122,101 @@ def test_round76_rejected_secret_scope_key_is_not_echoed(tmp_path: Any) -> None:
     assert record is not None
     persisted = json.dumps(record.to_dict(), ensure_ascii=False, default=str)
     assert "sk_live_1234" not in persisted
+
+
+# --------------------------------------------------------------------------- #
+# round-77 — the published grammar is honored: safe identifiers pass
+# --------------------------------------------------------------------------- #
+
+
+def _round77_answer(metric: str, filters: list[str]) -> dict[str, Any]:
+    return {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Usage counted for the requested scope.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            {
+                "source": "warehouse",
+                "request": {
+                    "operation": "read",
+                    "metric": metric,
+                    "aggregation": "count",
+                    "filters": filters,
+                },
+                "value": {"number": 12},
+                "observed_at": "2026-07-25T00:00:00Z",
+                "execution_status": "succeeded",
+            }
+        ],
+        "proposed_queries": [],
+        "caveats": ["point-in-time"],
+        "requires_user_confirmation": True,
+    }
+
+
+def test_round77_schema_valid_identifiers_complete_end_to_end(tmp_path: Any) -> None:
+    """What the published grammar allows, re-entry accepts.
+
+    `metric: "token_usage_v2"` and `filters: ["key_metrics_30d=active"]` have
+    zero schema errors, yet the whole-JSON credential regexes rejected them —
+    the scrub exempted only source and tool_name. A contradiction between
+    the advertised grammar and enforcement permanently blocks a required
+    lane: the child has no representable way to comply.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-77",
+        lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+    )
+    assert fanout_id is not None
+
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-77",
+        correlation_key="context.lane_id",
+        results=[
+            {
+                "key": "data_context",
+                "content": _round77_answer("token_usage_v2", ["key_metrics_30d=active"]),
+            }
+        ],
+        fanout_id=fanout_id,
+    )
+
+    assert out.get("contract_violations") in (None, []), out.get("contract_violations")
+    assert out["status"] == "complete"
+
+
+def test_round77_real_credentials_in_those_same_fields_still_fail(tmp_path: Any) -> None:
+    """Widening the exemption must not widen the door.
+
+    The exemption applies only to values that pass the field-aware guards;
+    a credential wearing the field is still caught by them.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-77b",
+        lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+    )
+    assert fanout_id is not None
+
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-77b",
+        correlation_key="context.lane_id",
+        results=[
+            {
+                "key": "data_context",
+                "content": _round77_answer("logins", ["api_key=sk_live_abc123"]),
+            }
+        ],
+        fanout_id=fanout_id,
+    )
+
+    assert out["status"] == "partial"
+    assert out.get("contract_violations")
+    serialized = json.dumps(out, ensure_ascii=False, default=str)
+    assert "sk_live_abc123" not in serialized
