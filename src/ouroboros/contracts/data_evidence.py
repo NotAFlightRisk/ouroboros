@@ -1347,10 +1347,12 @@ def _read_request_shape_problems(
         problems.append("metric must be a bounded identifier")
     elif _identifier_carries_payload(metric):
         problems.append("metric carries an identifier-length digit run")
-    elif _identifier_looks_secret(metric):
-        # A metric names what is measured; a credential-shaped name is the
-        # leak wearing that field (round-45 probe: password_swordfish).
-        problems.append("metric is credential-shaped; name the measurement instead")
+    # No separate credential-shape check for the metric (round-79): the
+    # grammar itself now encodes the classifier's metric rules — absolute
+    # words, vendor prefixes, qualified key/token forms, opaque tails — so a
+    # metric the schema admits is one enforcement accepts, by construction.
+    # Rounds 77-79 were each one rule the two surfaces disagreed on; trusting
+    # one definition removes the disagreement CLASS for this field.
     elif _entity_key(metric) and request.get("aggregation") not in _cardinality_aggregations():
         # Counting identities yields a cardinality; taking their min/max/median
         # yields an identity (round-48 probe: max(ssn)). The typed form makes
@@ -1590,8 +1592,14 @@ def _vendor_secret_prefix() -> re.Pattern[str]:
     # Recognized at the START or after any separator (round-43 probes:
     # warehouse_xoxb-…, tool_ghp_…, reader_AKIA…): a vendor token does not
     # stop being one because a word was glued in front of it.
+    # Case-insensitive (round-79): the whole-output credential scan is
+    # deliberately case-insensitive, and this copy was not — GHP_abc12345
+    # bypassed the classifier, entered known_data_tools through the config
+    # filter (which calls this same function), and completed re-entry as an
+    # evidence source. One case rule for both scans.
     return re.compile(
-        r"(?:^|[-_.])(?:" + DATA_EVIDENCE_VENDOR_TOKEN_PREFIX + r"|AKIA|ASIA|ABIA|ACCA)"
+        r"(?:^|[-_.])(?:" + DATA_EVIDENCE_VENDOR_TOKEN_PREFIX + r"|AKIA|ASIA|ABIA|ACCA)",
+        re.IGNORECASE,
     )
 
 
@@ -1633,19 +1641,49 @@ _ABSOLUTE_CREDENTIAL_WORDS = frozenset(
 #: rejected by enforcement. The word-shape route (distinguishing
 #: password_resets from round-45's password_swordfish) is not decidable, so
 #: the grammar is where the two surfaces can agree.
-_METRIC_ABSOLUTE_WORD_EXCLUSION = "|".join(sorted(_ABSOLUTE_CREDENTIAL_WORDS))
-METRIC_TOKEN_PATTERN = (
-    r"^(?!.*[0-9]{12})"
-    rf"(?!.*(?:^|[_.*-])(?:{_METRIC_ABSOLUTE_WORD_EXCLUSION})(?:[_.*-]|$))"
-    r"[a-z][a-z0-9_.*-]{0,63}$"
-)
-
-_READ_REQUEST_METRIC = re.compile(METRIC_TOKEN_PATTERN)
 
 _QUALIFIABLE_CREDENTIAL_WORDS = frozenset({"token", "tokens", "key", "keys"})
 
 
 _CREDENTIAL_WORDS = _ABSOLUTE_CREDENTIAL_WORDS | _QUALIFIABLE_CREDENTIAL_WORDS
+
+
+_METRIC_ABSOLUTE_WORD_EXCLUSION = "|".join(sorted(_ABSOLUTE_CREDENTIAL_WORDS))
+_METRIC_QUALIFIABLE_WORD_EXCLUSION = "|".join(sorted(_QUALIFIABLE_CREDENTIAL_WORDS))
+#: One grammar carrying EVERY metric rule the credential classifier applies
+#: (round-79): after round-78 aligned the absolute words, primary_key_count
+#: was still schema-valid yet rejected by _identifier_looks_secret ("key"
+#: qualified by a preceding token), leaving a required lane partial. Rather
+#: than keep re-aligning one rule per round, the grammar now encodes the
+#: classifier's whole metric-relevant rule set, and the metric path trusts
+#: the grammar alone — a disagreement between the two is no longer
+#: representable for this field:
+#:   * no 12+-digit payload run, no vendor token prefix (case irrelevant:
+#:     the grammar is lowercase-only), no ABSOLUTE credential word anywhere;
+#:   * a QUALIFIABLE credential word (key/token) is admitted only LEADING
+#:     (token_usage_v2, key_metrics_30d) with a word-like tail — short plain
+#:     words, version tags, window tags, no live/prod/priv/private markers —
+#:     which is precisely the round-36/-40 rule;
+#:   * qualified forms (primary_key_count, refresh_token_alphabetic) are
+#:     refused by the ADVERTISED grammar, so a child never holds a
+#:     schema-valid answer enforcement would reject.
+METRIC_TOKEN_PATTERN = (
+    r"^(?=[a-z])(?=.{1,64}$)"
+    r"(?!.*[0-9]{12})"
+    rf"(?!.*(?:^|[_.*-])(?:{DATA_EVIDENCE_VENDOR_TOKEN_PREFIX}))"
+    r"(?!.*(?:^|[_.*-])(?:akia|asia|abia|acca))"
+    rf"(?!.*(?:^|[_.*-])(?:{_METRIC_ABSOLUTE_WORD_EXCLUSION})(?:[_.*-]|$))"
+    r"(?:"
+    rf"(?:{_METRIC_QUALIFIABLE_WORD_EXCLUSION})"
+    r"(?:[_.*-](?!(?:live|prod|priv|private)(?:[_.*-]|$))"
+    r"(?:[a-z]{1,12}|v?[0-9]{1,3}|[0-9]{1,3}[dhwmy]))*"
+    r"|"
+    rf"(?!.*(?:^|[_.*-])(?:{_METRIC_QUALIFIABLE_WORD_EXCLUSION})(?:[_.*-]|$))"
+    r"[a-z][a-z0-9_.*-]{0,63}"
+    r")$"
+)
+
+_READ_REQUEST_METRIC = re.compile(METRIC_TOKEN_PATTERN)
 
 
 #: A tool NAME may carry an id (metabase.card.123456789, s3_logs_20260725),

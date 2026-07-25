@@ -8287,3 +8287,98 @@ def test_round78_metric_grammar_is_advertised_iff_enforced() -> None:
         assert not _READ_REQUEST_METRIC.match(refused), refused
     for admitted in ("token_usage_v2", "logins", "key_metrics_30d", "api.requests-total"):
         assert _READ_REQUEST_METRIC.match(admitted), admitted
+
+
+# --------------------------------------------------------------------------- #
+# round-79 — one case rule for vendor prefixes; the metric grammar absorbs
+# the classifier
+# --------------------------------------------------------------------------- #
+
+
+def test_round79_uppercase_vendor_prefix_is_caught_at_both_layers(
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    """GHP_abc12345 is ghp_abc12345 shouting.
+
+    The vendor-prefix classifier was case-sensitive while the whole-output
+    scan is deliberately case-insensitive, so the uppercase form passed the
+    config filter into known_data_tools AND completed re-entry as an
+    evidence source, returned intact.
+    """
+    from ouroboros.contracts.data_evidence import _identifier_looks_secret
+    from ouroboros.mcp.tools.authoring_handlers import (
+        _advisory_lanes_with_known_data_tools,
+    )
+
+    assert _identifier_looks_secret("GHP_abc12345")
+    assert _identifier_looks_secret("ghp_abc12345")
+
+    # Layer 1 — configuration dispatch: the hostile hint never reaches lanes.
+    monkeypatch.setenv("OUROBOROS_KNOWN_DATA_TOOLS", "GHP_abc12345,clickhouse_query")
+    lanes = _advisory_lanes_with_known_data_tools(
+        {"lanes": [{"lane_id": "data_context", "capability": "data_context"}]}
+    )
+    tools = next(
+        (lane.get("known_data_tools") for lane in lanes if lane.get("lane_id") == "data_context"),
+        None,
+    )
+    assert tools == ["clickhouse_query"]
+
+    # Layer 2 — handler re-entry: the same value as an evidence source fails
+    # and is not echoed.
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-79",
+        lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+    )
+    assert fanout_id is not None
+    answer = _round77_answer("logins", [])
+    answer["evidence"][0]["source"] = "GHP_abc12345"
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-79",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": answer}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert out.get("contract_violations")
+    assert "GHP_abc12345" not in json.dumps(out, ensure_ascii=False, default=str)
+
+
+def test_round79_every_schema_valid_metric_is_attainable(tmp_path: Any) -> None:
+    """The metric grammar and the enforcement can no longer disagree.
+
+    primary_key_count validated against the schema while the classifier
+    rejected it ("key" qualified by a preceding token) — a required lane
+    stayed partial holding a zero-error answer. The grammar now encodes the
+    classifier's whole metric rule set and the metric path trusts the
+    grammar, so the disagreement is unrepresentable: what the schema admits
+    completes, and the qualified forms are refused by the ADVERTISED grammar.
+    """
+    from ouroboros.contracts.data_evidence import _READ_REQUEST_METRIC
+
+    # Refused by the grammar itself — never accepted-then-rejected.
+    for refused in ("primary_key_count", "refresh_token_alphabetic", "token_live_x"):
+        assert not _READ_REQUEST_METRIC.match(refused), refused
+
+    # And an admitted metric completes end-to-end, including the leading
+    # qualifiable forms rounds 36-57 deliberately allow.
+    for index, admitted in enumerate(("token_usage_v2", "key_metrics_30d", "logins")):
+        registry = FanoutRegistry(tmp_path / str(index))
+        fanout_id = register_question_advisory_fanout_from_lanes(
+            registry,
+            session_id=f"sess-79-{index}",
+            lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+        )
+        assert fanout_id is not None
+        out = submit_fanout_results(
+            registry,
+            session_id=f"sess-79-{index}",
+            correlation_key="context.lane_id",
+            results=[{"key": "data_context", "content": _round77_answer(admitted, [])}],
+            fanout_id=fanout_id,
+        )
+        assert out["status"] == "complete", (admitted, out.get("contract_violations"))
