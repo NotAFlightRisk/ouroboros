@@ -18,6 +18,7 @@ import structlog
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.file_lock import file_lock as _file_lock
+from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.requirement_candidate import (
     RequirementDistillation,
     compute_requirement_input_fingerprint,
@@ -659,7 +660,7 @@ class InterviewEngine:
         self.model_is_explicit = self.model is not None
         if self.model is None:
             self.model = get_llm_model_for_role("interview")
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        secure_directory(self.state_dir)
 
     def _state_file_path(self, interview_id: str) -> Path:
         """Get the path to the state file for an interview.
@@ -1038,8 +1039,15 @@ class InterviewEngine:
             content = state.model_dump_json(indent=2)
 
             def _sync_write() -> None:
+                # Secure the directory at every write, not only at
+                # construction: a state directory created by an older version
+                # keeps its permissions otherwise.
+                secure_directory(file_path.parent)
                 with _file_lock(file_path, exclusive=True):
-                    file_path.write_text(content, encoding="utf-8")
+                    # Owner-only: the transcript holds confirmed data answers
+                    # and lives indefinitely, so it must not inherit the
+                    # umask default the way it did before.
+                    write_owner_only(file_path, content)
 
             await asyncio.to_thread(_sync_write)
 

@@ -6625,3 +6625,75 @@ def test_round58_both_transports_deliver_the_enforced_fallback() -> None:
     for rendered, name in ((host_prompt, "host"), (plugin_section, "plugin")):
         for field in required:
             assert field in rendered, f"{name} fallback omits {field}"
+
+
+def test_round59_metadata_publishes_what_is_enforced() -> None:
+    """Structured metadata may not say "not enforced" about an enforced form."""
+    from ouroboros.contracts.data_evidence import _data_context_answer_contract
+    from ouroboros.mcp.tools.subagent import (
+        UNENFORCED_CONTRACT_FIELD,
+        lanes_with_published_contracts,
+    )
+
+    oversized = {
+        "contract_id": "data_evidence_answer.v1",
+        "response_model_schema": {
+            "type": "object",
+            "properties": {
+                f"field_{index}": {"type": "string", "description": "x" * 300}
+                for index in range(80)
+            },
+        },
+    }
+    published = {
+        lane["lane_id"]: lane
+        for lane in lanes_with_published_contracts(
+            [
+                {
+                    "lane_id": "data_context",
+                    "purpose": "p",
+                    "capability": "call_mcp",
+                    "required": False,
+                    "answer_contract": oversized,
+                },
+                {
+                    "lane_id": "additive_lane",
+                    "purpose": "p",
+                    "capability": "future",
+                    "required": False,
+                    "answer_contract": oversized,
+                },
+            ]
+        )
+    }
+    # Registration substitutes the published data contract, so the metadata
+    # publishes it too.
+    assert published["data_context"]["answer_contract"] == _data_context_answer_contract()
+    assert UNENFORCED_CONTRACT_FIELD not in published["data_context"]
+    # An additive lane really is unenforced, and still says so.
+    assert UNENFORCED_CONTRACT_FIELD in published["additive_lane"]
+    assert "answer_contract" not in published["additive_lane"]
+
+
+def test_round59_plugin_prompt_states_the_completion_rule() -> None:
+    """The only prompt the bridge delivers must say what completion requires."""
+    from ouroboros.mcp.tools.subagent import build_interview_subagent
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    payload = build_interview_subagent(
+        session_id="sess-plugin",
+        action="start",
+        initial_context="ctx",
+        advisory_fanout_id="fanout-1",
+        advisory_fanout_contract=advisory,
+    )
+    prompt = payload.prompt
+    assert "required=true" in prompt
+    assert "no-op" in prompt
+    assert "permanently partial" in prompt
+    # The compatibility rules a host needs are stated, not left implicit.
+    assert "unsupported capability" in prompt
+    assert "never skipped" in prompt

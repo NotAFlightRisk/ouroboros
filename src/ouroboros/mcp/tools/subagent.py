@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 import hashlib
@@ -62,6 +62,7 @@ from ouroboros.contracts.data_evidence import (
     data_evidence_retained_schema,
     redact_prose_for_persistence,
 )
+from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.assignment import AssignmentMessage
@@ -1310,7 +1311,13 @@ def build_interview_subagent(
 2. Then add a compact helper from: code_context, web_context, data_context,
    ambiguity_contrarian, answer_simplifier, architecture_implications.
 3. Offer options, a draft, or unresolved ambiguities; preserve user agency.
-4. Follow each lane's contract below — `data_context` is a read-only
+4. EVERY lane marked required=true below must come back — run it, or return
+   its no-op finding. The no-op IS the completion signal; skipping a required
+   lane leaves re-entry permanently partial. Optional lanes may be omitted
+   and are reported as missing_optional_keys.
+5. An unknown lane_id or an unsupported capability is dispatched with the
+   generic prompt and answered with the no-op finding — never skipped.
+6. Follow each lane's contract below — `data_context` is a read-only
    proposer whose answers always require user confirmation — and submit
    lane outputs back via `ouroboros_submit_fanout_results`.""" + _plugin_advisory_contract_section(
         advisory_fanout_id, advisory_fanout_contract, session_id
@@ -1717,7 +1724,7 @@ forwarding anything back to ouroboros_interview."""
             # The SAME enforceability decision the prompt and registration
             # apply (round-38): the machine-readable payload context may not
             # carry a full form that re-entry will not enforce.
-            lane_context.update(published_lane_contract_fields(lane_answer_contract))
+            lane_context.update(published_lane_contract_fields(lane_answer_contract, lane_id))
         raw_lane_known_tools = raw_lane.get("known_data_tools")
         if isinstance(raw_lane_known_tools, (list, tuple)) and raw_lane_known_tools:
             lane_context["known_data_tools"] = [str(tool) for tool in raw_lane_known_tools]
@@ -3231,13 +3238,11 @@ class FanoutRegistry:
         target = self._path(record.fanout_id)
         tmp_path = target.with_name(f".{target.name}.tmp-{uuid4().hex}")
         try:
-            self._dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             # Secure the directory FIRST (round-49): mkdir's mode is ignored
             # when the directory already exists, so an inherited 0755 left a
             # write window during which the record was world-readable.
-            with suppress(OSError):
-                os.chmod(self._dir, 0o700)
-            _write_owner_only(
+            secure_directory(self._dir)
+            write_owner_only(
                 tmp_path,
                 # allow_nan=False: NaN/Infinity are not JSON. A record that
                 # would serialize to a non-standard document fails the write
@@ -3438,7 +3443,9 @@ def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
 UNENFORCED_CONTRACT_FIELD = "answer_contract_unenforced"
 
 
-def published_lane_contract_fields(contract: Mapping[str, Any]) -> dict[str, Any]:
+def published_lane_contract_fields(
+    contract: Mapping[str, Any], lane_id: str = ""
+) -> dict[str, Any]:
     """PUBLIC lane fields for a declared contract — advertised IFF enforced.
 
     The enforceability decision is made once and must reach every public
@@ -3446,9 +3453,18 @@ def published_lane_contract_fields(contract: Mapping[str, Any]) -> dict[str, Any
     omitted from the child prompt and from registry enforcement, yet its full
     form survived under ``payload.context.answer_contract``, so a host reading
     the payload would follow a form re-entry silently ignores).
+
+    For the data lane an undeliverable declared contract does not mean
+    "nothing is enforced": registration substitutes the published contract, so
+    THAT is what the metadata publishes (round-59). Saying ``enforced: false``
+    while enforcing something left a host following the metadata permanently
+    partial — the same divergence the prompts carried in rounds 57 and 58, one
+    surface over.
     """
     if _enforceable_lane_contract(contract):
         return {"answer_contract": dict(contract)}
+    if lane_id == "data_context":
+        return {"answer_contract": _data_context_answer_contract()}
     return {
         UNENFORCED_CONTRACT_FIELD: {
             "contract_id": str(contract.get("contract_id") or "unversioned"),
@@ -3470,7 +3486,9 @@ def lanes_with_published_contracts(lanes: Iterable[Any]) -> list[dict[str, Any]]
         lane_copy = dict(lane)
         contract = lane_copy.pop("answer_contract", None)
         if isinstance(contract, Mapping):
-            lane_copy.update(published_lane_contract_fields(contract))
+            lane_copy.update(
+                published_lane_contract_fields(contract, str(lane_copy.get("lane_id") or ""))
+            )
         published.append(lane_copy)
     return published
 
@@ -4187,17 +4205,6 @@ def _is_transportable(content: Any) -> bool:
     return True
 
 
-def _write_owner_only(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` as an owner-only file.
-
-    The mode is applied at CREATION rather than after the write, so the
-    content never exists at the umask default even briefly (round-49).
-    """
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(text)
-
-
 def _carries_redacted_data(
     results: Mapping[str, Any] | None, contracts: Mapping[str, Any] | None = None
 ) -> bool:
@@ -4224,9 +4231,7 @@ def _carries_redacted_data(
     return False
 
 
-def _unretained_keys(
-    contracts: Mapping[str, Any], provided: Mapping[str, Any]
-) -> frozenset[str]:
+def _unretained_keys(contracts: Mapping[str, Any], provided: Mapping[str, Any]) -> frozenset[str]:
     """Lanes whose content will NOT survive this write.
 
     Computed from what will be STORED, not from what was submitted: at
@@ -4435,9 +4440,7 @@ def _submit_fanout_results_locked(
             replay_policies = (
                 raw_policies_replay if isinstance(raw_policies_replay, Mapping) else {}
             )
-            violations = _lane_answer_contract_violations(
-                replay_contracts, resent, replay_policies
-            )
+            violations = _lane_answer_contract_violations(replay_contracts, resent, replay_policies)
             for violation in violations:
                 resent.pop(violation["lane_id"], None)
             if resent or rejected or violations:

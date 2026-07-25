@@ -35,6 +35,7 @@ from ouroboros.bigbang.requirement_distillation import (
 )
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
+from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     BrownfieldContext,
@@ -970,7 +971,8 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                 sort_keys=False,
             )
 
-            file_path.write_text(content, encoding="utf-8")
+            secure_directory(file_path.parent)
+            write_owner_only(file_path, content)
 
             log.info(
                 "seed.saved",
@@ -1078,7 +1080,8 @@ def save_seed_sync(seed: Seed, file_path: Path) -> Result[Path, ValidationError]
             sort_keys=False,
         )
 
-        file_path.write_text(content, encoding="utf-8")
+        secure_directory(file_path.parent)
+        write_owner_only(file_path, content)
 
         log.info(
             "seed.saved.sync",

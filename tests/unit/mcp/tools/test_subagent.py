@@ -561,8 +561,11 @@ class TestBuildInterviewSubagent:
         assert "[truncated]" in p.prompt
         assert "details " * 200 not in p.prompt
         # Bound covers the fixed prompt skeleton incl. the plugin advisory
-        # re-entry contract pointer; raised with it in PR #1703 round 4.
-        assert len(p.prompt) < 5_600
+        # re-entry contract pointer; raised with it in PR #1703 round 4 and
+        # again in round 59, when the required/optional/no-op completion rule
+        # was stated explicitly (a plugin child that skips a required lane
+        # leaves re-entry permanently partial).
+        assert len(p.prompt) < 6_000
 
     def test_answer_prompt_includes_answer(self) -> None:
         p = build_interview_subagent(
@@ -619,8 +622,11 @@ class TestBuildInterviewSubagent:
         assert "A" * 1_000 not in p.prompt
         assert "T" * 1_000 not in p.prompt
         # Bound covers the fixed prompt skeleton incl. the plugin advisory
-        # re-entry contract pointer; raised with it in PR #1703 round 4.
-        assert len(p.prompt) < 5_600
+        # re-entry contract pointer; raised with it in PR #1703 round 4 and
+        # again in round 59, when the required/optional/no-op completion rule
+        # was stated explicitly (a plugin child that skips a required lane
+        # leaves re-entry permanently partial).
+        assert len(p.prompt) < 6_000
 
     def test_answer_prompt_preserves_latest_transcript_round(self) -> None:
         latest_question = "**Q7:** Should subscription control be server-side or client-side?"
@@ -666,8 +672,11 @@ class TestBuildInterviewSubagent:
         assert "**A7:** Server-side should own it." in p.prompt
         assert "code line\n" * 100 not in p.prompt
         # Bound covers the fixed prompt skeleton incl. the plugin advisory
-        # re-entry contract pointer; raised with it in PR #1703 round 4.
-        assert len(p.prompt) < 5_600
+        # re-entry contract pointer; raised with it in PR #1703 round 4 and
+        # again in round 59, when the required/optional/no-op completion rule
+        # was stated explicitly (a plugin child that skips a required lane
+        # leaves re-entry permanently partial).
+        assert len(p.prompt) < 6_000
 
     def test_answer_prompt_falls_back_when_seed_closer_summary_missing(self, monkeypatch) -> None:
         from ouroboros.agents import loader
