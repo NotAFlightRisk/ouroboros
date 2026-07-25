@@ -194,9 +194,10 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    - `data_context` — fetch data evidence (metrics, DB/warehouse facts) via
      the host's own data MCP tools when the answer is a data-driven decision.
      The payload carries the full rules (`data_policy`, `answer_contract`).
-     Host duties: run returned `proposed_queries` only after the user
-     confirms, and forward user-confirmed data-derived answers prefixed
-     `[from-data]` with their point-in-time caveat.
+     Proposals come back as structured read requests, not query strings —
+     build and run the query yourself, and only after the user confirms.
+     Forward user-confirmed data-derived answers prefixed `[from-data]` with
+     their point-in-time caveat.
    - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
      decisions, and risky defaults.
    - `answer_simplifier` — turn the question into 2-3 easy choices or one

@@ -605,7 +605,7 @@ def _data_context_answer_contract() -> dict[str, Any]:
                     # violation instead of a missed phrase.
                     "required": [
                         "source",
-                        "query_summary",
+                        "request",
                         "value",
                         "observed_at",
                         "execution_status",
@@ -613,35 +613,10 @@ def _data_context_answer_contract() -> dict[str, Any]:
                     "properties": {
                         "execution_status": {
                             "const": "succeeded",
-                            "description": (
-                                "Execution outcome of THIS lookup. Only 'succeeded' is "
-                                "admissible as evidence: a failed, timed-out, denied, or "
-                                "partial call is a no-evidence finding "
-                                "(data_needed=false-style narration in 'finding'), never "
-                                "an evidence item with a caveat."
-                            ),
                         },
                         "source": {"type": "string", "minLength": 1, "maxLength": 120},
-                        "query_summary": {"type": "string", "minLength": 1, "maxLength": 300},
-                        "value": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 400,
-                            # The evidence policy (aggregates only, no raw
-                            # rows, PII-scrubbed) is part of the contract, not
-                            # just the prompt: email-, credential-, and
-                            # phone-shaped substrings and JSON-encoded
-                            # row/object payloads are raw evidence and never
-                            # validate.
-                            "allOf": [
-                                {"pattern": DATA_EVIDENCE_MEASUREMENT_PATTERN},
-                                {"not": {"pattern": DATA_EVIDENCE_EMAIL_PATTERN}},
-                                {"not": {"pattern": DATA_EVIDENCE_SECRET_PATTERN}},
-                                {"not": {"pattern": DATA_EVIDENCE_PHONE_PATTERN}},
-                                {"not": {"pattern": DATA_EVIDENCE_ROW_SHAPE_PATTERN}},
-                                {"not": {"pattern": DATA_EVIDENCE_MULTILINE_PATTERN}},
-                            ],
-                        },
+                        "request": {"$ref": "#/$defs/read_request"},
+                        "value": {"$ref": "#/$defs/aggregate"},
                         "observed_at": {
                             "type": "string",
                             "maxLength": 40,
@@ -665,13 +640,13 @@ def _data_context_answer_contract() -> dict[str, Any]:
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["tool_name", "query", "expected_decision", "source_class"],
+                    "required": ["tool_name", "request", "expected_decision", "source_class"],
                     # An unexecuted proposal is only useful if the parent
-                    # session can actually run and judge it: empty tool, query,
-                    # or decision fields are not a proposal.
+                    # session can actually run and judge it: empty tool,
+                    # request, or decision fields are not a proposal.
                     "properties": {
                         "tool_name": {"type": "string", "minLength": 1, "maxLength": 120},
-                        "query": {"type": "string", "minLength": 1, "maxLength": 400},
+                        "request": {"$ref": "#/$defs/read_request"},
                         "expected_decision": {"type": "string", "minLength": 1, "maxLength": 300},
                         "source_class": {
                             "enum": [
@@ -689,6 +664,84 @@ def _data_context_answer_contract() -> dict[str, Any]:
                 "type": "array",
                 "maxItems": 5,
                 "items": {"type": "string", "minLength": 1, "maxLength": 200},
+            },
+        },
+        "$defs": {
+            "aggregation_kind": {
+                "enum": [
+                    "count",
+                    "distinct_count",
+                    "sum",
+                    "avg",
+                    "median",
+                    "percentile",
+                    "min",
+                    "max",
+                    "ratio",
+                    "share",
+                    "duration",
+                ]
+            },
+            "aggregate": {
+                # An aggregate IS a number with a unit — that is what makes it
+                # an aggregate rather than a record. Typing it this way makes
+                # raw rows, PII, credentials, and error narratives
+                # UNREPRESENTABLE in the durable evidence path instead of
+                # something a text classifier must recognize and reject.
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["aggregation", "number", "unit"],
+                "properties": {
+                    "aggregation": {"$ref": "#/$defs/aggregation_kind"},
+                    "number": {"type": "number"},
+                    "unit": {
+                        "type": "string",
+                        "maxLength": 24,
+                        "pattern": "^[a-z%][a-z_/%]{0,23}$",
+                    },
+                    "dimension": {
+                        "type": "string",
+                        "maxLength": 48,
+                        "pattern": "^[a-z][a-z0-9_]{0,23}=[A-Za-z0-9_.-]{1,22}$",
+                    },
+                },
+            },
+            "read_request": {
+                # A read request is a STRUCTURE, not a query string. The lane
+                # names what to measure; the parent session builds and runs the
+                # actual query after user confirmation. Mutating statements,
+                # side-effecting functions, and prose instructions have no
+                # field to live in.
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["operation", "metric", "aggregation"],
+                "properties": {
+                    "operation": {"const": "read"},
+                    "metric": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^[A-Za-z][A-Za-z0-9_.*-]{0,63}$",
+                    },
+                    "aggregation": {"$ref": "#/$defs/aggregation_kind"},
+                    "filters": {
+                        "type": "array",
+                        "maxItems": 5,
+                        "items": {
+                            "type": "string",
+                            "maxLength": 48,
+                            "pattern": "^[a-z][a-z0-9_]{0,23}[=<>!]{1,2}[A-Za-z0-9_.:+-]{1,22}$",
+                        },
+                    },
+                    "grouping": {
+                        "type": "array",
+                        "maxItems": 3,
+                        "items": {
+                            "type": "string",
+                            "maxLength": 32,
+                            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+                        },
+                    },
+                },
             },
         },
         "allOf": [
@@ -761,12 +814,12 @@ def _data_context_answer_contract() -> dict[str, Any]:
             "auto_execution": "forbidden",
         },
         "runtime_instruction": (
-            "Fill this form so the confirming user can decide with full "
-            "context: what you executed (evidence with source, query_summary, "
-            "value, and its required observed_at timestamp), "
-            "what you deliberately did not execute and why (proposed_queries "
-            "with source_class), and point-in-time caveats. Every data answer "
-            "requires user confirmation; there is no auto-confirmed grade."
+            "Evidence and proposals are STRUCTURED, not prose: each carries a "
+            "read_request; evidence adds the resulting aggregate, observed_at, "
+            "and execution_status. There is no free-text value or query field — "
+            "what cannot be expressed as an aggregate is a no-evidence finding, "
+            "and a lookup you did not run belongs in proposed_queries with its "
+            "source_class. Narrative goes in finding and caveats."
         ),
     }
 
@@ -827,6 +880,13 @@ def _data_context_lane_policy() -> dict[str, Any]:
             "aggregates_only": True,
             "raw_rows_allowed": False,
             "pii_scrub_required": True,
+            # How the policy above is ENFORCED rather than merely asserted:
+            # evidence values and proposed lookups are typed structures in
+            # data_evidence_answer.v1, so raw rows, PII values, credentials,
+            # error envelopes, and mutating statements have no field to
+            # occupy. Prose survives only in operator-facing narrative.
+            "enforcement": "typed_contract_fields",
+            "free_text_fields": ["finding", "caveats", "expected_decision"],
         },
     }
 

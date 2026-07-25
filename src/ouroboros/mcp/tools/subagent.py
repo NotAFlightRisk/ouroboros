@@ -1496,18 +1496,23 @@ def build_interview_question_advisory_subagents(
                 "descriptions. Directly execute only obviously local, free, "
                 "read-only lookups. For metered, external, or "
                 "side-effect-ambiguous sources, do NOT execute: return the "
-                "queries you would run as proposed_queries so the parent "
+                "lookups you would run as proposed_queries so the parent "
                 "session can run them after user confirmation. Never run "
-                "mutating operations. Return aggregates and summaries only — "
-                "never raw rows — and scrub anything that looks like PII. "
-                "Every evidence value must state its NUMERIC measurement "
-                "(count, share, duration); qualitative context belongs in "
-                "the finding field. "
+                "mutating operations. "
+                "Report results as TYPED structures, not prose: each evidence "
+                "item and each proposal carries a read_request naming what to "
+                "measure (operation 'read', metric, aggregation, optional "
+                "filters/grouping), and evidence adds the resulting aggregate "
+                "as a number with a unit. There is no free-text value or query "
+                "field, so anything you cannot express as an aggregate — a row "
+                "list, a name, an identifier, an error message — is a "
+                "no-evidence finding, not evidence. "
                 "Treat error-shaped tool output (for example an HTTP 200 body "
-                "carrying an error envelope) as no evidence, not as evidence: "
-                "every evidence item must declare execution_status "
-                "'succeeded', and a failed, denied, timed-out, or partial "
-                "lookup belongs in the finding as a no-evidence result. "
+                "carrying an error envelope) as no evidence: every evidence "
+                "item must declare execution_status 'succeeded', and a failed, "
+                "denied, timed-out, or partial lookup belongs in the finding as "
+                "a no-evidence result. Narrative for the human goes in finding "
+                "and caveats; keep PII out of it. "
                 "If this runtime has no MCP or data-tool access, return the "
                 "no-op finding: the no-op IS your completion signal, so never "
                 "skip returning a result."
@@ -3372,36 +3377,6 @@ def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...
 
 
 @lru_cache(maxsize=1)
-def _data_forbidden_operation_pattern() -> re.Pattern[str]:
-    """Mutating-operation SHAPES, not bare words.
-
-    The canonical ``forbidden_operation_patterns`` word list stays the
-    machine-readable host-side declaration (hosts apply it when selecting
-    tools), but the server-side scan matches operation shapes: a bare-word
-    scan rejected legitimate read-only evidence like "call volume by day",
-    "merge rate of premium upgrades", or "grant program signups" — blocking
-    the exact aggregates the lane exists to deliver. Every shape below still
-    catches the reviewed probes (DROP TABLE, DELETE FROM, UPSERT/REPLACE
-    INTO, CALL proc()).
-    """
-    shapes = (
-        r"\b(?:insert|upsert|replace|merge)\s+into\b",
-        r"\bdelete\s+from\b",
-        r"\bupdate\s+\S+\s+set\b",
-        # rename joins the DDL verbs (round-37 probe: "RENAME TABLE accounts
-        # TO accounts_old" completed as a valid read-only proposal).
-        r"\b(?:drop|truncate|alter|create|rename)\s+"
-        r"(?:table|database|schema|index|view|user|role|procedure|function|column)\b",
-        r"\bgrant\s+(?:all|select|insert|update|delete|usage|create|execute)\b",
-        r"\bcall\s+\w+\s*\(",
-        r"\bexec(?:ute)?\s+(?:immediate\b|procedure\b|\w+\s*\()",
-        r"\btruncate\s+\S+",
-        r"\b(?:write|save|upload|publish)\s+(?:to|into|file|files|report|dataset|table)\b",
-    )
-    return re.compile("|".join(f"(?:{shape})" for shape in shapes), re.IGNORECASE)
-
-
-@lru_cache(maxsize=1)
 def _mutating_tool_verbs() -> frozenset[str]:
     from ouroboros.orchestrator.capabilities.interview_schemas import (
         _data_context_lane_policy,
@@ -3814,206 +3789,6 @@ def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
 _UNRESOLVED = object()
 
 
-def _strip_sql_comments(query: str) -> str:
-    """Remove SQL line/block comments so a comment prefix cannot hide the
-    statement form from classification (round-25)."""
-    without_blocks = re.sub(r"/\*.*?\*/", " ", query, flags=re.DOTALL)
-    return re.sub(r"--[^\n]*", " ", without_blocks)
-
-
-def _blank_paren_content(text: str) -> str:
-    """Blank nested parenthesized CONTENT, keeping the parens themselves."""
-    out: list[str] = []
-    depth = 0
-    for char in text:
-        if char == "(":
-            depth += 1
-            out.append(char)
-        elif char == ")":
-            depth = max(0, depth - 1)
-            out.append(char)
-        elif depth == 0:
-            out.append(char)
-    return "".join(out)
-
-
-# READ-ONLY statement heads. A recognized SQL statement whose head is not
-# in this set is rejected for NOT BEING read-only — the classification is an
-# allowlist within recognized SQL, so an unlisted mutating or utility
-# statement (round-38 probe: ``COPY users FROM PROGRAM 'curl …'``, which
-# executes a program and loads rows while matching no mutation shape) fails
-# closed instead of waiting to be blacklisted.
-_READ_ONLY_SQL_HEADS = frozenset(
-    {"select", "with", "values", "table", "show", "describe", "desc", "explain"}
-)
-# Statement heads that never open ordinary English prose. Their presence IS
-# the classification — no clause-shape corroboration (round-39: requiring a
-# FROM/INTO/TABLE marker let ``VACUUM users``, ``REINDEX users``, ``EXEC
-# dangerous_proc``, and ``COPY users TO '/tmp/users.csv'`` through, because a
-# clause heuristic is exactly the incomplete thing this classification
-# replaced).
-_UNAMBIGUOUS_SQL_HEADS = frozenset(
-    {
-        "insert",
-        "update",
-        "delete",
-        "merge",
-        "upsert",
-        "truncate",
-        "drop",
-        "alter",
-        "rename",
-        "grant",
-        "revoke",
-        "deny",
-        "unload",
-        "exec",
-        "execute",
-        "pragma",
-        "savepoint",
-        "deallocate",
-        "checkpoint",
-        "discard",
-        "vacuum",
-        "reindex",
-        "optimize",
-        "cluster",
-        "detach",
-        "commit",
-        "rollback",
-    }
-)
-# Heads that are ALSO ordinary English verbs. Classifying these on the head
-# alone would false-reject the natural-language proposals the lane exists to
-# hand a human ("Load the dashboard from Metabase"), so they fail closed
-# UNLESS the text carries an explicit prose signal — a determiner or pronoun,
-# which statement syntax never contains.
-_AMBIGUOUS_SQL_HEADS = frozenset(
-    {
-        "copy",
-        "load",
-        "import",
-        "export",
-        "backup",
-        "restore",
-        "call",
-        "do",
-        "begin",
-        "start",
-        "set",
-        "reset",
-        "use",
-        "attach",
-        "lock",
-        "unlock",
-        "install",
-        "kill",
-        "shutdown",
-        "prepare",
-        "declare",
-        "create",
-        "comment",
-        "replace",
-        "refresh",
-        "analyze",
-    }
-)
-_PROSE_SIGNAL = re.compile(
-    r"\b(the|a|an|our|my|your|their|its|this|that|these|those|please|we|us|i)\b",
-    re.IGNORECASE,
-)
-
-
-def _non_read_only_statement_head(query: str) -> str | None:
-    """The statement head of a recognized SQL statement that is not read-only.
-
-    Returns ``None`` when the text is read-only SQL or is not a recognized
-    SQL statement at all (prose, another dialect) — those stay under the
-    confirming human's gate, which is the structural guarantee this lint is
-    defense-in-depth for.
-    """
-    text = _strip_sql_comments(query).strip()
-    match = re.match(r"([A-Za-z][A-Za-z_]*)\b", text)
-    if not match:
-        return None
-    head = match.group(1).lower()
-    if head in _READ_ONLY_SQL_HEADS:
-        return None
-    if head in _UNAMBIGUOUS_SQL_HEADS:
-        return head
-    if head in _AMBIGUOUS_SQL_HEADS and not _PROSE_SIGNAL.search(text):
-        return head
-    return None
-
-
-def _call_argument_spans(text: str, name_pattern: str) -> list[tuple[int, int]]:
-    """``(start, end)`` of each matching call's argument text, parens balanced.
-
-    Balanced-span extraction replaces "identity column immediately inside the
-    aggregate" matching (round-38 probe: ``max(lower(email))`` laundered the
-    column through one nested call), so an identity expression is seen at any
-    nesting depth of the argument.
-    """
-    spans: list[tuple[int, int]] = []
-    for match in re.finditer(r"\b(?:" + name_pattern + r")\s*\(", text, re.IGNORECASE):
-        depth = 1
-        index = match.end()
-        while index < len(text) and depth:
-            if text[index] == "(":
-                depth += 1
-            elif text[index] == ")":
-                depth -= 1
-            index += 1
-        spans.append((match.end(), index - 1 if depth == 0 else len(text)))
-    return spans
-
-
-# Aggregates that return one of the input VALUES (so a PII column stays PII)
-# versus aggregates that reduce to a NUMBER (so count(email) is a count).
-_VALUE_RETURNING_AGGREGATES = (
-    r"min|max|any_value|first_value|last_value|mode|string_agg|group_concat|array_agg|listagg"
-)
-_NUMERIC_AGGREGATES = (
-    r"count|sum|avg|mean|median|stddev\w*|variance|var_\w+|percentile\w*|approx\w*"
-)
-
-
-def _blank_numeric_aggregate_arguments(text: str) -> str:
-    """Blank the arguments of NUMBER-reducing aggregates.
-
-    ``max(count(email))`` is a count of emails, not an email — blanking the
-    numeric aggregate's argument keeps that valid while
-    ``max(lower(email))`` still exposes the column.
-    """
-    blanked = text
-    for start, end in reversed(_call_argument_spans(text, _NUMERIC_AGGREGATES)):
-        blanked = blanked[:start] + " " * (end - start) + blanked[end:]
-    return blanked
-
-
-def _main_select_segment(query: str) -> str:
-    """Return the query text from its first TOP-LEVEL select.
-
-    CTE prefixes (``WITH name AS (...), ...``) are skipped by paren
-    depth-walking, so an aggregate marker inside an unrelated CTE cannot
-    launder a raw final projection (round-24). Aggregation belongs in the
-    outermost SELECT.
-    """
-    lowered = query.lower()
-    if not re.match(r"\s*with\b", lowered):
-        return query
-    depth = 0
-    for index in range(len(lowered)):
-        char = lowered[index]
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-        elif depth == 0 and lowered.startswith("select", index):
-            return query[index:]
-    return query
-
-
 def _mutating_source_identifier_verb(source: str) -> str | None:
     """Mutating verb carried by a tool IDENTIFIER inside ``source``, if any.
 
@@ -4036,213 +3811,6 @@ def _mutating_source_identifier_verb(source: str) -> str | None:
         if is_compound and (verb := _mutating_tool_verb(token)):
             return verb
     return None
-
-
-# Builtins that mutate or reach outside the database while wearing a
-# read-only statement head (round-42 probe: SELECT count(nextval(...))
-# advances a sequence). These are DOCUMENTED side-effecting functions —
-# mechanically decidable facts about named builtins, not a guess about
-# unknown names, which is why an allowlist-of-known-bad is the right shape
-# here and the compound-identifier rule below covers everything else.
-_SIDE_EFFECTING_SQL_FUNCTIONS = frozenset(
-    {
-        "nextval",
-        "setval",
-        "pg_sleep",
-        "pg_read_file",
-        "pg_read_binary_file",
-        "pg_ls_dir",
-        "pg_terminate_backend",
-        "pg_cancel_backend",
-        "pg_logical_emit_message",
-        "lo_import",
-        "lo_export",
-        "dblink",
-        "dblink_exec",
-        "load_file",
-        "sys_exec",
-        "sys_eval",
-        "xp_cmdshell",
-        "sp_executesql",
-        "utl_http",
-        "utl_file",
-        "dbms_lock",
-        "dbms_pipe",
-    }
-)
-# Function words that can precede an imperative, and the determiners and
-# quantifiers that follow a transitive verb. Together they mark VERB
-# position, so a mutating word used as a NOUN ("call volume by day", "grant
-# program signups", "merge rate of upgrades") stays valid while an
-# instruction ("Please delete every customer record") does not.
-_IMPERATIVE_LEAD_INS = frozenset(
-    {"please", "can", "could", "would", "you", "kindly", "we", "i", "let", "us", "then", "first"}
-)
-_OBJECT_DETERMINERS = frozenset(
-    {"the", "a", "an", "all", "every", "each", "any", "this", "that", "these", "those", "our"}
-)
-# Canonical mutating verbs whose ordinary English imperative is a READ
-# instruction: "Call the analytics API", "Write a query that counts …",
-# "Merge the daily counts", "Replace the label in the output", "Create a
-# weekly cohort query". Their STATEMENT forms (CALL proc(), CREATE TABLE,
-# MERGE INTO, REPLACE INTO) are still rejected by the operation shapes and
-# the statement-head classification — this exclusion applies only to the
-# prose-imperative reading, where flagging them would block the proposals
-# the lane exists to hand a human.
-_READ_SIDE_IMPERATIVES = frozenset({"call", "merge", "replace", "create", "write"})
-
-
-def _imperative_mutating_verb(text: str) -> str | None:
-    """A mutating verb used as an INSTRUCTION in prose, if any.
-
-    A proposal is executable payload — the parent runs it after the user
-    confirms — so a natural-language proposal that instructs a mutation is a
-    read-only violation even though it never reaches SQL classification
-    (round-42 probe: "Please delete every customer record").
-    """
-    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text.lower())
-    verbs = _mutating_tool_verbs() - _READ_SIDE_IMPERATIVES
-    for index, token in enumerate(tokens):
-        if token not in verbs:
-            continue
-        leads_the_clause = all(prior in _IMPERATIVE_LEAD_INS for prior in tokens[:index])
-        takes_an_object = index + 1 < len(tokens) and tokens[index + 1] in _OBJECT_DETERMINERS
-        if leads_the_clause or takes_an_object:
-            return token
-    return None
-
-
-def _mutating_called_function(query: str) -> tuple[str, str] | None:
-    """A mutating function INVOKED by the query, if any.
-
-    A read-only statement head does not make the statement read-only: the
-    projection can call a mutator (round-41 probe: ``SELECT
-    count(delete_user(user_id)) FROM users``), and hosts execute confirmed
-    proposals. Called names are judged by the SAME compound-identifier rule
-    tool names are (round-11): ``delete_user(`` and ``dropTable(`` are tool
-    identifiers, while bare standard SQL functions like ``replace(`` are
-    ordinary vocabulary, not mutators.
-    """
-    for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_.]*)\s*\(", _strip_sql_comments(query)):
-        name = match.group(1)
-        bare = name.rsplit(".", 1)[-1].lower()
-        if bare in _SIDE_EFFECTING_SQL_FUNCTIONS:
-            return name, bare
-        is_compound = bool(re.search(r"[_.]", name) or re.search(r"(?<=[a-z0-9])[A-Z]", name))
-        if is_compound and (verb := _mutating_tool_verb(name)):
-            return name, verb
-    return None
-
-
-def _is_row_shaped_value(value: str) -> bool:
-    """True when an evidence value looks like serialized rows, not an aggregate.
-
-    Aggregates are short scalar statements; a JSON-encoded list/object or a
-    multi-record blob is raw data regardless of what it contains.
-    """
-    stripped = value.strip()
-    if stripped.startswith(("[", "{")):
-        return True
-    if "},{" in stripped.replace(" ", "") or '",["' in stripped:
-        return True
-    # An aggregate is a SINGLE-LINE scalar statement: two customer rows
-    # separated by one newline are raw data (bot-review round-5 probe).
-    if "\n" in stripped or "\r" in stripped:
-        return True
-    # Pipe-delimited TABLES flattened onto one line (round-35 probe: a
-    # headered "id|plan|mrr 101|premium|49 102|free|0" user table): two or
-    # more whitespace-separated cells each carrying 2+ pipes are serialized
-    # table rows. A single pipe used as prose punctuation ("premium|free
-    # split: 34% vs 12%") never reaches two multi-pipe cells and stays
-    # valid.
-    piped_cells = sum(1 for token in stripped.split() if token.count("|") >= 2)
-    if piped_cells >= 2:
-        return True
-    # Single-line CSV rows (bot-review round-6 probe: "Alice Kim,premium;
-    # Bob Lee,free"): two or more letter,letter joints are field boundaries —
-    # prose puts a space after a comma, and thousands separators are
-    # digit,digit so neither trips this.
-    if len(re.findall(r"[A-Za-z],[A-Za-z]", stripped)) >= 2:
-        return True
-    # Semicolon-delimited record lists: 2+ segments with 2+ commas EACH is a
-    # multi-field record list even with digits (round-7 probe: "Alice Kim,
-    # premium, 1; Bob Lee, free, 2"), and every ;-segment carrying a comma
-    # with no digit anywhere is a name/label roster. Metric prose keeps one
-    # comma per clause ("revenue up 12%, churn down 3%; retention flat,
-    # NPS +4") and stays valid.
-    segments = [segment for segment in stripped.split(";") if segment.strip()]
-    if len(segments) >= 2 and all(segment.count(",") >= 2 for segment in segments):
-        return True
-    if (
-        len(segments) >= 2
-        and all("," in segment for segment in segments)
-        and not any(char.isdigit() for char in stripped)
-    ):
-        return True
-    # Same-label, identifier-keyed records survive comma separation too
-    # (round-29: "account u1 premium 34, account u2 free 12") — the second
-    # token being identifier-shaped (letters+digits) marks per-entity rows,
-    # while grouped aggregates key by category words ("region us-east 34,
-    # region eu-west 12" has hyphenated bucket names, not ids).
-    id_segments = [seg.strip() for seg in re.split(r"[,;\\|/]", stripped) if seg.strip()]
-    if len(id_segments) >= 2:
-        tokens_per_segment = [seg.split() for seg in id_segments]
-        firsts = {tokens[0].lower() for tokens in tokens_per_segment if tokens}
-        id_shaped_seconds = sum(
-            1
-            for tokens in tokens_per_segment
-            if len(tokens) > 1 and re.match(r"^[A-Za-z]+[-_]?\d+$", tokens[1])
-        )
-        if len(firsts) == 1 and id_shaped_seconds >= 2:
-            return True
-        # Segments LED by separator-bearing ids are identity rows too
-        # (round-34: "user-123 premium 34, user-456 free 12") — the
-        # separator requirement keeps bare quarter buckets ("q1 78, q2 82")
-        # valid.
-        id_shaped_firsts = sum(
-            1
-            for tokens in tokens_per_segment
-            if tokens and re.match(r"^[A-Za-z]+[-_]\d+$", tokens[0])
-        )
-        if id_shaped_firsts >= 2:
-            return True
-    # Segments sharing their FIRST token are repeated records (round-20:
-    # "acct u1 premium 34 \\ acct u2 free 12") — grouped aggregates lead each
-    # segment with a DIFFERENT category ("free: 78%; pro: 15%") and stay
-    # valid.
-    record_segments = [seg.strip() for seg in re.split(r"[;\\|/]", stripped) if seg.strip()]
-    if len(record_segments) >= 2:
-        first_tokens = [seg.split()[0].lower().rstrip(":,=") for seg in record_segments]
-        if len(set(first_tokens)) < len(first_tokens):
-            return True
-    # Repeated "CapName attribute N" segments are entity rows (round-33:
-    # "Alice premium 34, Bob free 12") — categories lead with a colon
-    # ("Free: 78%") or lowercase and stay valid.
-    name_row_segments = [seg.strip() for seg in re.split(r"[,;\\|/]", stripped) if seg.strip()]
-    if len(name_row_segments) >= 2:
-        name_rows = sum(
-            1 for seg in name_row_segments if re.match(r"^[A-Z][a-z]+ [a-z][^:]*\d", seg)
-        )
-        if name_rows >= 2:
-            return True
-    # Two or more capitalized word-pairs are a person/entity roster
-    # (round-19: digit-bearing Alice/Bob rows; round-23: acronym-suffixed
-    # company names like "Beta LLC") — one aggregate names at most one
-    # entity; aggregate by count instead.
-    if len(re.findall(r"\b[A-Z][a-z]+ [A-Z][A-Za-z]*\b", stripped)) >= 2:
-        return True
-    # A REPEATED field label is a record list, independent of punctuation
-    # (rounds 15-16 probes: "customer=Alice ...; customer=Bob ..." and
-    # "customer: Alice ...; customer: Bob ...") — one aggregate states each
-    # field once, so "p50=120ms p95=340ms" and "p50: 120ms p95: 340ms" stay
-    # valid (labels distinct). Labels start with a letter so clock times
-    # ("10:00 and 10:45") never count, and URL schemes are excluded.
-    labels = [
-        label.lower()
-        for label in re.findall(r"\b([A-Za-z_]\w*)\s*[=:]", stripped)
-        if label.lower() not in ("http", "https")
-    ]
-    return len(labels) >= 2 and len(set(labels)) < len(labels)
 
 
 # Error-envelope shapes: a JSON error key or an HTTP 4xx/5xx status inside an
@@ -4363,16 +3931,24 @@ def _parseable_timestamp(value: str) -> bool:
 
 
 def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
-    """Scan a data-lane output for shapes the data policy forbids.
+    """Check a data-lane output against the data policy at re-entry.
 
-    The policy (read-only proposals; aggregates only, no raw rows,
-    PII-scrubbed, real point-in-time timestamps) is enforced at re-entry —
-    the point the engine owns — not just declared in the schema: the WHOLE
-    serialized output is scanned so PII/credential content cannot hide in any
-    field, including outputs validated against a contract persisted before
-    the schema carried the boundary patterns. Matched content is deliberately
-    NOT echoed into the error messages: the violation report flows back to
-    the host and must not re-leak the data.
+    ``data_evidence_answer.v1`` carries evidence and proposals as TYPED
+    structures — an aggregate is a number with a unit, a proposal is a
+    structured read request — so raw rows, PII values, credentials, error
+    envelopes, and mutating statements have no field to live in. This function
+    therefore checks INVARIANTS, not vocabulary:
+
+    * the typed shapes actually hold (also for records persisted before the
+      contract was typed, where the schema may be missing or unenforced),
+    * executed evidence declares a succeeded execution and a real timestamp,
+    * identifier fields do not name a mutating tool or carry a credential.
+
+    The remaining free text is advisory prose written FOR THE HUMAN
+    (``finding``, ``caveats``, ``expected_decision``); it carries no data, so
+    the PII/credential/row scan over it is defense-in-depth rather than the
+    mechanism. Matched content is never echoed into the messages: violations
+    flow back to the host and ride the persisted record.
     """
     try:
         serialized = json.dumps(output, ensure_ascii=False, default=str)
@@ -4416,46 +3992,99 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
     except (TypeError, ValueError):
         serialized_sans_identifiers = serialized
     errors = [
-        f"data evidence boundary: {label} content is raw evidence; the "
-        "evidence policy requires aggregates only, PII-scrubbed"
+        f"data evidence boundary: {label} content is not admissible; the "
+        "evidence policy requires typed aggregates, PII-scrubbed"
         for label, pattern in _data_evidence_boundary_patterns()
         if pattern.search(
             serialized_sans_identifiers if label.startswith("credential") else serialized
         )
     ]
-    # STRUCTURAL aggregate rule (bot-review round-18, ending the delimiter
-    # game): an executed evidence VALUE is a measurement, and aggregation is
-    # numeric by definition — a value with no numeral is a claim or a name
-    # roster, not query output. This makes digit-free record lists
-    # unrepresentable under ANY delimiter; qualitative context belongs in
-    # ``finding``.
+
     evidence_items = output.get("evidence")
     for index, item in enumerate(evidence_items if isinstance(evidence_items, list) else ()):
         if not isinstance(item, Mapping):
             continue
-        value = item.get("value")
-        if isinstance(value, str) and not re.search(r"\d", value):
+        # The TYPED shape is the boundary. A string value is the pre-typed
+        # form: accepting it would reopen the free-text path the contract
+        # closed, so it fails closed here even when the persisted schema is
+        # missing or unenforceable.
+        errors.extend(
+            f"evidence[{index}].value: {problem}"
+            for problem in _aggregate_shape_problems(item.get("value"))
+        )
+        errors.extend(
+            f"evidence[{index}].request: {problem}"
+            for problem in _read_request_shape_problems(item.get("request"))
+        )
+        # Evidence exists only for a SUCCEEDED execution (round-42): the
+        # outcome is declared, so a failed lookup is a located violation
+        # rather than a phrase some detector has to recognize.
+        if item.get("execution_status") != "succeeded":
             errors.append(
-                f"evidence[{index}].value: no numeric measurement — an "
-                "aggregate states a count/share/duration; qualitative "
-                "context belongs in finding"
+                f"evidence[{index}].execution_status: evidence requires a "
+                "succeeded execution; a failed, denied, timed-out, or "
+                "undeclared lookup is a no-evidence finding"
             )
-    # The no-rows policy binds EVERY persisted prose field, not just
-    # evidence.value (bot-review round-10 probe: JSON rows smuggled through
-    # ``finding``). Each field gets the prose-appropriate subset of the row
-    # check; proposal query text is covered by the embedded-JSON rule only,
-    # since comma lists are legitimate query syntax.
+        observed_at = item.get("observed_at")
+        if not isinstance(observed_at, str) or not _parseable_timestamp(observed_at):
+            errors.append(
+                f"evidence[{index}].observed_at: not a real ISO-8601 calendar date(-time)"
+            )
+        # ``source`` names the executed tool. It is a free identifier, so the
+        # two identifier rules still apply: a mutating tool name is a
+        # read-only violation, and a credential-shaped name is the leak.
+        source = item.get("source")
+        if isinstance(source, str) and (verb := _mutating_source_identifier_verb(source)):
+            errors.append(
+                f"evidence[{index}].source: names a mutating tool ({verb!r}); "
+                "the data lane is read-only"
+            )
+        if isinstance(source, str) and _identifier_looks_secret(source.strip()):
+            errors.append(
+                f"evidence[{index}].source: credential-shaped identifier; "
+                "name the read-only data tool instead"
+            )
+
+    proposals = output.get("proposed_queries")
+    for index, item in enumerate(proposals if isinstance(proposals, list) else ()):
+        if not isinstance(item, Mapping):
+            continue
+        # A proposal is executed by the parent after confirmation, so its
+        # request is the executable payload. Typed, ``operation`` is a const
+        # and every other field is a bounded identifier grammar — a mutating
+        # statement, a side-effecting function call, and a prose instruction
+        # are all unrepresentable rather than filtered.
+        errors.extend(
+            f"proposed_queries[{index}].request: {problem}"
+            for problem in _read_request_shape_problems(item.get("request"))
+        )
+        tool_name = item.get("tool_name")
+        if isinstance(tool_name, str) and (verb := _mutating_tool_verb(tool_name)):
+            errors.append(
+                f"proposed_queries[{index}].tool_name: names a mutating tool "
+                f"({verb!r}); the data lane is read-only"
+            )
+        if isinstance(tool_name, str) and _identifier_looks_secret(tool_name.strip()):
+            errors.append(
+                f"proposed_queries[{index}].tool_name: credential-shaped "
+                "identifier; name the read-only data tool instead"
+            )
+        # ``expected_decision`` is advisory prose for the human.
+        decision = item.get("expected_decision")
+        if isinstance(decision, str) and _prose_contains_rows(decision):
+            errors.append(
+                f"proposed_queries[{index}].expected_decision: row-shaped "
+                "content is raw evidence and may not ride any persisted field"
+            )
+
+    # Advisory prose for the human. It carries no data — the aggregates do —
+    # so these checks are defense-in-depth, not the boundary.
     finding = output.get("finding")
     if isinstance(finding, str) and _prose_contains_rows(finding):
         errors.append(
             "finding: row-shaped (serialized-record) content is raw evidence "
             "and may not ride any persisted field; state aggregates only"
         )
-    # The error-shape rule binds the FINDING too (round-40 probe: a finding
-    # narrating "the query failed because access was denied" shipped
-    # alongside evidence). Same condition as caveats: the contradiction needs
-    # evidence to exist — a no-op (data_needed=false, empty evidence)
-    # legitimately narrates why no lookup ran.
     if (
         isinstance(finding, str)
         and isinstance(evidence_items, list)
@@ -4468,19 +4097,18 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
         )
     caveats = output.get("caveats")
     for index, caveat in enumerate(caveats if isinstance(caveats, list) else ()):
-        if isinstance(caveat, str) and _prose_contains_rows(caveat):
+        if not isinstance(caveat, str):
+            continue
+        if _prose_contains_rows(caveat):
             errors.append(
                 f"caveats[{index}]: row-shaped (serialized-record) content is "
                 "raw evidence and may not ride any persisted field"
             )
         # A caveat admitting the call produced nothing contradicts EXECUTED
-        # evidence it accompanies (rounds 31-32): the contradiction requires
-        # evidence to exist — a no-op (data_needed=false, empty evidence)
-        # legitimately narrates "no data was returned because no lookup was
-        # needed" and must not be rejected for saying so.
+        # evidence it accompanies (rounds 31-32); a no-op legitimately
+        # narrates that no lookup was needed.
         if (
-            isinstance(caveat, str)
-            and isinstance(evidence_items, list)
+            isinstance(evidence_items, list)
             and evidence_items
             and _DATA_EVIDENCE_ERROR_SHAPE.search(caveat)
         ):
@@ -4488,279 +4116,109 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                 f"caveats[{index}]: describes a failed lookup; a failed call "
                 "is a no-evidence finding, not evidence with a caveat"
             )
-    forbidden = _data_forbidden_operation_pattern()
-    evidence = output.get("evidence")
-    for index, item in enumerate(evidence if isinstance(evidence, list) else ()):
-        if not isinstance(item, Mapping):
-            continue
-        value = item.get("value")
-        if isinstance(value, str) and _is_row_shaped_value(value):
-            errors.append(
-                f"evidence[{index}].value: row-shaped (list/object/multi-record) "
-                "content is raw evidence, not an aggregate"
-            )
-        # Error semantics bind the WHOLE evidence item (round-31): a failure
-        # narrative in query_summary or source is the same failed call as
-        # one in value — the policy's error_shaped_tool_output rule requires
-        # a no-evidence finding either way.
-        for error_field in ("value", "source", "query_summary"):
-            field_text = item.get(error_field)
-            if isinstance(field_text, str) and _DATA_EVIDENCE_ERROR_SHAPE.search(field_text):
-                errors.append(
-                    f"evidence[{index}].{error_field}: error-shaped tool "
-                    "output is not evidence; return a no-evidence finding "
-                    "instead"
-                )
-        # TYPED execution invariant (round-42): evidence exists only for a
-        # SUCCEEDED execution. Declaring the outcome turns "a failed call is
-        # not evidence" from a detector that has to recognize failure prose
-        # into a contract term with a located violation; the failure-vocabulary
-        # scan below stays as defense-in-depth against a contradicting
-        # narrative. Absent is fail-closed: an undeclared outcome is not a
-        # successful one.
-        execution_status = item.get("execution_status")
-        if execution_status != "succeeded":
-            errors.append(
-                f"evidence[{index}].execution_status: evidence requires a "
-                "succeeded execution; a failed, denied, timed-out, or "
-                "undeclared lookup is a no-evidence finding"
-            )
-        observed_at = item.get("observed_at")
-        if isinstance(observed_at, str) and not _parseable_timestamp(observed_at):
-            errors.append(
-                f"evidence[{index}].observed_at: not a real ISO-8601 calendar date(-time)"
-            )
-        # The read-only boundary binds EXECUTED evidence too, not only
-        # proposals: evidence whose provenance claims a mutating operation
-        # (e.g. query_summary "DELETE FROM customers") is a policy violation
-        # regardless of whether the mutation already happened elsewhere.
-        for field_name in ("source", "query_summary"):
-            field_value = item.get(field_name)
-            if isinstance(field_value, str) and (match := forbidden.search(field_value)):
-                errors.append(
-                    f"evidence[{index}].{field_name}: claims forbidden operation "
-                    f"{match.group(0).split()[0].lower()!r}; the data lane is read-only"
-                )
-            if isinstance(field_value, str) and _prose_contains_rows(field_value):
-                errors.append(
-                    f"evidence[{index}].{field_name}: row-shaped "
-                    "(serialized-record) content is raw evidence and may not "
-                    "ride any persisted field"
-                )
-        # The executed-tool identity inside ``source`` gets the same
-        # mutating-verb check as proposal tool names. Detection is per
-        # whitespace-separated token, so surrounding prose cannot disable it
-        # (bot-review round-11 probe: "delete_database tool"): a token is
-        # treated as a TOOL IDENTIFIER when it is either the whole source or
-        # a compound identifier (snake_case/kebab/dotted/camelCase). Bare
-        # English words inside prose ("call center logs") are not
-        # identifiers and stay exempt — the SQL-shape scan covers prose.
-        source = item.get("source")
-        if isinstance(source, str) and (verb := _mutating_source_identifier_verb(source)):
-            errors.append(
-                f"evidence[{index}].source: names a mutating tool ({verb!r}); "
-                "the data lane is read-only"
-            )
-        # A credential-shaped identifier IS the leak, digits or not
-        # (round-33: api_key_live_supersecret) — classified directly, since
-        # alphabetic secrets evade the entropy-based content pattern.
-        if isinstance(source, str) and _identifier_looks_secret(source.strip()):
-            errors.append(
-                f"evidence[{index}].source: credential-shaped identifier; "
-                "name the read-only data tool instead"
-            )
-    proposals = output.get("proposed_queries")
-    for index, item in enumerate(proposals if isinstance(proposals, list) else ()):
-        if not isinstance(item, Mapping):
-            continue
-        query = item.get("query")
-        # A query is SQL context, so comments are stripped before the
-        # operation matcher (round-35 probe: "DROP/**/TABLE users") — the
-        # same normalization the aggregate lint already applies below.
-        if isinstance(query, str) and (match := forbidden.search(_strip_sql_comments(query))):
-            # User confirmation gates *execution* of read-only proposals; it
-            # must never make an explicitly mutating operation permissible.
-            errors.append(
-                f"proposed_queries[{index}].query: proposes forbidden operation "
-                f"{match.group(0).split()[0].lower()!r}; the data lane is read-only"
-            )
-        # Fail-closed statement classification, not a mutation blacklist
-        # (round-38 probe: COPY … FROM PROGRAM matches no mutation shape yet
-        # executes a program). A recognized SQL statement must open with a
-        # read-only head; user confirmation gates EXECUTION of read-only
-        # proposals and can never make a non-read-only statement permissible.
-        elif isinstance(query, str) and (head := _non_read_only_statement_head(query)):
-            errors.append(
-                f"proposed_queries[{index}].query: {head.upper()} is not a "
-                "read-only statement; the data lane may only propose "
-                "SELECT/WITH/SHOW/DESCRIBE/EXPLAIN reads"
-            )
-        # A prose proposal is executable payload too — the parent runs it
-        # after confirmation — so an instruction to mutate is a violation
-        # even though it never reaches SQL classification (round-42 probe:
-        # "Please delete every customer record").
-        if isinstance(query, str) and (imperative := _imperative_mutating_verb(query)):
-            errors.append(
-                f"proposed_queries[{index}].query: instructs a mutating "
-                f"operation ({imperative!r}); the data lane may only propose "
-                "reads"
-            )
-        # A read-only HEAD does not make the statement read-only — the
-        # projection can invoke a mutator (round-41 probe: "SELECT
-        # count(delete_user(user_id)) FROM users"), and the host executes
-        # confirmed proposals verbatim.
-        if isinstance(query, str) and (called := _mutating_called_function(query)):
-            errors.append(
-                f"proposed_queries[{index}].query: invokes a mutating "
-                f"function ({called[0]!r}, verb {called[1]!r}); the data lane "
-                "is read-only"
-            )
-        tool_name = item.get("tool_name")
-        if isinstance(tool_name, str) and (verb := _mutating_tool_verb(tool_name)):
-            errors.append(
-                f"proposed_queries[{index}].tool_name: names a mutating tool "
-                f"({verb!r}); the data lane is read-only"
-            )
-        if isinstance(tool_name, str) and _identifier_looks_secret(tool_name.strip()):
-            errors.append(
-                f"proposed_queries[{index}].tool_name: credential-shaped "
-                "identifier; name the read-only data tool instead"
-            )
-        # A confirmed proposal is executed by the parent, so the aggregate
-        # policy binds the QUERY too (bot-review round-19): a select-star
-        # projection requests raw rows by construction. count(*)/aggregated
-        # projections stay valid.
-        #
-        # DIALECT BOUNDARY (round-26): this lint classifies SQL — the
-        # dominant dialect — plus the demonstrated GraphQL identity-field
-        # shape below. Other dialects and natural-language proposals are
-        # validated by the confirming human, who sees every proposal
-        # verbatim before any execution; the lint is advisory
-        # defense-in-depth under that structural gate, not a completeness
-        # contract.
-        if isinstance(query, str) and re.search(
-            r"\{[^{}]*\b(id|email|phone|name|address|ssn)\b[^{}]*\}",
-            query,
-            re.IGNORECASE,
-        ):
-            errors.append(
-                f"proposed_queries[{index}].query: selects raw identity "
-                "fields (GraphQL-style entity selection); request aggregate "
-                "fields (counts, totals) instead"
-            )
-        if isinstance(query, str) and re.search(r"\bselect\s+(?:\w+\.)?\*", query, re.IGNORECASE):
-            errors.append(
-                f"proposed_queries[{index}].query: requests raw rows "
-                "(SELECT *); propose an aggregate projection "
-                "(COUNT/AVG/GROUP BY) instead"
-            )
-        # A SELECT projection WITHOUT any aggregate marker returns rows by
-        # construction (round-20: "SELECT account_id, plan, seats FROM
-        # accounts"; round-23: CTE-prefixed "WITH ... SELECT ..."): the
-        # aggregate policy binds confirmable payload, so it must aggregate,
-        # deduplicate to categories, or fetch a scalar. The marker scan runs
-        # over the WHOLE query, so a raw projection OVER an aggregated CTE
-        # stays valid.
-        elif isinstance(query, str) and re.match(
-            r"\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*(with|select)\b",
-            query,
-            re.IGNORECASE | re.DOTALL,
-        ):
-            # The aggregation must live in the MAIN statement (round-24): an
-            # unrelated aggregated CTE must not launder a raw final
-            # projection, so markers are scanned from the first top-level
-            # SELECT after any WITH prefix. LIMIT 1 is NOT an aggregate
-            # marker (round-21): it fetches one ROW of raw columns.
-            main_statement = _main_select_segment(_strip_sql_comments(query))
-            # Markers inside parenthesized subexpressions cannot launder the
-            # MAIN projection (round-25: a scalar count(*) subquery aliased
-            # into a raw row projection): scan with paren contents blanked —
-            # aggregate calls keep their name+paren, subquery internals
-            # vanish.
-            scannable = _blank_paren_content(main_statement)
-            has_aggregate_marker = re.search(
-                r"\b(count|sum|avg|min|max|median|percentile\w*|approx\w*)\s*\("
-                r"|\bgroup\s+by\b|\bdistinct\b",
-                scannable,
-                re.IGNORECASE,
-            )
-            identity_columns = (
-                r"(email|phone|address|ssn"
-                r"|first_name|last_name|full_name|user_id|account_id|customer_id)"
-            )
-            # VALUE-RETURNING aggregates over an identity/PII column return
-            # the raw value itself (round-36 probe: "SELECT max(email) FROM
-            # users" — an aggregate wrapper around a raw email). The WHOLE
-            # balanced argument is scanned, so a nested expression cannot
-            # launder the column (round-38 probe: max(lower(email))). Numeric
-            # aggregates reduce to numbers and stay valid, so count(email)
-            # and max(count(email)) are both fine.
-            value_extracting_pii = any(
-                re.search(
-                    r"\b(?:\w+\.)?" + identity_columns + r"\b",
-                    _blank_numeric_aggregate_arguments(main_statement[start:end]),
-                    re.IGNORECASE,
-                )
-                for start, end in _call_argument_spans(main_statement, _VALUE_RETURNING_AGGREGATES)
-            )
-            distinct_pii = re.search(
-                r"\bdistinct\b[^,]*\b" + identity_columns + r"\b",
-                scannable,
-                re.IGNORECASE,
-            )
-            # Grouping BY an identity column keys the aggregate per user —
-            # per-identity rows, not categories (round-25).
-            grouped_identity = re.search(
-                r"\bgroup\s+by\b[^;]*\b" + identity_columns + r"\b",
-                scannable,
-                re.IGNORECASE,
-            )
-            if value_extracting_pii:
-                errors.append(
-                    f"proposed_queries[{index}].query: a value-returning "
-                    "aggregate (min/max/string_agg/...) over an identity/PII "
-                    "column returns the raw value; aggregate by count "
-                    "instead"
-                )
-            elif grouped_identity:
-                errors.append(
-                    f"proposed_queries[{index}].query: GROUP BY an "
-                    "identity/PII column keys results per identity — "
-                    "aggregate by category (plan, region, time bucket) "
-                    "instead"
-                )
-            elif distinct_pii:
-                # DISTINCT deduplicates to categories — a DISTINCT projection
-                # of an identity/PII column is a raw identifier list, not a
-                # category set (round-24: SELECT DISTINCT email FROM users).
-                errors.append(
-                    f"proposed_queries[{index}].query: DISTINCT over an "
-                    "identity/PII column returns raw identifiers; aggregate "
-                    "by count instead"
-                )
-            elif not has_aggregate_marker:
-                errors.append(
-                    f"proposed_queries[{index}].query: a SELECT projection "
-                    "without aggregation returns raw rows; use "
-                    "COUNT/AVG/GROUP BY/DISTINCT (a scalar fetch is "
-                    "max(col), not LIMIT 1)"
-                )
-        if isinstance(query, str) and _EMBEDDED_JSON_ROWS.search(query):
-            errors.append(
-                f"proposed_queries[{index}].query: embedded serialized rows "
-                "are raw evidence and may not ride any persisted field"
-            )
-        expected_decision = item.get("expected_decision")
-        if isinstance(expected_decision, str) and _prose_contains_rows(expected_decision):
-            errors.append(
-                f"proposed_queries[{index}].expected_decision: row-shaped "
-                "(serialized-record) content is raw evidence and may not ride "
-                "any persisted field"
-            )
     return errors
 
 
+def _aggregate_shape_problems(value: Any) -> list[str]:
+    """Whether an evidence value is a typed aggregate.
+
+    An aggregate is a NUMBER with a unit. Enforcing that here — not only in
+    the JSON Schema — keeps the guarantee for records whose persisted contract
+    is missing or unenforceable, and makes the pre-typed free-text form fail
+    closed instead of silently reopening the old path.
+    """
+    if not isinstance(value, Mapping):
+        return [
+            "must be a typed aggregate object "
+            "({aggregation, number, unit[, dimension]}), not free text"
+        ]
+    problems: list[str] = []
+    if value.get("aggregation") not in _AGGREGATION_KINDS:
+        problems.append("aggregation is not one of the declared kinds")
+    number = value.get("number")
+    if isinstance(number, bool) or not isinstance(number, (int, float)):
+        problems.append("number must be a JSON number")
+    unit = value.get("unit")
+    if not isinstance(unit, str) or not _AGGREGATE_UNIT.match(unit):
+        problems.append("unit must be a short lowercase unit token")
+    dimension = value.get("dimension")
+    if dimension is not None and (
+        not isinstance(dimension, str) or not _AGGREGATE_DIMENSION.match(dimension)
+    ):
+        problems.append("dimension must be a single bounded category scope (key=value)")
+    unknown = set(value) - {"aggregation", "number", "unit", "dimension"}
+    if unknown:
+        problems.append("carries fields outside the aggregate shape")
+    return problems
+
+
+def _read_request_shape_problems(request: Any) -> list[str]:
+    """Whether a read request is the typed structure the contract declares.
+
+    The lane names WHAT to measure; the parent session builds and runs the
+    query after user confirmation. Because every field is a bounded grammar
+    and ``operation`` is a const, a mutating statement or a prose instruction
+    cannot be expressed — which is why this replaced the statement-head,
+    aggregate-projection, side-effecting-function, and imperative-mood
+    classifiers that preceded it.
+    """
+    if not isinstance(request, Mapping):
+        return [
+            "must be a typed read request "
+            "({operation: read, metric, aggregation[, filters, grouping]}), "
+            "not a query string"
+        ]
+    problems: list[str] = []
+    if request.get("operation") != "read":
+        problems.append("operation must be 'read'")
+    metric = request.get("metric")
+    if not isinstance(metric, str) or not _READ_REQUEST_METRIC.match(metric):
+        problems.append("metric must be a bounded identifier")
+    if request.get("aggregation") not in _AGGREGATION_KINDS:
+        problems.append("aggregation is not one of the declared kinds")
+    for list_field, pattern, limit in (
+        ("filters", _READ_REQUEST_FILTER, 5),
+        ("grouping", _READ_REQUEST_GROUPING, 3),
+    ):
+        items = request.get(list_field)
+        if items is None:
+            continue
+        if not isinstance(items, list) or len(items) > limit:
+            problems.append(f"{list_field} must be a bounded list")
+            continue
+        if any(not isinstance(item, str) or not pattern.match(item) for item in items):
+            problems.append(f"{list_field} entries must match the declared grammar")
+    unknown = set(request) - {"operation", "metric", "aggregation", "filters", "grouping"}
+    if unknown:
+        problems.append("carries fields outside the read-request shape")
+    return problems
+
+
 _DATA_EVIDENCE_CONTRACT_ID = "data_evidence_answer.v1"
+
+# The typed vocabularies the contract declares. Kept beside the re-entry
+# checks so the schema and the enforcement point cannot disagree about what a
+# typed aggregate or read request IS.
+_AGGREGATION_KINDS = frozenset(
+    {
+        "count",
+        "distinct_count",
+        "sum",
+        "avg",
+        "median",
+        "percentile",
+        "min",
+        "max",
+        "ratio",
+        "share",
+        "duration",
+    }
+)
+_AGGREGATE_UNIT = re.compile(r"^[a-z%][a-z_/%]{0,23}$")
+_AGGREGATE_DIMENSION = re.compile(r"^[a-z][a-z0-9_]{0,23}=[A-Za-z0-9_.-]{1,22}$")
+_READ_REQUEST_METRIC = re.compile(r"^[A-Za-z][A-Za-z0-9_.*-]{0,63}$")
+_READ_REQUEST_FILTER = re.compile(r"^[a-z][a-z0-9_]{0,23}[=<>!]{1,2}[A-Za-z0-9_.:+-]{1,22}$")
+_READ_REQUEST_GROUPING = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 
 # A safe identifier is one token of word/dot/dash characters — no spaces,
 # no '=', no ':' — so a credential can never wear the exemption.

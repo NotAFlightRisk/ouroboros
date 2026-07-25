@@ -819,13 +819,14 @@ class TestBuildInterviewQuestionAdvisorySubagents:
         assert payload.context["answer_contract"] == answer_contract
         # The proposer contract must be in the prompt: pre-call relevance
         # gate, proposed queries for metered sources, no-op as completion
-        # signal, aggregates-only evidence, skeptical error handling.
+        # signal, TYPED evidence, skeptical error handling.
         assert "BEFORE any tool call" in payload.prompt
         assert "proposed_queries" in payload.prompt
         assert "no-op finding" in payload.prompt
-        assert "never raw rows" in payload.prompt
+        assert "TYPED structures, not prose" in payload.prompt
+        assert "no free-text value or query field" in payload.prompt
         assert "Never run mutating operations" in payload.prompt
-        assert "no evidence, not as evidence" in payload.prompt
+        assert "no evidence" in payload.prompt
         assert "## Data Access Policy" in payload.prompt
         # The answer contract form ships whole and supersedes the generic
         # output shape for this lane.

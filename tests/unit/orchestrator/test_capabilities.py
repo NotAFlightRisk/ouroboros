@@ -5066,7 +5066,12 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
         "proposed_queries": [
             {
                 "tool_name": "clickhouse_query",
-                "query": "SELECT count(DISTINCT user_id) FROM events WHERE ...",
+                "request": {
+                    "operation": "read",
+                    "metric": "user_id",
+                    "aggregation": "distinct_count",
+                    "filters": ["event=checkout_started"],
+                },
                 "expected_decision": "Whether the flow is actually used.",
                 "source_class": "external",
             }
@@ -5083,8 +5088,18 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
         "evidence": [
             {
                 "source": "clickhouse_query",
-                "query_summary": "count distinct MAU by plan tier",
-                "value": "78% of MAU are on the free tier",
+                "request": {
+                    "operation": "read",
+                    "metric": "user_id",
+                    "aggregation": "distinct_count",
+                    "grouping": ["plan_tier"],
+                },
+                "value": {
+                    "aggregation": "share",
+                    "number": 78,
+                    "unit": "%",
+                    "dimension": "plan=free",
+                },
                 "observed_at": "2026-07-22T02:00:00+09:00",
                 "execution_status": "succeeded",
             }
@@ -5125,46 +5140,41 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
         "evidence": [{**executed["evidence"][0], "observed_at": "2026-99-99T99:::"}],
     }
     assert list(validator.iter_errors(out_of_range_timestamp))
-    # The evidence boundary is part of the contract: email-shaped (PII) and
-    # credential-shaped values are raw evidence, never an aggregate.
-    pii_value = {
-        **executed,
-        "evidence": [{**executed["evidence"][0], "value": "alice@example.com token=sk-live-123"}],
-    }
-    assert list(validator.iter_errors(pii_value))
-    # Aggregate-only means aggregate-shaped (bot-review round-4 probe): a
-    # JSON-encoded row list and phone-shaped digit groups are raw evidence.
-    row_value = {
-        **executed,
-        "evidence": [
-            {
-                **executed["evidence"][0],
-                "value": '[{"name": "Alice Kim", "phone": "010-1234-5678"}]',
-            }
-        ],
-    }
-    assert list(validator.iter_errors(row_value))
-    phone_value = {
-        **executed,
-        "evidence": [{**executed["evidence"][0], "value": "top customer phone 010-1234-5678"}],
-    }
-    assert list(validator.iter_errors(phone_value))
-    # Hyphenated vocabulary is NOT a credential (round-4 false-positive fix).
-    vocabulary_value = {
-        **executed,
-        "evidence": [
-            {**executed["evidence"][0], "value": "aggregate token-counts by plan tier: 12,400 avg"}
-        ],
-    }
-    validator.validate(vocabulary_value)
-    # An evidence value is a MEASUREMENT (round-18): aggregation is numeric,
-    # so a digit-free value — including any-delimiter name rosters — never
-    # validates; qualitative context belongs in finding.
-    no_measurement = {
-        **executed,
-        "evidence": [{**executed["evidence"][0], "value": "premium tier dominates"}],
-    }
-    assert list(validator.iter_errors(no_measurement))
+    # The evidence boundary is the TYPE, not a pattern list: an aggregate is a
+    # number with a unit, so every free-text form previously probed here —
+    # PII, credentials, JSON row lists, phone numbers, name rosters, failure
+    # narratives — is now unrepresentable rather than filtered.
+    for unrepresentable in (
+        "alice@example.com token=sk-live-123",
+        '[{"name": "Alice Kim", "phone": "010-1234-5678"}]',
+        "top customer phone 010-1234-5678",
+        "premium tier dominates",
+        "status=timeout; attempts=3",
+        "user-123 has 12 seats / user-456 has 13 seats",
+    ):
+        assert list(
+            validator.iter_errors(
+                {**executed, "evidence": [{**executed["evidence"][0], "value": unrepresentable}]}
+            )
+        ), unrepresentable
+    # The typed shape is enforced field by field, so a malformed aggregate is
+    # rejected as precisely as a free-text one.
+    for malformed in (
+        {"aggregation": "count", "number": "many", "unit": "accounts"},
+        {"aggregation": "roster", "number": 42, "unit": "accounts"},
+        {"aggregation": "count", "number": 42, "unit": "Alice Kim 010-1234-5678"},
+        {"aggregation": "count", "number": 42},
+    ):
+        assert list(
+            validator.iter_errors(
+                {**executed, "evidence": [{**executed["evidence"][0], "value": malformed}]}
+            )
+        ), malformed
+    # Hyphenated vocabulary is NOT a credential (round-4 false-positive fix);
+    # advisory prose is where such wording legitimately lives now.
+    validator.validate(
+        {**executed, "finding": "Aggregate token-counts by plan tier; secret-santa signups are up."}
+    )
     # The confidence constraint is two-way (round-12): executed evidence
     # alongside confidence="no_evidence" is contradictory consent state.
     contradictory_confidence = {**executed, "confidence": "no_evidence"}
@@ -5175,7 +5185,7 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
         **noop,
         "data_needed": True,
         "proposed_queries": [
-            {"tool_name": "", "query": "", "expected_decision": "", "source_class": "external"}
+            {"tool_name": "", "request": {}, "expected_decision": "", "source_class": "external"}
         ],
     }
     assert list(validator.iter_errors(empty_proposal))
