@@ -1332,14 +1332,17 @@ def test_release_workflow_checks_tag_metadata_before_build() -> None:
 
     validation = workflow.index("python scripts/sync-plugin-version.py")
     build = workflow.index("uv build")
+    package_identity = workflow.index("PACKAGE_VERSION=", build)
     tui_job = workflow[workflow.index("  build-tui:") : workflow.index("  attach-tui-binaries:")]
 
     assert "${REF_NAME#v}" in workflow
     assert '[[ "$VERSION" == *.dev* ]]' in workflow
     assert "--require-canonical" in workflow
-    assert 'PACKAGE_VERSION="$(uv run hatch version)"' in workflow
+    assert "zipfile.ZipFile" in workflow
     assert '[[ "$PACKAGE_VERSION" != "$VERSION" ]]' in workflow
     assert validation < build
+    assert build < package_identity
+    assert workflow.count("zipfile.ZipFile") == 2
     assert "needs: release" in tui_job
 
 

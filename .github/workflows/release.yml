@@ -44,19 +44,39 @@ jobs:
             exit 1
           fi
           python scripts/sync-plugin-version.py --require-canonical --version "$VERSION"
-          PACKAGE_VERSION="$(uv run hatch version)"
-          if [[ "$PACKAGE_VERSION" != "$VERSION" ]]; then
-            echo "Package version $PACKAGE_VERSION does not match release tag $VERSION" >&2
-            exit 1
-          fi
 
       - name: Build package
         run: |
           uv build
 
       - name: Check package
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
           uv publish --dry-run dist/*
+          VERSION="${REF_NAME#v}"
+          PACKAGE_VERSION="$(python - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          wheels = list(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
+          with zipfile.ZipFile(wheels[0]) as archive:
+              metadata_files = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+              if len(metadata_files) != 1:
+                  raise SystemExit(f"expected exactly one METADATA file, found {len(metadata_files)}")
+              metadata = archive.read(metadata_files[0]).decode("utf-8")
+          versions = [line.removeprefix("Version: ") for line in metadata.splitlines() if line.startswith("Version: ")]
+          if len(versions) != 1:
+              raise SystemExit(f"expected exactly one package version, found {len(versions)}")
+          print(versions[0])
+          PY
+          )"
+          if [[ "$PACKAGE_VERSION" != "$VERSION" ]]; then
+            echo "Package version $PACKAGE_VERSION does not match release tag $VERSION" >&2
+            exit 1
+          fi
 
       - name: Detect pre-release
         id: prerelease
@@ -176,20 +196,37 @@ jobs:
           uv sync --dev
           uv pip check
 
-      - name: Validate package version
+      - name: Build package
+        run: |
+          uv build
+
+      - name: Validate built package version
         env:
           REF_NAME: ${{ github.ref_name }}
         run: |
           VERSION="${REF_NAME#v}"
-          PACKAGE_VERSION="$(uv run hatch version)"
+          PACKAGE_VERSION="$(python - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          wheels = list(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
+          with zipfile.ZipFile(wheels[0]) as archive:
+              metadata_files = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+              if len(metadata_files) != 1:
+                  raise SystemExit(f"expected exactly one METADATA file, found {len(metadata_files)}")
+              metadata = archive.read(metadata_files[0]).decode("utf-8")
+          versions = [line.removeprefix("Version: ") for line in metadata.splitlines() if line.startswith("Version: ")]
+          if len(versions) != 1:
+              raise SystemExit(f"expected exactly one package version, found {len(versions)}")
+          print(versions[0])
+          PY
+          )"
           if [[ "$PACKAGE_VERSION" != "$VERSION" ]]; then
             echo "Package version $PACKAGE_VERSION does not match release tag $VERSION" >&2
             exit 1
           fi
-
-      - name: Build package
-        run: |
-          uv build
 
       - name: Publish to PyPI
         env:
