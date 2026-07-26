@@ -1033,6 +1033,14 @@ def redact_prose_for_persistence(output: Any) -> Any:
     """
     if not isinstance(output, Mapping):
         return output
+    # IDEMPOTENT: the durable form is already the durable form. A second pass
+    # read `evidence`/`proposed_queries` off a value that no longer has them,
+    # so the counts collapsed to 0 and `content_digest` re-committed to the
+    # SUMMARY instead of the accepted content — the audit commitment would
+    # then bind nothing. Redaction has to be a fixed point before it can be
+    # enforced at the persistence door rather than remembered by each caller.
+    if output.get("content_retained") is False:
+        return dict(output)
     evidence = output.get("evidence")
     proposals = output.get("proposed_queries")
     return {

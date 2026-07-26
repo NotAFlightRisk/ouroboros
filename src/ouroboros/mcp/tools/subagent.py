@@ -35,6 +35,7 @@ from __future__ import annotations
 import base64
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
+import copy
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 import hashlib
@@ -3023,6 +3024,19 @@ class FanoutRecord:
     # "already_complete" error when the first response was lost in transit.
     terminal_response: dict[str, Any] | None = None
 
+    def lane_contracts(self) -> dict[str, Any]:
+        """The record's own lane contracts, resolved as registration resolves them.
+
+        Every caller that sanitized before saving recomputed this from the
+        record's own fields, which is why sanitization could be forgotten:
+        the knowledge needed to sanitize was always ON the record, but the
+        obligation lived with the caller. Asking the record directly is what
+        lets :meth:`FanoutRegistry.save` own the boundary instead.
+        """
+        return loaded_lane_contracts(
+            self.synthesizer_input.get("lane_answer_contracts"), self.expected_keys
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "fanout_id": self.fanout_id,
@@ -3383,7 +3397,16 @@ class FanoutRegistry:
         directory): a failure mid-write leaves the PRIOR record intact and
         replayable instead of tearing the live JSON file, so the documented
         resubmission path still finds the fan-out.
+
+        Sanitization happens HERE, not in the callers. Every call site used to
+        wrap ``received_results`` in ``_durable_results`` and substitute a
+        separately-sanitized value into ``terminal_response`` — two fields,
+        two mechanisms, both by memory. Each new persistence path was another
+        chance to forget one, and the record on disk is the one place a
+        mistake cannot be taken back. Passing an unsanitized record is now
+        simply not a way to write one.
         """
+        record = _sanitized_for_persistence(record)
         if not self.valid_fanout_id(record.fanout_id):
             log.warning(
                 "fanout.registry.invalid_fanout_id",
@@ -4674,6 +4697,34 @@ def _unretained_keys(contracts: Mapping[str, Any], provided: Mapping[str, Any]) 
         and isinstance(value, Mapping)
         and value.get("content_retained") is False
     )
+
+
+def _sanitized_for_persistence(record: FanoutRecord) -> FanoutRecord:
+    """The only form of ``record`` that reaches disk.
+
+    Both fields that can carry child-written content are normalized here:
+    ``received_results`` through the per-lane durable projection, and
+    ``terminal_response`` through the shape-based walk that recognizes a data
+    submission wherever it sits. The walk was already the read-side defence
+    for replayed legacy records; the write side trusted its callers instead,
+    which is the asymmetry this closes.
+
+    Safe to run on an already-sanitized record: both projections are fixed
+    points, which is what makes owning the boundary here possible at all.
+    """
+    contracts = record.lane_contracts()
+    received = _durable_results(contracts, record.received_results)
+
+    terminal = record.terminal_response
+    if terminal is not None:
+        terminal = copy.deepcopy(terminal)
+        data_lane_ids = frozenset(
+            lane_id for lane_id in contracts if _is_data_contract_lane(contracts, lane_id)
+        )
+        _redact_legacy_data_prose(terminal, data_lane_ids)
+        terminal = _scrub_credentials_for_persistence(terminal)
+
+    return replace(record, received_results=received, terminal_response=terminal)
 
 
 def _is_data_contract_lane(contracts: Mapping[str, Any], lane_id: str) -> bool:

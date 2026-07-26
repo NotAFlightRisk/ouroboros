@@ -2645,6 +2645,22 @@ def test_null_content_does_not_count_toward_completion(tmp_path: Any) -> None:
     assert record.received_results == {}
 
 
+def _plant_legacy_record(registry: Any, record: Any) -> None:
+    """Put a pre-sanitization record on disk the way an older build left one.
+
+    ``registry.save`` sanitizes now, so it is no longer a way to write raw
+    child content — that is the point of the persistence door. A record whose
+    content predates the door therefore has to be written as the older build
+    wrote it: straight to the file. Using ``save`` here would fabricate a
+    state the current code cannot produce and then assert on it.
+    """
+    import json
+
+    path = registry._path(record.fanout_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record.to_dict(), ensure_ascii=False), encoding="utf-8")
+
+
 def test_legacy_violating_required_value_reopens_and_scrubs(tmp_path: Any) -> None:
     """Accumulated violations fail closed (bot-review round-14 probe).
 
@@ -2686,7 +2702,7 @@ def test_legacy_violating_required_value_reopens_and_scrubs(tmp_path: Any) -> No
         required_keys=("data_context", "ambiguity_contrarian"),
         received_results={"data_context": violating_legacy_value},
     )
-    assert registry.save(record)
+    _plant_legacy_record(registry, record)
 
     out = submit_fanout_results(
         registry,
@@ -2826,7 +2842,7 @@ def test_accumulated_violations_are_scrubbed_before_partial_persistence(
         required_keys=("ambiguity_contrarian", "answer_simplifier"),
         received_results={"data_context": violating_legacy_value},
     )
-    assert registry.save(record)
+    _plant_legacy_record(registry, record)
 
     # Submit only ONE required lane: the other stays missing, so this call
     # exits through the EARLY partial branch — which must already have
@@ -9557,3 +9573,202 @@ def test_carried_generic_lane_is_not_re_redacted_across_saves() -> None:
 
     assert findings[0] == findings[1] == findings[2]
     assert findings[0].count("redacted-key") == 1
+
+
+# ---------------------------------------------------------------------------
+# The persistence door owns sanitization
+# ---------------------------------------------------------------------------
+#
+# Callers used to sanitize `received_results` through `_durable_results` and
+# substitute a separately-sanitized value into `terminal_response`: two
+# fields, two mechanisms, both by memory. These pin that a caller which does
+# neither still cannot write raw child content, because that is the property
+# a future persistence path needs to inherit for free.
+
+
+def test_save_sanitizes_received_results_a_caller_forgot(tmp_path: Any) -> None:
+    """A record handed to save() unsanitized is stored in its durable form."""
+    import json
+
+    from ouroboros.mcp.tools.subagent import FANOUT_KIND_QUESTION_ADVISORY, FanoutRecord
+
+    registry = FanoutRegistry(tmp_path)
+    metadata_lanes = _interview_question_advisory_fanout_metadata()["lanes"]
+    data_contract = next(
+        lane["answer_contract"] for lane in metadata_lanes if lane["lane_id"] == "data_context"
+    )
+    record = FanoutRecord(
+        fanout_id="fanout_door_received",
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="sess-door",
+        correlation_key="context.lane_id",
+        expected_keys=("data_context",),
+        synthesizer_input={
+            "lane_ids": ["data_context"],
+            "lane_answer_contracts": {"data_context": dict(data_contract)},
+        },
+        received_results={
+            "data_context": {
+                "lane_id": "data_context",
+                "data_needed": True,
+                "confidence": "reported_by_tool",
+                "finding": "Enterprise has 412 accounts; contact alice@example.com",
+                "caveats": ["point in time"],
+                "evidence": [],
+                "proposed_queries": [],
+                "requires_user_confirmation": False,
+            }
+        },
+    )
+
+    assert registry.save(record)
+
+    on_disk = json.loads((tmp_path / "fanout_door_received.json").read_text(encoding="utf-8"))
+    stored = on_disk["received_results"]["data_context"]
+
+    assert stored["content_retained"] is False
+    assert "finding" not in stored
+    assert "alice@example.com" not in json.dumps(on_disk)
+
+
+def test_save_sanitizes_terminal_response_a_caller_forgot(tmp_path: Any) -> None:
+    """The terminal snapshot is walked too, whatever envelope it uses."""
+    import json
+
+    from ouroboros.mcp.tools.subagent import FANOUT_KIND_QUESTION_ADVISORY, FanoutRecord
+
+    registry = FanoutRegistry(tmp_path)
+    metadata_lanes = _interview_question_advisory_fanout_metadata()["lanes"]
+    data_contract = next(
+        lane["answer_contract"] for lane in metadata_lanes if lane["lane_id"] == "data_context"
+    )
+    raw_submission = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "confidence": "reported_by_tool",
+        "finding": "Enterprise has 412 accounts; contact alice@example.com",
+        "caveats": ["point in time"],
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": False,
+    }
+    record = FanoutRecord(
+        fanout_id="fanout_door_terminal",
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="sess-door",
+        correlation_key="context.lane_id",
+        expected_keys=("data_context",),
+        synthesizer_input={
+            "lane_ids": ["data_context"],
+            "lane_answer_contracts": {"data_context": dict(data_contract)},
+        },
+        completed=True,
+        terminal_response={
+            "status": "complete",
+            "result": {
+                "aggregated_outputs": [{"lane_id": "data_context", "output": raw_submission}]
+            },
+        },
+    )
+
+    assert registry.save(record)
+
+    on_disk = json.loads((tmp_path / "fanout_door_terminal.json").read_text(encoding="utf-8"))
+
+    assert "alice@example.com" not in json.dumps(on_disk)
+    stored = on_disk["terminal_response"]["result"]["aggregated_outputs"][0]["output"]
+    assert stored["content_retained"] is False
+
+
+def test_save_does_not_mutate_the_response_the_host_receives(tmp_path: Any) -> None:
+    """Sanitizing for disk must not reach back into the caller's own object.
+
+    The terminal snapshot is built from the completion mapping that is also
+    returned to the host, and the host is supposed to receive the full
+    content — the record is what keeps only the shape.
+    """
+    from ouroboros.mcp.tools.subagent import FANOUT_KIND_QUESTION_ADVISORY, FanoutRecord
+
+    registry = FanoutRegistry(tmp_path)
+    metadata_lanes = _interview_question_advisory_fanout_metadata()["lanes"]
+    data_contract = next(
+        lane["answer_contract"] for lane in metadata_lanes if lane["lane_id"] == "data_context"
+    )
+    raw_submission = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "confidence": "reported_by_tool",
+        "finding": "Enterprise has 412 accounts",
+        "caveats": [],
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": False,
+    }
+    live_response = {
+        "status": "complete",
+        "result": {"aggregated_outputs": [{"lane_id": "data_context", "output": raw_submission}]},
+    }
+    record = FanoutRecord(
+        fanout_id="fanout_door_nomutate",
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="sess-door",
+        correlation_key="context.lane_id",
+        expected_keys=("data_context",),
+        synthesizer_input={
+            "lane_ids": ["data_context"],
+            "lane_answer_contracts": {"data_context": dict(data_contract)},
+        },
+        completed=True,
+        terminal_response=live_response,
+    )
+
+    assert registry.save(record)
+
+    assert live_response["result"]["aggregated_outputs"][0]["output"]["finding"] == (
+        "Enterprise has 412 accounts"
+    )
+
+
+def test_save_is_a_fixed_point(tmp_path: Any) -> None:
+    """Saving an already-saved record produces byte-identical content."""
+    from ouroboros.mcp.tools.subagent import FANOUT_KIND_QUESTION_ADVISORY, FanoutRecord
+
+    registry = FanoutRegistry(tmp_path)
+    metadata_lanes = _interview_question_advisory_fanout_metadata()["lanes"]
+    data_contract = next(
+        lane["answer_contract"] for lane in metadata_lanes if lane["lane_id"] == "data_context"
+    )
+    record = FanoutRecord(
+        fanout_id="fanout_door_fixedpoint",
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="sess-door",
+        correlation_key="context.lane_id",
+        expected_keys=("data_context", "code_context"),
+        synthesizer_input={
+            "lane_ids": ["data_context", "code_context"],
+            "lane_answer_contracts": {"data_context": dict(data_contract)},
+        },
+        received_results={
+            "data_context": {
+                "lane_id": "data_context",
+                "data_needed": True,
+                "confidence": "reported_by_tool",
+                "finding": "412 accounts",
+                "caveats": [],
+                "evidence": [],
+                "proposed_queries": [],
+                "requires_user_confirmation": False,
+            },
+            "code_context": {"finding": "config has token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"},
+        },
+    )
+
+    assert registry.save(record)
+    first = (tmp_path / "fanout_door_fixedpoint.json").read_text(encoding="utf-8")
+
+    reloaded = registry.load("fanout_door_fixedpoint")
+    assert reloaded is not None
+    assert registry.save(reloaded)
+    second = (tmp_path / "fanout_door_fixedpoint.json").read_text(encoding="utf-8")
+
+    assert first == second
