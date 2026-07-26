@@ -4943,6 +4943,9 @@ def test_interview_metadata_includes_question_advisory_fanout_contract() -> None
         "forward_to_mcp_only_after_user_or_auto_confirm": True,
         # No-auto-confirm for data output is machine-readable (round-7).
         "confirmation_overrides": {"data_context": "user_confirm_only_no_auto_confirm"},
+        # Isolation (user decision, 2026-07-26): data lane output is
+        # material for the user's judgment, never forwarded as the answer.
+        "lane_output_role": {"data_context": "material_for_user_answer_never_the_answer"},
     }
     assert fanout["response_payload_refs"]["plugin"] == "parent_runtime.ouroboros_dispatch.children"
     assert fanout["response_payload_refs"]["requires_prose_parsing"] is False
@@ -5009,11 +5012,21 @@ def test_question_advisory_data_context_lane_ships_read_only_proposer_policy() -
     assert evidence["max_evidence_chars"] == 2000
 
     # Host duties ride the wire contract, not skill prose (the skill stays
-    # thin like code_context): proposed-query gating and [from-data]
-    # forwarding are part of the versioned runtime_instruction.
+    # thin like code_context): proposed-query gating and the ISOLATION rule
+    # are part of the versioned runtime_instruction. Isolation (user
+    # decision, 2026-07-26): lane output is material for the user's
+    # judgment and is NEVER forwarded as the interview answer — the user's
+    # own words are the answer, and the durable record of what was
+    # consulted is the fan-out record, not the transcript.
     instruction = fanout["runtime_instruction"]
     assert "proposed_queries only after the user confirms" in instruction
-    assert "[from-data]" in instruction
+    assert "NEVER forwarded" in instruction
+    assert "USER'S OWN WORDS" in instruction
+    assert "prefixed [from-data] with their point-in-time caveat" not in instruction
+    assert (
+        fanout["synthesis_contract"]["lane_output_role"]["data_context"]
+        == "material_for_user_answer_never_the_answer"
+    )
 
 
 def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> None:

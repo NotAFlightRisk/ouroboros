@@ -745,6 +745,13 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                         "type": "object",
                         "additionalProperties": {"type": "string"},
                     },
+                    # Per-lane output role: lanes listed here produce material
+                    # for the user's judgment that is never forwarded as the
+                    # interview answer.
+                    "lane_output_role": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
                 },
             },
             "mcp_tool_capability": {
@@ -870,6 +877,17 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
             "confirmation_overrides": {
                 "data_context": "user_confirm_only_no_auto_confirm",
             },
+            # The ISOLATION statement (user decision, 2026-07-26): lane
+            # output listed here is material for the user's judgment and is
+            # NEVER forwarded as the interview answer, marked or otherwise —
+            # the user's own words are the answer, and the durable record of
+            # what was consulted is the fan-out record, not the transcript.
+            # Downstream provenance machinery remains as defense-in-depth
+            # for out-of-contract arrivals; this field is what makes the
+            # official flow one-directional.
+            "lane_output_role": {
+                "data_context": "material_for_user_answer_never_the_answer",
+            },
         },
         "response_payload_refs": {
             "plugin": "parent_runtime.ouroboros_dispatch.children",
@@ -887,12 +905,15 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
             "Read child task results as they complete and synthesize them into "
             "two or three answer options or one recommended draft. Do not forward advisory text to "
             "ouroboros_interview until the user approves, edits, or explicitly "
-            "chooses auto-confirm — EXCEPT data_context output, which has no "
-            "auto-confirm path (synthesis_contract.confirmation_overrides): a "
-            "data-derived answer is forwarded only after explicit user "
-            "confirmation. Execute a data lane's proposed_queries only "
-            "after the user confirms, and forward user-confirmed data-derived "
-            "answers prefixed [from-data] with their point-in-time caveat."
+            "chooses auto-confirm — and data_context output is NEVER forwarded "
+            "at all: data evidence is material for the user's judgment, not an "
+            "answer (synthesis_contract.lane_output_role). Present the evidence "
+            "beside the question with its point-in-time caveat; execute a data "
+            "lane's proposed_queries only after the user confirms; and when the "
+            "user decides, forward the USER'S OWN WORDS as the answer. Do not "
+            "forward lane output, quoted evidence, or [from-data]-prefixed text "
+            "as an interview answer — the durable record of what was consulted "
+            "lives in the fan-out record, not in the transcript."
         ),
     }
 

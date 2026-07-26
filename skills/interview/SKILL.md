@@ -196,8 +196,12 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      The payload carries the full rules (`data_policy`, `answer_contract`).
      Proposals come back as structured read requests, not query strings —
      build and run the query yourself, and only after the user confirms.
-     Forward user-confirmed data-derived answers prefixed `[from-data]` with
-     their point-in-time caveat.
+     **Data evidence is material for the user's judgment, never the answer**
+     (`synthesis_contract.lane_output_role`): show it beside the question
+     with its point-in-time caveat, and when the user decides, forward the
+     user's OWN words. Never forward lane output, quoted evidence, or
+     `[from-data]`-prefixed text as an interview answer — what was consulted
+     is durably recorded in the fan-out record, not the transcript.
    - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
      decisions, and risky defaults.
    - `answer_simplifier` — turn the question into 2-3 easy choices or one
@@ -295,11 +299,13 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      `missing_optional_keys` until you resend it. Submitting every lane in one
      call is the normal path and never hits this.
    - **A replayed `already_complete` does not return the data content.** It
-     carries `consent_status: "not_confirmable_prose_not_retained"`, so do NOT
-     forward a `[from-data]` answer from it. If you still hold the child's
-     output, resubmit that lane against the completed fan-out: it is returned
-     to you unchanged under `resubmitted_results` and nothing is added to
-     durable state. If you do not, re-run the advisory fan-out.
+     carries `consent_status: "not_confirmable_prose_not_retained"` — there
+     is nothing in it to show the user as evidence. If you still hold the
+     child's output, resubmit that lane against the completed fan-out: it is
+     returned to you unchanged under `resubmitted_results` and nothing is
+     added to durable state. If you do not, re-run the advisory fan-out.
+     (Lane output is display material either way — it is never forwarded as
+     an answer.)
 
    **Milestone lateral-review dispatch**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it
@@ -534,11 +540,12 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
    Append `[refined]` to an existing valid prefix (`[from-code]`,
    `[from-user]`, or `[from-research]`) only when the answer has been through
-   the Refine gate (see Step 4). `[from-data]` answers bypass the Refine
-   gate entirely: they are user-confirmed verbatim evidence, and rewriting
-   them would break the point-in-time provenance — never append `[refined]`
-   to `[from-data]`. MCP records the answer, generates the next question,
-   and returns it.
+   the Refine gate (see Step 4). There is no `[from-data]` answer to refine:
+   data evidence is never forwarded as an answer — the user reads it and
+   answers in their own words, which take the normal `[from-user]` path.
+   (If a `[from-data]`-prefixed answer arrives anyway, the server classifies
+   and withholds it downstream; do not produce one.) MCP records the answer,
+   generates the next question, and returns it.
 
 4. **Refine before forwarding** (free-text answers only):
 
