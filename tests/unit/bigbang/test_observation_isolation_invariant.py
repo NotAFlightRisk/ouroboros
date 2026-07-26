@@ -50,27 +50,39 @@ def _pm_context(state: InterviewState) -> str:
 
 
 def _pm_document_context(state: InterviewState) -> str:
-    """The PM document prompt surface (round-84: found OUTSIDE this table).
+    """The PM document prompt surface, through its PRODUCTION entry point.
 
-    PMDocumentGenerator reconstructs raw Q&A for a prompt that instructs the
-    LLM to preserve transcript information in a durable requirements
-    document — an extraction surface by this file's own criterion, missed in
-    the first enumeration. Its sanitizer is pinned here so the miss cannot
-    recur silently.
+    Round-106: this helper used to assemble the pairs itself — prepending
+    the initial context, which production did not do — so it asserted a
+    safety production never had. It now drives `PMDocumentGenerator.generate`
+    and captures the prompt the LLM would actually receive.
     """
-    from ouroboros.bigbang.interview import prompt_safe_initial_context_with_provenance
-    from ouroboros.bigbang.pm_document import extraction_safe_qa_pairs
+    import asyncio
+    from unittest.mock import MagicMock
 
-    pairs = [(r.question, r.user_response or "") for r in state.rounds]
-    provenances = [r.answer_provenance for r in state.rounds]
-    if state.initial_context:
-        # Any inclusion of interview context in a durable prompt goes
-        # through the AUTHORITATIVE value with its provenance (round-92) —
-        # the raw oversized blob can carry the observation mid-text.
-        context, context_provenance = prompt_safe_initial_context_with_provenance(state)
-        pairs = [("What is the initial context?", context), *pairs]
-        provenances = [context_provenance, *provenances]
-    return "\n".join(f"Q: {q}\nA: {a}" for q, a in extraction_safe_qa_pairs(pairs, provenances))
+    from ouroboros.bigbang.pm_document import PMDocumentGenerator
+    from ouroboros.bigbang.pm_seed import PMSeed
+    from ouroboros.core.types import Result
+    from ouroboros.providers.base import CompletionResponse
+
+    captured: dict[str, str] = {}
+
+    async def _capture(messages, config=None, **_):
+        captured["prompt"] = "\n".join(message.content for message in messages)
+        return Result.ok(CompletionResponse(content="# doc", model="m", usage=None))
+
+    adapter = MagicMock()
+    adapter.complete = _capture
+    generator = PMDocumentGenerator(llm_adapter=adapter, model="m")
+    seed = PMSeed(
+        pm_id="pm_seed_invariant",
+        product_name="Reporting",
+        goal="Reporting lane",
+        interview_id=state.interview_id,
+    )
+    outcome = asyncio.run(generator.generate(seed, interview_state=state))
+    assert outcome.is_ok, outcome
+    return captured["prompt"]
 
 
 #: The extraction surfaces. THE enumeration — a new extractor belongs here.

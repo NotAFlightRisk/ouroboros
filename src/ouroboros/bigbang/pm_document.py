@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from ouroboros.bigbang.interview import prompt_safe_initial_context_with_provenance
 from ouroboros.bigbang.pm_seed import PMSeed
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
@@ -234,6 +235,10 @@ def save_pm_document(
 # ──────────────────────────────────────────────────────────────────
 
 
+#: The label the initial context rides under when it leads the Q&A pairs.
+INITIAL_CONTEXT_QUESTION = "What is the initial context?"
+
+
 def extraction_safe_qa_pairs(
     qa_pairs: list[tuple[str, str]],
     provenances: list[str] | None = None,
@@ -316,11 +321,22 @@ class PMDocumentGenerator:
         Returns:
             Result containing the generated Markdown string or ProviderError.
         """
-        # Extract Q&A from interview state if not provided directly
+        # Extract Q&A from interview state if not provided directly. The
+        # AUTHORITATIVE initial context leads the pairs (round-106): every
+        # question in the interview was generated after it, so an
+        # observation-marked context taints them — production passed only
+        # rounds, so `observation_seen` started False and a data-derived
+        # question reached the durable prompt.
         provenances: list[str] | None = None
         if qa_pairs is None and interview_state is not None:
             qa_pairs = [(r.question, r.user_response or "") for r in interview_state.rounds]
             provenances = [r.answer_provenance for r in interview_state.rounds]
+            if interview_state.initial_context:
+                context, context_provenance = prompt_safe_initial_context_with_provenance(
+                    interview_state
+                )
+                qa_pairs = [(INITIAL_CONTEXT_QUESTION, context), *qa_pairs]
+                provenances = [context_provenance, *provenances]
         # The PM document is a DURABLE requirements artifact and its prompt
         # tells the LLM to preserve transcript information, so it is an
         # extraction surface (round-84) — it reconstructed raw Q&A and

@@ -61,6 +61,7 @@ from ouroboros.contracts.data_evidence import (
     _data_evidence_fallback_schema,
     _identifier_carries_payload,
     _identifier_looks_secret,
+    data_evidence_boundary_patterns,
     data_evidence_content_digest,
     data_evidence_retained_schema,
     redact_prose_for_persistence,
@@ -4708,14 +4709,26 @@ def _durable_results(contracts: Mapping[str, Any], provided: Mapping[str, Any]) 
 
 
 def _scrub_credentials_for_persistence(value: Any, _depth: int = 0) -> Any:
-    """Replace credential-shaped tokens in child content with their digest."""
-    if _depth > 8:
-        return value
+    """Replace credential/PII-shaped content in child output before storage.
+
+    Fail-CLOSED in every direction (round-106): keys are scrubbed as well as
+    values (a secret can ride a key), and a structure deeper than the walk
+    budget is replaced by its digest rather than passed through. The
+    vocabulary is the PUBLISHED boundary pattern set — the same one the data
+    lane enforces at re-entry — instead of a second list that can lag it.
+    """
+    if _depth > _SCRUB_MAX_DEPTH:
+        # Depth is a budget, not an escape: what cannot be inspected does
+        # not reach durable state.
+        return redacted_segment(json.dumps(value, ensure_ascii=False, default=str))
     if isinstance(value, str):
         return _redact_credential_tokens(value)
     if isinstance(value, Mapping):
         return {
-            key: _scrub_credentials_for_persistence(item, _depth + 1) for key, item in value.items()
+            _redact_credential_tokens(str(key)): _scrub_credentials_for_persistence(
+                item, _depth + 1
+            )
+            for key, item in value.items()
         }
     if isinstance(value, list):
         return [_scrub_credentials_for_persistence(item, _depth + 1) for item in value]
@@ -4723,21 +4736,59 @@ def _scrub_credentials_for_persistence(value: Any, _depth: int = 0) -> Any:
 
 
 def _redact_credential_tokens(text: str) -> str:
-    """Digest every credential-shaped token in ``text``.
+    """Digest every credential/PII-shaped span in ``text``.
 
-    Token-level rather than whole-value rejection: a code_context finding
-    legitimately quotes configuration and code, so the finding survives with
-    only the secret replaced.
+    ONE pass over merged spans (round-106): replacing pattern by pattern
+    re-scanned its own digests and produced nested markers. Span sources are
+    the published boundary vocabulary, a persistence-side rule covering the
+    VALUE that follows a credential keyword (``Authorization: Bearer <tok>``
+    — the published rule stops at the keyword because it exists to reject,
+    not to scrub), and identifier-shaped tokens the classifier calls secret.
     """
     if not text:
         return text
+    spans: list[list[int]] = []
+    for _label, pattern in data_evidence_boundary_patterns():
+        spans.extend([match.start(), match.end()] for match in pattern.finditer(text))
+    spans.extend([match.start(), match.end()] for match in _SCRUB_CREDENTIAL_CONTEXT.finditer(text))
+    spans.extend(
+        [match.start(), match.end()]
+        for match in _CREDENTIAL_TOKEN_CANDIDATE.finditer(text)
+        if _identifier_looks_secret(match.group(0))
+    )
+    if not spans:
+        return text
+    spans.sort()
+    merged: list[list[int]] = []
+    for span in spans:
+        if merged and span[0] <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], span[1])
+        else:
+            merged.append(span)
+    pieces: list[str] = []
+    cursor = 0
+    for start_index, end_index in merged:
+        pieces.append(text[cursor:start_index])
+        pieces.append(redacted_segment(text[start_index:end_index]))
+        cursor = end_index
+    pieces.append(text[cursor:])
+    return "".join(pieces)
 
-    def _replace(match: re.Match[str]) -> str:
-        token = match.group(0)
-        return redacted_segment(token) if _identifier_looks_secret(token) else token
 
-    scrubbed = _CREDENTIAL_TOKEN_CANDIDATE.sub(_replace, text)
-    return _DATA_EVIDENCE_SECRET_RE.sub(lambda m: redacted_segment(m.group(0)), scrubbed)
+#: Persistence-side rule: the VALUE after a credential keyword goes with it.
+_SCRUB_CREDENTIAL_CONTEXT = re.compile(
+    # keyword [: =] optional-scheme value  →  "Authorization: Bearer <tok>"
+    r"\b(?:authorization|api[_-]?key|apikey|password|passwd|pwd|secret|credential"
+    r"|access[_-]?key|client[_-]?secret|token)\b\s*[:=]\s*"
+    r"(?:(?:bearer|basic|token)\s+)?\S+"
+    # bare scheme form  →  "Bearer <tok>"
+    r"|\b(?:bearer|basic)\s+\S+",
+    re.IGNORECASE,
+)
+
+
+#: How deep the durable-write scrub walks before it digests the remainder.
+_SCRUB_MAX_DEPTH = 8
 
 
 #: Token shapes worth asking the credential classifier about: assignment

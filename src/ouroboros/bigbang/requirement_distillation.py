@@ -256,6 +256,14 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
         answer = (round_data.user_response or "").strip()
         if not answer or round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
             continue
+        # The provenance gate applies to EVERY candidate-producing branch
+        # (round-106): it sat after the reference-contrast branch, so a
+        # data_fact answer became a REFERENCE_DERIVED candidate carrying the
+        # full observation — the one deterministic surface the invariant
+        # says can never carry it. Hoisted here so no future branch can be
+        # added in front of it.
+        if effective_answer_provenance(answer, round_data.answer_provenance) != "human":
+            continue
         reference_cue = reference_by_question.get(round_data.question)
         if reference_cue is not None:
             if reference_cue.reference_id in resolved_reference_ids:
@@ -321,8 +329,6 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
         # about WHO decided, so only HUMAN provenance may make it —
         # `[from-auto]` safe-defaults and other generated text promoted as
         # user decisions the user never made.
-        if effective_answer_provenance(answer, round_data.answer_provenance) != "human":
-            continue
 
         referenced = tuple(
             cue.reference_id

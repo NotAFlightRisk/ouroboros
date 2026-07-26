@@ -9397,8 +9397,11 @@ def test_round104_generic_lane_content_is_credential_scrubbed_before_persistence
     )
     assert "ghp_abcdefghijklmnop1234" not in on_disk
     assert "redacted-key" in on_disk
-    # The surrounding finding survives — only the secret is replaced.
-    assert "config.py sets token" in on_disk
+    # The surrounding finding survives; the credential keyword goes with its
+    # value (round-106 made the span cover `token = <secret>` as one unit,
+    # since the value is what the keyword introduces).
+    assert "config.py sets" in on_disk
+    assert "for the client" in on_disk
 
 
 def test_round104_retention_marker_is_scoped_to_the_data_contract(tmp_path: Any) -> None:
@@ -9499,3 +9502,60 @@ def test_round105_reentry_tool_is_a_reciprocal_companion() -> None:
     reentry = ouroboros_tool_capability_metadata("ouroboros_submit_fanout_results")["companions"]
     assert "ouroboros_interview" in reentry
     assert "ouroboros_lateral_think" in reentry
+
+
+def test_round106_generic_scrub_is_fail_closed(tmp_path: Any) -> None:
+    """Keys, assignment forms, and over-deep structures all fail closed.
+
+    Round-104's scrub only asked the identifier classifier about standalone
+    tokens: `password=huntertwo`, `api_key=supersecret`, alphabetic Bearer
+    credentials, secrets riding a KEY, and anything nested past the walk
+    budget all survived into the fan-out JSON.
+    """
+    import json as json_module
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-106",
+        lanes=[{"lane_id": "code_context", "capability": "inspect_code", "required": True}],
+    )
+    assert fanout_id is not None
+
+    deep: Any = {"leaf": "password=buriedsecret"}
+    for _ in range(12):
+        deep = {"nested": deep}
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-106",
+        correlation_key="context.lane_id",
+        results=[
+            {
+                "key": "code_context",
+                "content": {
+                    "lane_id": "code_context",
+                    "finding": "settings use password=huntertwo and api_key=supersecret",
+                    "headers": "Authorization: Bearer abcdefghijklmnopqrst",
+                    "api_key=supersecret": "value under a secret KEY",
+                    "deep": deep,
+                },
+            }
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+
+    record = registry.load(fanout_id)
+    assert record is not None
+    on_disk = json_module.dumps(
+        {"received": record.received_results, "terminal": record.terminal_response}
+    )
+    for secret in (
+        "huntertwo",
+        "supersecret",
+        "abcdefghijklmnopqrst",
+        "buriedsecret",
+    ):
+        assert secret not in on_disk, secret
+    # The surrounding finding still survives — only the secrets are replaced.
+    assert "settings use" in on_disk

@@ -781,6 +781,16 @@ def _data_context_lane_policy() -> dict[str, Any]:
 _DATA_EVIDENCE_CONTRACT_ID = CONTRACT_VERSION
 
 
+def data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
+    """The published content-boundary vocabulary, for every durable writer.
+
+    Public because generic fan-out lanes scrub their content with the SAME
+    set the data lane enforces (round-106): two lists would drift, and the
+    one that lagged would be the one guarding persistence.
+    """
+    return _data_evidence_boundary_patterns()
+
+
 @lru_cache(maxsize=1)
 def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
     return (
