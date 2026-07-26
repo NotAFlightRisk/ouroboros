@@ -33,6 +33,7 @@ BUNDLED_SETUP_SKILL_MD = ROOT / ".claude-plugin" / "skills" / "setup" / "SKILL.m
 VERSION_MARKER_RE = re.compile(r"<!-- ooo:VERSION:([0-9A-Za-z.]+) -->")
 VERSION_MARKER_ENVELOPE_RE = re.compile(r"<!-- ooo:VERSION:(.*?) -->", re.DOTALL)
 _MAX_CONFLICT_RESTORE_EXCHANGES = 8
+_PathGeneration = tuple[int, int, int, int, int, int, int, int, int, int]
 
 
 def get_version() -> str:
@@ -208,18 +209,37 @@ def _exchange_paths(source: Path, destination: Path) -> bool:
     raise OSError(error, os.strerror(error), destination)
 
 
+def _path_generation(path: Path) -> _PathGeneration:
+    """Return the pathname identity and mutable inode generation fields."""
+    metadata = path.stat(follow_symlinks=False)
+    # Path exchange itself updates ctime on APFS, so ctime cannot distinguish
+    # an external writer from the ownership transfer being validated here.
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        int(getattr(metadata, "st_flags", 0)),
+        int(getattr(metadata, "st_gen", 0)),
+    )
+
+
 def _restore_latest_exchanged_content(
     temp_path: Path,
     path: Path,
     *,
-    expected_displaced: bytes,
+    expected_displaced: _PathGeneration,
 ) -> bool:
     """Restore the newest observed external edit without deleting a later writer."""
     for _ in range(_MAX_CONFLICT_RESTORE_EXCHANGES):
-        candidate = temp_path.read_bytes()
+        candidate = _path_generation(temp_path)
         if not _exchange_paths(temp_path, path):
             return False
-        displaced = temp_path.read_bytes()
+        displaced = _path_generation(temp_path)
         if displaced == expected_displaced:
             return True
         expected_displaced = candidate
@@ -246,6 +266,7 @@ def _atomic_write_bytes(
         if expected_current is not None:
             if not path.exists():
                 raise RuntimeError(f"write conflict for {path}: file changed since preflight")
+            staged_generation = _path_generation(temp_path)
             if not _exchange_paths(temp_path, path):
                 raise RuntimeError(
                     f"write conflict for {path}: atomic path exchange is unavailable"
@@ -256,7 +277,7 @@ def _atomic_write_bytes(
                     restored = _restore_latest_exchanged_content(
                         temp_path,
                         path,
-                        expected_displaced=content,
+                        expected_displaced=staged_generation,
                     )
                 except BaseException:
                     raise
