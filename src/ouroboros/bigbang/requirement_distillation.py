@@ -20,6 +20,7 @@ from ouroboros.core.requirement_candidate import (
     RequirementEvidenceKind,
     RequirementSection,
     classify_answer_provenance,
+    effective_answer_provenance,
     evaluate_promotion,
 )
 from ouroboros.core.seed import (
@@ -75,6 +76,47 @@ def is_reference_aware_distillation(distillation: RequirementDistillation) -> bo
         candidate.content_source is CandidateContentSource.REFERENCE_DERIVED
         for candidate in distillation.candidates
     )
+
+
+def interview_is_observation_only(state: InterviewState) -> bool:
+    """Whether every contentful input is an adopted external observation.
+
+    ONE readiness check for every generation path (round-85): the
+    reference-aware gate ran only inside apply_requirement_distillation, so a
+    plain interview whose context and answers were all `[from-data]` yielded
+    zero candidates, zero blockers, and a Seed invented by the extractor from
+    a fully withheld transcript — and the plugin path called
+    evaluate_promotion directly, bypassing the gate entirely. The PM path had
+    no gate at all. Every caller asks this ONE question before extracting or
+    dispatching; a single user-authored contentful answer anywhere makes the
+    interview generatable again.
+    """
+    saw_content = False
+    if state.initial_context.strip():
+        saw_content = True
+        if classify_answer_provenance(state.initial_context) not in {
+            "data_fact",
+            "research_fact",
+        }:
+            return False
+    for round_data in state.rounds:
+        answer = (round_data.user_response or "").strip()
+        if not answer:
+            continue
+        saw_content = True
+        if effective_answer_provenance(answer, round_data.answer_provenance) not in {
+            "data_fact",
+            "research_fact",
+        }:
+            return False
+    return saw_content
+
+
+OBSERVATION_ONLY_INTERVIEW_MESSAGE = (
+    "Interview carries only withheld data/research observations; no "
+    "user-authored requirement exists to generate from. State the goal and "
+    "requirements in your own words, then generate again."
+)
 
 
 def build_requirement_distillation(state: InterviewState) -> RequirementDistillation:
@@ -176,7 +218,10 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
         # groups them). The requirement path stays open: the user states the
         # decision in their own words, in an unmarked answer, and that
         # promotes exactly as before.
-        if classify_answer_provenance(answer) in {"data_fact", "research_fact"}:
+        if effective_answer_provenance(answer, round_data.answer_provenance) in {
+            "data_fact",
+            "research_fact",
+        }:
             continue
 
         referenced = tuple(

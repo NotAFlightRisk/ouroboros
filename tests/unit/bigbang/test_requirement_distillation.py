@@ -742,3 +742,60 @@ def test_round84_observation_only_input_is_not_runnable() -> None:
         {"goal": "llm-extracted"}, build_requirement_distillation(promoted_state)
     )
     assert not promoted.promotion.blockers
+
+
+def test_round85_observation_only_gate_covers_every_generation_path() -> None:
+    """ONE readiness check, asked by all three generation paths.
+
+    A plain (non-reference) observation-only interview yielded zero
+    candidates, zero blockers, and an extractor-invented Seed; the plugin
+    path bypassed the reference gate entirely; the PM path had no gate.
+    """
+    import asyncio
+
+    from ouroboros.bigbang.requirement_distillation import (
+        OBSERVATION_ONLY_INTERVIEW_MESSAGE,
+        interview_is_observation_only,
+    )
+
+    state = _state_with_answer("[from-data] Confirmed: 42 accounts require SSO.")
+    state.initial_context = "[from-research] The provider requires 3DS."
+
+    assert interview_is_observation_only(state)
+
+    # A single user-authored answer anywhere makes it generatable again.
+    state.rounds.append(
+        InterviewRound(
+            round_number=2,
+            question="So what must ship?",
+            user_response="Enterprise tier must include SSO.",
+        )
+    )
+    assert not interview_is_observation_only(state)
+
+    # Field-only observation (marker stripped) still counts as observation.
+    field_only = _state_with_answer("Confirmed: 42 accounts require SSO.")
+    field_only.initial_context = ""
+    field_only.rounds[0].answer_provenance = "data_fact"
+    assert interview_is_observation_only(field_only)
+
+    # And the dev generation path refuses end-to-end with the shared message.
+    from pathlib import Path as _Path
+    import tempfile
+    from unittest.mock import AsyncMock
+
+    from ouroboros.bigbang.ambiguity import AmbiguityScore
+    from ouroboros.bigbang.seed_generator import SeedGenerator
+
+    observation_only = _state_with_answer("[from-data] Confirmed: 42 accounts require SSO.")
+    observation_only.initial_context = "[from-data] observed context"
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        generator = SeedGenerator(llm_adapter=AsyncMock(), output_dir=_Path(tmp_dir) / "seeds")
+        outcome = asyncio.run(
+            generator.generate(
+                observation_only,
+                AmbiguityScore(overall_score=0.1, breakdown=None),
+            )
+        )
+    assert outcome.is_err
+    assert OBSERVATION_ONLY_INTERVIEW_MESSAGE in str(outcome.error)

@@ -49,6 +49,10 @@ from ouroboros.bigbang.question_classifier import (
     QuestionCategory,
     QuestionClassifier,
 )
+from ouroboros.bigbang.requirement_distillation import (
+    OBSERVATION_ONLY_INTERVIEW_MESSAGE,
+    interview_is_observation_only,
+)
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.owner_only import write_owner_only
@@ -1099,6 +1103,17 @@ class PMInterviewEngine:
                     field="rounds",
                 )
             )
+        if interview_is_observation_only(state):
+            # Same single readiness check as the dev paths (round-85): the
+            # prompt withheld the observation correctly, and the extractor
+            # then INVENTED a PMSeed from nothing — which pm_seed_to_dev_context
+            # would have carried into dev interviews as fact.
+            return Result.err(
+                ValidationError(
+                    OBSERVATION_ONLY_INTERVIEW_MESSAGE,
+                    field="rounds",
+                )
+            )
 
         if not state.is_complete:
             return Result.err(
@@ -1255,7 +1270,9 @@ class PMInterviewEngine:
                 f"\nQ: {extraction_safe_question(round_data.question, observation_seen=observation_seen)}"
             )
             if round_data.user_response:
-                safe = extraction_safe_answer(round_data.user_response)
+                safe = extraction_safe_answer(
+                    round_data.user_response, round_data.answer_provenance
+                )
                 if safe != round_data.user_response:
                     observation_seen = True
                 parts.append(f"A: {safe}")

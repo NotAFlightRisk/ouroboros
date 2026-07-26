@@ -234,19 +234,27 @@ def save_pm_document(
 # ──────────────────────────────────────────────────────────────────
 
 
-def extraction_safe_qa_pairs(qa_pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+def extraction_safe_qa_pairs(
+    qa_pairs: list[tuple[str, str]],
+    provenances: list[str] | None = None,
+) -> list[tuple[str, str]]:
     """Q&A pairs in the form that may enter a durable requirements prompt.
 
-    Answers by marker, questions by taint provenance — the same rules the
-    three transcript formatters apply (rounds 74, 80, 84). Module-level so
-    the observation-isolation invariant table can pin this surface next to
-    the others.
+    Answers by ingestion-time provenance (field-first, marker fallback),
+    questions by taint provenance — the same rules the transcript formatters
+    apply (rounds 74, 80, 84, 85). ``provenances`` aligns with ``qa_pairs``
+    when the pairs come from interview rounds; explicitly supplied pairs
+    default to the marker fallback. Module-level so the observation-isolation
+    invariant table can pin this surface next to the others.
     """
     sanitized: list[tuple[str, str]] = []
     observation_seen = False
-    for question, answer in qa_pairs:
+    for index, (question, answer) in enumerate(qa_pairs):
+        declared = (
+            provenances[index] if provenances is not None and index < len(provenances) else "human"
+        )
         safe_question = extraction_safe_question(question, observation_seen=observation_seen)
-        safe_answer = extraction_safe_answer(answer)
+        safe_answer = extraction_safe_answer(answer, declared)
         if safe_answer != answer:
             observation_seen = True
         sanitized.append((safe_question, safe_answer))
@@ -309,8 +317,10 @@ class PMDocumentGenerator:
             Result containing the generated Markdown string or ProviderError.
         """
         # Extract Q&A from interview state if not provided directly
+        provenances: list[str] | None = None
         if qa_pairs is None and interview_state is not None:
             qa_pairs = [(r.question, r.user_response or "") for r in interview_state.rounds]
+            provenances = [r.answer_provenance for r in interview_state.rounds]
         # The PM document is a DURABLE requirements artifact and its prompt
         # tells the LLM to preserve transcript information, so it is an
         # extraction surface (round-84) — it reconstructed raw Q&A and
@@ -318,7 +328,7 @@ class PMDocumentGenerator:
         # and explicitly supplied pairs) funnel through the same rules:
         # answers by marker, questions by taint provenance.
         if qa_pairs is not None:
-            qa_pairs = extraction_safe_qa_pairs(qa_pairs)
+            qa_pairs = extraction_safe_qa_pairs(qa_pairs, provenances)
 
         user_prompt = self._build_generation_prompt(seed, qa_pairs)
 

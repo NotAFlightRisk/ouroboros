@@ -28,9 +28,11 @@ from ouroboros.bigbang.interview import (
     prompt_safe_initial_context,
 )
 from ouroboros.bigbang.requirement_distillation import (
+    OBSERVATION_ONLY_INTERVIEW_MESSAGE,
     apply_requirement_distillation,
     build_promoted_reference_seed,
     build_requirement_distillation,
+    interview_is_observation_only,
     is_reference_aware_distillation,
     seed_readiness_details,
 )
@@ -324,6 +326,17 @@ class SeedGenerator:
                 )
             )
 
+        if interview_is_observation_only(state):
+            # ONE readiness check for every generation path (round-85): with
+            # every contentful input withheld, the extractor would invent a
+            # Seed from nothing the user authored.
+            return Result.err(
+                ValidationError(
+                    OBSERVATION_ONLY_INTERVIEW_MESSAGE,
+                    field="rounds",
+                    details={"interview_id": state.interview_id},
+                )
+            )
         distillation = build_requirement_distillation(state)
         preflight = apply_requirement_distillation({}, distillation)
         if preflight.promotion.blockers:
@@ -725,7 +738,9 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                 f"\nQ: {extraction_safe_question(round_data.question, observation_seen=observation_seen)}"
             )
             if round_data.user_response:
-                safe = extraction_safe_answer(round_data.user_response)
+                safe = extraction_safe_answer(
+                    round_data.user_response, round_data.answer_provenance
+                )
                 if safe != round_data.user_response:
                     observation_seen = True
                 parts.append(f"A: {safe}")

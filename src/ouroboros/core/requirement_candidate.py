@@ -99,7 +99,19 @@ def extraction_safe_question(question: str, *, observation_seen: bool) -> str:
     return question
 
 
-def extraction_safe_answer(answer: str) -> str:
+def effective_answer_provenance(answer: str, declared: str = "human") -> str:
+    """Field-first provenance: the ingestion-time field wins when set.
+
+    The marker is the display/legacy projection; the field is the record
+    (round-85). A round whose field says data_fact is an observation even if
+    the marker was stripped from the text.
+    """
+    if declared and declared != "human":
+        return declared
+    return classify_answer_provenance(answer)
+
+
+def extraction_safe_answer(answer: str, declared_provenance: str = "human") -> str:
     """The form of an answer that may enter requirement extraction.
 
     A ``[from-data]`` / ``[from-research]`` answer is an observation the user
@@ -113,7 +125,10 @@ def extraction_safe_answer(answer: str) -> str:
     note, and what the extractor never receives it cannot promote. A Seed is
     a durable artifact; a point-in-time measurement decays inside it.
     """
-    if classify_answer_provenance(answer) in {"data_fact", "research_fact"}:
+    if effective_answer_provenance(answer, declared_provenance) in {
+        "data_fact",
+        "research_fact",
+    }:
         return OBSERVATION_WITHHELD_NOTE
     return answer
 

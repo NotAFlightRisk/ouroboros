@@ -25,6 +25,10 @@ This module pins the population. Three properties:
                        so the metric field must never appear here)
    * identity-metric — a value-returning aggregation over an identity metric
                        (round 48)
+   * unverified-grouping — a row-splitting key whose head does not positively
+                       name a category (round 85: the admit direction — a key
+                       is a category because its head says so, not because no
+                       identity word was recognized)
 
 A rejection outside these classes is this test failing, not a future review
 round.
@@ -162,6 +166,18 @@ _DECLARED_REJECTIONS: list[tuple[str, dict[str, Any], str]] = [
     ("network-address-value", _answer(filters=["client=10.0.0.7"]), "network address"),
     ("network-key", _answer(filters=["ip=192.168.1.1"]), "keys an entity"),
     ("derived-identifier-grouping", _proposal_answer(grouping=["email_hash"]), "keys an entity"),
+    # Round-85 positive classification: unknown heads are refused without
+    # being known.
+    (
+        "unverified-grouping-card",
+        _proposal_answer(grouping=["credit_card_number"]),
+        "not a recognized category dimension",
+    ),
+    (
+        "unverified-grouping-imei",
+        _proposal_answer(grouping=["imei"]),
+        "not a recognized category dimension",
+    ),
 ]
 
 

@@ -1190,6 +1190,7 @@ def _plugin_advisory_contract_section(
     lane_lines = []
     data_policy: Any = None
     known_data_tools: Any = None
+    proposal_only_tools: Any = None
     contract_blocks: list[str] = []
     for lane in advisory_fanout_contract.get("lanes") or ():
         if not isinstance(lane, Mapping):
@@ -1231,6 +1232,7 @@ def _plugin_advisory_contract_section(
         if lane_id == "data_context":
             data_policy = lane.get("data_policy")
             known_data_tools = lane.get("known_data_tools")
+            proposal_only_tools = lane.get("proposal_only_data_tools")
     fanout_line = (
         f"fanout_id: {advisory_fanout_id}"
         if advisory_fanout_id
@@ -1241,8 +1243,21 @@ def _plugin_advisory_contract_section(
         "\n\n".join(contract_blocks) if contract_blocks else "(no lane carries an answer contract)"
     )
     known_tools_line = (
-        f"\ndata_context known_data_tools: {json.dumps(known_data_tools, ensure_ascii=False)}"
-        if isinstance(known_data_tools, list) and known_data_tools
+        (
+            f"\ndata_context known_data_tools: {json.dumps(known_data_tools, ensure_ascii=False)}"
+            if isinstance(known_data_tools, list) and known_data_tools
+            else ""
+        )
+        + (
+            "\ndata_context proposal_only_data_tools (unverified — NEVER "
+            "execute directly; return proposed_queries against them for the "
+            "parent to run after user confirmation): "
+            f"{json.dumps(proposal_only_tools, ensure_ascii=False)}"
+            if isinstance(proposal_only_tools, list) and proposal_only_tools
+            else ""
+        )
+        if (isinstance(known_data_tools, list) and known_data_tools)
+        or (isinstance(proposal_only_tools, list) and proposal_only_tools)
         else ""
     )
     # session_id is part of the re-entry identity: the record is registered
@@ -1604,6 +1619,12 @@ def build_interview_question_advisory_subagents(
                 if isinstance(raw_known_tools, (list, tuple))
                 else []
             )
+            raw_proposal_only = raw_lane.get("proposal_only_data_tools")
+            proposal_only_tools = (
+                [str(tool) for tool in raw_proposal_only if str(tool).strip()]
+                if isinstance(raw_proposal_only, (list, tuple))
+                else []
+            )
             known_tools_hint = (
                 (
                     "## Known Data Tools Hint\n"
@@ -1611,6 +1632,16 @@ def build_interview_question_advisory_subagents(
                     f"{', '.join(known_tools)}\n"
                 )
                 if known_tools
+                else ""
+            ) + (
+                (
+                    "## Proposal-Only Data Tools\n"
+                    "These host-configured tools are UNVERIFIED for direct "
+                    "execution — never execute them yourself; return "
+                    "proposed_queries against them so the parent session can "
+                    f"run them after user confirmation: {', '.join(proposal_only_tools)}\n"
+                )
+                if proposal_only_tools
                 else ""
             )
             extra = (
@@ -1749,6 +1780,11 @@ forwarding anything back to ouroboros_interview."""
         raw_lane_known_tools = raw_lane.get("known_data_tools")
         if isinstance(raw_lane_known_tools, (list, tuple)) and raw_lane_known_tools:
             lane_context["known_data_tools"] = [str(tool) for tool in raw_lane_known_tools]
+        raw_lane_proposal_only = raw_lane.get("proposal_only_data_tools")
+        if isinstance(raw_lane_proposal_only, (list, tuple)) and raw_lane_proposal_only:
+            lane_context["proposal_only_data_tools"] = [
+                str(tool) for tool in raw_lane_proposal_only
+            ]
         payloads.append(
             build_subagent_payload(
                 tool_name="ouroboros_interview",

@@ -21,6 +21,7 @@ from ouroboros.core.file_lock import file_lock as _file_lock
 from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.requirement_candidate import (
     RequirementDistillation,
+    classify_answer_provenance,
     compute_requirement_input_fingerprint,
 )
 from ouroboros.core.security import InputValidator
@@ -171,6 +172,15 @@ class InterviewRound(BaseModel):
     round_number: int = Field(ge=1)  # No upper limit - user decides when to stop
     question: str
     user_response: str | None = None
+    # Provenance as a TYPED FIELD, decided once at ingestion (round-85).
+    # The `[from-data]` string prefix is in-band provenance — the exact
+    # anti-pattern rounds 50 and 62 eliminated at the fan-out layer (state
+    # read from inside the value) — and re-classifying it at every consumer
+    # is how the extraction entrances kept multiplying. The field is set
+    # when the answer is recorded; the marker remains the display/legacy
+    # projection. A field that says data_fact withholds the answer from
+    # extraction even if the marker was stripped from the text.
+    answer_provenance: str = "human"
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -993,11 +1003,14 @@ class InterviewEngine:
 
         state.record_adapter_answer(question, user_response)
 
-        # Create new round
+        # Create new round. Provenance is classified ONCE, here at ingestion,
+        # and carried as a typed field (round-85) — consumers read the field
+        # instead of re-parsing the marker at every surface.
         round_data = InterviewRound(
             round_number=state.current_round_number,
             question=question,
             user_response=user_response,
+            answer_provenance=classify_answer_provenance(user_response),
         )
 
         state.rounds.append(round_data)

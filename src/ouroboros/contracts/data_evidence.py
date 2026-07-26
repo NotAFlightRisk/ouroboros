@@ -1335,6 +1335,13 @@ def _aggregate_shape_problems(value: Any, *, retained: bool = False) -> list[str
         problem := _identity_scope_problem(dimension, "dimension")
     ):
         problems.append(problem)
+    elif isinstance(dimension, str) and not _category_dimension_key(dimension.split("=", 1)[0]):
+        # The same positive rule as grouping (round-85): a dimension labels
+        # which category slice the number describes — its key must NAME one.
+        problems.append(
+            f"dimension key ({redacted_segment(dimension.split('=', 1)[0])}) is "
+            "not a recognized category dimension; use a categorical attribute"
+        )
     unknown = set(value) - _aggregate_fields()
     if unknown:
         problems.append("carries fields outside the aggregate shape")
@@ -1414,6 +1421,22 @@ def _read_request_shape_problems(
             for item in items
             if (problem := _identity_scope_problem(item, list_field)) is not None
         )
+        if list_field == "grouping":
+            # POSITIVE classification for the row-splitting surface
+            # (round-85): a grouping key is admitted because its head names
+            # a category, not because no identity word was recognized —
+            # credit_card_number, passport_number, and imei carried no
+            # listed token and walked through the absence proof.
+            problems.extend(
+                f"{list_field} key ({redacted_segment(item)}) is not a recognized "
+                "category dimension; group by a categorical attribute "
+                "(…_segment, …_tier, …_type, month, region, …) or narrow "
+                "with filters"
+                for item in items
+                if isinstance(item, str)
+                and _identity_scope_problem(item, list_field) is None
+                and not _category_dimension_key(item)
+            )
     unknown = set(request) - _read_request_fields()
     if unknown:
         problems.append("carries fields outside the read-request shape")
@@ -1560,6 +1583,75 @@ _IDENTITY_KEYS = frozenset(
         "device_id",
     }
 )
+
+
+#: POSITIVE category heads (round-85). Grouping and dimensions split rows —
+#: they are the enumeration surface — so their keys are classified
+#: positively: a key is a category dimension because its head names one,
+#: not because no identity word was recognized. The denylist direction was
+#: an absence proof (credit_card_number, passport_number, and imei carried
+#: no listed identity token and walked through); this is the presence proof
+#: the review asked for. Filters are unchanged: they narrow one aggregate
+#: and do not enumerate rows.
+_CATEGORY_HEADS = frozenset(
+    {
+        "segment",
+        "tier",
+        "type",
+        "class",
+        "cohort",
+        "category",
+        "bucket",
+        "band",
+        "grade",
+        "level",
+        "plan",
+        "status",
+        "stage",
+        "region",
+        "country",
+        "market",
+        "channel",
+        "source",
+        "platform",
+        "os",
+        "browser",
+        "version",
+        "release",
+        "month",
+        "week",
+        "day",
+        "year",
+        "quarter",
+        "date",
+        "hour",
+        "industry",
+        "sector",
+        "size",
+        "range",
+        "kind",
+        "family",
+        "currency",
+        "language",
+        "locale",
+        "timezone",
+        "environment",
+        "env",
+    }
+)
+
+
+def _category_dimension_key(key: str) -> bool:
+    """Whether ``key`` positively names a category dimension.
+
+    The head decides (round-54's rule, now in the admit direction):
+    plan_tier is a tier and customer_segment is a segment. The identity and
+    credential checks still run first, so an identity-modified preserving
+    head (user_code-style) never reaches this question.
+    """
+    lowered = key.lower()
+    tokens = [token for token in re.split(r"[-_.]", lowered) if token]
+    return bool(tokens) and tokens[-1] in _CATEGORY_HEADS
 
 
 #: Heads that PRESERVE per-entity cardinality (round-84): email_hash groups

@@ -1743,7 +1743,11 @@ def test_known_data_tools_env_is_bounded_and_identifier_validated(monkeypatch: A
         runtime_backend="codex",
     )
     lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
-    assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query", "metabase"]
+    # metabase carries no read-shaped token, so it is advertised
+    # proposal-only since round 85 — admission filtering (bounds,
+    # identifier validation) is unchanged.
+    assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query"]
+    assert lanes["data_context"]["proposal_only_data_tools"] == ["metabase"]
 
 
 def test_finalize_false_preserves_late_optional_results(tmp_path: Any) -> None:
@@ -2120,7 +2124,11 @@ def test_mutating_known_data_tool_hint_is_rejected_before_dispatch(monkeypatch: 
         runtime_backend="codex",
     )
     lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
-    assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query", "metabase_card"]
+    # metabase_card is proposal-only since round 85 (no read token);
+    # the property under test — the mutating hint never appears on ANY
+    # advertised list — is asserted below.
+    assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query"]
+    assert lanes["data_context"]["proposal_only_data_tools"] == ["metabase_card"]
 
 
 def test_oversized_lane_contract_is_rejected_whole(tmp_path: Any) -> None:
@@ -4317,7 +4325,11 @@ def test_known_data_tools_env_reaches_the_data_lane(monkeypatch: Any) -> None:
         runtime_backend="codex",
     )
     lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
-    assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query", "metabase_card"]
+    # metabase_card carries no read-shaped token, so since round 85 it is
+    # advertised proposal-only; the env var remains the public source for
+    # both lists.
+    assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query"]
+    assert lanes["data_context"]["proposal_only_data_tools"] == ["metabase_card"]
 
 
 def test_non_object_non_text_content_is_malformed(tmp_path: Any) -> None:
@@ -4531,7 +4543,11 @@ def test_long_alphabetic_credential_suffixes_fail_closed(monkeypatch: Any) -> No
         runtime_backend="codex",
     )
     lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
-    assert lanes["data_context"]["known_data_tools"] == ["metabase_card"]
+    # Proposal-only since round 85: the credential-suffixed names are
+    # DROPPED (the property under test), the surviving name is advertised
+    # on the proposal-only list.
+    assert "known_data_tools" not in lanes["data_context"]
+    assert lanes["data_context"]["proposal_only_data_tools"] == ["metabase_card"]
 
 
 def test_combinator_depth_never_binds_before_the_size_budget() -> None:
@@ -8736,3 +8752,95 @@ def test_round84_state_transition_verbs_are_mutators(
     )
     assert out["status"] == "partial"
     assert out.get("contract_violations")
+
+
+# --------------------------------------------------------------------------- #
+# round-85 — positive classification on the row-splitting and steering surfaces
+# --------------------------------------------------------------------------- #
+
+
+def test_round85_grouping_is_positively_classified(tmp_path: Any) -> None:
+    """A grouping key is admitted because its head NAMES a category.
+
+    credit_card_number, passport_number, and imei carried no listed identity
+    token and walked through the absence proof; the presence proof rejects
+    them without knowing them.
+    """
+    from ouroboros.contracts.data_evidence import _read_request_shape_problems
+
+    def grouping_problems(key: str) -> list[str]:
+        return _read_request_shape_problems(
+            {
+                "operation": "read",
+                "metric": "logins",
+                "aggregation": "count",
+                "grouping": [key],
+            },
+            executed=False,
+        )
+
+    for refused in ("credit_card_number", "passport_number", "imei", "naics_code"):
+        problems = grouping_problems(refused)
+        assert problems, refused
+        assert refused not in " ".join(problems), "the rejected key was echoed"
+    for admitted in ("plan_tier", "customer_segment", "month", "region", "device_type"):
+        assert grouping_problems(admitted) == [], admitted
+
+
+def test_round85_unverified_tools_are_proposal_only(monkeypatch: Any) -> None:
+    """Direct-execution steering is granted on positive read evidence only.
+
+    migrate/archive/provision carry no recognized mutator — the absence
+    proof admitted them as preferred tools. They are now advertised
+    proposal-only: the channel that runs after user confirmation.
+    """
+    from ouroboros.mcp.tools.authoring_handlers import (
+        _advisory_lanes_with_known_data_tools,
+    )
+
+    monkeypatch.setenv(
+        "OUROBOROS_KNOWN_DATA_TOOLS",
+        "migrate_database,archive_customers,provision_tenant,clickhouse_query,"
+        "token_usage_v2,reset_database",
+    )
+    lanes = _advisory_lanes_with_known_data_tools(
+        {"lanes": [{"lane_id": "data_context", "capability": "data_context"}]}
+    )
+    lane = next(entry for entry in lanes if entry.get("lane_id") == "data_context")
+
+    assert lane.get("known_data_tools") == ["clickhouse_query", "token_usage_v2"]
+    assert lane.get("proposal_only_data_tools") == [
+        "migrate_database",
+        "archive_customers",
+        "provision_tenant",
+    ]
+    # A recognized mutator is not even proposal-only — it is dropped.
+    assert "reset_database" not in (
+        lane.get("known_data_tools", []) + lane.get("proposal_only_data_tools", [])
+    )
+
+
+def test_round85_prompts_state_the_proposal_only_rule() -> None:
+    """The child is told, on the machine-readable and prompt surfaces."""
+    payloads = build_interview_question_advisory_subagents(
+        {
+            "session_id": "sess-85",
+            "question_identity": "interview-question:00112233445566ff",
+            "question": "How many enterprise accounts churned last quarter?",
+            "user_question_first": True,
+            "lanes": [
+                {
+                    "lane_id": "data_context",
+                    "capability": "data_context",
+                    "required": False,
+                    "known_data_tools": ["clickhouse_query"],
+                    "proposal_only_data_tools": ["migrate_database"],
+                }
+            ],
+        }
+    )
+    assert payloads
+    prompt = payloads[0].prompt
+    assert "Proposal-Only Data Tools" in prompt
+    assert "never execute them yourself" in prompt
+    assert payloads[0].context["proposal_only_data_tools"] == ["migrate_database"]

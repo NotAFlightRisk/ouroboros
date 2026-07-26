@@ -43,8 +43,10 @@ from ouroboros.bigbang.interview import (
     InterviewStatus,
 )
 from ouroboros.bigbang.requirement_distillation import (
+    OBSERVATION_ONLY_INTERVIEW_MESSAGE,
     build_promoted_reference_seed,
     build_requirement_distillation,
+    interview_is_observation_only,
     is_reference_aware_distillation,
     seed_readiness_details,
 )
@@ -748,6 +750,46 @@ _KNOWN_DATA_TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 _MAX_KNOWN_DATA_TOOLS = 16
 
 
+#: Tokens that positively evidence a read-side tool name. The admit
+#: direction: a name earns direct-execution steering by carrying one, rather
+#: than by not carrying a known mutator (round-85).
+_READ_SHAPED_TOKENS = frozenset(
+    {
+        "get",
+        "list",
+        "read",
+        "query",
+        "search",
+        "fetch",
+        "find",
+        "describe",
+        "show",
+        "select",
+        "count",
+        "view",
+        "browse",
+        "inspect",
+        "lookup",
+        "scan",
+        "stat",
+        "stats",
+        "report",
+        "aggregate",
+        "metrics",
+        "usage",
+        "logs",
+        "events",
+        "analytics",
+    }
+)
+
+
+def _read_shaped_tool_name(name: str) -> bool:
+    decamelled = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", name)
+    tokens = [tok for tok in re.split(r"[^A-Za-z0-9]+", decamelled.lower()) if tok]
+    return any(token in _READ_SHAPED_TOKENS for token in tokens)
+
+
 def _advisory_lanes_with_known_data_tools(advisory: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Copy advisory lanes, injecting configured ``known_data_tools``.
 
@@ -772,7 +814,7 @@ def _advisory_lanes_with_known_data_tools(advisory: Mapping[str, Any]) -> list[d
     # re-entry boundary applies (round-37): a hint that survives
     # configuration must never be rejected when a child later reports it as
     # a source — the two identifier contracts stay aligned.
-    known_tools = [
+    admissible = [
         item.strip()
         for item in os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS", "").split(",")
         if item.strip()
@@ -781,10 +823,23 @@ def _advisory_lanes_with_known_data_tools(advisory: Mapping[str, Any]) -> list[d
         and not _identifier_looks_secret(item.strip())
         and not _identifier_carries_payload(item.strip())
     ][:_MAX_KNOWN_DATA_TOOLS]
-    if known_tools:
-        for lane in lanes:
-            if lane.get("lane_id") == "data_context" and "known_data_tools" not in lane:
-                lane["known_data_tools"] = known_tools
+    # POSITIVE read admission (round-85): passing the mutator denylist proves
+    # an absence, and migrate/archive/provision proved the absence proof
+    # wrong. A hint steers DIRECT execution, so direct-execution steering is
+    # granted only on positive evidence — a read-shaped token in the name.
+    # Everything else stays advertised, but proposal-only: the child may
+    # propose queries against it for the parent to run after user
+    # confirmation, which is the channel that was always safe for unverified
+    # tools.
+    known_tools = [item for item in admissible if _read_shaped_tool_name(item)]
+    proposal_only = [item for item in admissible if not _read_shaped_tool_name(item)]
+    for lane in lanes:
+        if lane.get("lane_id") != "data_context":
+            continue
+        if known_tools and "known_data_tools" not in lane:
+            lane["known_data_tools"] = known_tools
+        if proposal_only and "proposal_only_data_tools" not in lane:
+            lane["proposal_only_data_tools"] = proposal_only
     return lanes
 
 
@@ -1306,7 +1361,7 @@ def _format_extraction_transcript(state: InterviewState) -> str:
             f"{extraction_safe_question(r.question, observation_seen=observation_seen)}"
         )
         if r.user_response:
-            safe = extraction_safe_answer(r.user_response)
+            safe = extraction_safe_answer(r.user_response, r.answer_provenance)
             if safe != r.user_response:
                 observation_seen = True
             lines.append(f"**A{r.round_number}:** {safe}")
@@ -1586,6 +1641,16 @@ class GenerateSeedHandler:
                         )
                     )
 
+            if interview_is_observation_only(interview_state):
+                # The same single readiness check the in-process generator
+                # runs (round-85): this path called evaluate_promotion
+                # directly and bypassed the gate.
+                return Result.err(
+                    MCPToolError(
+                        OBSERVATION_ONLY_INTERVIEW_MESSAGE,
+                        tool_name="ouroboros_generate_seed",
+                    )
+                )
             transcript = _format_extraction_transcript(interview_state)
             distillation = build_requirement_distillation(interview_state)
             from ouroboros.core.requirement_candidate import evaluate_promotion
