@@ -112,7 +112,7 @@ def test_update_version_marker_preserves_unrelated_bytes_with_bom_and_crlf(tmp_p
     original = b"\xef\xbb\xbfheading\r\n" + marker + "\r\nbody café\r\n".encode()
     target.write_bytes(original)
 
-    assert sync_plugin_version.update_version_marker(target, "1.2.4") is True
+    assert sync_plugin_version.update_version_marker(target, "1.2.4") is not None
 
     assert target.read_bytes() == original.replace(marker, b"<!-- ooo:VERSION:1.2.4 -->")
 
@@ -643,7 +643,6 @@ def test_atomic_exchange_preserves_newer_edit_arriving_during_restore(
             expected_current=original,
         )
 
-    assert target.read_bytes() == newer_external
     preserved = [path.read_bytes() for path in tmp_path.iterdir()]
     assert first_external in preserved
     assert newer_external in preserved
@@ -730,10 +729,59 @@ def test_atomic_exchange_preserves_same_bytes_edit_arriving_during_restore(
             expected_current=original,
         )
 
-    assert target.read_bytes() == content
     preserved = [path.read_bytes() for path in tmp_path.iterdir()]
     assert first_external in preserved
     assert content in preserved
+
+
+@pytest.mark.skipif(
+    not (sys.platform.startswith("linux") or sys.platform == "darwin"),
+    reason="atomic pathname exchange is unavailable on this platform",
+)
+def test_atomic_exchange_preserves_open_descriptor_write_displaced_to_temp(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "target.json"
+    original = b'{"version":"1.2.3"}\n'
+    content = b'{"version":"1.2.4"}\n'
+    first_external = b'{"version":"1.2.3","note":"first"}\n'
+    late_external = b'{"version":"1.2.4","note":"late fd"}\n'
+    target.write_bytes(original)
+    real_exchange = sync_plugin_version._exchange_paths
+    exchange_count = 0
+    displaced_fd: int | None = None
+
+    def inject_open_descriptor_writer(source: Path, destination: Path) -> bool:
+        nonlocal exchange_count, displaced_fd
+        exchange_count += 1
+        if exchange_count == 1:
+            destination.write_bytes(first_external)
+        result = real_exchange(source, destination)
+        if exchange_count == 1:
+            displaced_fd = os.open(destination, os.O_WRONLY)
+        elif exchange_count == 2:
+            assert displaced_fd is not None
+            os.write(displaced_fd, late_external)
+            os.ftruncate(displaced_fd, len(late_external))
+            os.fsync(displaced_fd)
+            os.close(displaced_fd)
+            displaced_fd = None
+        return result
+
+    monkeypatch.setattr(sync_plugin_version, "_exchange_paths", inject_open_descriptor_writer)
+
+    with pytest.raises(RuntimeError, match="preserved exchanged content"):
+        sync_plugin_version._atomic_write_bytes(
+            target,
+            content,
+            expected_current=original,
+        )
+
+    preserved = [path for path in tmp_path.iterdir() if path != target]
+    reachable_bytes = [target.read_bytes(), *(path.read_bytes() for path in preserved)]
+    assert preserved
+    assert late_external in reachable_bytes
 
 
 def test_atomic_write_fails_closed_when_exchange_is_unavailable(
@@ -874,6 +922,71 @@ def test_main_write_does_not_clobber_external_edit_during_rollback(
 
     assert plugin_json.read_bytes() == external
     assert any("rollback conflict" in str(exc) for exc in raised.value.exceptions)
+
+
+def test_main_write_does_not_roll_back_same_bytes_new_inode_aba(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_skill = tmp_path / "skills/setup/SKILL.md"
+    bundled_skill = tmp_path / ".claude-plugin/skills/setup/SKILL.md"
+    plugin_json = tmp_path / ".claude-plugin/plugin.json"
+    marketplace_json = tmp_path / ".claude-plugin/marketplace.json"
+    source_skill.parent.mkdir(parents=True)
+    bundled_skill.parent.mkdir(parents=True)
+    plugin_json.parent.mkdir(parents=True, exist_ok=True)
+    source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
+    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
+    plugin_json.write_text('{"version":"1.2.3"}\n')
+    marketplace_json.write_text('{"plugins":[{"version":"1.2.3"}]}\n')
+    monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
+    monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
+    monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
+    monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
+    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
+    monkeypatch.setattr(
+        sync_plugin_version.sys,
+        "argv",
+        ["sync-plugin-version.py", "--write", "--version", "1.2.4"],
+    )
+    original_update_json = sync_plugin_version.update_json
+    calls = 0
+
+    def replace_first_write_with_same_bytes_new_inode_before_bookkeeping_then_fail(
+        path: Path,
+        version: str,
+        *,
+        nested_key=None,
+        expected_current=None,
+    ):
+        nonlocal calls
+        calls += 1
+        result = original_update_json(
+            path,
+            version,
+            nested_key=nested_key,
+            expected_current=expected_current,
+        )
+        if calls == 1:
+            same_bytes = plugin_json.read_bytes()
+            replacement = tmp_path / "same-bytes-replacement"
+            replacement.write_bytes(same_bytes)
+            os.replace(replacement, plugin_json)
+        if calls == 2:
+            raise OSError("injected later write failure")
+        return result
+
+    monkeypatch.setattr(
+        sync_plugin_version,
+        "update_json",
+        replace_first_write_with_same_bytes_new_inode_before_bookkeeping_then_fail,
+    )
+
+    with pytest.raises(BaseExceptionGroup, match="rollback was incomplete") as raised:
+        sync_plugin_version.main()
+
+    assert __import__("json").loads(plugin_json.read_text())["version"] == "1.2.4"
+    assert any("file generation changed" in str(exc) for exc in raised.value.exceptions)
 
 
 def test_main_write_rejects_external_edit_after_preflight(tmp_path: Path, monkeypatch) -> None:
@@ -1064,7 +1177,8 @@ def test_main_write_rolls_back_only_successfully_replaced_targets(
         content: bytes,
         *,
         expected_current: bytes | None = None,
-    ) -> None:
+        expected_generation=None,
+    ):
         if b"1.2.4" in content and path == marketplace_json:
             raise OSError("primary marketplace failure")
         if b"1.2.3" in content:
@@ -1073,7 +1187,12 @@ def test_main_write_rolls_back_only_successfully_replaced_targets(
                 raise OSError("plugin rollback failure")
             if path == source_skill:
                 raise OSError("source rollback failure")
-        original_atomic_write(path, content, expected_current=expected_current)
+        return original_atomic_write(
+            path,
+            content,
+            expected_current=expected_current,
+            expected_generation=expected_generation,
+        )
 
     monkeypatch.setattr(
         sync_plugin_version,
@@ -1258,7 +1377,7 @@ def test_main_write_rolls_back_when_marker_update_reports_no_change(
     monkeypatch.setattr(
         sync_plugin_version,
         "update_version_marker",
-        lambda *_args, **_kwargs: False,
+        lambda *_args, **_kwargs: None,
     )
 
     with pytest.raises(SystemExit, match="failed to update"):

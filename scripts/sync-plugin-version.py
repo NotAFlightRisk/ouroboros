@@ -253,7 +253,8 @@ def _atomic_write_bytes(
     content: bytes,
     *,
     expected_current: bytes | None = None,
-) -> None:
+    expected_generation: _PathGeneration | None = None,
+) -> _PathGeneration:
     """Durably replace one target without exposing a partial file."""
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -265,15 +266,18 @@ def _atomic_write_bytes(
             temp_file.flush()
             os.fchmod(temp_file.fileno(), mode)
             os.fsync(temp_file.fileno())
+        staged_generation = _path_generation(temp_path)
         if expected_current is not None:
             if not path.exists():
                 raise RuntimeError(f"write conflict for {path}: file changed since preflight")
-            staged_generation = _path_generation(temp_path)
             if not _exchange_paths(temp_path, path):
                 raise RuntimeError(
                     f"write conflict for {path}: atomic path exchange is unavailable"
                 )
-            if temp_path.read_bytes() != expected_current:
+            displaced_generation = _path_generation(temp_path)
+            if temp_path.read_bytes() != expected_current or (
+                expected_generation is not None and displaced_generation != expected_generation
+            ):
                 preserve_temp = True
                 try:
                     restored = _restore_latest_exchanged_content(
@@ -299,6 +303,7 @@ def _atomic_write_bytes(
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+        return staged_generation
     finally:
         if not preserve_temp:
             temp_path.unlink(missing_ok=True)
@@ -309,7 +314,7 @@ def update_version_marker(
     version: str,
     *,
     expected_current: bytes | None = None,
-) -> bool:
+) -> _PathGeneration | None:
     """Update <!-- ooo:VERSION:X.Y.Z --> marker in a text file."""
     original = expected_current if expected_current is not None else path.read_bytes()
     text = original.decode("utf-8")
@@ -321,8 +326,8 @@ def update_version_marker(
     new_marker_bytes = f"<!-- ooo:VERSION:{version} -->".encode("ascii")
     content = original.replace(old_marker_bytes, new_marker_bytes, 1)
     if original == content:
-        return False
-    _atomic_write_bytes(path, content, expected_current=original)
+        return None
+    owned_generation = _atomic_write_bytes(path, content, expected_current=original)
 
     updated = path.read_bytes()
     if updated != content:
@@ -330,7 +335,7 @@ def update_version_marker(
     updated_matches = list(VERSION_MARKER_RE.finditer(updated.decode("utf-8")))
     if len(updated_matches) != 1 or updated_matches[0].group(1) != version:
         raise RuntimeError(f"failed to verify version marker update in {path}")
-    return True
+    return owned_generation
 
 
 def update_json(
@@ -339,8 +344,8 @@ def update_json(
     *,
     nested_key: str | None = None,
     expected_current: bytes | None = None,
-) -> bool:
-    """Update version in a JSON file. Returns True if changed."""
+) -> _PathGeneration | None:
+    """Update version in a JSON file. Returns the owned generation if changed."""
     original = expected_current if expected_current is not None else path.read_bytes()
     data = _parse_json_bytes(original)
     if not isinstance(data, dict):
@@ -361,11 +366,10 @@ def update_json(
         data["version"] = version
 
     if old == version:
-        return False
+        return None
 
     content = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-    _atomic_write_bytes(path, content, expected_current=original)
-    return True
+    return _atomic_write_bytes(path, content, expected_current=original)
 
 
 def _run() -> None:
@@ -455,18 +459,22 @@ def _run() -> None:
             1,
         )
     attempted: list[Path] = []
+    owned_writes: dict[Path, _PathGeneration] = {}
     try:
         for path, nested, _data, old in json_targets:
             if old == version:
                 print(f"  OK    {path.relative_to(ROOT)} ({old})")
             elif write:
                 attempted.append(path)
-                update_json(
+                owned_generation = update_json(
                     path,
                     version,
                     nested_key=nested,
                     expected_current=originals[path],
                 )
+                if owned_generation is None:
+                    sys.exit(f"Error: failed to update {path.relative_to(ROOT)}")
+                owned_writes[path] = owned_generation
                 print(f"  WRITE {path.relative_to(ROOT)} ({old} -> {version})")
                 changed = True
             else:
@@ -478,13 +486,14 @@ def _run() -> None:
                 print(f"  OK    {path.relative_to(ROOT)} ({old_marker})")
             elif write:
                 attempted.append(path)
-                updated = update_version_marker(
+                owned_generation = update_version_marker(
                     path,
                     version,
                     expected_current=originals[path],
                 )
-                if not updated:
+                if owned_generation is None:
                     sys.exit(f"Error: failed to update {path.relative_to(ROOT)}")
+                owned_writes[path] = owned_generation
                 print(f"  WRITE {path.relative_to(ROOT)} ({old_marker} -> {version})")
                 changed = True
             else:
@@ -511,10 +520,16 @@ def _run() -> None:
                     raise RuntimeError(
                         f"rollback conflict for {path}: file changed after version sync write"
                     )
+                if _path_generation(path) != owned_writes.get(path):
+                    raise RuntimeError(
+                        f"rollback conflict for {path}: file generation changed after "
+                        "version sync write"
+                    )
                 _atomic_write_bytes(
                     path,
                     originals[path],
                     expected_current=expected_writes[path],
+                    expected_generation=owned_writes[path],
                 )
             except BaseException as rollback_error:
                 failure = RuntimeError(f"failed to roll back {path}: {rollback_error}")
