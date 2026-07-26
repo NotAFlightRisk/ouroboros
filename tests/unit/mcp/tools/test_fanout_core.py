@@ -9207,10 +9207,15 @@ def test_round100_legacy_completed_record_is_redacted_on_replay(tmp_path: Any) -
     assert record is not None
     legacy = _round77_answer("logins", ["cohort=enterprise"])
     legacy["finding"] = "Contact ada@example.com about the 42 enterprise accounts."
+    # The REAL terminal envelope shape (round-101 caught this fixture using
+    # an invented one): aggregated_outputs carries {result_id, output}.
     registry.save(
         dataclasses.replace(
             record,
-            terminal_response={"outputs": [{"key": "data_context", "content": legacy}]},
+            terminal_response={
+                "aggregated_outputs": [{"result_id": "data_context", "output": legacy}],
+                "synthesis": {"lane_outputs": {"data_context": legacy}},
+            },
         )
     )
 
@@ -9226,4 +9231,54 @@ def test_round100_legacy_completed_record_is_redacted_on_replay(tmp_path: Any) -
     serialized = json_module.dumps(replay)
     assert replay["status"] == "already_complete"
     assert "ada@example.com" not in serialized
-    assert "42" not in serialized or "enterprise accounts" not in serialized
+    assert "enterprise accounts" not in serialized
+    # The envelope SHAPE survives — only the nested payload is replaced —
+    # and consent is classified from the redaction that just happened, not
+    # from a marker legacy state never carried.
+    envelope = replay["aggregated_outputs"][0]
+    assert envelope["result_id"] == "data_context"
+    assert envelope["output"]["lane_id"] == "data_context"
+    assert envelope["output"]["content_retained"] is False
+    assert envelope["output"]["evidence_count"] == 1
+    assert replay["consent_status"] == "not_confirmable_prose_not_retained"
+
+
+def test_round101_digest_is_canonical_across_number_spellings(tmp_path: Any) -> None:
+    """12 and 12.0 are the same value, so they are the same commitment.
+
+    A JavaScript host round-trips integers as floats; hashing the spelling
+    made a valid recovery resubmission report a digest mismatch.
+    """
+    from ouroboros.contracts.data_evidence import data_evidence_content_digest
+
+    as_int = _round77_answer("logins", ["cohort=enterprise"])
+    as_float = _round77_answer("logins", ["cohort=enterprise"])
+    as_float["evidence"][0]["value"] = {"number": 12.0}
+    assert data_evidence_content_digest(as_int) == data_evidence_content_digest(as_float)
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-101",
+        lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+    )
+    assert fanout_id is not None
+    assert (
+        submit_fanout_results(
+            registry,
+            session_id="sess-101",
+            correlation_key="context.lane_id",
+            results=[{"key": "data_context", "content": as_float}],
+            fanout_id=fanout_id,
+        )["status"]
+        == "complete"
+    )
+    replay = submit_fanout_results(
+        registry,
+        session_id="sess-101",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": as_int}],
+        fanout_id=fanout_id,
+    )
+    assert replay.get("resubmission_mismatch_keys") is None
+    assert replay.get("consent_status") == "confirmable_resubmitted"

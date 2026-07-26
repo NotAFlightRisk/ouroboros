@@ -1056,11 +1056,35 @@ def redact_prose_for_persistence(output: Any) -> Any:
 
 
 def data_evidence_content_digest(output: Any) -> str:
-    """SHA-256 over the canonical JSON form of a data-lane output."""
+    """SHA-256 over the CANONICAL JSON form of a data-lane output.
+
+    Integer-valued numbers are normalized before hashing (round-101): a
+    JavaScript host round-trips ``12`` as ``12.0`` and vice versa, both
+    satisfy the published integer schema, and hashing the representation
+    made a valid recovery resubmission report a digest mismatch. The
+    commitment is over the VALUE, not over one host's spelling of it.
+    """
     encoded = json.dumps(
-        output, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True
+        _canonical_digest_value(output),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_digest_value(value: Any) -> Any:
+    """Normalize integral floats to ints, recursively."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, Mapping):
+        return {key: _canonical_digest_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_canonical_digest_value(item) for item in value]
+    return value
 
 
 def _data_evidence_boundary_violations(

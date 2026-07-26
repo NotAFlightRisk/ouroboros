@@ -4569,38 +4569,52 @@ def _is_transportable(content: Any) -> bool:
     return True
 
 
-def _redact_legacy_data_prose(
-    payload: Any, contracts: Mapping[str, Any] | None = None, _depth: int = 0
-) -> None:
-    """Replace any data-lane content found in a persisted payload in place.
+def _redact_legacy_data_prose(payload: Any, data_lane_ids: frozenset[str]) -> bool:
+    """Redact any un-redacted data-lane OUTPUT inside a persisted payload.
 
-    Round-100: terminal responses written before ``redact_prose_for_persistence``
-    existed still hold the child's full narrative and measured values, and
-    replay copied them out verbatim. The walk is bounded and keyed on the
-    lane id so it cannot touch anything else.
+    Round-101: the first version keyed on ``lane_id`` found inside a value
+    and replaced whatever mapping carried it — but the terminal envelope is
+    ``{"result_id": <lane>, "output": {...}}``, so it redacted the ENVELOPE,
+    returned null lifecycle fields, and lost the output shape. The lane is
+    identified by the REGISTERED contract instead (the same authority
+    re-entry uses), and only the nested payload is replaced.
+
+    Returns whether anything was redacted, so the caller can classify
+    consent from the fact rather than from a marker legacy state lacks.
     """
-    if _depth > 6:
-        return
-    if isinstance(payload, dict):
-        for key, value in list(payload.items()):
-            if (
-                isinstance(value, Mapping)
-                and value.get("lane_id") == "data_context"
-                and value.get("content_retained") is not False
-            ):
-                payload[key] = redact_prose_for_persistence(value)
-                continue
-            _redact_legacy_data_prose(value, contracts, _depth + 1)
-    elif isinstance(payload, list):
-        for index, value in enumerate(payload):
-            if (
-                isinstance(value, Mapping)
-                and value.get("lane_id") == "data_context"
-                and value.get("content_retained") is not False
-            ):
-                payload[index] = redact_prose_for_persistence(value)
-                continue
-            _redact_legacy_data_prose(value, contracts, _depth + 1)
+    redacted = False
+
+    def _is_unredacted_data(value: Any) -> bool:
+        return isinstance(value, Mapping) and value.get("content_retained") is not False
+
+    def _walk(node: Any, depth: int = 0) -> None:
+        nonlocal redacted
+        if depth > 6:
+            return
+        if isinstance(node, dict):
+            for key, value in list(node.items()):
+                # {"data_context": {...}} — keyed by lane id.
+                if key in data_lane_ids and _is_unredacted_data(value):
+                    node[key] = redact_prose_for_persistence(value)
+                    redacted = True
+                    continue
+                # {"result_id": "data_context", "output": {...}} — the
+                # terminal envelope shape.
+                if (
+                    key == "output"
+                    and _is_unredacted_data(value)
+                    and str(node.get("result_id") or node.get("key") or "") in data_lane_ids
+                ):
+                    node[key] = redact_prose_for_persistence(value)
+                    redacted = True
+                    continue
+                _walk(value, depth + 1)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item, depth + 1)
+
+    _walk(payload)
+    return redacted
 
 
 def _carries_redacted_data(
@@ -4824,12 +4838,15 @@ def _submit_fanout_results_locked(
         # with the same server-owned summary every fresh record gets, so the
         # retention guarantee is a property of what leaves the door rather
         # than of when the record happened to be written.
-        _redact_legacy_data_prose(
-            replay,
-            loaded_lane_contracts(
+        replay_data_lanes = frozenset(
+            lane_id
+            for lane_id, contract in loaded_lane_contracts(
                 record.synthesizer_input.get("lane_answer_contracts"), record.expected_keys
-            ),
+            ).items()
+            if isinstance(contract, Mapping)
+            and str(contract.get("contract_id") or "") == _DATA_EVIDENCE_CONTRACT_ID
         )
+        legacy_data_redacted = _redact_legacy_data_prose(replay, replay_data_lanes)
         # This is where a host lands after being told to resubmit an
         # unconfirmed completion, so it is where the flush is retried
         # (round-66). Retrying the CONTENT would be pointless — it is already
@@ -4975,12 +4992,15 @@ def _submit_fanout_results_locked(
                 "added to durable state; a later replay without a "
                 "resubmission will be unconfirmable again."
             )
-        elif _carries_redacted_data(
+        elif legacy_data_redacted or _carries_redacted_data(
             record.received_results,
             loaded_lane_contracts(
                 record.synthesizer_input.get("lane_answer_contracts"), record.expected_keys
             ),
         ):
+            # A legacy record has no redaction marker in received_results, so
+            # consent is classified from the FACT that this replay carried
+            # data content the server had to redact (round-101).
             replay["consent_status"] = "not_confirmable_prose_not_retained"
             replay["consent_note"] = (
                 "This replay carries the server-owned summary of the data "
