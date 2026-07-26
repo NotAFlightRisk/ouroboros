@@ -1313,11 +1313,16 @@ def _format_extraction_transcript(state: InterviewState) -> str:
     provenance-checked afterwards, so an observation's content must not
     reach it at all.
     """
-    if not state.rounds:
-        return ""
     lines: list[str] = []
     transcript = extraction_safe_transcript(state)
-    if state.initial_context:
+    # No round-count guard: what is extractable is the transcript's decision,
+    # not this surface's. A `no rounds -> nothing to extract` shortcut predates
+    # `initial_context` being part of the transcript, and it dropped the goal
+    # on exactly the path that needs it most — forced generation bypasses the
+    # no-round check, so an interview carrying only its initial context handed
+    # the extractor an empty string and let it invent a Seed. An interview with
+    # nothing in it still renders to nothing, because the transcript is empty.
+    if transcript.initial_context:
         lines.append(f"**Initial Context:** {transcript.initial_context}")
         lines.append("")
     for r in transcript.rounds:

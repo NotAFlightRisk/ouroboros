@@ -9772,3 +9772,98 @@ def test_save_is_a_fixed_point(tmp_path: Any) -> None:
     second = (tmp_path / "fanout_door_fixedpoint.json").read_text(encoding="utf-8")
 
     assert first == second
+
+
+# ---------------------------------------------------------------------------
+# Credential detection sits on the space that can be enumerated
+# ---------------------------------------------------------------------------
+#
+# Secret VALUES are an open space; scanning them alone let `api_key:
+# supersecret` through, because the value carried no digits. The NAMES that
+# carry a secret are closed and published, so a credential-named field yields
+# its value whatever the value looks like.
+
+
+def test_credential_named_key_yields_its_value_whatever_its_shape() -> None:
+    """A name that carries a secret is enough; the value need not look like one."""
+    import json
+
+    from ouroboros.mcp.tools.subagent import _scrub_credentials_for_persistence
+
+    scrubbed = _scrub_credentials_for_persistence(
+        {
+            "api_key": "supersecret",
+            "authorization": "Bearer alphabeticsecret",
+            "password": "hunter2",
+        }
+    )
+    rendered = json.dumps(scrubbed)
+
+    assert "supersecret" not in rendered
+    assert "alphabeticsecret" not in rendered
+    assert "hunter2" not in rendered
+
+
+def test_nesting_past_the_inspection_bound_fails_closed() -> None:
+    """An uninspectable subtree does not survive the write."""
+    import json
+
+    from ouroboros.mcp.tools.subagent import _scrub_credentials_for_persistence
+
+    deep: dict[str, object] = {}
+    cursor = deep
+    for _ in range(12):
+        nested: dict[str, object] = {}
+        cursor["n"] = nested
+        cursor = nested
+    cursor["tok"] = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+
+    assert "ghp_ABCDEFGHIJ" not in json.dumps(_scrub_credentials_for_persistence(deep))
+
+
+def test_the_fanouts_own_bookkeeping_keys_are_not_credentials() -> None:
+    """`missing_keys` holds lane ids; `api_key` holds a credential.
+
+    The identifier classifier was built for tool and metric names, where
+    `access_key` is a credential and nothing is called `missing_keys`. English
+    puts the head last, so a plural qualifiable head names a SET of
+    identifiers — unless an absolute credential word appears too.
+    """
+    from ouroboros.mcp.tools.subagent import _key_names_a_credential
+
+    for bookkeeping in (
+        "missing_keys",
+        "received_keys",
+        "expected_keys",
+        "unexpected_keys",
+        "malformed_keys",
+        "not_retained_keys",
+    ):
+        assert not _key_names_a_credential(bookkeeping), bookkeeping
+
+    for credential in (
+        "api_key",
+        "access_key",
+        "auth_token",
+        "refresh_token",
+        "secret_key",
+        "secret_keys",
+        "password",
+        "authorization",
+        "cookie",
+    ):
+        assert _key_names_a_credential(credential), credential
+
+
+def test_generic_lane_content_survives_the_key_rule() -> None:
+    """Ordinary code_context findings and analytics names are untouched."""
+    from ouroboros.mcp.tools.subagent import _scrub_credentials_for_persistence
+
+    content = {
+        "finding": "auth/session.py:142 reads the cookie value",
+        "files": ["src/auth/session.py"],
+        "access_token_usage": 412,
+        "key_rotation_count": 7,
+    }
+
+    assert _scrub_credentials_for_persistence(content) == content

@@ -2272,6 +2272,17 @@ _ABSOLUTE_CREDENTIAL_WORDS = frozenset(
         "creds",
         "apikey",
         "apikeys",
+        # The transport vocabulary for carrying one. These are standardized
+        # header and cookie names, not a growing catalogue of secret shapes:
+        # the space of secret VALUES is open, which is why scanning them
+        # never converged, while the space of names that carry a secret is
+        # closed and published. `authorization: Bearer alphabeticsecret`
+        # survived because the value carried no digits and nothing looked at
+        # the name.
+        "authorization",
+        "authorisation",
+        "cookie",
+        "cookies",
     }
 )
 

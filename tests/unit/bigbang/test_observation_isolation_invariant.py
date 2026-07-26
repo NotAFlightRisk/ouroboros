@@ -777,3 +777,33 @@ def test_no_transport_stamps_provenance_next_to_a_manual_answer_assignment() -> 
             f"InterviewState.fill_pending_answer so the answer and its "
             f"provenance are decided together."
         )
+
+
+def test_an_interview_with_only_its_goal_still_reaches_the_extractor() -> None:
+    """What is extractable is the transcript's decision, not a surface's.
+
+    A `no rounds -> nothing to extract` shortcut predated `initial_context`
+    being part of the transcript, and forced generation bypasses the no-round
+    check — so an interview carrying only its goal handed the extractor an
+    empty string and let it invent a Seed.
+    """
+    from ouroboros.mcp.tools.authoring_handlers import _format_extraction_transcript
+
+    state = InterviewState(
+        interview_id="goal-only",
+        initial_context="Build an SSO dashboard for enterprise admins.",
+    )
+
+    assert "SSO dashboard" in _format_extraction_transcript(state)
+    assert _format_extraction_transcript(InterviewState(interview_id="empty")) == ""
+
+
+def test_a_goal_only_interview_still_withholds_an_observation() -> None:
+    """Reaching the extractor is not the same as bypassing the isolation."""
+    from ouroboros.mcp.tools.authoring_handlers import _format_extraction_transcript
+
+    state = InterviewState(
+        interview_id="goal-only-observed", initial_context=f"[from-data] {_OBSERVATION}"
+    )
+
+    assert _OBSERVATION not in _format_extraction_transcript(state)

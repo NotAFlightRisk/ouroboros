@@ -55,6 +55,7 @@ from ouroboros.backends.capabilities import (
     resolve_subagent_dispatch,
 )
 from ouroboros.contracts.data_evidence import (
+    _ABSOLUTE_CREDENTIAL_WORDS,
     _DATA_EVIDENCE_CONTRACT_ID,
     DATA_EVIDENCE_SECRET_PATTERN,
     _data_context_answer_contract,
@@ -4759,18 +4760,75 @@ def _durable_results(contracts: Mapping[str, Any], provided: Mapping[str, Any]) 
 
 
 def _scrub_credentials_for_persistence(value: Any, _depth: int = 0) -> Any:
-    """Replace credential-shaped tokens in child content with their digest."""
+    """Replace credential-shaped tokens in child content with their digest.
+
+    Two rules, because the two spaces are not alike. Secret VALUES are an
+    open space — that is why scanning them alone never converged, and why
+    `api_key: supersecret` survived: the value carries no digits, so no shape
+    matched. The NAMES that carry a secret are a closed, published
+    vocabulary, so a credential-named field yields its value whatever the
+    value looks like. Detection stays on the space where enumeration is
+    possible.
+
+    The depth bound fails CLOSED. Returning an uninspected subtree verbatim
+    made nesting an evasion: a token twelve levels down was persisted intact.
+    Past the bound the subtree cannot be vouched for, so it does not survive
+    the write.
+    """
     if _depth > 8:
-        return value
+        return redacted_segment(_stable_repr(value))
     if isinstance(value, str):
         return _redact_credential_tokens(value)
     if isinstance(value, Mapping):
         return {
-            key: _scrub_credentials_for_persistence(item, _depth + 1) for key, item in value.items()
+            key: (
+                redacted_segment(_stable_repr(item))
+                if _key_names_a_credential(str(key))
+                else _scrub_credentials_for_persistence(item, _depth + 1)
+            )
+            for key, item in value.items()
         }
     if isinstance(value, list):
         return [_scrub_credentials_for_persistence(item, _depth + 1) for item in value]
     return value
+
+
+#: Qualifiable credential words whose PLURAL names a set of identifiers
+#: rather than a secret. English puts the head last — the same reading the
+#: metric grammar uses — so `api_key` holds one credential while
+#: `missing_keys` holds lane ids.
+_IDENTIFIER_SET_HEADS = frozenset({"keys", "tokens"})
+
+
+def _key_names_a_credential(key: str) -> bool:
+    """Whether a mapping KEY names a field whose value IS a credential.
+
+    The identifier classifier answers this everywhere else, but it was built
+    for tool and metric names, where `access_key` is a credential and nothing
+    is called `missing_keys`. In a retained mapping the fan-out's own
+    bookkeeping travels under exactly those plural names, so the classifier
+    alone digested `expected_keys` and `received_keys`.
+
+    The exemption is the head, and only for a plural qualifiable word with no
+    absolute credential word anywhere in the compound — `secret_keys` is
+    still a credential name.
+    """
+    tokens = [tok for tok in re.split(r"[-_.]", key.lower()) if tok]
+    if (
+        tokens
+        and tokens[-1] in _IDENTIFIER_SET_HEADS
+        and not any(tok in _ABSOLUTE_CREDENTIAL_WORDS for tok in tokens)
+    ):
+        return False
+    return _identifier_looks_secret(key)
+
+
+def _stable_repr(value: Any) -> str:
+    """A deterministic string for digesting a value of any shape."""
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _redact_credential_tokens(text: str) -> str:
