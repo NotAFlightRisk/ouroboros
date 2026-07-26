@@ -21,6 +21,10 @@ from ouroboros.bigbang.pm_seed import PMSeed
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.owner_only import write_owner_only
+from ouroboros.core.requirement_candidate import (
+    extraction_safe_answer,
+    extraction_safe_question,
+)
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -230,6 +234,25 @@ def save_pm_document(
 # ──────────────────────────────────────────────────────────────────
 
 
+def extraction_safe_qa_pairs(qa_pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Q&A pairs in the form that may enter a durable requirements prompt.
+
+    Answers by marker, questions by taint provenance — the same rules the
+    three transcript formatters apply (rounds 74, 80, 84). Module-level so
+    the observation-isolation invariant table can pin this surface next to
+    the others.
+    """
+    sanitized: list[tuple[str, str]] = []
+    observation_seen = False
+    for question, answer in qa_pairs:
+        safe_question = extraction_safe_question(question, observation_seen=observation_seen)
+        safe_answer = extraction_safe_answer(answer)
+        if safe_answer != answer:
+            observation_seen = True
+        sanitized.append((safe_question, safe_answer))
+    return sanitized
+
+
 @dataclass
 class PMDocumentGenerator:
     """Generates a polished PM document using LLM from Q&A transcript + PMSeed.
@@ -288,6 +311,14 @@ class PMDocumentGenerator:
         # Extract Q&A from interview state if not provided directly
         if qa_pairs is None and interview_state is not None:
             qa_pairs = [(r.question, r.user_response or "") for r in interview_state.rounds]
+        # The PM document is a DURABLE requirements artifact and its prompt
+        # tells the LLM to preserve transcript information, so it is an
+        # extraction surface (round-84) — it reconstructed raw Q&A and
+        # bypassed the withholding entirely. Both sources (interview state
+        # and explicitly supplied pairs) funnel through the same rules:
+        # answers by marker, questions by taint provenance.
+        if qa_pairs is not None:
+            qa_pairs = extraction_safe_qa_pairs(qa_pairs)
 
         user_prompt = self._build_generation_prompt(seed, qa_pairs)
 

@@ -11,6 +11,8 @@ from ouroboros.core.requirement_candidate import (
     CandidateContentSource,
     CandidateResolution,
     ConfirmationAuthority,
+    PromotionDecision,
+    PromotionDisposition,
     PromotionResult,
     RequirementCandidate,
     RequirementDistillation,
@@ -289,6 +291,43 @@ def apply_requirement_distillation(
         if candidate.section
         in {RequirementSection.CONSTRAINT, RequirementSection.EXISTING_CONSTRAINT}
     ]
+    if not promotion.promoted:
+        # Observation-only input (round-84): the provenance gate withheld the
+        # initial goal, references resolved, and nothing user-authored was
+        # promoted — the fallback goal then produced a RUNNABLE Seed with no
+        # constraints and no acceptance criteria. An empty confirmed set is
+        # not a Seed; the result is explicitly non-runnable until the user
+        # states a goal in their own words, surfaced through the same
+        # blocker channel every other reopen condition uses.
+        gate_candidate = RequirementCandidate(
+            candidate_id="promotion-gate:user-authored-goal",
+            section=RequirementSection.GOAL,
+            text=(
+                "No user-authored requirement was promoted: the interview "
+                "carries only withheld observations. State the goal in your "
+                "own words to generate a Seed."
+            ),
+            content_source=CandidateContentSource.USER_STATED,
+            resolution=CandidateResolution.UNKNOWN,
+            confirmation_authority=ConfirmationAuthority.NONE,
+            evidence_ids=(),
+            required=True,
+        )
+        blocked = PromotionResult(
+            decisions=(
+                *promotion.decisions,
+                PromotionDecision(
+                    candidate=gate_candidate,
+                    disposition=PromotionDisposition.BLOCK,
+                    reason="no_user_authored_requirement_promoted",
+                ),
+            )
+        )
+        return AppliedRequirementDistillation(
+            requirements=dict(requirements),
+            distillation=distillation,
+            promotion=blocked,
+        )
     filtered = {
         "goal": promoted_goals[0] if promoted_goals else "Confirmed interview requirements",
         "constraints": tuple(dict.fromkeys(promoted_constraints)),

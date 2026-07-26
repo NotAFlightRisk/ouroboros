@@ -606,6 +606,33 @@ def _data_context_lane_policy() -> dict[str, Any]:
             "wipe",
             "erase",
             "revoke",
+            # State-transition and HTTP-write verbs (round-84 probe:
+            # reset_database / patch_customer / post_webhook admitted as
+            # preferred data tools and as executed evidence sources). Same
+            # whole-token matching, so read vocabulary (dataset, offset,
+            # settings) is unaffected. "load" and "seed" are deliberately
+            # absent: load_metrics and the project's own Seed tooling are
+            # read-side names, and the typed read_request — operation is the
+            # const "read" — remains the contract this list defends in depth.
+            "reset",
+            "patch",
+            "post",
+            "put",
+            "push",
+            "apply",
+            "assign",
+            "rotate",
+            "restore",
+            "rollback",
+            "flush",
+            "clear",
+            "disable",
+            "enable",
+            "send",
+            "submit",
+            "sync",
+            "import",
+            "set",
         ],
         "evidence_policy": {
             "max_evidence_items": 5,
@@ -1520,8 +1547,32 @@ _IDENTITY_KEYS = frozenset(
         "customer",
         "account",
         "member",
+        # Network endpoints identify a device, which identifies a person for
+        # exactly the cohort sizes this policy exists to protect (round-84
+        # probe: ip=192.168.1.1 completed re-entry).
+        "ip",
+        "ips",
+        "ip_address",
+        "ipv4",
+        "ipv6",
+        "mac",
+        "mac_address",
+        "device_id",
     }
 )
+
+
+#: Heads that PRESERVE per-entity cardinality (round-84): email_hash groups
+#: one row per person exactly as email does — a hash is a pseudonym, not a
+#: category. Contrast customer_segment, whose head REDUCES cardinality, which
+#: is why the round-54 head-last rule admits it.
+_IDENTITY_PRESERVING_HEADS = frozenset(
+    {"hash", "hashes", "digest", "digests", "checksum", "fingerprint", "uuid", "guid"}
+)
+
+
+#: A dotted-quad value is a device address whatever the key is called.
+_IPV4_VALUE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
 # A category VALUE is a label ("growth", "kr", "2026-01"); an opaque entity
@@ -1580,7 +1631,16 @@ def _entity_key(key: str) -> bool:
     # address (round-54: the per-token rule refused legitimate scopes). The
     # head is what the key names; a modifier only says which kind.
     tokens = [token for token in re.split(r"[-_.]", lowered) if token]
-    return bool(tokens) and tokens[-1] in _IDENTITY_KEYS
+    if not tokens:
+        return False
+    if tokens[-1] in _IDENTITY_KEYS:
+        return True
+    # A DERIVED identifier is still an identifier (round-84): email_hash has
+    # head "hash", but a hash of an identity value is a pseudonym with the
+    # same per-person cardinality — the head reduces nothing.
+    return tokens[-1] in _IDENTITY_PRESERVING_HEADS and any(
+        token in _IDENTITY_KEYS for token in tokens[:-1]
+    )
 
 
 # The public filter grammar accepts <, >, ! and = in one- or two-character
@@ -1624,6 +1684,10 @@ def _identity_scope_problem(text: str, label: str) -> str | None:
     # the same credential classification every other identifier field has.
     if _identifier_looks_secret(key) or (value and _identifier_looks_secret(value)):
         return f"{label} names or compares a credential; it may not ride a data request"
+    if value and _IPV4_VALUE.match(value):
+        # A device address identifies its holder whatever the key is called
+        # (round-84): the dotted quad is the identifier shape itself.
+        return f"{label} scopes to a network address; aggregate by category instead"
     if value and _OPAQUE_ENTITY_VALUE.match(value) and not _compact_date_partition(value):
         return f"{label} scopes to an opaque entity identifier; aggregate by category instead"
     return None

@@ -46,11 +46,29 @@ def _pm_context(state: InterviewState) -> str:
     return PMInterviewEngine.__new__(PMInterviewEngine)._build_interview_context(state)
 
 
-#: The extraction surfaces. THE enumeration — a fourth extractor belongs here.
+def _pm_document_context(state: InterviewState) -> str:
+    """The PM document prompt surface (round-84: found OUTSIDE this table).
+
+    PMDocumentGenerator reconstructs raw Q&A for a prompt that instructs the
+    LLM to preserve transcript information in a durable requirements
+    document — an extraction surface by this file's own criterion, missed in
+    the first enumeration. Its sanitizer is pinned here so the miss cannot
+    recur silently.
+    """
+    from ouroboros.bigbang.pm_document import extraction_safe_qa_pairs
+
+    pairs = [(r.question, r.user_response or "") for r in state.rounds]
+    if state.initial_context:
+        pairs = [("What is the initial context?", state.initial_context), *pairs]
+    return "\n".join(f"Q: {q}\nA: {a}" for q, a in extraction_safe_qa_pairs(pairs))
+
+
+#: The extraction surfaces. THE enumeration — a new extractor belongs here.
 _EXTRACTORS: list[tuple[str, Callable[[InterviewState], str]]] = [
     ("dev", _dev_context),
     ("pm", _pm_context),
     ("plugin", _format_extraction_transcript),
+    ("pm-document", _pm_document_context),
 ]
 
 

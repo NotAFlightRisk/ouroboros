@@ -711,3 +711,34 @@ def test_round82_observation_context_is_not_promoted_as_the_goal() -> None:
     assert any(
         c.candidate_id == "initial-goal" for c in build_requirement_distillation(plain).candidates
     )
+
+
+def test_round84_observation_only_input_is_not_runnable() -> None:
+    """Nothing user-authored promoted → explicitly non-runnable, not empty.
+
+    After the provenance gate withholds the initial goal, a resolved
+    reference with an ordinary (non-promoting) follow-up used to fall back
+    to the generic goal and produce a runnable Seed with no constraints and
+    no acceptance criteria.
+    """
+    state = _reference_state(confirmation="Thanks, that makes sense to me.")
+    state.initial_context = "[from-data] 42 enterprise accounts require SSO."
+
+    applied = apply_requirement_distillation(
+        {"goal": "llm-extracted"}, build_requirement_distillation(state)
+    )
+
+    reasons = [b.reason for b in applied.promotion.blockers]
+    assert "no_user_authored_requirement_promoted" in reasons
+    # And nothing pretended to be a runnable confirmed contract.
+    assert applied.requirements.get("goal") != "Confirmed interview requirements"
+
+    # The gate is about EMPTINESS, not observations: a promoting user answer
+    # keeps the reference path runnable exactly as before.
+    promoted_state = _reference_state(
+        confirmation="Confirmed requirement: keyboard-first triage must ship."
+    )
+    promoted = apply_requirement_distillation(
+        {"goal": "llm-extracted"}, build_requirement_distillation(promoted_state)
+    )
+    assert not promoted.promotion.blockers

@@ -8661,3 +8661,78 @@ def test_round83_retention_applies_without_fcntl(tmp_path: Any) -> None:
         )
 
     assert not stale_path.exists(), "stale record survived the fcntl-less sweep"
+
+
+# --------------------------------------------------------------------------- #
+# round-84 — network and derived identifiers; state-transition verbs
+# --------------------------------------------------------------------------- #
+
+
+def test_round84_network_and_derived_identifiers_are_entities(tmp_path: Any) -> None:
+    """ip=192.168.1.1 and grouping by email_hash are per-person scopes.
+
+    A dotted quad identifies a device whatever the key is called, and a hash
+    of an identity value is a pseudonym with the same cardinality — the head
+    reduces nothing.
+    """
+    from ouroboros.contracts.data_evidence import _entity_key, _identity_scope_problem
+
+    assert _identity_scope_problem("ip=192.168.1.1", "filters[0]") is not None
+    assert _identity_scope_problem("client=10.0.0.7", "filters[0]") is not None
+    assert _entity_key("email_hash")
+    assert _entity_key("user_digest")
+    # The narrowing that matters: non-identity modifiers keep their heads.
+    assert not _entity_key("content_hash")
+    assert not _entity_key("build_checksum")
+    assert not _entity_key("customer_segment")
+
+
+def test_round84_state_transition_verbs_are_mutators(
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    """reset_database / patch_customer / post_webhook, at both layers.
+
+    The config filter and re-entry share the classifier, so one vocabulary
+    fixes admission and evidence together (the round-79 shape).
+    """
+    from ouroboros.contracts.data_evidence import _mutating_tool_verb
+    from ouroboros.mcp.tools.authoring_handlers import (
+        _advisory_lanes_with_known_data_tools,
+    )
+
+    for name in ("reset_database", "patch_customer", "post_webhook"):
+        assert _mutating_tool_verb(name) is not None, name
+    for name in ("dataset_query", "offset_reader", "settings_lookup", "clickhouse_query"):
+        assert _mutating_tool_verb(name) is None, name
+
+    monkeypatch.setenv(
+        "OUROBOROS_KNOWN_DATA_TOOLS", "reset_database,patch_customer,clickhouse_query"
+    )
+    lanes = _advisory_lanes_with_known_data_tools(
+        {"lanes": [{"lane_id": "data_context", "capability": "data_context"}]}
+    )
+    tools = next(
+        (lane.get("known_data_tools") for lane in lanes if lane.get("lane_id") == "data_context"),
+        None,
+    )
+    assert tools == ["clickhouse_query"]
+
+    # Re-entry: the same name as an executed evidence source is rejected.
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-84",
+        lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+    )
+    answer = _round77_answer("logins", [])
+    answer["evidence"][0]["source"] = "reset_database"
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-84",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": answer}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert out.get("contract_violations")

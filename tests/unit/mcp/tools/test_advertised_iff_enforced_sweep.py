@@ -158,6 +158,10 @@ _DECLARED_REJECTIONS: list[tuple[str, dict[str, Any], str]] = [
         _answer(metric="user_id", aggregation="max"),
         "identity metric may only be counted",
     ),
+    # Round-84 additions to the declared classes.
+    ("network-address-value", _answer(filters=["client=10.0.0.7"]), "network address"),
+    ("network-key", _answer(filters=["ip=192.168.1.1"]), "keys an entity"),
+    ("derived-identifier-grouping", _proposal_answer(grouping=["email_hash"]), "keys an entity"),
 ]
 
 
