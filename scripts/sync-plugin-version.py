@@ -288,8 +288,10 @@ def _atomic_write_bytes(
                         f"write conflict for {path}: could not restore exchanged target; "
                         f"preserved displaced content at {temp_path}"
                     )
-                preserve_temp = False
-                raise RuntimeError(f"write conflict for {path}: file changed since preflight")
+                raise RuntimeError(
+                    f"write conflict for {path}: file changed since preflight; "
+                    f"preserved exchanged content at {temp_path}"
+                )
         else:
             os.replace(temp_path, path)
         directory_fd = os.open(path.parent, os.O_RDONLY)
@@ -489,12 +491,13 @@ def _run() -> None:
                 print(f"  DRIFT {path.relative_to(ROOT)} ({old_marker} != {version})")
                 changed = True
 
-        if write:
-            for path, expected in expected_writes.items():
-                if path.read_bytes() != expected:
-                    raise RuntimeError(
-                        f"post-write conflict for {path}: final content differs from preflight plan"
-                    )
+        final_expectations = expected_writes if write else originals
+        for path, expected in final_expectations.items():
+            if path.read_bytes() != expected:
+                phase = "post-write" if write else "validation"
+                raise RuntimeError(
+                    f"{phase} conflict for {path}: final content differs from preflight plan"
+                )
     except BaseException as primary_error:
         if not write:
             raise

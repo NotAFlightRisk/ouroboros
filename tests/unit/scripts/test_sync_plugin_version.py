@@ -644,14 +644,16 @@ def test_atomic_exchange_preserves_newer_edit_arriving_during_restore(
         )
 
     assert target.read_bytes() == newer_external
-    assert list(tmp_path.iterdir()) == [target]
+    preserved = [path.read_bytes() for path in tmp_path.iterdir()]
+    assert first_external in preserved
+    assert newer_external in preserved
 
 
 @pytest.mark.skipif(
     not (sys.platform.startswith("linux") or sys.platform == "darwin"),
     reason="atomic pathname exchange is unavailable on this platform",
 )
-def test_atomic_exchange_preserves_timestamp_restored_same_size_edit_during_restore(
+def test_atomic_exchange_preserves_timestamp_restored_same_bytes_edit_during_restore(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -659,8 +661,7 @@ def test_atomic_exchange_preserves_timestamp_restored_same_size_edit_during_rest
     original = b'{"version":"1.2.3"}\n'
     content = b'{"version":"1.2.4"}\n'
     first_external = b'{"version":"1.2.5"}\n'
-    newer_external = b'{"version":"9.9.9"}\n'
-    assert len(content) == len(newer_external)
+    newer_external = content
     target.write_bytes(original)
     real_exchange = sync_plugin_version._exchange_paths
     exchange_count = 0
@@ -682,15 +683,17 @@ def test_atomic_exchange_preserves_timestamp_restored_same_size_edit_during_rest
 
     monkeypatch.setattr(sync_plugin_version, "_exchange_paths", inject_edits)
 
-    with pytest.raises(RuntimeError, match="write conflict"):
+    with pytest.raises(RuntimeError, match="write conflict") as raised:
         sync_plugin_version._atomic_write_bytes(
             target,
             content,
             expected_current=original,
         )
 
-    assert target.read_bytes() == newer_external
-    assert list(tmp_path.iterdir()) == [target]
+    assert "preserved exchanged content at" in str(raised.value)
+    preserved = [path.read_bytes() for path in tmp_path.iterdir()]
+    assert first_external in preserved
+    assert newer_external in preserved
 
 
 @pytest.mark.skipif(
@@ -728,7 +731,9 @@ def test_atomic_exchange_preserves_same_bytes_edit_arriving_during_restore(
         )
 
     assert target.read_bytes() == content
-    assert list(tmp_path.iterdir()) == [target]
+    preserved = [path.read_bytes() for path in tmp_path.iterdir()]
+    assert first_external in preserved
+    assert content in preserved
 
 
 def test_atomic_write_fails_closed_when_exchange_is_unavailable(
@@ -982,6 +987,47 @@ def test_main_write_revalidates_targets_that_were_already_current(
     assert marketplace_json.read_bytes() == original_marketplace
 
 
+def test_main_read_only_revalidates_targets_after_preflight(tmp_path: Path, monkeypatch) -> None:
+    source_skill = tmp_path / "skills/setup/SKILL.md"
+    bundled_skill = tmp_path / ".claude-plugin/skills/setup/SKILL.md"
+    plugin_json = tmp_path / ".claude-plugin/plugin.json"
+    marketplace_json = tmp_path / ".claude-plugin/marketplace.json"
+    source_skill.parent.mkdir(parents=True)
+    bundled_skill.parent.mkdir(parents=True)
+    plugin_json.parent.mkdir(parents=True, exist_ok=True)
+    source_skill.write_text("<!-- ooo:VERSION:1.2.4 -->\nsource\n")
+    bundled_skill.write_text("<!-- ooo:VERSION:1.2.4 -->\nbundled\n")
+    plugin_json.write_text('{"version":"1.2.4"}\n')
+    marketplace_json.write_text('{"plugins":[{"version":"1.2.4"}]}\n')
+    external_plugin = b'{"version":"external"}\n'
+    monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
+    monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
+    monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
+    monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
+    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
+    monkeypatch.setattr(
+        sync_plugin_version.sys,
+        "argv",
+        ["sync-plugin-version.py", "--require-canonical", "--version", "1.2.4"],
+    )
+    original_print = print
+    mutated = False
+
+    def mutate_after_preflight(*args, **kwargs) -> None:
+        nonlocal mutated
+        original_print(*args, **kwargs)
+        if not mutated and args and str(args[0]).startswith("  OK"):
+            mutated = True
+            plugin_json.write_bytes(external_plugin)
+
+    monkeypatch.setattr(sync_plugin_version, "print", mutate_after_preflight, raising=False)
+
+    with pytest.raises(RuntimeError, match="validation conflict"):
+        sync_plugin_version.main()
+
+    assert plugin_json.read_bytes() == external_plugin
+
+
 def test_main_write_rolls_back_only_successfully_replaced_targets(
     tmp_path: Path,
     monkeypatch,
@@ -1172,6 +1218,8 @@ def test_release_workflow_checks_tag_metadata_before_build() -> None:
     assert "${REF_NAME#v}" in workflow
     assert '[[ "$VERSION" == *.dev* ]]' in workflow
     assert "--require-canonical" in workflow
+    assert 'PACKAGE_VERSION="$(uv run hatch version)"' in workflow
+    assert '[[ "$PACKAGE_VERSION" != "$VERSION" ]]' in workflow
     assert validation < build
     assert "needs: release" in tui_job
 
