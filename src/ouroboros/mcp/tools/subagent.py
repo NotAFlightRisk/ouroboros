@@ -96,7 +96,16 @@ _INTERVIEW_ADVISORY_MAX_JSON_CHARS = 2_400
 # structure that replaced them is larger and buys the guarantees those
 # patterns only approximated, so the budget follows the contract rather than
 # the contract being trimmed to fit the budget.
-_INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS = 12_000
+_INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS = 14_000
+# Round-100 raised this from 12,000 for the same reason round-96 raised the
+# policy budget: the figure is a DELIVERY budget and the budget follows the
+# contract. The value-returning metric rule moved INTO the published schema
+# (max(credit_card_number) was schema-valid), and a grammar that carries the
+# rule is larger than a comment that describes it. Silently crossing the
+# budget is the failure mode this constant must never cause: the canonical
+# contract would fall back to the structural schema and the lane would lose
+# the very rules just added — which is exactly what the metadata-parity test
+# caught before this change.
 # The data policy is the machine-readable ENFORCEMENT block ("enforce, do
 # not just read") — a torn render advertises fewer forbidden operations and
 # category heads than re-entry enforces, which is the same informed-consent
@@ -4560,6 +4569,40 @@ def _is_transportable(content: Any) -> bool:
     return True
 
 
+def _redact_legacy_data_prose(
+    payload: Any, contracts: Mapping[str, Any] | None = None, _depth: int = 0
+) -> None:
+    """Replace any data-lane content found in a persisted payload in place.
+
+    Round-100: terminal responses written before ``redact_prose_for_persistence``
+    existed still hold the child's full narrative and measured values, and
+    replay copied them out verbatim. The walk is bounded and keyed on the
+    lane id so it cannot touch anything else.
+    """
+    if _depth > 6:
+        return
+    if isinstance(payload, dict):
+        for key, value in list(payload.items()):
+            if (
+                isinstance(value, Mapping)
+                and value.get("lane_id") == "data_context"
+                and value.get("content_retained") is not False
+            ):
+                payload[key] = redact_prose_for_persistence(value)
+                continue
+            _redact_legacy_data_prose(value, contracts, _depth + 1)
+    elif isinstance(payload, list):
+        for index, value in enumerate(payload):
+            if (
+                isinstance(value, Mapping)
+                and value.get("lane_id") == "data_context"
+                and value.get("content_retained") is not False
+            ):
+                payload[index] = redact_prose_for_persistence(value)
+                continue
+            _redact_legacy_data_prose(value, contracts, _depth + 1)
+
+
 def _carries_redacted_data(
     results: Mapping[str, Any] | None, contracts: Mapping[str, Any] | None = None
 ) -> bool:
@@ -4774,6 +4817,18 @@ def _submit_fanout_results_locked(
     if record.completed:
         replay: dict[str, Any] = (
             dict(record.terminal_response) if record.terminal_response is not None else {}
+        )
+        # A terminal response persisted BEFORE redaction existed can still
+        # hold full data-lane prose, and copying it replayed that content
+        # verbatim (round-99/100). Legacy state is sanitized on the way out
+        # with the same server-owned summary every fresh record gets, so the
+        # retention guarantee is a property of what leaves the door rather
+        # than of when the record happened to be written.
+        _redact_legacy_data_prose(
+            replay,
+            loaded_lane_contracts(
+                record.synthesizer_input.get("lane_answer_contracts"), record.expected_keys
+            ),
         )
         # This is where a host lands after being told to resubmit an
         # unconfirmed completion, so it is where the flush is retried

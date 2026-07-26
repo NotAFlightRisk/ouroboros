@@ -22,13 +22,17 @@ This module pins the population. Three properties:
    * credential-name — a source/tool name shaped like a credential
                        (rounds 29-40; metric absorbed its rules in round 79,
                        so the metric field must never appear here)
-   * identity-metric — a value-returning aggregation over an identity metric
-                       (round 48)
 
    * entity-key      — an identity-MODIFIED preserving head the grammar
                        cannot see (round-88: customer_code — the pattern
                        admits the head, the modifier semantics are
                        cross-token English)
+
+   The round-48 identity-metric class was ABSORBED in round 100: a
+   value-returning aggregation now requires a metric that positively names a
+   measurement (VALUE_METRIC_PATTERN in the published schema), so
+   max(user_id) — and max(credit_card_number), which no identity vocabulary
+   recognized — are schema-invalid rather than schema-valid-but-rejected.
 
    The round-85 unverified-grouping class and the entity-NAMED keys
    (user_id, ip, passport_number as scope keys) were ABSORBED into the
@@ -213,16 +217,6 @@ _DECLARED_REJECTIONS: list[tuple[str, dict[str, Any], str]] = [
     ),
     ("opaque-7-digits", _answer(filters=["cohort=9999999"]), "opaque entity identifier"),
     ("opaque-bad-date", _answer(filters=["day=20260231"]), "opaque entity identifier"),
-    # Executed evidence absorbed this rule into the schema long ago
-    # (round-46: aggregation is enum count/distinct_count) — the declared
-    # residue survives only on PROPOSALS, whose requests may aggregate
-    # freely (round-90 made the sweep schema-validate its own corpus and
-    # caught the executed form asserting an unreachable path).
-    (
-        "identity-metric-max",
-        _proposal_answer(metric="user_id", aggregation="max"),
-        "identity metric may only be counted",
-    ),
     # Round-84 addition to the declared classes. (The key is category-headed
     # so the VALUE rule is what rejects it; entity-named keys like `ip` or
     # `client` are grammar-invalid since round 86.)
@@ -356,3 +350,32 @@ def test_round98_version_quads_and_analytics_heads_are_attainable() -> None:
     assert _identifier_looks_secret("refresh_token_alphabetic")
     assert _identifier_looks_secret("access_token")
     assert _identifier_looks_secret("access_key_abcd1234")
+
+
+def test_round100_value_returning_requires_a_measurement_metric() -> None:
+    """Positive classification on the value-returning surface.
+
+    max(credit_card_number), max(passport_number) and max(token) were
+    schema-valid proposals directing the parent to fetch PII or a
+    credential — the identity vocabulary recognized none of them. A
+    value-returning aggregation now requires a metric that NAMES a
+    measurement; counting any metric stays available.
+    """
+    from ouroboros.contracts.data_evidence import _read_request_shape_problems
+
+    for metric in ("credit_card_number", "passport_number", "token", "user_id", "ssn"):
+        request = {"operation": "read", "metric": metric, "aggregation": "max"}
+        assert _read_request_shape_problems(request), metric
+        assert (
+            _read_request_shape_problems(
+                {"operation": "read", "metric": metric, "aggregation": "count"}
+            )
+            == []
+        ), f"counting {metric} must stay available"
+    for metric in ("latency_ms", "checkout_duration", "revenue_total", "error_rate"):
+        assert (
+            _read_request_shape_problems(
+                {"operation": "read", "metric": metric, "aggregation": "max"}
+            )
+            == []
+        ), metric

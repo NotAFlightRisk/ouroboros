@@ -1034,3 +1034,25 @@ def test_round94_pm_decoration_does_not_launder_provenance(tmp_path) -> None:
     distillation = build_requirement_distillation(state)
     assert not [c for c in distillation.candidates if "42 enterprise accounts" in c.text]
     assert interview_has_no_promotable_requirement(state)
+
+
+def test_round100_generated_only_interviews_are_not_generatable() -> None:
+    """Human authority must exist somewhere — auto is unaffected.
+
+    A probe whose every contentful input was [from-auto]/[from-safe-default]
+    passed the gate and produced a runnable Seed. `ooo auto` still works:
+    it always carries the user's own goal as initial_context, and safe
+    defaults fill in what the user left unspecified.
+    """
+    from ouroboros.bigbang.requirement_distillation import (
+        interview_has_no_promotable_requirement,
+    )
+
+    generated_only = _state_with_answer("[from-auto] Use a conservative retry policy.")
+    generated_only.initial_context = "[from-safe-default] Assume a single-tenant deployment."
+    assert interview_has_no_promotable_requirement(generated_only)
+
+    # Auto's real shape: a human goal plus generated detail answers.
+    auto_like = _state_with_answer("[from-auto] Use a conservative retry policy.")
+    auto_like.initial_context = "Build a rate-limited ingestion API."
+    assert not interview_has_no_promotable_requirement(auto_like)

@@ -5866,11 +5866,16 @@ def test_round50_lifecycle_is_provenance_and_scopes_are_keys(tmp_path: Any) -> N
 
     # Warning — the percentile discriminator is two-way.
     assert _read_request_shape_problems(
-        {"operation": "read", "metric": "m", "aggregation": "count", "percentile": 95}
+        {"operation": "read", "metric": "latency_ms", "aggregation": "count", "percentile": 95}
     )
     assert (
         _read_request_shape_problems(
-            {"operation": "read", "metric": "m", "aggregation": "percentile", "percentile": 95}
+            {
+                "operation": "read",
+                "metric": "latency_ms",
+                "aggregation": "percentile",
+                "percentile": 95,
+            }
         )
         == []
     )
@@ -9146,3 +9151,79 @@ def test_round99_plugin_prompt_carries_the_no_forward_role() -> None:
     assert "material_for_user_answer_never_the_answer" in section
     assert "USER'S OWN WORDS" in section
     assert "NEVER the interview answer" in section
+
+
+def test_round100_canonical_contract_stays_within_its_delivery_budget() -> None:
+    """The canonical data contract must be enforceable, with headroom.
+
+    Round-100: added published rules pushed the contract past the delivery
+    budget, so canonical_data_lane_contract() silently fell back to the
+    structural schema — the lane would have lost the rules just added. This
+    pins the property (enforceable, i.e. deliverable whole) rather than the
+    number, and keeps a visible margin so the next addition fails here
+    instead of degrading the contract.
+    """
+    from ouroboros.contracts.data_evidence import _data_context_answer_contract
+    from ouroboros.mcp.tools.subagent import (
+        _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
+        _canonical_contract_json,
+        _enforceable_lane_contract,
+        canonical_data_lane_contract,
+    )
+
+    canonical = _data_context_answer_contract()
+    assert _enforceable_lane_contract(canonical), "canonical contract is not deliverable whole"
+    assert canonical_data_lane_contract() == canonical
+    rendered = _canonical_contract_json(canonical)
+    assert rendered is not None
+    assert len(rendered) <= _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS
+
+
+def test_round100_legacy_completed_record_is_redacted_on_replay(tmp_path: Any) -> None:
+    """Terminal responses written before redaction are sanitized on the way out."""
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-100",
+        lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+    )
+    assert fanout_id is not None
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-100",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": _round77_answer("logins", ["cohort=enterprise"])}
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+
+    # Simulate a record persisted before redaction existed: full prose in the
+    # terminal response.
+    import dataclasses
+
+    record = registry.load(fanout_id)
+    assert record is not None
+    legacy = _round77_answer("logins", ["cohort=enterprise"])
+    legacy["finding"] = "Contact ada@example.com about the 42 enterprise accounts."
+    registry.save(
+        dataclasses.replace(
+            record,
+            terminal_response={"outputs": [{"key": "data_context", "content": legacy}]},
+        )
+    )
+
+    replay = submit_fanout_results(
+        registry,
+        session_id="sess-100",
+        correlation_key="context.lane_id",
+        results=[],
+        fanout_id=fanout_id,
+    )
+    import json as json_module
+
+    serialized = json_module.dumps(replay)
+    assert replay["status"] == "already_complete"
+    assert "ada@example.com" not in serialized
+    assert "42" not in serialized or "enterprise accounts" not in serialized

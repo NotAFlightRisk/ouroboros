@@ -182,6 +182,10 @@ def _data_context_answer_contract() -> dict[str, Any]:
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 600,
+                # At least one non-whitespace character (round-100): a blank
+                # narrative satisfied minLength while leaving the informed-
+                # consent field empty in practice.
+                "pattern": r"\S",
                 # Published so the enforced prose bound is representable in
                 # the contract (round-96): sentence counting is not
                 # regex-expressible, so the constraint is stated here and
@@ -288,7 +292,12 @@ def _data_context_answer_contract() -> dict[str, Any]:
                             "pattern": "^(?!.*[0-9]{12})[A-Za-z][A-Za-z0-9_.-]{0,63}$",
                         },
                         "request": {"$ref": "#/$defs/read_request"},
-                        "expected_decision": {"type": "string", "minLength": 1, "maxLength": 300},
+                        "expected_decision": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 300,
+                            "pattern": r"\S",
+                        },
                         "source_class": {
                             "enum": [
                                 "metered",
@@ -304,7 +313,12 @@ def _data_context_answer_contract() -> dict[str, Any]:
             "caveats": {
                 "type": "array",
                 "maxItems": 5,
-                "items": {"type": "string", "minLength": 1, "maxLength": 200},
+                "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "pattern": r"\S",
+                },
             },
         },
         "$defs": {
@@ -364,6 +378,21 @@ def _data_context_answer_contract() -> dict[str, Any]:
             },
             "read_request": {
                 "allOf": [
+                    {
+                        # A VALUE-returning aggregation reports one of the
+                        # input values, so the metric must positively name a
+                        # measurement (round-100): max(credit_card_number)
+                        # and max(token) were schema-valid proposals telling
+                        # the parent to fetch PII or a credential. Counting
+                        # any metric stays available.
+                        "if": {
+                            "properties": {
+                                "aggregation": {"not": {"$ref": "#/$defs/cardinality_aggregation"}}
+                            },
+                            "required": ["aggregation"],
+                        },
+                        "then": {"properties": {"metric": {"pattern": VALUE_METRIC_PATTERN}}},
+                    },
                     {
                         "if": {"properties": {"aggregation": {"const": "percentile"}}},
                         "then": {"required": ["percentile"]},
@@ -1337,83 +1366,73 @@ def _data_evidence_boundary_violations(
                 f"proposed_queries[{index}].tool_name: carries an "
                 "identifier-length digit run; name the read-only data tool instead"
             )
-        # ``expected_decision`` is advisory prose for the human.
-        decision = item.get("expected_decision")
-        if isinstance(decision, str) and _prose_contains_rows(decision):
-            errors.append(
-                f"proposed_queries[{index}].expected_decision: row-shaped "
-                "content is raw evidence and may not ride any persisted field"
-            )
-        if isinstance(decision, str) and (problem := _prose_layout_problem(decision)):
-            errors.append(f"proposed_queries[{index}].expected_decision: {problem}")
+        # expected_decision is consent prose — checked with finding and
+        # caveats in the single population pass below (round-100).
 
     # Advisory prose for the human. It carries no data — the aggregates do —
     # so these checks are defense-in-depth, not the boundary.
+    # ONE rule set for EVERY consent prose field (round-100). Rounds 97 and
+    # 98 added the execution-consistency mirror to finding, then to caveats,
+    # and expected_decision was the third field waiting to be found. The
+    # population is enumerated here instead: any prose the user reads when
+    # consenting gets the same checks, so a new prose field cannot silently
+    # get fewer.
+    for label, text in _consent_prose_fields(output):
+        errors.extend(
+            f"{label}: {problem}"
+            for problem in _consent_prose_problems(
+                text, carries_executed_evidence=bool(evidence_items)
+            )
+        )
+    return errors
+
+
+def _consent_prose_fields(output: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """THE enumeration of prose the confirming user reads."""
+    fields: list[tuple[str, str]] = []
     finding = output.get("finding")
-    if isinstance(finding, str) and _prose_contains_rows(finding):
-        errors.append(
-            "finding: row-shaped (serialized-record) content is raw evidence "
-            "and may not ride any persisted field; state aggregates only"
-        )
-    if isinstance(finding, str) and (problem := _prose_layout_problem(finding)):
-        errors.append(f"finding: {problem}")
-    if (
-        isinstance(finding, str)
-        and isinstance(evidence_items, list)
-        and evidence_items
-        and _DATA_EVIDENCE_ERROR_SHAPE.search(finding)
-    ):
-        errors.append(
-            "finding: describes a failed lookup; a failed call is a "
-            "no-evidence finding, not evidence with a narrative"
-        )
-    if (
-        isinstance(finding, str)
-        and isinstance(evidence_items, list)
-        and evidence_items
-        and _DATA_EVIDENCE_NO_LOOKUP_SHAPE.search(finding)
-    ):
-        errors.append(
-            "finding: claims no lookup ran while carrying executed "
-            "evidence; the consent narrative must match the typed record"
-        )
+    if isinstance(finding, str):
+        fields.append(("finding", finding))
     caveats = output.get("caveats")
     for index, caveat in enumerate(caveats if isinstance(caveats, list) else ()):
-        if not isinstance(caveat, str):
+        if isinstance(caveat, str):
+            fields.append((f"caveats[{index}]", caveat))
+    proposals = output.get("proposed_queries")
+    for index, item in enumerate(proposals if isinstance(proposals, list) else ()):
+        if not isinstance(item, Mapping):
             continue
-        if _prose_contains_rows(caveat):
-            errors.append(
-                f"caveats[{index}]: row-shaped (serialized-record) content is "
-                "raw evidence and may not ride any persisted field"
-            )
-        if problem := _prose_layout_problem(caveat):
-            errors.append(f"caveats[{index}]: {problem}")
-        # A caveat admitting the call produced nothing contradicts EXECUTED
-        # evidence it accompanies (rounds 31-32); a no-op legitimately
-        # narrates that no lookup was needed.
-        if (
-            isinstance(evidence_items, list)
-            and evidence_items
-            and _DATA_EVIDENCE_ERROR_SHAPE.search(caveat)
-        ):
-            errors.append(
-                f"caveats[{index}]: describes a failed lookup; a failed call "
-                "is a no-evidence finding, not evidence with a caveat"
-            )
-        # The no-lookup mirror applies to EVERY consent prose field
-        # (round-98: round-97 added it to finding only, and the same
-        # contradiction completed when it rode a caveat instead).
-        if (
-            isinstance(evidence_items, list)
-            and evidence_items
-            and _DATA_EVIDENCE_NO_LOOKUP_SHAPE.search(caveat)
-        ):
-            errors.append(
-                f"caveats[{index}]: claims no lookup ran while carrying "
-                "executed evidence; the consent narrative must match the "
-                "typed record"
-            )
-    return errors
+        decision = item.get("expected_decision")
+        if isinstance(decision, str):
+            fields.append((f"proposed_queries[{index}].expected_decision", decision))
+    return fields
+
+
+def _consent_prose_problems(text: str, *, carries_executed_evidence: bool) -> list[str]:
+    """The checks every consent prose field gets."""
+    problems: list[str] = []
+    if not text.strip():
+        # A blank narrative satisfies minLength while leaving the informed-
+        # consent field empty in practice (round-100). The published grammar
+        # requires a non-whitespace character, and this is its compile.
+        problems.append("must carry a non-whitespace narrative")
+    if _prose_contains_rows(text):
+        problems.append(
+            "row-shaped (serialized-record) content is raw evidence and may "
+            "not ride any persisted field; state aggregates only"
+        )
+    if problem := _prose_layout_problem(text):
+        problems.append(problem)
+    if carries_executed_evidence and _DATA_EVIDENCE_ERROR_SHAPE.search(text):
+        problems.append(
+            "describes a failed lookup; a failed call is a no-evidence "
+            "finding, not evidence with a narrative"
+        )
+    if carries_executed_evidence and _DATA_EVIDENCE_NO_LOOKUP_SHAPE.search(text):
+        problems.append(
+            "claims no lookup ran while carrying executed evidence; the "
+            "consent narrative must match the typed record"
+        )
+    return problems
 
 
 def _retained_summary_problems(output: Mapping[str, Any]) -> list[str]:
@@ -1518,13 +1537,19 @@ def _read_request_shape_problems(
     # metric the schema admits is one enforcement accepts, by construction.
     # Rounds 77-79 were each one rule the two surfaces disagreed on; trusting
     # one definition removes the disagreement CLASS for this field.
-    elif _entity_key(metric) and request.get("aggregation") not in _cardinality_aggregations():
+    elif request.get("aggregation") not in _cardinality_aggregations() and not _VALUE_METRIC.match(
+        metric
+    ):
         # Counting identities yields a cardinality; taking their min/max/median
-        # yields an identity (round-48 probe: max(ssn)). The typed form makes
-        # that decidable per field instead of per SQL projection.
+        # yields an identity (round-48 probe: max(ssn)). Round-100 turned the
+        # rule around: instead of refusing metrics recognized as identities
+        # (credit_card_number and token were not), a value-returning
+        # aggregation requires a metric that positively names a measurement.
+        # The pattern is the published one, so the surfaces agree by
+        # construction and this branch is unreachable for schema-valid input.
         problems.append(
-            "an identity metric may only be counted; a value-returning "
-            "aggregation over it reports the identity itself"
+            "a value-returning aggregation requires a metric naming a "
+            "measurement; count or distinct_count any other metric"
         )
     if request.get("aggregation") not in _aggregation_kinds():
         problems.append("aggregation is not one of the declared kinds")
@@ -1768,6 +1793,69 @@ _WINDOW_TOKEN = r"[0-9]{1,4}[dhwmy]"
 #: sets above, so the published schema and the enforcement cannot disagree;
 #: the semantic ``_category_dimension_key`` checks below remain for the
 #: retained path, whose relaxed bare-key grammar cannot carry the rule.
+#: Heads that positively name a NUMERIC MEASUREMENT (round-100). A
+#: value-returning aggregation (max/avg/median/percentile/sum) reports one of
+#: the input values, so it may only be requested over a metric that names a
+#: measurement — max(credit_card_number), max(passport_number) and max(token)
+#: were schema-valid proposals directing the parent to retrieve PII or a
+#: credential. The rule is positive and fail-closed, like the category heads:
+#: an unrecognized head is not refused for being known-bad, it simply never
+#: earns a value-returning request — counting it stays available.
+_VALUE_METRIC_HEADS = frozenset(
+    {
+        "latency",
+        "duration",
+        "ms",
+        "seconds",
+        "minutes",
+        "hours",
+        "days",
+        "bytes",
+        "size",
+        "length",
+        "depth",
+        "age",
+        "count",
+        "counts",
+        "total",
+        "totals",
+        "sum",
+        "amount",
+        "revenue",
+        "spend",
+        "cost",
+        "price",
+        "rate",
+        "rates",
+        "ratio",
+        "percent",
+        "pct",
+        "score",
+        "scores",
+        "usage",
+        "usages",
+        "volume",
+        "quantity",
+        "qty",
+        "errors",
+        "events",
+        "requests",
+        "sessions",
+        "logins",
+        "views",
+        "clicks",
+        "failures",
+        "retries",
+        "attempts",
+    }
+)
+_VALUE_METRIC_HEAD_ALTERNATION = "|".join(sorted(_VALUE_METRIC_HEADS))
+#: A metric usable with a value-returning aggregation: the published form of
+#: the rule above, so the schema and the validator cannot disagree.
+VALUE_METRIC_PATTERN = (
+    r"^(?:[a-z0-9]+[._-])*(?:" + _VALUE_METRIC_HEAD_ALTERNATION + r")(?:[._-][a-z0-9]+)?$"
+)
+
 _CATEGORY_HEAD_ALTERNATION = "|".join(sorted(_CATEGORY_HEADS))
 _FILTER_KEY_HEAD_ALTERNATION = "|".join(sorted(_FILTER_KEY_HEADS))
 #: POSITIVE value-token forms (round-91). A category label is a WORD, a
@@ -1834,6 +1922,7 @@ DIMENSION_TOKEN_PATTERN = (
 )
 
 _AGGREGATE_DIMENSION = re.compile(DIMENSION_TOKEN_PATTERN)
+_VALUE_METRIC = re.compile(VALUE_METRIC_PATTERN)
 
 
 # _READ_REQUEST_METRIC is compiled below, after METRIC_TOKEN_PATTERN.

@@ -119,12 +119,29 @@ def interview_is_observation_only(state: InterviewState) -> bool:
 
 
 OBSERVATION_ONLY_INTERVIEW_MESSAGE = (
-    "Interview carries only withheld data/research observations; no "
-    "user-authored requirement was promoted to generate from. Ask the user "
+    "Interview carries no user-authored requirement to generate from — "
+    "every contentful input was an adopted observation or a generated "
+    "default, and no user decision was promoted. Ask the user "
     "the goal-restatement question VERBATIM and record their answer as a "
     "round (pass it as last_question), then generate again: "
     f'"{GOAL_RESTATEMENT_QUESTION}"'
 )
+
+
+def _has_human_authored_content(state: InterviewState) -> bool:
+    """Whether any contentful input carries HUMAN provenance."""
+    goal_text, goal_provenance = prompt_safe_initial_context_with_provenance(state)
+    if (
+        goal_text.strip()
+        and goal_text != INITIAL_CONTEXT_SUMMARY_REQUIRED
+        and effective_answer_provenance(goal_text, goal_provenance) == "human"
+    ):
+        return True
+    return any(
+        effective_answer_provenance(answer, round_data.answer_provenance) == "human"
+        for round_data in state.rounds
+        if (answer := (round_data.user_response or "").strip())
+    )
 
 
 def interview_has_no_promotable_requirement(state: InterviewState) -> bool:
@@ -144,6 +161,15 @@ def interview_has_no_promotable_requirement(state: InterviewState) -> bool:
     substantive authority was never withheld.
     """
     if interview_is_observation_only(state):
+        return True
+    # NO human-authoritative content anywhere is the same failure with a
+    # different provenance (round-100): an interview whose every contentful
+    # input was `[from-auto]` / `[from-safe-default]` passed this gate and
+    # produced a runnable Seed from generated defaults alone. Auto is
+    # unaffected — it always carries the user's own goal as initial_context,
+    # and safe defaults FILL IN what the user left unspecified rather than
+    # standing in for the user's decision to build anything.
+    if not _has_human_authored_content(state):
         return True
     has_observation = classify_answer_provenance(state.initial_context) in {
         "data_fact",
