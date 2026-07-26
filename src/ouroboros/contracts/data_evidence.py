@@ -28,6 +28,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 from functools import lru_cache
+import hashlib
 import json
 import math
 import re
@@ -553,6 +554,11 @@ def data_evidence_retained_schema() -> dict[str, Any]:
             "requires_user_confirmation": {"const": True},
             "prose_retained": {"const": False},
             "content_retained": {"const": False},
+            # Fixed-length server-derived commitment (round-99): binds
+            # terminal resubmission to what the fan-out completed with. It
+            # cannot hold a child payload, so the shape-property guarantee
+            # above is unchanged.
+            "content_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         },
     }
 
@@ -1010,7 +1016,22 @@ def redact_prose_for_persistence(output: Any) -> Any:
         "requires_user_confirmation": output.get("requires_user_confirmation"),
         "prose_retained": False,
         "content_retained": False,
+        # The AUDIT COMMITMENT (round-99): a fixed-length server-derived
+        # digest of the accepted content. It cannot hold a payload, so the
+        # rounds-46..55 line is unbroken — and it binds terminal
+        # resubmission: a completed fan-out returned accounts=42 once, and a
+        # later resubmission of payments=999 was labeled confirmable with
+        # nothing tying it to what the fan-out actually completed with.
+        "content_digest": data_evidence_content_digest(output),
     }
+
+
+def data_evidence_content_digest(output: Any) -> str:
+    """SHA-256 over the canonical JSON form of a data-lane output."""
+    encoded = json.dumps(
+        output, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _data_evidence_boundary_violations(

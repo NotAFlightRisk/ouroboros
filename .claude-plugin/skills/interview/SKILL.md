@@ -196,8 +196,14 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      The payload carries the full rules (`data_policy`, `answer_contract`).
      Proposals come back as structured read requests, not query strings —
      build and run the query yourself, and only after the user confirms.
-     Forward user-confirmed data-derived answers prefixed `[from-data]` with
-     their point-in-time caveat.
+     **Data evidence is material for the user's judgment, never the answer**
+     (`synthesis_contract.lane_output_role`): show it beside the question
+     with its point-in-time caveat, and when the user decides, forward the
+     user's OWN words. Never forward lane output, quoted evidence, or
+     `[from-data]`-prefixed text as an interview answer. The fan-out record
+     durably notes THAT a consultation occurred (lanes, counts, and a
+     content digest); the evidence itself is shown in the moment and not
+     retained — the transcript carries only the user's decision.
    - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
      decisions, and risky defaults.
    - `answer_simplifier` — turn the question into 2-3 easy choices or one
@@ -295,11 +301,13 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      `missing_optional_keys` until you resend it. Submitting every lane in one
      call is the normal path and never hits this.
    - **A replayed `already_complete` does not return the data content.** It
-     carries `consent_status: "not_confirmable_prose_not_retained"`, so do NOT
-     forward a `[from-data]` answer from it. If you still hold the child's
-     output, resubmit that lane against the completed fan-out: it is returned
-     to you unchanged under `resubmitted_results` and nothing is added to
-     durable state. If you do not, re-run the advisory fan-out.
+     carries `consent_status: "not_confirmable_prose_not_retained"` — there
+     is nothing in it to show the user as evidence. If you still hold the
+     child's output, resubmit that lane against the completed fan-out: it is
+     returned to you unchanged under `resubmitted_results` and nothing is
+     added to durable state. If you do not, re-run the advisory fan-out.
+     (Lane output is display material either way — it is never forwarded as
+     an answer.)
 
    **Milestone lateral-review dispatch**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it
@@ -534,11 +542,12 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
    Append `[refined]` to an existing valid prefix (`[from-code]`,
    `[from-user]`, or `[from-research]`) only when the answer has been through
-   the Refine gate (see Step 4). `[from-data]` answers bypass the Refine
-   gate entirely: they are user-confirmed verbatim evidence, and rewriting
-   them would break the point-in-time provenance — never append `[refined]`
-   to `[from-data]`. MCP records the answer, generates the next question,
-   and returns it.
+   the Refine gate (see Step 4). There is no `[from-data]` answer to refine:
+   data evidence is never forwarded as an answer — the user reads it and
+   answers in their own words, which take the normal `[from-user]` path.
+   (If a `[from-data]`-prefixed answer arrives anyway, the server classifies
+   and withholds it downstream; do not produce one.) MCP records the answer,
+   generates the next question, and returns it.
 
 4. **Refine before forwarding** (free-text answers only):
 
@@ -620,19 +629,34 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
 7. **Repeat steps 2-6** until the user says "done" or MCP signals seed-ready.
 
-8. **Seed-ready Acceptance Guard**:
+8. **Seed-ready Acceptance Guard (tri-panel fan-out)**:
    When MCP signals seed-ready, do NOT relay completion blindly. Before
-   announcing completion or suggesting `ooo seed`, apply the canonical Seed
-   Closer criteria from `src/ouroboros/agents/seed-closer.md` as the single
-   source of truth for closure readiness. Run the check from the main session's
-   perspective, including any code, research, or brownfield context MCP did not
-   see.
+   announcing completion or suggesting `ooo seed`, run the acceptance guard as a
+   **3-lane fan-out** instead of a single local check, so closure is pressure
+   -tested from three independent perspectives:
+   - `closer` — apply the canonical Seed Closer criteria from
+     `src/ouroboros/agents/seed-closer.md`. This lane's verdict **gates**.
+   - `contrarian` — challenge the interview's conclusions: hidden assumptions,
+     overloaded terms, decisions the interview skipped.
+   - `gap_hunter` — hunt for missing requirements, unlisted constraints,
+     unhandled edge cases, and unverifiable acceptance criteria.
 
-   If any material decision remains unresolved, do not announce seed-ready.
-   If the local challenge finds a material gap, explicitly override the MCP
-   signal: `"MCP says seed-ready, but I am not accepting it yet because <gap>."`
-   Explain the gap briefly and ask the single highest-impact follow-up question,
-   routed through PATH 2 or PATH 3 as appropriate.
+   Spawn one subagent per lane through your runtime's native subagent mechanism
+   (Claude Code → one Task/Agent call per lane in one parallel batch; Codex →
+   one native Codex subagent per lane; runtimes with no parallel primitive →
+   process the lane payloads sequentially). Correlate results by
+   `context.lane_id`. Run the check from the main session's perspective,
+   including any code, research, or brownfield context MCP did not see.
+
+   **Synthesis (deterministic)**: the `closer` verdict gates — if it is not
+   `seed_ready`, do not announce seed-ready. Additionally, any HIGH-severity
+   `contrarian` or `gap_hunter` finding blocks closure and its question is
+   appended to the blocking follow-ups. If closure is blocked, explicitly
+   override the MCP signal: `"MCP says seed-ready, but I am not accepting it yet
+   because <gap>."` Explain the gap briefly and ask the single highest-impact
+   blocking follow-up question, routed through PATH 2 or PATH 3 as appropriate.
+   When no parallel primitive exists, running only the `closer` lane is the
+   backward-compatible single-pass fallback.
 
 9. **Restate gate** (only after Seed-ready Acceptance Guard passes):
 
@@ -723,7 +747,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    When the Restate gate passes, suggest `ooo seed`.
 
 11. After completion, suggest the next step:
-   `📍 Next: ooo seed to crystallize these requirements into a specification`
+   `◆ Current state → next: ooo seed to crystallize these requirements into a specification`
 
 #### Dialectic Rhythm Guard
 
@@ -794,8 +818,8 @@ If the MCP tool is NOT available, fall back to agent-based interview:
    to MCP" in Path B; the conversation context is the source of truth.
 9. Continue until the user says "done"
 10. Interview results live in conversation context (not persisted)
-11. After completion, suggest the next step in `📍 Next:` format:
-   `📍 Next: ooo seed to crystallize these requirements into a specification`
+11. After completion, suggest the next step in `◆ Current state → next:` format:
+   `◆ Current state → next: ooo seed to crystallize these requirements into a specification`
 
 ## Interviewer Behavior
 
@@ -861,9 +885,19 @@ MCP signals seed-ready; Acceptance Guard passes
 → Restate again: "Add Stripe payments with charges, webhooks, refunds, failed-payment rollback, and no retry scheduling."
 → User: "Yes, generate seed"
 
-📍 Next: `ooo seed` to crystallize these requirements into a specification
+◆ Current state → next: `ooo seed` to crystallize these requirements into a specification
 ```
 
 ## Next Steps
 
 After interview completion, use `ooo seed` to generate the Seed specification.
+
+## RFC #1392 State Breadcrumb Footer
+
+Your final response MUST end with exactly one breadcrumb footer line:
+
+```
+◆ <current state> → next: <recommended action>
+```
+
+Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.

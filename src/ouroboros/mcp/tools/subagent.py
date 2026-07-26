@@ -60,6 +60,7 @@ from ouroboros.contracts.data_evidence import (
     _data_evidence_fallback_schema,
     _identifier_carries_payload,
     _identifier_looks_secret,
+    data_evidence_content_digest,
     data_evidence_retained_schema,
     redact_prose_for_persistence,
 )
@@ -1282,6 +1283,13 @@ lanes:
 
 data_context data_policy (enforce, do not just read):
 {policy_json}
+
+data_context output role (synthesis_contract.lane_output_role =
+material_for_user_answer_never_the_answer): data evidence is material for
+the user's judgment, NEVER the interview answer. Show it beside the
+question with its point-in-time caveat; when the user decides, forward the
+USER'S OWN WORDS as the answer. Never forward lane output, quoted
+evidence, or [from-data]-prefixed text as an interview answer.
 
 {contracts_section}
 
@@ -4843,9 +4851,40 @@ def _submit_fanout_results_locked(
             violations = _lane_answer_contract_violations(replay_contracts, resent, replay_policies)
             for violation in violations:
                 resent.pop(violation["lane_id"], None)
-            if resent or rejected or violations:
+            # Terminal resubmission is BOUND to what the fan-out completed
+            # with (round-99): a completed record returned accounts=42 once,
+            # and a later schema-valid resubmission of payments=999 was
+            # labeled confirmable with nothing tying it to the original.
+            # The retained summary carries a server-derived content digest;
+            # a resubmission is confirmable only when it hashes to that
+            # commitment. Records persisted before the digest existed cannot
+            # verify anything and fail closed — re-run the fan-out.
+            mismatched: list[str] = []
+            for key in list(resent):
+                contract = replay_contracts.get(key)
+                contract_id = (
+                    str(contract.get("contract_id") or "") if isinstance(contract, Mapping) else ""
+                )
+                if contract_id != _DATA_EVIDENCE_CONTRACT_ID:
+                    continue
+                retained_summary = record.received_results.get(key)
+                stored_digest = (
+                    retained_summary.get("content_digest")
+                    if isinstance(retained_summary, Mapping)
+                    else None
+                )
+                if (
+                    not isinstance(stored_digest, str)
+                    or not stored_digest
+                    or data_evidence_content_digest(resent[key]) != stored_digest
+                ):
+                    resent.pop(key)
+                    mismatched.append(key)
+            if resent or rejected or violations or mismatched:
                 replay["resubmitted_keys"] = sorted(resent)
                 replay["resubmitted_results"] = resent
+                if mismatched:
+                    replay["resubmission_mismatch_keys"] = sorted(mismatched)
                 if rejected:
                     replay["resubmission_malformed_keys"] = sorted(rejected)
                 if violations:
@@ -4871,11 +4910,15 @@ def _submit_fanout_results_locked(
         if restored:
             replay["consent_status"] = "confirmable_resubmitted"
             replay["consent_note"] = (
-                "The lanes listed under resubmitted_keys were validated exactly "
-                "as a first submission and are returned complete, so a "
-                "data-derived answer may be forwarded from them. Nothing was "
-                "added to durable state; a later replay without a resubmission "
-                "will be unconfirmable again."
+                "The lanes listed under resubmitted_keys were validated "
+                "exactly as a first submission AND digest-verified against "
+                "the completed record's retained commitment, so this content "
+                "is what the fan-out completed with — show it to the user as "
+                "display material. Lane output is never forwarded as an "
+                "interview answer (synthesis_contract.lane_output_role): when "
+                "the user decides, forward the user's own words. Nothing was "
+                "added to durable state; a later replay without a "
+                "resubmission will be unconfirmable again."
             )
         elif _carries_redacted_data(
             record.received_results,
@@ -4886,11 +4929,13 @@ def _submit_fanout_results_locked(
             replay["consent_status"] = "not_confirmable_prose_not_retained"
             replay["consent_note"] = (
                 "This replay carries the server-owned summary of the data "
-                "lane — its lifecycle flags and item counts, not the measured "
-                "numbers, which are not retained either (round-65). The "
-                "advisory narrative a user confirms is not in durable state, "
-                "so a data-derived answer may not be forwarded from a replay — "
-                "re-run the advisory fan-out to obtain it."
+                "lane — its lifecycle flags, item counts, and content digest, "
+                "not the measured numbers, which are not retained (round-65). "
+                "There is nothing here to show the user as evidence: re-run "
+                "the advisory fan-out to obtain display material, or resubmit "
+                "the original content to have it digest-verified. Lane output "
+                "is never forwarded as an interview answer either way "
+                "(synthesis_contract.lane_output_role)."
             )
         replay.update(
             {

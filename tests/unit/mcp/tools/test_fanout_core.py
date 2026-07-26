@@ -9071,3 +9071,78 @@ def test_round98_no_lookup_mirror_covers_caveats(tmp_path: Any) -> None:
         for item in out.get("contract_violations", [])
         for error in item.get("errors", [])
     )
+
+
+def test_round99_terminal_resubmission_is_digest_bound(tmp_path: Any) -> None:
+    """A resubmission is confirmable only for the content the fan-out
+    completed with — the retained digest is the commitment.
+
+    The probe: complete with accounts=42, then resubmit payments=999; the
+    substitute came back labeled confirmable with nothing binding it.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-99",
+        lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+    )
+    assert fanout_id is not None
+
+    original = _round77_answer("accounts", ["cohort=enterprise"])
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-99",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": original}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+
+    # A DIFFERENT schema-valid payload is refused the confirmable label.
+    substitute = _round77_answer("payments", ["cohort=enterprise"])
+    replay = submit_fanout_results(
+        registry,
+        session_id="sess-99",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": substitute}],
+        fanout_id=fanout_id,
+    )
+    assert replay["status"] == "already_complete"
+    assert replay.get("resubmission_mismatch_keys") == ["data_context"]
+    assert replay.get("consent_status") == "not_confirmable_prose_not_retained"
+
+    # The ORIGINAL content digest-verifies and is returned as display
+    # material; the note carries the no-forward rule, not a forwarding grant.
+    replay = submit_fanout_results(
+        registry,
+        session_id="sess-99",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": original}],
+        fanout_id=fanout_id,
+    )
+    assert replay.get("consent_status") == "confirmable_resubmitted"
+    assert replay.get("resubmitted_results", {}).get("data_context") == original
+    assert "never forwarded as an interview answer" in replay.get("consent_note", "")
+    assert "may be forwarded" not in replay.get("consent_note", "")
+
+
+def test_round99_plugin_prompt_carries_the_no_forward_role() -> None:
+    """The OpenCode transport receives the isolation contract in its prompt."""
+    from ouroboros.mcp.tools.subagent import _plugin_advisory_contract_section
+
+    section = _plugin_advisory_contract_section(
+        "fanout_role",
+        {
+            "lanes": [
+                {
+                    "lane_id": "data_context",
+                    "capability": "data_context",
+                    "required": False,
+                }
+            ],
+        },
+        "sess-role",
+    )
+    assert "material_for_user_answer_never_the_answer" in section
+    assert "USER'S OWN WORDS" in section
+    assert "NEVER the interview answer" in section

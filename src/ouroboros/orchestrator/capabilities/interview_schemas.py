@@ -924,8 +924,11 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
             "lane's proposed_queries only after the user confirms; and when the "
             "user decides, forward the USER'S OWN WORDS as the answer. Do not "
             "forward lane output, quoted evidence, or [from-data]-prefixed text "
-            "as an interview answer — the durable record of what was consulted "
-            "lives in the fan-out record, not in the transcript."
+            "as an interview answer. The fan-out record durably notes THAT a "
+            "consultation occurred — lanes, counts, and a content digest that "
+            "binds any terminal resubmission — while the evidence itself is "
+            "shown to the user in the moment and is not retained; the "
+            "transcript carries only the user's decision."
         ),
     }
 

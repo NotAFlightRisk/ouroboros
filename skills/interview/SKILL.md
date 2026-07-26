@@ -200,8 +200,10 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      (`synthesis_contract.lane_output_role`): show it beside the question
      with its point-in-time caveat, and when the user decides, forward the
      user's OWN words. Never forward lane output, quoted evidence, or
-     `[from-data]`-prefixed text as an interview answer — what was consulted
-     is durably recorded in the fan-out record, not the transcript.
+     `[from-data]`-prefixed text as an interview answer. The fan-out record
+     durably notes THAT a consultation occurred (lanes, counts, and a
+     content digest); the evidence itself is shown in the moment and not
+     retained — the transcript carries only the user's decision.
    - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
      decisions, and risky defaults.
    - `answer_simplifier` — turn the question into 2-3 easy choices or one
