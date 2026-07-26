@@ -9499,3 +9499,61 @@ def test_round105_reentry_tool_is_a_reciprocal_companion() -> None:
     reentry = ouroboros_tool_capability_metadata("ouroboros_submit_fanout_results")["companions"]
     assert "ouroboros_interview" in reentry
     assert "ouroboros_lateral_think" in reentry
+
+
+# ---------------------------------------------------------------------------
+# Credential redaction is a fixed point
+# ---------------------------------------------------------------------------
+
+
+def test_redacted_segment_shape_is_matched() -> None:
+    """``_REDACTED_SEGMENT_RE`` must match what ``redacted_segment`` emits.
+
+    The pass-through guard is only as good as this agreement; if the marker
+    format changes and the pattern does not, redaction silently starts
+    nesting again.
+    """
+    from ouroboros.core.requirement_candidate import redacted_segment
+    from ouroboros.mcp.tools.subagent import _REDACTED_SEGMENT_RE
+
+    marker = redacted_segment("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345")
+
+    assert _REDACTED_SEGMENT_RE.fullmatch(marker)
+
+
+def test_credential_redaction_is_idempotent() -> None:
+    """Re-redacting already-redacted text changes nothing."""
+    from ouroboros.mcp.tools.subagent import _redact_credential_tokens
+
+    once = _redact_credential_tokens("config has token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345")
+    twice = _redact_credential_tokens(once)
+
+    assert once == twice
+    assert "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345" not in once
+    assert _redact_credential_tokens("def calculate_total(items, tax_rate):") == (
+        "def calculate_total(items, tax_rate):"
+    )
+
+
+def test_carried_generic_lane_is_not_re_redacted_across_saves() -> None:
+    """A generic lane carried across saves keeps ONE marker, not a nest.
+
+    ``carried`` drops a data lane whose content was not retained, but keeps
+    every generic lane, so each save re-ran the scrub over text it had
+    already scrubbed. The digest inside a marker is itself secret-shaped, so
+    every pass wrapped the previous marker and grew the stored value.
+    """
+    from ouroboros.mcp.tools.subagent import _durable_results
+
+    contracts: dict[str, object] = {}
+    first = _durable_results(
+        contracts,
+        {"code_context": {"finding": "config has token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"}},
+    )
+    second = _durable_results(contracts, {**first, "web_context": {"finding": "ok"}})
+    third = _durable_results(contracts, {**second, "answer_simplifier": {"finding": "ok"}})
+
+    findings = [call["code_context"]["finding"] for call in (first, second, third)]
+
+    assert findings[0] == findings[1] == findings[2]
+    assert findings[0].count("redacted-key") == 1

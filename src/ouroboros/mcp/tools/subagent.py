@@ -4728,6 +4728,14 @@ def _redact_credential_tokens(text: str) -> str:
     Token-level rather than whole-value rejection: a code_context finding
     legitimately quotes configuration and code, so the finding survives with
     only the secret replaced.
+
+    IDEMPOTENT: an already-redacted marker is passed through untouched. A
+    generic lane submitted under ``finalize: false`` is carried forward on
+    every subsequent save, so this ran once per call over the same text; the
+    digest inside the marker is itself secret-shaped, so each pass wrapped
+    the previous marker (``<<redacted-key ...> sha256:...>``), corrupting the
+    stored value and growing it by 22 bytes a call. Redaction has to be a
+    fixed point before it can be enforced at the persistence door.
     """
     if not text:
         return text
@@ -4736,13 +4744,28 @@ def _redact_credential_tokens(text: str) -> str:
         token = match.group(0)
         return redacted_segment(token) if _identifier_looks_secret(token) else token
 
-    scrubbed = _CREDENTIAL_TOKEN_CANDIDATE.sub(_replace, text)
-    return _DATA_EVIDENCE_SECRET_RE.sub(lambda m: redacted_segment(m.group(0)), scrubbed)
+    def _scrub_outside_markers(source: str, pattern: re.Pattern[str], repl: Any) -> str:
+        parts: list[str] = []
+        cursor = 0
+        for marker in _REDACTED_SEGMENT_RE.finditer(source):
+            parts.append(pattern.sub(repl, source[cursor : marker.start()]))
+            parts.append(marker.group(0))
+            cursor = marker.end()
+        parts.append(pattern.sub(repl, source[cursor:]))
+        return "".join(parts)
+
+    scrubbed = _scrub_outside_markers(text, _CREDENTIAL_TOKEN_CANDIDATE, _replace)
+    return _scrub_outside_markers(
+        scrubbed, _DATA_EVIDENCE_SECRET_RE, lambda m: redacted_segment(m.group(0))
+    )
 
 
 #: Token shapes worth asking the credential classifier about: assignment
 #: right-hand sides and standalone identifier-like runs.
 _CREDENTIAL_TOKEN_CANDIDATE = re.compile(r"[A-Za-z0-9_.\-]{8,}")
+#: The output shape of :func:`redacted_segment`, matched so a second pass
+#: leaves it alone. Kept in sync by ``test_redacted_segment_shape_is_matched``.
+_REDACTED_SEGMENT_RE = re.compile(r"<redacted-key sha256:[0-9a-f]{12}>")
 #: The published vendor-token vocabulary, compiled once here.
 _DATA_EVIDENCE_SECRET_RE = re.compile(DATA_EVIDENCE_SECRET_PATTERN, re.IGNORECASE)
 
