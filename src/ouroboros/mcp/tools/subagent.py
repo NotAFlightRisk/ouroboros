@@ -55,6 +55,7 @@ from ouroboros.backends.capabilities import (
 )
 from ouroboros.contracts.data_evidence import (
     _DATA_EVIDENCE_CONTRACT_ID,
+    DATA_EVIDENCE_SECRET_PATTERN,
     _data_context_answer_contract,
     _data_evidence_boundary_violations,
     _data_evidence_fallback_schema,
@@ -1352,7 +1353,9 @@ def build_interview_subagent(
    lane leaves re-entry permanently partial. Optional lanes may be omitted
    and are reported as missing_optional_keys.
 5. An unknown lane_id or an unsupported capability is dispatched with the
-   generic prompt and answered with the no-op finding — never skipped.
+   generic prompt and answered with the no-op finding. A REQUIRED unknown
+   lane is never skipped — it gates completion; an optional unknown lane may
+   be omitted, exactly as the versioned lane_compatibility_rules say.
 6. Follow each lane's contract below — `data_context` is a read-only
    proposer whose answers always require user confirmation — and submit
    lane outputs back via `ouroboros_submit_fanout_results`.""" + _plugin_advisory_contract_section(
@@ -4662,7 +4665,23 @@ def _unretained_keys(contracts: Mapping[str, Any], provided: Mapping[str, Any]) 
     return frozenset(
         key
         for key, value in stored.items()
-        if isinstance(value, Mapping) and value.get("content_retained") is False
+        # The marker is the DATA lane's lifecycle flag, so it only means
+        # "not retained" for a lane registered with that contract
+        # (round-104): a generic lane whose own output happens to carry
+        # content_retained: false was reported unretained, discarded, and
+        # its required slot could never be filled again.
+        if _is_data_contract_lane(contracts, key)
+        and isinstance(value, Mapping)
+        and value.get("content_retained") is False
+    )
+
+
+def _is_data_contract_lane(contracts: Mapping[str, Any], lane_id: str) -> bool:
+    """Whether ``lane_id`` is registered with the data-evidence contract."""
+    contract = contracts.get(lane_id)
+    return (
+        isinstance(contract, Mapping)
+        and str(contract.get("contract_id") or "") == _DATA_EVIDENCE_CONTRACT_ID
     )
 
 
@@ -4674,16 +4693,58 @@ def _durable_results(contracts: Mapping[str, Any], provided: Mapping[str, Any]) 
     """
     stored: dict[str, Any] = {}
     for lane_id, output in provided.items():
-        contract = contracts.get(lane_id)
-        contract_id = (
-            str(contract.get("contract_id") or "") if isinstance(contract, Mapping) else ""
-        )
-        stored[lane_id] = (
-            redact_prose_for_persistence(output)
-            if contract_id == _DATA_EVIDENCE_CONTRACT_ID
-            else output
-        )
+        if _is_data_contract_lane(contracts, lane_id):
+            stored[lane_id] = redact_prose_for_persistence(output)
+            continue
+        # Generic lanes DO retain their content — that is how synthesis
+        # works for code_context and its peers — but retention is not a
+        # licence to store a secret (round-104: credential-shaped text
+        # submitted through code_context survived verbatim in
+        # received_results and on disk). Credential-shaped tokens are
+        # replaced by their digest on the way to durable state; everything
+        # else, including code quotations, is untouched.
+        stored[lane_id] = _scrub_credentials_for_persistence(output)
     return stored
+
+
+def _scrub_credentials_for_persistence(value: Any, _depth: int = 0) -> Any:
+    """Replace credential-shaped tokens in child content with their digest."""
+    if _depth > 8:
+        return value
+    if isinstance(value, str):
+        return _redact_credential_tokens(value)
+    if isinstance(value, Mapping):
+        return {
+            key: _scrub_credentials_for_persistence(item, _depth + 1) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_scrub_credentials_for_persistence(item, _depth + 1) for item in value]
+    return value
+
+
+def _redact_credential_tokens(text: str) -> str:
+    """Digest every credential-shaped token in ``text``.
+
+    Token-level rather than whole-value rejection: a code_context finding
+    legitimately quotes configuration and code, so the finding survives with
+    only the secret replaced.
+    """
+    if not text:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        return redacted_segment(token) if _identifier_looks_secret(token) else token
+
+    scrubbed = _CREDENTIAL_TOKEN_CANDIDATE.sub(_replace, text)
+    return _DATA_EVIDENCE_SECRET_RE.sub(lambda m: redacted_segment(m.group(0)), scrubbed)
+
+
+#: Token shapes worth asking the credential classifier about: assignment
+#: right-hand sides and standalone identifier-like runs.
+_CREDENTIAL_TOKEN_CANDIDATE = re.compile(r"[A-Za-z0-9_.\-]{8,}")
+#: The published vendor-token vocabulary, compiled once here.
+_DATA_EVIDENCE_SECRET_RE = re.compile(DATA_EVIDENCE_SECRET_PATTERN, re.IGNORECASE)
 
 
 def submit_fanout_results(
@@ -5114,7 +5175,14 @@ def _submit_fanout_results_locked(
     carried = {
         key: value
         for key, value in record.received_results.items()
-        if not (isinstance(value, Mapping) and value.get("content_retained") is False)
+        # Same scoping as _unretained_keys (round-104): the lifecycle marker
+        # belongs to the data contract, so a generic lane is never dropped
+        # for carrying the field in its own output.
+        if not (
+            _is_data_contract_lane(contracts, key)
+            and isinstance(value, Mapping)
+            and value.get("content_retained") is False
+        )
     }
     provided: dict[str, Any] = {**carried, **accepted}
 

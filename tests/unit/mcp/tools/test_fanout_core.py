@@ -9353,3 +9353,90 @@ def test_round102_legacy_redaction_uses_the_real_synthesis_envelope(tmp_path: An
     assert "churn spike" not in serialized
     assert replay["consent_status"] == "not_confirmable_prose_not_retained"
     assert '"content_retained": false' in json_module.dumps(replay).replace(", ", ", ")
+
+
+def test_round104_generic_lane_content_is_credential_scrubbed_before_persistence(
+    tmp_path: Any,
+) -> None:
+    """Retention is not a licence to store a secret.
+
+    code_context legitimately retains its content — that is how synthesis
+    works — but a credential-shaped token submitted through it survived
+    verbatim in received_results and on disk.
+    """
+    import json as json_module
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-104",
+        lanes=[{"lane_id": "code_context", "capability": "inspect_code", "required": True}],
+    )
+    assert fanout_id is not None
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-104",
+        correlation_key="context.lane_id",
+        results=[
+            {
+                "key": "code_context",
+                "content": {
+                    "lane_id": "code_context",
+                    "finding": "config.py sets token = ghp_abcdefghijklmnop1234 for the client",
+                },
+            }
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+
+    record = registry.load(fanout_id)
+    assert record is not None
+    on_disk = json_module.dumps(
+        {"received": record.received_results, "terminal": record.terminal_response}
+    )
+    assert "ghp_abcdefghijklmnop1234" not in on_disk
+    assert "redacted-key" in on_disk
+    # The surrounding finding survives — only the secret is replaced.
+    assert "config.py sets token" in on_disk
+
+
+def test_round104_retention_marker_is_scoped_to_the_data_contract(tmp_path: Any) -> None:
+    """A generic lane carrying content_retained: false is not discarded.
+
+    Two required generic lanes: the first result was reported under
+    not_retained_keys and dropped, so the fan-out could never complete.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-104b",
+        lanes=[
+            {"lane_id": "code_context", "capability": "inspect_code", "required": True},
+            {"lane_id": "web_context", "capability": "web_research", "required": True},
+        ],
+    )
+    assert fanout_id is not None
+    first = submit_fanout_results(
+        registry,
+        session_id="sess-104b",
+        correlation_key="context.lane_id",
+        results=[
+            {
+                "key": "code_context",
+                "content": {"lane_id": "code_context", "finding": "ok", "content_retained": False},
+            }
+        ],
+        fanout_id=fanout_id,
+        finalize=False,
+    )
+    assert "code_context" not in (first.get("not_retained_keys") or [])
+
+    second = submit_fanout_results(
+        registry,
+        session_id="sess-104b",
+        correlation_key="context.lane_id",
+        results=[{"key": "web_context", "content": {"lane_id": "web_context", "finding": "ok"}}],
+        fanout_id=fanout_id,
+    )
+    assert second["status"] == "complete", second
