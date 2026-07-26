@@ -324,7 +324,20 @@ def _atomic_write_bytes(
         raise
     finally:
         if not preserve_temp:
-            temp_path.unlink(missing_ok=True)
+            active_error = sys.exception()
+            try:
+                temp_path.unlink(missing_ok=True)
+            except BaseException as cleanup_error:
+                if active_error is not None:
+                    active_error.add_note(
+                        f"also failed to remove temporary file {temp_path}: {cleanup_error}"
+                    )
+                elif replaced_target:
+                    raise _OwnedWriteError(
+                        path, staged_generation, cleanup_error
+                    ) from cleanup_error
+                else:
+                    raise
 
 
 def update_version_marker(

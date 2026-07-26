@@ -805,6 +805,48 @@ def test_atomic_write_fails_closed_when_exchange_is_unavailable(
     assert list(tmp_path.iterdir()) == [target]
 
 
+@pytest.mark.skipif(
+    not (sys.platform.startswith("linux") or sys.platform == "darwin"),
+    reason="atomic pathname exchange is unavailable on this platform",
+)
+def test_atomic_write_cleanup_failure_does_not_mask_active_owned_write_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "target.json"
+    original = b'{"version":"1.2.3"}\n'
+    content = b'{"version":"1.2.4"}\n'
+    target.write_bytes(original)
+    real_open = sync_plugin_version.os.open
+    real_unlink = Path.unlink
+
+    def fail_directory_open(path, flags, *args, **kwargs):
+        if Path(path) == tmp_path:
+            raise OSError("injected directory open failure")
+        return real_open(path, flags, *args, **kwargs)
+
+    def fail_displaced_temp_unlink(path: Path, *, missing_ok: bool = False) -> None:
+        if path != target and path.parent == tmp_path and path.read_bytes() == original:
+            raise OSError("injected displaced temp unlink failure")
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(sync_plugin_version.os, "open", fail_directory_open)
+    monkeypatch.setattr(Path, "unlink", fail_displaced_temp_unlink)
+
+    with pytest.raises(sync_plugin_version._OwnedWriteError) as raised:
+        sync_plugin_version._atomic_write_bytes(
+            target,
+            content,
+            expected_current=original,
+        )
+
+    assert "directory open failure" in str(raised.value)
+    assert isinstance(raised.value.__cause__, OSError)
+    assert "directory open failure" in str(raised.value.__cause__)
+    assert any("displaced temp unlink failure" in note for note in raised.value.__notes__)
+    assert target.read_bytes() == content
+
+
 def test_main_write_rolls_back_when_later_write_fails(
     tmp_path: Path,
     monkeypatch,
@@ -1042,6 +1084,77 @@ def test_main_write_rolls_back_owned_exchange_when_parent_dir_open_fails(
         sync_plugin_version.main()
 
     assert failure_injected
+    assert foreign_generation is not None
+    assert source_skill.read_bytes() == originals[source_skill]
+    assert sync_plugin_version._path_generation(source_skill) == foreign_generation
+    assert bundled_skill.read_bytes() == originals[bundled_skill]
+    assert plugin_json.read_bytes() == originals[plugin_json]
+    assert marketplace_json.read_bytes() == originals[marketplace_json]
+
+
+@pytest.mark.skipif(
+    not (sys.platform.startswith("linux") or sys.platform == "darwin"),
+    reason="atomic pathname exchange is unavailable on this platform",
+)
+def test_main_write_rolls_back_owned_exchange_when_displaced_temp_unlink_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_skill = tmp_path / "skills/setup/SKILL.md"
+    bundled_skill = tmp_path / ".claude-plugin/skills/setup/SKILL.md"
+    plugin_json = tmp_path / ".claude-plugin/plugin.json"
+    marketplace_json = tmp_path / ".claude-plugin/marketplace.json"
+    source_skill.parent.mkdir(parents=True)
+    bundled_skill.parent.mkdir(parents=True)
+    plugin_json.parent.mkdir(parents=True, exist_ok=True)
+    source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
+    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
+    plugin_json.write_text('{"version":"1.2.3"}\n')
+    marketplace_json.write_text('{"plugins":[{"version":"1.2.3"}]}\n')
+    originals = {
+        path: path.read_bytes()
+        for path in (source_skill, bundled_skill, plugin_json, marketplace_json)
+    }
+    monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
+    monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
+    monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
+    monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
+    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
+    monkeypatch.setattr(
+        sync_plugin_version.sys,
+        "argv",
+        ["sync-plugin-version.py", "--write", "--version", "1.2.4"],
+    )
+    real_unlink = Path.unlink
+    cleanup_failure_injected = False
+    foreign_generation = None
+
+    def fail_marketplace_displaced_temp_unlink(
+        path: Path,
+        *,
+        missing_ok: bool = False,
+    ) -> None:
+        nonlocal cleanup_failure_injected, foreign_generation
+        if (
+            not cleanup_failure_injected
+            and path.parent == marketplace_json.parent
+            and path.name.startswith(f".{marketplace_json.name}.")
+            and path.read_bytes() == originals[marketplace_json]
+        ):
+            replacement = tmp_path / "source-skill-same-bytes-foreign-generation"
+            replacement.write_bytes(originals[source_skill])
+            os.replace(replacement, source_skill)
+            foreign_generation = sync_plugin_version._path_generation(source_skill)
+            cleanup_failure_injected = True
+            raise OSError("injected displaced temp unlink failure")
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_marketplace_displaced_temp_unlink)
+
+    with pytest.raises(sync_plugin_version._OwnedWriteError, match="displaced temp unlink failure"):
+        sync_plugin_version.main()
+
+    assert cleanup_failure_injected
     assert foreign_generation is not None
     assert source_skill.read_bytes() == originals[source_skill]
     assert sync_plugin_version._path_generation(source_skill) == foreign_generation
