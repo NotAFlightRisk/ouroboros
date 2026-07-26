@@ -36,6 +36,16 @@ _MAX_CONFLICT_RESTORE_EXCHANGES = 8
 _PathGeneration = tuple[int, int, int, int, int, int, int, int, int, int, str]
 
 
+class _OwnedWriteError(RuntimeError):
+    """Error raised after this process owns a completed pathname replacement."""
+
+    def __init__(self, path: Path, generation: _PathGeneration, error: BaseException) -> None:
+        super().__init__(str(error))
+        self.path = path
+        self.generation = generation
+        self.__cause__ = error
+
+
 def get_version() -> str:
     """Get version from hatch-vcs (same source as the Python package)."""
     # Try hatch first
@@ -260,6 +270,7 @@ def _atomic_write_bytes(
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     temp_path = Path(temp_name)
     preserve_temp = False
+    replaced_target = False
     try:
         with os.fdopen(fd, "wb") as temp_file:
             temp_file.write(content)
@@ -274,10 +285,12 @@ def _atomic_write_bytes(
                 raise RuntimeError(
                     f"write conflict for {path}: atomic path exchange is unavailable"
                 )
+            replaced_target = True
             displaced_generation = _path_generation(temp_path)
             if temp_path.read_bytes() != expected_current or (
                 expected_generation is not None and displaced_generation != expected_generation
             ):
+                replaced_target = False
                 preserve_temp = True
                 try:
                     restored = _restore_latest_exchanged_content(
@@ -298,12 +311,17 @@ def _atomic_write_bytes(
                 )
         else:
             os.replace(temp_path, path)
+            replaced_target = True
         directory_fd = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
         return staged_generation
+    except BaseException as exc:
+        if replaced_target and not isinstance(exc, _OwnedWriteError):
+            raise _OwnedWriteError(path, staged_generation, exc) from exc
+        raise
     finally:
         if not preserve_temp:
             temp_path.unlink(missing_ok=True)
@@ -329,12 +347,15 @@ def update_version_marker(
         return None
     owned_generation = _atomic_write_bytes(path, content, expected_current=original)
 
-    updated = path.read_bytes()
-    if updated != content:
-        raise RuntimeError(f"failed to verify version marker update in {path}")
-    updated_matches = list(VERSION_MARKER_RE.finditer(updated.decode("utf-8")))
-    if len(updated_matches) != 1 or updated_matches[0].group(1) != version:
-        raise RuntimeError(f"failed to verify version marker update in {path}")
+    try:
+        updated = path.read_bytes()
+        if updated != content:
+            raise RuntimeError(f"failed to verify version marker update in {path}")
+        updated_matches = list(VERSION_MARKER_RE.finditer(updated.decode("utf-8")))
+        if len(updated_matches) != 1 or updated_matches[0].group(1) != version:
+            raise RuntimeError(f"failed to verify version marker update in {path}")
+    except BaseException as exc:
+        raise _OwnedWriteError(path, owned_generation, exc) from exc
     return owned_generation
 
 
@@ -510,6 +531,8 @@ def _run() -> None:
     except BaseException as primary_error:
         if not write:
             raise
+        if isinstance(primary_error, _OwnedWriteError):
+            owned_writes[primary_error.path] = primary_error.generation
         rollback_failures: list[BaseException] = []
         for path in attempted:
             try:

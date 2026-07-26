@@ -147,7 +147,7 @@ Before creating a release tag, synchronize every version-bearing plugin artifact
 
 ```bash
 python scripts/sync-plugin-version.py --write --version 0.50.7
-python scripts/sync-plugin-version.py --version 0.50.7
+python scripts/sync-plugin-version.py --require-canonical --version 0.50.7
 git diff --check
 ```
 
