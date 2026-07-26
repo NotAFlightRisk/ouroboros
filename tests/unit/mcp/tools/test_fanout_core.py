@@ -9867,3 +9867,60 @@ def test_generic_lane_content_survives_the_key_rule() -> None:
     }
 
     assert _scrub_credentials_for_persistence(content) == content
+
+
+# ---------------------------------------------------------------------------
+# What may be executed is the operator's declaration
+# ---------------------------------------------------------------------------
+#
+# Rounds 85-86 deleted the name heuristic from the parent: `migrate_query`
+# earned direct execution through its `query` token, and a name cannot prove
+# read-onlyness because names are an open world. The same heuristic stayed in
+# the child's instructions, which asked it to judge "obviously local, free,
+# read-only" from names and descriptions. These pin that the child is asked to
+# execute only what the operator declared, and nothing at all when the
+# operator declared nothing.
+
+
+def _data_child_prompt(declared_read_only: list[str]) -> str:
+    from ouroboros.mcp.tools.subagent import build_interview_question_advisory_subagents
+
+    lanes = [dict(lane) for lane in _interview_question_advisory_fanout_metadata()["lanes"]]
+    for lane in lanes:
+        if lane["lane_id"] == "data_context" and declared_read_only:
+            lane["known_data_tools"] = declared_read_only
+    payloads = build_interview_question_advisory_subagents(
+        {
+            "contract_id": "c",
+            "session_id": "s",
+            "question": "What share of enterprise accounts asked for SSO?",
+            "question_identity": "q1",
+            "phase": "discovery",
+            "lanes": lanes,
+        }
+    )
+    payload = next(p for p in payloads if p.to_dict()["context"]["lane_id"] == "data_context")
+    return payload.to_dict()["prompt"]
+
+
+def test_no_declaration_asks_the_child_to_execute_nothing() -> None:
+    """The default runtime declares nothing, so the lane is purely a proposer."""
+    prompt = _data_child_prompt([])
+
+    assert "Execute NOTHING" in prompt
+    assert "obviously local, free, read-only" not in prompt
+
+
+def test_a_declaration_bounds_execution_to_itself() -> None:
+    """A discovered tool that merely looks read-only is still not executable."""
+    prompt = _data_child_prompt(["metabase_query", "warehouse_read"])
+
+    assert "Execute ONLY the tools the operator declared read-only" in prompt
+    assert "metabase_query, warehouse_read" in prompt
+    assert "including one you discover that looks read-only" in prompt
+
+
+def test_discovery_survives_so_proposals_can_name_their_tool() -> None:
+    """Not executing is not the same as not looking: a proposal needs a name."""
+    for declared in ([], ["metabase_query"]):
+        assert "discover data-related MCP tools" in _data_child_prompt(declared)

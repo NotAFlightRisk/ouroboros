@@ -1353,9 +1353,15 @@ def _data_evidence_boundary_violations(
         # advertisement, never authorized for direct execution (round-97):
         # registration now snapshots the rosters with the policy, so the
         # classification the child was shown is the one re-entry enforces.
-        # Unknown sources remain the documented not_adjudicated residue —
-        # runtime-discovered local read-only tools are a designed capability
-        # and the confirming human sees the source beside the claim.
+        #
+        # Deliberately still a denylist, not an allowlist over
+        # ``known_data_tools``. Re-entry runs AFTER execution, so refusing an
+        # undeclared source here discards a lookup that already ran and
+        # already cost — it cannot prevent the side effect it would be
+        # punishing. What execution is requested at all is decided where the
+        # request is made, in the dispatch instruction; this boundary keeps
+        # the narrower job of refusing what the child was explicitly told not
+        # to run.
         proposal_only_roster = (policy or {}).get("proposal_only_data_tools")
         if (
             isinstance(source, str)

@@ -1532,6 +1532,14 @@ def build_interview_question_advisory_subagents(
         required = bool(raw_lane.get("required"))
         data_policy = raw_lane.get("data_policy")
         lane_answer_contract = declared_lane_contract(raw_lane)
+        # Read BEFORE the task text: whether the child is asked to execute at
+        # all depends on whether the operator declared anything read-only.
+        raw_known_tools = raw_lane.get("known_data_tools")
+        declared_read_only = [
+            str(tool)
+            for tool in (raw_known_tools if isinstance(raw_known_tools, (list, tuple)) else ())
+            if str(tool).strip()
+        ]
 
         if lane_id == "code_context":
             lane_task = (
@@ -1549,22 +1557,45 @@ def build_interview_question_advisory_subagents(
             extra = "Use web research only when the answer depends on current external facts."
         elif lane_id == "data_context":
             # Read-only proposer lane (Q00/ouroboros#1671): relevance is decided
-            # before any tool call, direct execution covers only local free
-            # read-only lookups, and everything metered or side-effect-ambiguous
-            # comes back as proposed queries for the parent session to run
-            # after user confirmation.
+            # before any tool call, and everything the operator has not
+            # declared read-only comes back as proposed queries for the parent
+            # session to run after user confirmation.
+            #
+            # WHAT MAY BE EXECUTED IS THE OPERATOR'S DECLARATION, NOT THE
+            # CHILD'S READING OF A TOOL NAME. Rounds 85-86 deleted exactly that
+            # heuristic from the parent — `migrate_query` earned direct
+            # execution through its `query` token — on the finding that a name
+            # cannot prove read-onlyness because names are an open world. The
+            # same heuristic stayed in the child's instructions, which asked it
+            # to judge "obviously local, free, read-only" from names and
+            # descriptions. With no declaration there is nothing to execute,
+            # so the lane is a proposer exactly as its name says.
+            execution_clause = (
+                (
+                    "Execute ONLY the tools the operator declared read-only, "
+                    f"listed under Known Data Tools ({', '.join(declared_read_only)}). "
+                    "Any other tool — including one you discover that looks "
+                    "read-only — is NOT executable: return the lookup you would "
+                    "run as proposed_queries so the parent session can run it "
+                    "after user confirmation. "
+                )
+                if declared_read_only
+                else (
+                    "Execute NOTHING: this runtime declares no read-only data "
+                    "tool, and a tool's name cannot prove it is safe to run. "
+                    "Return every lookup you would run as proposed_queries so "
+                    "the parent session can run it after user confirmation. "
+                )
+            )
             lane_task = (
                 "Decide from the question text alone, BEFORE any tool call, "
                 "whether the answer depends on data evidence (metrics, database "
                 "or warehouse facts, usage numbers). If it does not, return the "
                 "no-op finding immediately. If it does, discover data-related "
                 "MCP tools available in this runtime by their names and "
-                "descriptions. Directly execute only obviously local, free, "
-                "read-only lookups. For metered, external, or "
-                "side-effect-ambiguous sources, do NOT execute: return the "
-                "lookups you would run as proposed_queries so the parent "
-                "session can run them after user confirmation. Never run "
-                "mutating operations. "
+                "descriptions so you can name them in your proposals. "
+                f"{execution_clause}"
+                "Never run mutating operations. "
                 "Report results as TYPED structures, not prose: each evidence "
                 "item and each proposal carries a read_request naming what to "
                 "measure (operation 'read', metric, aggregation, optional "
