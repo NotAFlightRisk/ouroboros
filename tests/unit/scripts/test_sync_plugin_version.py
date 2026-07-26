@@ -34,6 +34,9 @@ def test_git_describe_fallback_preserves_exact_tag_version() -> None:
         ("1.2.3b4", "1.2.3b4"),
         ("1.2.3rc2", "1.2.3rc2"),
         ("1.2.3b4.dev1", "1.2.3b4"),
+        ("1.2.3alpha1", "1.2.3a1"),
+        ("1.2.3beta02", "1.2.3b2"),
+        ("01.02.003", "1.2.3"),
     ],
 )
 def test_plugin_metadata_version_normalizes_supported_versions(
@@ -223,6 +226,15 @@ def test_update_json_rejects_duplicate_object_keys(tmp_path: Path) -> None:
         sync_plugin_version.update_json(target, "1.2.4")
 
     assert target.read_bytes() == original
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_load_json_rejects_non_rfc_constants(tmp_path: Path, constant: str) -> None:
+    path = tmp_path / "plugin.json"
+    path.write_text(f'{{"version":"1.2.3","invalid":{constant}}}\n')
+
+    with pytest.raises(ValueError, match="non-RFC JSON constant"):
+        sync_plugin_version._load_json(path)
 
 
 def test_main_write_preflight_rejects_duplicate_json_keys_before_mutation(

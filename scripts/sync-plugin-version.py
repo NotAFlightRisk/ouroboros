@@ -102,13 +102,20 @@ def normalize_version(v: str) -> str:
     # Match semver + optional pre-release (a/alpha/b/beta/rc + number)
     # and an optional hatch-vcs development suffix.
     match = re.fullmatch(
-        r"(?P<public>[0-9]+\.[0-9]+\.[0-9]+(?:(?:a|alpha|b|beta|rc)[0-9]*)?)"
+        r"(?P<major>[0-9]+)\.(?P<minor>[0-9]+)\.(?P<patch>[0-9]+)"
+        r"(?:(?P<label>a|alpha|b|beta|rc)(?P<pre>[0-9]*))?"
         r"(?:\.dev[0-9]+)?",
         v,
     )
     if match is None:
         raise ValueError(f"unsupported version: {v}")
-    return match.group("public")
+    public = ".".join(str(int(match.group(name))) for name in ("major", "minor", "patch"))
+    label = match.group("label")
+    if label is None:
+        return public
+    canonical_label = {"alpha": "a", "beta": "b"}.get(label, label)
+    prerelease = int(match.group("pre") or "0")
+    return f"{public}{canonical_label}{prerelease}"
 
 
 def _read_version_marker(text: str, path: Path) -> str:
@@ -138,11 +145,20 @@ def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]
     return result
 
 
-def _load_json(path: Path) -> object:
+def _reject_json_constant(value: str) -> object:
+    raise ValueError(f"non-RFC JSON constant: {value}")
+
+
+def _parse_json_bytes(content: bytes) -> object:
     return json.loads(
-        path.read_bytes().decode("utf-8"),
+        content.decode("utf-8"),
         object_pairs_hook=_reject_duplicate_keys,
+        parse_constant=_reject_json_constant,
     )
+
+
+def _load_json(path: Path) -> object:
+    return _parse_json_bytes(path.read_bytes())
 
 
 def _atomic_write_bytes(
@@ -211,10 +227,7 @@ def update_json(
 ) -> bool:
     """Update version in a JSON file. Returns True if changed."""
     original = expected_current if expected_current is not None else path.read_bytes()
-    data = json.loads(
-        original.decode("utf-8"),
-        object_pairs_hook=_reject_duplicate_keys,
-    )
+    data = _parse_json_bytes(original)
     if not isinstance(data, dict):
         raise TypeError("top-level JSON value must be an object")
 
@@ -287,10 +300,7 @@ def _run() -> None:
         try:
             original = path.read_bytes()
             originals[path] = original
-            data = json.loads(
-                original.decode("utf-8"),
-                object_pairs_hook=_reject_duplicate_keys,
-            )
+            data = _parse_json_bytes(original)
             if not isinstance(data, dict):
                 raise TypeError("top-level JSON value must be an object")
             target: object = data
