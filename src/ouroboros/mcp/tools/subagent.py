@@ -4570,49 +4570,57 @@ def _is_transportable(content: Any) -> bool:
 
 
 def _redact_legacy_data_prose(payload: Any, data_lane_ids: frozenset[str]) -> bool:
-    """Redact any un-redacted data-lane OUTPUT inside a persisted payload.
+    """Redact any un-redacted data-lane SUBMISSION inside a persisted payload.
 
-    Round-101: the first version keyed on ``lane_id`` found inside a value
-    and replaced whatever mapping carried it — but the terminal envelope is
-    ``{"result_id": <lane>, "output": {...}}``, so it redacted the ENVELOPE,
-    returned null lifecycle fields, and lost the output shape. The lane is
-    identified by the REGISTERED contract instead (the same authority
-    re-entry uses), and only the nested payload is replaced.
+    Rounds 100-102 rewrote this twice by chasing envelope key names — first
+    ``lane_id`` sniffed anywhere (which matched the envelope itself), then
+    ``result_id``/``key`` (the generic aggregator's shape, while
+    question-advisory synthesis stores ``{"lane_id", "output"}``). Both
+    times a fixture using the wrong shape hid the leak.
+
+    Key names are not the signal. A data SUBMISSION is recognizable by its
+    own shape — it carries the contract's content fields — while every
+    envelope shape carries only an identifier and a nested payload. So the
+    walk redacts values that ARE data content, wherever they sit and under
+    whatever key, and no future envelope shape can evade it.
 
     Returns whether anything was redacted, so the caller can classify
     consent from the fact rather than from a marker legacy state lacks.
     """
     redacted = False
+    content_fields = ("evidence", "proposed_queries", "finding", "caveats")
 
-    def _is_unredacted_data(value: Any) -> bool:
-        return isinstance(value, Mapping) and value.get("content_retained") is not False
+    def _is_unredacted_data_submission(value: Any) -> bool:
+        return (
+            isinstance(value, Mapping)
+            and str(value.get("lane_id") or "") in data_lane_ids
+            and value.get("content_retained") is not False
+            and any(field in value for field in content_fields)
+        )
 
     def _walk(node: Any, depth: int = 0) -> None:
         nonlocal redacted
-        if depth > 6:
+        if depth > 8:
             return
         if isinstance(node, dict):
             for key, value in list(node.items()):
-                # {"data_context": {...}} — keyed by lane id.
-                if key in data_lane_ids and _is_unredacted_data(value):
-                    node[key] = redact_prose_for_persistence(value)
-                    redacted = True
-                    continue
-                # {"result_id": "data_context", "output": {...}} — the
-                # terminal envelope shape.
-                if (
-                    key == "output"
-                    and _is_unredacted_data(value)
-                    and str(node.get("result_id") or node.get("key") or "") in data_lane_ids
-                ):
+                if _is_unredacted_data_submission(value):
                     node[key] = redact_prose_for_persistence(value)
                     redacted = True
                     continue
                 _walk(value, depth + 1)
         elif isinstance(node, list):
-            for item in node:
-                _walk(item, depth + 1)
+            for index, value in enumerate(node):
+                if _is_unredacted_data_submission(value):
+                    node[index] = redact_prose_for_persistence(value)
+                    redacted = True
+                    continue
+                _walk(value, depth + 1)
 
+    if _is_unredacted_data_submission(payload):
+        # Defensive: the payload itself is never a submission today, but the
+        # rule is about shape, not position.
+        redacted = True
     _walk(payload)
     return redacted
 

@@ -9207,13 +9207,15 @@ def test_round100_legacy_completed_record_is_redacted_on_replay(tmp_path: Any) -
     assert record is not None
     legacy = _round77_answer("logins", ["cohort=enterprise"])
     legacy["finding"] = "Contact ada@example.com about the 42 enterprise accounts."
-    # The REAL terminal envelope shape (round-101 caught this fixture using
-    # an invented one): aggregated_outputs carries {result_id, output}.
+    # The envelope shape is taken from the ACTUAL synthesis path rather than
+    # written by hand (rounds 100-102 each used a wrong shape and the
+    # fixture hid the leak): question-advisory synthesis stores
+    # {"lane_id", "output"}.
     registry.save(
         dataclasses.replace(
             record,
             terminal_response={
-                "aggregated_outputs": [{"result_id": "data_context", "output": legacy}],
+                "aggregated_outputs": [{"lane_id": "data_context", "output": legacy}],
                 "synthesis": {"lane_outputs": {"data_context": legacy}},
             },
         )
@@ -9236,7 +9238,7 @@ def test_round100_legacy_completed_record_is_redacted_on_replay(tmp_path: Any) -
     # and consent is classified from the redaction that just happened, not
     # from a marker legacy state never carried.
     envelope = replay["aggregated_outputs"][0]
-    assert envelope["result_id"] == "data_context"
+    assert envelope["lane_id"] == "data_context"
     assert envelope["output"]["lane_id"] == "data_context"
     assert envelope["output"]["content_retained"] is False
     assert envelope["output"]["evidence_count"] == 1
@@ -9282,3 +9284,72 @@ def test_round101_digest_is_canonical_across_number_spellings(tmp_path: Any) -> 
     )
     assert replay.get("resubmission_mismatch_keys") is None
     assert replay.get("consent_status") == "confirmable_resubmitted"
+
+
+def test_round102_legacy_redaction_uses_the_real_synthesis_envelope(tmp_path: Any) -> None:
+    """The envelope comes from the code, not from the test author's memory.
+
+    Rounds 100-102 each rewrote legacy redaction against a hand-written
+    envelope shape, and each fixture hid the leak it was meant to catch.
+    This test drives a REAL completion, reads the terminal envelope the
+    synthesis actually produced, re-persists it with un-redacted content in
+    exactly that shape, and asserts nothing sensitive survives replay.
+    """
+    import dataclasses
+    import json as json_module
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-102",
+        lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+    )
+    assert fanout_id is not None
+    answer = _round77_answer("logins", ["cohort=enterprise"])
+    complete = submit_fanout_results(
+        registry,
+        session_id="sess-102",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": answer}],
+        fanout_id=fanout_id,
+    )
+    assert complete["status"] == "complete"
+
+    # THE envelope, as PERSISTED — located by walking the real terminal
+    # response instead of hand-writing a shape.
+    record = registry.load(fanout_id)
+    assert record is not None
+    terminal = json_module.loads(json_module.dumps(record.terminal_response))
+
+    sensitive = _round77_answer("logins", ["cohort=enterprise"])
+    sensitive["finding"] = "Contact ada@example.com about the churn spike."
+
+    def _inject(node: Any) -> bool:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "output" and isinstance(value, Mapping):
+                    node[key] = sensitive
+                    return True
+                if _inject(value):
+                    return True
+        elif isinstance(node, list):
+            for item in node:
+                if _inject(item):
+                    return True
+        return False
+
+    assert _inject(terminal), "no {…, output} envelope found in the terminal response"
+    registry.save(dataclasses.replace(record, terminal_response=terminal))
+
+    replay = submit_fanout_results(
+        registry,
+        session_id="sess-102",
+        correlation_key="context.lane_id",
+        results=[],
+        fanout_id=fanout_id,
+    )
+    serialized = json_module.dumps(replay)
+    assert "ada@example.com" not in serialized
+    assert "churn spike" not in serialized
+    assert replay["consent_status"] == "not_confirmable_prose_not_retained"
+    assert '"content_retained": false' in json_module.dumps(replay).replace(", ", ", ")
