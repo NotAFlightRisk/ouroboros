@@ -1528,8 +1528,14 @@ _IDENTITY_KEYS = frozenset(
 # or a small bucket is a category (round-54: year=2026 was refused). Six
 # digits is the shortest plausible account/customer id and leaves four-digit
 # years and three-digit buckets usable.
+# Digit runs are opaque from SEVEN digits (round-82): six-digit values are
+# the standard width of published category codes — NAICS 541511, HS headings,
+# date months — and reading them as entity identifiers rejected schema-valid
+# categorical scopes. Individual identifiers that matter (phone, SSN, card,
+# account numbers) are 7+ digits, and an entity-NAMED key is rejected by the
+# key rule before the value is ever consulted.
 _OPAQUE_ENTITY_VALUE = re.compile(
-    r"^(?:\d{6,}|[0-9a-fA-F]{8,}|[0-9a-fA-F-]{16,})$",
+    r"^(?:\d{7,}|[0-9a-fA-F]{8,}|[0-9a-fA-F-]{16,})$",
 )
 
 

@@ -41,6 +41,7 @@ import json
 import os
 from pathlib import Path
 import re
+import threading
 from typing import Any
 from uuid import uuid4
 
@@ -2995,6 +2996,28 @@ class FanoutRecord:
         )
 
 
+#: Process-local per-fanout locks (round-82). flock excludes processes; two
+#: THREADS in one process open distinct descriptors, and on a platform
+#: without fcntl the section previously yielded with no exclusion at all — a
+#: synchronized two-thread probe produced two divergent complete responses.
+#: The thread lock is held around every yield path, so the documented
+#: process-local guarantee holds everywhere, and flock adds the
+#: cross-process half where the platform provides it.
+_LOCAL_FANOUT_LOCKS: dict[str, threading.Lock] = {}
+_LOCAL_FANOUT_LOCKS_GUARD = threading.Lock()
+
+
+def _local_fanout_lock(fanout_id: str) -> threading.Lock:
+    with _LOCAL_FANOUT_LOCKS_GUARD:
+        lock = _LOCAL_FANOUT_LOCKS.get(fanout_id)
+        if lock is None:
+            # Bounded by the registry's own retention: ids are <=128 chars and
+            # the set of live fan-outs is small; entries for expired ids cost
+            # one Lock object until process exit.
+            lock = _LOCAL_FANOUT_LOCKS[fanout_id] = threading.Lock()
+        return lock
+
+
 @dataclass(frozen=True, slots=True)
 class RecordWrite:
     """Outcome of persisting a fan-out record.
@@ -3352,6 +3375,13 @@ class FanoutRegistry:
         if not self.valid_fanout_id(fanout_id):
             yield
             return
+        # The process-local half is unconditional (round-82): it wraps every
+        # path below, including the degraded ones, so two threads can never
+        # both terminalize whatever the platform lacks.
+        with _local_fanout_lock(fanout_id):
+            yield from self._exclusive_cross_process(fanout_id)
+
+    def _exclusive_cross_process(self, fanout_id: str) -> Iterator[None]:
         lock_path = self._dir / f".{fanout_id}.lock"
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
@@ -3361,9 +3391,10 @@ class FanoutRegistry:
         try:
             import fcntl
         except ImportError:
-            # PLATFORM QUALIFICATION (round-26): without fcntl (e.g. native
-            # Windows) the section degrades to best-effort and the
-            # terminal-immutability guarantee is process-local only.
+            # PLATFORM QUALIFICATION (rounds 26 and 82): without fcntl (e.g.
+            # native Windows) the CROSS-PROCESS half is unavailable and the
+            # guarantee is the process-local lock already held by the caller.
+            # That limitation is the documented contract for such platforms.
             log.warning(
                 "fanout.registry.exclusive_unavailable_no_fcntl",
                 fanout_id=fanout_id,

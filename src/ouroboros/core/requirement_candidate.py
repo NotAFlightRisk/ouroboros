@@ -17,12 +17,14 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-# v2 (round-76): the derivation policy changed — observation-marked answers
+# v3 (round-82): the initial-goal candidate now takes the provenance gate
+# too — a v2 cache may carry an observation-marked context promoted as a
+# confirmed goal. v2 (round-76): the derivation policy changed — observation-marked answers
 # ([from-data]/[from-research]) are no longer promoted to requirement
 # candidates (round-73). The version participates in is_current(), so a
 # cache distilled under v1 with an observation-derived candidate is
 # invalidated by this bump instead of being reused past the new gate.
-REQUIREMENT_DISTILLATION_SCHEMA_VERSION = "requirement-distillation.v2"
+REQUIREMENT_DISTILLATION_SCHEMA_VERSION = "requirement-distillation.v3"
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 

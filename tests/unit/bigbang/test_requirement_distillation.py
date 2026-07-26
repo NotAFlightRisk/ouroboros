@@ -688,3 +688,26 @@ def test_round81_plugin_initial_context_is_sanitized() -> None:
 
     assert "42 enterprise accounts" not in transcript
     assert OBSERVATION_WITHHELD_NOTE in transcript
+
+
+def test_round82_observation_context_is_not_promoted_as_the_goal() -> None:
+    """The initial context takes the same provenance gate as every answer.
+
+    An observation-marked context was promoted as a CONFIRMED goal with user
+    authority, so [from-data] observations became the runnable Seed goal
+    through the reference-aware path while every extraction surface withheld
+    them — the fifth entrance.
+    """
+    state = _state_with_answer("Enterprise tier must include SSO.")
+    state.initial_context = "[from-data] 42 enterprise accounts require SSO today."
+
+    distillation = build_requirement_distillation(state)
+
+    assert all(c.candidate_id != "initial-goal" for c in distillation.candidates)
+
+    # An ordinary user-authored context still yields the goal candidate.
+    plain = _state_with_answer("Enterprise tier must include SSO.")
+    plain.initial_context = "Build SSO for enterprise accounts"
+    assert any(
+        c.candidate_id == "initial-goal" for c in build_requirement_distillation(plain).candidates
+    )

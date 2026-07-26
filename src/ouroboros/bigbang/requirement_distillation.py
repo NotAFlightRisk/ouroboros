@@ -97,18 +97,29 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
                 text=state.initial_context.strip(),
             )
         )
-        candidates.append(
-            RequirementCandidate(
-                candidate_id="initial-goal",
-                section=RequirementSection.GOAL,
-                text=state.initial_context.strip(),
-                content_source=CandidateContentSource.USER_STATED,
-                resolution=CandidateResolution.CONFIRMED,
-                confirmation_authority=ConfirmationAuthority.USER,
-                evidence_ids=(evidence_id,),
-                required=True,
+        # The initial context takes the same provenance gate as every round
+        # answer (round-82): an observation-marked context was promoted as a
+        # CONFIRMED goal with user authority, so [from-data] observations
+        # became the runnable Seed goal through the reference-aware path even
+        # while every extraction surface withheld them. Without a candidate
+        # the promoted Seed falls back to its generic goal; the user states
+        # the real goal in their own words.
+        if classify_answer_provenance(state.initial_context) not in {
+            "data_fact",
+            "research_fact",
+        }:
+            candidates.append(
+                RequirementCandidate(
+                    candidate_id="initial-goal",
+                    section=RequirementSection.GOAL,
+                    text=state.initial_context.strip(),
+                    content_source=CandidateContentSource.USER_STATED,
+                    resolution=CandidateResolution.CONFIRMED,
+                    confirmation_authority=ConfirmationAuthority.USER,
+                    evidence_ids=(evidence_id,),
+                    required=True,
+                )
             )
-        )
 
     reference_by_question = {
         resolution.asked_question: cue

@@ -8418,7 +8418,9 @@ def test_round80_compact_date_partitions_complete_end_to_end(tmp_path: Any) -> N
     from ouroboros.contracts.data_evidence import _identity_scope_problem
 
     assert _identity_scope_problem("user_id=202607", "filters[0]") is not None
-    assert _identity_scope_problem("cohort=999999", "filters[0]") is not None
+    # 6-digit non-calendar values are category-code width and admitted since
+    # round 82 (naics_code=541511); opaqueness starts at seven digits.
+    assert _identity_scope_problem("cohort=9999999", "filters[0]") is not None
     assert _identity_scope_problem("day=20260231", "filters[0]") is not None
 
 
@@ -8461,3 +8463,100 @@ def test_round81_letter_hex_scope_values_are_refused_by_the_grammar(tmp_path: An
         fanout_id=fanout_id,
     )
     assert out["status"] == "complete", out.get("contract_violations")
+
+
+# --------------------------------------------------------------------------- #
+# round-82 — process-local exclusion is unconditional; categorical codes pass
+# --------------------------------------------------------------------------- #
+
+
+def test_round82_two_threads_cannot_both_complete_without_fcntl(tmp_path: Any) -> None:
+    """The documented process-local guarantee must not depend on fcntl.
+
+    Without it, exclusive() yielded with no exclusion at all, and a
+    synchronized two-thread probe produced two divergent complete responses
+    while only one outcome survived durably.
+    """
+    import builtins
+    import threading
+    from unittest.mock import patch
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-82",
+        payloads=_mixed_advisory_payloads(),
+    )
+    results = [
+        {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+        {"key": "answer_simplifier", "content": "simplifier-advice"},
+    ]
+
+    real_import = builtins.__import__
+
+    def _no_fcntl(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "fcntl":
+            raise ImportError("no fcntl on this platform")
+        return real_import(name, *args, **kwargs)
+
+    barrier = threading.Barrier(2)
+    outcomes: list[dict[str, Any]] = []
+
+    def _submit() -> None:
+        barrier.wait()
+        outcomes.append(
+            submit_fanout_results(
+                registry,
+                session_id="sess-82",
+                correlation_key="context.lane_id",
+                results=results,
+                fanout_id=fanout_id,
+            )
+        )
+
+    with patch("builtins.__import__", side_effect=_no_fcntl):
+        threads = [threading.Thread(target=_submit) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    statuses = sorted(str(outcome.get("status")) for outcome in outcomes)
+    # Exactly one submission completes; the other observes the terminal
+    # record and replays it.
+    assert statuses == ["already_complete", "complete"], statuses
+
+
+def test_round82_numeric_category_codes_complete_end_to_end(tmp_path: Any) -> None:
+    """naics_code=541511 is a published category, not an entity.
+
+    Six digits is the standard width of category codes, and the opaque rule
+    read every 6-digit run as an identifier — a schema-valid answer left a
+    required lane partial. Opaqueness now starts at seven digits; the
+    identifiers that matter (phone, SSN, card) are all longer, and an
+    entity-NAMED key is rejected before the value is consulted.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-82b",
+        lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+    )
+    assert fanout_id is not None
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-82b",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": _round77_answer("logins", ["naics_code=541511"])}
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete", out.get("contract_violations")
+
+    from ouroboros.contracts.data_evidence import _identity_scope_problem
+
+    # The boundary of the narrowing: 7+ digits stays opaque, entity keys
+    # stay rejected whatever the value.
+    assert _identity_scope_problem("cohort=9999999", "filters[0]") is not None
+    assert _identity_scope_problem("user_id=541511", "filters[0]") is not None
