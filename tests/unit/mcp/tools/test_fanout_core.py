@@ -5561,8 +5561,12 @@ def test_round48_request_fields_and_replay_consent(tmp_path: Any) -> None:
     from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
 
     # B1 — every parsed request field gets the credential classification.
+    # (password_tier: the category grammar admits the key by its head, so the
+    # credential token classification is what rejects it — a bare "password"
+    # never reaches classification since the grammar absorbed the category
+    # rule.)
     for request in (
-        {"operation": "read", "metric": "u", "aggregation": "count", "grouping": ["password"]},
+        {"operation": "read", "metric": "u", "aggregation": "count", "grouping": ["password_tier"]},
         {
             "operation": "read",
             "metric": "u",

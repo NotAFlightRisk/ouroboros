@@ -25,10 +25,13 @@ This module pins the population. Three properties:
                        so the metric field must never appear here)
    * identity-metric — a value-returning aggregation over an identity metric
                        (round 48)
-   * unverified-grouping — a row-splitting key whose head does not positively
-                       name a category (round 85: the admit direction — a key
-                       is a category because its head says so, not because no
-                       identity word was recognized)
+
+   The round-85 unverified-grouping class (a row-splitting key whose head
+   does not positively name a category) was ABSORBED into the grouping and
+   dimension grammars, like the metric's credential rules in round 79: the
+   published patterns compile from _CATEGORY_HEADS, so an unverified head is
+   schema-invalid rather than schema-valid-but-rejected, and the class no
+   longer appears in the declared residue below.
 
 A rejection outside these classes is this test failing, not a future review
 round.
@@ -154,7 +157,6 @@ def test_schema_valid_scopes_are_accepted(label: str, output: dict[str, Any]) ->
 #: class via a stable message fragment.
 _DECLARED_REJECTIONS: list[tuple[str, dict[str, Any], str]] = [
     ("entity-filter-key", _answer(filters=["user_id=541511"]), "keys an entity"),
-    ("entity-grouping", _proposal_answer(grouping=["email_address"]), "keys an entity"),
     ("opaque-7-digits", _answer(filters=["cohort=9999999"]), "opaque entity identifier"),
     ("opaque-bad-date", _answer(filters=["day=20260231"]), "opaque entity identifier"),
     (
@@ -165,19 +167,6 @@ _DECLARED_REJECTIONS: list[tuple[str, dict[str, Any], str]] = [
     # Round-84 additions to the declared classes.
     ("network-address-value", _answer(filters=["client=10.0.0.7"]), "network address"),
     ("network-key", _answer(filters=["ip=192.168.1.1"]), "keys an entity"),
-    ("derived-identifier-grouping", _proposal_answer(grouping=["email_hash"]), "keys an entity"),
-    # Round-85 positive classification: unknown heads are refused without
-    # being known.
-    (
-        "unverified-grouping-card",
-        _proposal_answer(grouping=["credit_card_number"]),
-        "not a recognized category dimension",
-    ),
-    (
-        "unverified-grouping-imei",
-        _proposal_answer(grouping=["imei"]),
-        "not a recognized category dimension",
-    ),
 ]
 
 
@@ -195,6 +184,35 @@ def test_every_semantic_rejection_belongs_to_a_declared_class(
     violations = _data_evidence_boundary_violations(output)
     assert violations, label
     assert any(declared_class in violation for violation in violations), (label, violations)
+
+
+def test_the_row_splitting_grammars_absorbed_the_category_rule() -> None:
+    """The round-85 positive classification lives in the published patterns.
+
+    An unverified or identity-preserving head (credit_card_number, imei,
+    email_address, email_hash) is schema-INVALID for grouping and dimension —
+    not schema-valid-but-semantically-rejected — so the advertised and
+    enforced surfaces agree by construction. Rejection messages never echo
+    the key. Category-headed keys remain fully attainable end-to-end.
+    """
+    for key in ("credit_card_number", "passport_number", "imei", "email_address", "email_hash"):
+        assert not _READ_REQUEST_GROUPING.match(key), key
+        assert not _AGGREGATE_DIMENSION.match(f"{key}=x1"), key
+        violations = _data_evidence_boundary_violations(_proposal_answer(grouping=[key]))
+        assert violations, key
+        assert key not in " ".join(violations), "the rejected key was echoed"
+    for key in ("plan_tier", "customer_segment", "month", "region", "device_type"):
+        assert _READ_REQUEST_GROUPING.match(key), key
+        assert _data_evidence_boundary_violations(_proposal_answer(grouping=[key])) == [], key
+
+
+def test_the_category_heads_are_advertised_in_the_policy() -> None:
+    """Hosts and children see the same closed set the grammars compile from."""
+    from ouroboros.contracts.data_evidence import _CATEGORY_HEADS, _data_context_lane_policy
+
+    advertised = _data_context_lane_policy()["category_dimension_heads"]
+    assert advertised == sorted(_CATEGORY_HEADS)
+    assert "tier" in advertised and "month" in advertised
 
 
 def test_the_metric_field_never_needs_the_declared_residue() -> None:

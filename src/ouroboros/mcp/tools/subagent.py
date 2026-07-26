@@ -96,6 +96,13 @@ _INTERVIEW_ADVISORY_MAX_JSON_CHARS = 2_400
 # patterns only approximated, so the budget follows the contract rather than
 # the contract being trimmed to fit the budget.
 _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS = 12_000
+# The data policy is the machine-readable ENFORCEMENT block ("enforce, do
+# not just read") — a torn render advertises fewer forbidden operations and
+# category heads than re-entry enforces, which is the same informed-consent
+# defect as a torn contract. Same rule as the contract budget above: the
+# budget follows the policy. The plugin transport already renders the policy
+# unbounded; this bound only keeps the host-driven prompt honest.
+_INTERVIEW_ADVISORY_MAX_POLICY_CHARS = 6_000
 _LATERAL_PANEL_FALLBACK_ID = "lateral_persona_panel.v1"
 _LATERAL_PANEL_FALLBACK_TOOL = "ouroboros_lateral_think"
 _LATERAL_PANEL_FALLBACK_SEQUENTIAL_MODE = "sequential_persona_payload_dispatch"
@@ -1540,7 +1547,11 @@ def build_interview_question_advisory_subagents(
                 "item and each proposal carries a read_request naming what to "
                 "measure (operation 'read', metric, aggregation, optional "
                 "filters/grouping), and evidence adds the resulting aggregate "
-                "as a count of rows. There is no free-text value or query "
+                "as a count of rows. Group or slice only by categorical "
+                "attributes: a grouping or dimension key must end in one of "
+                "data_policy.category_dimension_heads (plan_tier, month, "
+                "region, ...) — never by an identifier. There is no free-text "
+                "value or query "
                 "field, so anything you cannot express as an aggregate — a row "
                 "list, a name, an identifier, an error message — is a "
                 "no-evidence finding, not evidence. "
@@ -1560,7 +1571,7 @@ def build_interview_question_advisory_subagents(
                 "could not look. Either way you must return a result: it IS "
                 "your completion signal, so never skip it."
             )
-            data_policy_json = _bounded_json(data_policy, _INTERVIEW_ADVISORY_MAX_JSON_CHARS)
+            data_policy_json = _bounded_json(data_policy, _INTERVIEW_ADVISORY_MAX_POLICY_CHARS)
             # Rendering uses the SAME enforceability decision as registration
             # (bot-review round-13): an undeliverable contract is never
             # rendered truncated while claiming to supersede the generic

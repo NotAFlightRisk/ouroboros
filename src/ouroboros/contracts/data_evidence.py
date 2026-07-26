@@ -570,6 +570,11 @@ def _data_context_lane_policy() -> dict[str, Any]:
     return {
         "read_only": True,
         "aggregate_only": True,
+        # The closed set the row-splitting grammars compile from: a grouping
+        # or dimension key is admitted because its last _-token is one of
+        # these heads. Advertised here so hosts and children see the same
+        # boundary the schema patterns enforce.
+        "category_dimension_heads": sorted(_CATEGORY_HEADS),
         "relevance_gate": "decide_from_question_text_before_any_tool_call",
         "direct_execution_scope": "local_free_read_only_lookups_only",
         "metered_or_uncertain_sources": "return_proposed_queries_without_executing",
@@ -1514,75 +1519,6 @@ _AGGREGATE_UNIT = re.compile(r"^[a-z%][a-z_/%]{0,23}$")
 #: calendar-valid partitions (month=202607) are admitted and the round-80
 #: calendar rule handles the rest.
 _HEX_ID_VALUE_EXCLUSION = r"(?!(?=[0-9a-f]{8,}(?:$|[_.:+-]))[0-9]*[a-f])"
-GROUPING_TOKEN_PATTERN = r"^[a-z][a-z0-9_]{0,31}$"
-FILTER_TOKEN_PATTERN = (
-    r"^[a-z][a-z0-9_]{0,23}(=|!=|<|>|<=|>=)"
-    + _HEX_ID_VALUE_EXCLUSION
-    + r"[a-z0-9][a-z0-9_.:+-]{0,21}$"
-)
-DIMENSION_TOKEN_PATTERN = (
-    r"^[a-z][a-z0-9_]{0,23}=" + _HEX_ID_VALUE_EXCLUSION + r"[a-z0-9][a-z0-9_.-]{0,21}$"
-)
-
-_AGGREGATE_DIMENSION = re.compile(DIMENSION_TOKEN_PATTERN)
-
-
-# _READ_REQUEST_METRIC is compiled below, after METRIC_TOKEN_PATTERN.
-
-
-_READ_REQUEST_FILTER = re.compile(FILTER_TOKEN_PATTERN)
-
-
-# One definition with the published schema (round-83, closing the class
-# rounds 78-81 aligned one field at a time).
-_READ_REQUEST_GROUPING = re.compile(GROUPING_TOKEN_PATTERN)
-#: The RETAINED form keeps a scope's key and drops its value, so its grammar
-#: is the bare key. Re-checking a carried-forward result against the
-#: submission grammar is the same category error as validating it against the
-#: submission schema (round-50).
-_RETAINED_SCOPE_KEY = re.compile(r"^[a-z][a-z0-9_]{0,23}$")
-#: A trillion rows is past any real table; a 13-19 digit card number and other
-#: long numeric identifiers are not counts (round-56).
-_MAX_PLAUSIBLE_CARDINALITY = 1_000_000_000_000
-
-
-# An ENTITY key identifies a person or account; grouping or scoping by one
-# produces per-identity results, which the aggregate-only policy forbids
-# (round-43 probes: grouping ["user_id"], dimension "user_id=847291").
-# Mechanically decidable from the key alone: the `*_id`/`*_uuid` suffix is the
-# universal entity-key convention, plus the identity columns the policy names.
-_ENTITY_KEY_SUFFIX = re.compile(r"(?:^|_)(id|ids|uuid|guid|key|keys)$")
-
-
-_IDENTITY_KEYS = frozenset(
-    {
-        "email",
-        "emails",
-        "phone",
-        "address",
-        "ssn",
-        "name",
-        "first_name",
-        "last_name",
-        "full_name",
-        "username",
-        "user",
-        "customer",
-        "account",
-        "member",
-        # Network endpoints identify a device, which identifies a person for
-        # exactly the cohort sizes this policy exists to protect (round-84
-        # probe: ip=192.168.1.1 completed re-entry).
-        "ip",
-        "ips",
-        "ip_address",
-        "ipv4",
-        "ipv6",
-        "mac",
-        "mac_address",
-        "device_id",
-    }
-)
 
 
 #: POSITIVE category heads (round-85). Grouping and dimensions split rows —
@@ -1652,6 +1588,94 @@ def _category_dimension_key(key: str) -> bool:
     lowered = key.lower()
     tokens = [token for token in re.split(r"[-_.]", lowered) if token]
     return bool(tokens) and tokens[-1] in _CATEGORY_HEADS
+
+
+#: The category rule lives in the PUBLISHED row-splitting grammars,
+#: following the round-79 (metric) and round-81 (hex values) absorption
+#: precedent: a rule the validator enforces but the schema does not
+#: advertise is exactly the advertised-iff-enforced gap the sweep exists to
+#: prevent — under the shape-only grammar, ``naics_code`` grouping was
+#: schema-valid yet re-entry-rejected. Both grammars compile from
+#: ``_CATEGORY_HEADS``, so the published schema and the enforcement cannot
+#: disagree; the semantic ``_category_dimension_key`` checks below remain
+#: for the retained-dimension path, whose relaxed bare-key grammar cannot
+#: carry the rule.
+_CATEGORY_HEAD_ALTERNATION = "|".join(sorted(_CATEGORY_HEADS))
+GROUPING_TOKEN_PATTERN = (
+    r"^(?=[a-z][a-z0-9_]{0,31}$)(?:[a-z0-9]+_)*(?:" + _CATEGORY_HEAD_ALTERNATION + r")$"
+)
+FILTER_TOKEN_PATTERN = (
+    r"^[a-z][a-z0-9_]{0,23}(=|!=|<|>|<=|>=)"
+    + _HEX_ID_VALUE_EXCLUSION
+    + r"[a-z0-9][a-z0-9_.:+-]{0,21}$"
+)
+DIMENSION_TOKEN_PATTERN = (
+    r"^(?=[a-z][a-z0-9_]{0,23}=)(?:[a-z0-9]+_)*(?:"
+    + _CATEGORY_HEAD_ALTERNATION
+    + r")="
+    + _HEX_ID_VALUE_EXCLUSION
+    + r"[a-z0-9][a-z0-9_.-]{0,21}$"
+)
+
+_AGGREGATE_DIMENSION = re.compile(DIMENSION_TOKEN_PATTERN)
+
+
+# _READ_REQUEST_METRIC is compiled below, after METRIC_TOKEN_PATTERN.
+
+
+_READ_REQUEST_FILTER = re.compile(FILTER_TOKEN_PATTERN)
+
+
+# One definition with the published schema (round-83, closing the class
+# rounds 78-81 aligned one field at a time).
+_READ_REQUEST_GROUPING = re.compile(GROUPING_TOKEN_PATTERN)
+#: The RETAINED form keeps a scope's key and drops its value, so its grammar
+#: is the bare key. Re-checking a carried-forward result against the
+#: submission grammar is the same category error as validating it against the
+#: submission schema (round-50).
+_RETAINED_SCOPE_KEY = re.compile(r"^[a-z][a-z0-9_]{0,23}$")
+#: A trillion rows is past any real table; a 13-19 digit card number and other
+#: long numeric identifiers are not counts (round-56).
+_MAX_PLAUSIBLE_CARDINALITY = 1_000_000_000_000
+
+
+# An ENTITY key identifies a person or account; grouping or scoping by one
+# produces per-identity results, which the aggregate-only policy forbids
+# (round-43 probes: grouping ["user_id"], dimension "user_id=847291").
+# Mechanically decidable from the key alone: the `*_id`/`*_uuid` suffix is the
+# universal entity-key convention, plus the identity columns the policy names.
+_ENTITY_KEY_SUFFIX = re.compile(r"(?:^|_)(id|ids|uuid|guid|key|keys)$")
+
+
+_IDENTITY_KEYS = frozenset(
+    {
+        "email",
+        "emails",
+        "phone",
+        "address",
+        "ssn",
+        "name",
+        "first_name",
+        "last_name",
+        "full_name",
+        "username",
+        "user",
+        "customer",
+        "account",
+        "member",
+        # Network endpoints identify a device, which identifies a person for
+        # exactly the cohort sizes this policy exists to protect (round-84
+        # probe: ip=192.168.1.1 completed re-entry).
+        "ip",
+        "ips",
+        "ip_address",
+        "ipv4",
+        "ipv6",
+        "mac",
+        "mac_address",
+        "device_id",
+    }
+)
 
 
 #: Heads that PRESERVE per-entity cardinality (round-84): email_hash groups
