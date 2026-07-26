@@ -268,7 +268,8 @@ class MCPToolParameter:
         required: Whether the parameter is required.
         default: Default value if not provided.
         enum: Allowed values if restricted.
-        items: JSON Schema for array items (e.g. ``{"type": "string"}``).
+        items: JSON Schema for array items. Nested (an object item with
+            its own ``properties``) as well as flat (``{"type": "string"}``).
     """
 
     name: str
@@ -277,7 +278,7 @@ class MCPToolParameter:
     required: bool = True
     default: Any = None
     enum: tuple[str, ...] | None = None
-    items: dict[str, str] | None = None
+    items: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

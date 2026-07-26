@@ -20,6 +20,11 @@ import structlog
 from ouroboros.bigbang.pm_seed import PMSeed
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.owner_only import write_owner_only
+from ouroboros.core.requirement_candidate import (
+    extraction_safe_answer,
+    extraction_safe_question,
+)
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -212,7 +217,8 @@ def save_pm_document(
         pm_path = output_dir / _PM_FILENAME
 
     content = generate_pm_markdown(seed)
-    pm_path.write_text(content, encoding="utf-8")
+    if not write_owner_only(pm_path, content):
+        log.warning("pm.document_save_durability_uncertain", path=str(pm_path))
 
     log.info(
         "pm.document_saved",
@@ -226,6 +232,33 @@ def save_pm_document(
 # ──────────────────────────────────────────────────────────────────
 # LLM-based PM Document Generator
 # ──────────────────────────────────────────────────────────────────
+
+
+def extraction_safe_qa_pairs(
+    qa_pairs: list[tuple[str, str]],
+    provenances: list[str] | None = None,
+) -> list[tuple[str, str]]:
+    """Q&A pairs in the form that may enter a durable requirements prompt.
+
+    Answers by ingestion-time provenance (field-first, marker fallback),
+    questions by taint provenance — the same rules the transcript formatters
+    apply (rounds 74, 80, 84, 85). ``provenances`` aligns with ``qa_pairs``
+    when the pairs come from interview rounds; explicitly supplied pairs
+    default to the marker fallback. Module-level so the observation-isolation
+    invariant table can pin this surface next to the others.
+    """
+    sanitized: list[tuple[str, str]] = []
+    observation_seen = False
+    for index, (question, answer) in enumerate(qa_pairs):
+        declared = (
+            provenances[index] if provenances is not None and index < len(provenances) else "human"
+        )
+        safe_question = extraction_safe_question(question, observation_seen=observation_seen)
+        safe_answer = extraction_safe_answer(answer, declared)
+        if safe_answer != answer:
+            observation_seen = True
+        sanitized.append((safe_question, safe_answer))
+    return sanitized
 
 
 @dataclass
@@ -284,8 +317,18 @@ class PMDocumentGenerator:
             Result containing the generated Markdown string or ProviderError.
         """
         # Extract Q&A from interview state if not provided directly
+        provenances: list[str] | None = None
         if qa_pairs is None and interview_state is not None:
             qa_pairs = [(r.question, r.user_response or "") for r in interview_state.rounds]
+            provenances = [r.answer_provenance for r in interview_state.rounds]
+        # The PM document is a DURABLE requirements artifact and its prompt
+        # tells the LLM to preserve transcript information, so it is an
+        # extraction surface (round-84) — it reconstructed raw Q&A and
+        # bypassed the withholding entirely. Both sources (interview state
+        # and explicitly supplied pairs) funnel through the same rules:
+        # answers by marker, questions by taint provenance.
+        if qa_pairs is not None:
+            qa_pairs = extraction_safe_qa_pairs(qa_pairs, provenances)
 
         user_prompt = self._build_generation_prompt(seed, qa_pairs)
 
@@ -363,7 +406,8 @@ class PMDocumentGenerator:
         output_dir.mkdir(parents=True, exist_ok=True)
         pm_path = output_dir / _PM_FILENAME
 
-        pm_path.write_text(content, encoding="utf-8")
+        if not write_owner_only(pm_path, content):
+            log.warning("pm.document_save_durability_uncertain", path=str(pm_path))
 
         log.info(
             "pm.document_saved",

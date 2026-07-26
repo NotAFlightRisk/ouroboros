@@ -374,3 +374,685 @@ async def test_seed_generator_returns_typed_reopen_error_for_conflict(tmp_path) 
     assert result.error.details["code"] == "interview_reopen_required"
     assert result.error.details["blockers"][0]["reason"] == "conflict_requires_tradeoff"
     adapter.complete.assert_not_awaited()
+
+
+def _round_candidates(distillation: RequirementDistillation) -> list[RequirementCandidate]:
+    """Only the candidates promoted from interview ROUNDS.
+
+    The initial goal always yields its own candidate; the round-73 property
+    is about answers.
+    """
+    return [c for c in distillation.candidates if c.candidate_id.startswith("round-")]
+
+
+def _state_with_answer(answer: str) -> InterviewState:
+    return InterviewState(
+        interview_id="iv_provenance",
+        initial_context="Build the reporting lane",
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question="What must the system guarantee?",
+                user_response=answer,
+            )
+        ],
+    )
+
+
+def test_round73_data_observation_is_not_promoted_to_a_requirement() -> None:
+    """A [from-data] answer is a confirmed OBSERVATION, not a product decision.
+
+    Its narrative routinely contains this gate's own trigger words —
+    "confirmed", "required" — so the deterministic promotion manufactured a
+    requirement with confirmation_authority=USER out of a decision the user
+    never made. End-to-end through build_requirement_distillation, as the
+    review asked.
+    """
+    marked = "[from-data] Confirmed: 42 enterprise accounts require SSO today."
+    distillation = build_requirement_distillation(_state_with_answer(marked))
+
+    assert _round_candidates(distillation) == []
+
+    # The same sentence in the user's own words IS a decision, and promotes.
+    unmarked = "Confirmed: 42 enterprise accounts require SSO today."
+    promoted = _round_candidates(build_requirement_distillation(_state_with_answer(unmarked)))
+
+    assert len(promoted) == 1
+    assert promoted[0].text == unmarked
+
+
+def test_round73_research_observation_is_the_same_class() -> None:
+    """[from-research] carries the same user-adopted-observation provenance;
+    the intent guard already groups them, and a second grouping here is how
+    the two surfaces would drift."""
+    marked = "[from-research] The payment provider requires 3DS for EU cards."
+    assert _round_candidates(build_requirement_distillation(_state_with_answer(marked))) == []
+
+
+def test_round73_users_own_words_around_data_still_decide() -> None:
+    """A mixed answer the USER leads is the user's decision.
+
+    The marker is a provenance stamp on what the answer leads with; an answer
+    that opens in the user's own words and cites data inline promotes.
+    """
+    mixed = "We must support 100 concurrent sessions given [from-data] 42 accounts."
+    promoted = _round_candidates(build_requirement_distillation(_state_with_answer(mixed)))
+    assert len(promoted) == 1
+
+
+def test_round74_observation_content_never_reaches_the_extractor() -> None:
+    """The LLM path is enforced at its INPUT, where enforcement is decidable.
+
+    Round 73 gated the deterministic candidates; the ordinary interview hands
+    the transcript to an LLM extractor, which paraphrased the observation into
+    a Seed AC. A paraphrase cannot be provenance-checked afterwards, so the
+    content must not reach the prompt at all.
+    """
+    from ouroboros.bigbang.seed_generator import SeedGenerator
+    from ouroboros.core.requirement_candidate import OBSERVATION_WITHHELD_NOTE
+
+    state = _state_with_answer("[from-data] Confirmed: 42 enterprise accounts require SSO today.")
+    state.rounds.append(
+        InterviewRound(
+            round_number=2,
+            question="So what must the product guarantee?",
+            user_response="Enterprise accounts must be able to use SSO.",
+        )
+    )
+
+    generator = SeedGenerator.__new__(SeedGenerator)
+    context = generator._build_interview_context(state)
+
+    assert "42 enterprise accounts" not in context
+    assert "[from-data]" not in context
+    assert OBSERVATION_WITHHELD_NOTE in context
+    # The user's own decision still reaches the extractor verbatim.
+    assert "Enterprise accounts must be able to use SSO." in context
+
+
+def test_round74_pm_transcript_withholds_the_same_class() -> None:
+    """A PMSeed is durable too, and the PM extractor paraphrases the same way."""
+    from ouroboros.bigbang.pm_interview import PMInterviewEngine
+    from ouroboros.core.requirement_candidate import OBSERVATION_WITHHELD_NOTE
+
+    state = _state_with_answer("[from-research] The provider requires 3DS for EU cards.")
+
+    engine = PMInterviewEngine.__new__(PMInterviewEngine)
+    transcript = engine._build_interview_context(state)
+
+    assert "3DS" not in transcript
+    assert OBSERVATION_WITHHELD_NOTE in transcript
+
+
+def test_round76_a_pre_change_cache_cannot_bypass_the_provenance_gate() -> None:
+    """The derivation-policy version participates in cache validity.
+
+    Rounds 73-74 changed what the distillation derives, but a cache computed
+    before the change matches on fingerprint and revision — a probe reused
+    one and emitted its research observation as a Seed acceptance criterion.
+    The version bump is the migration: v1 caches are recomputed, not reused.
+    """
+    from ouroboros.core.requirement_candidate import (
+        REQUIREMENT_DISTILLATION_SCHEMA_VERSION,
+        RequirementDistillation,
+    )
+
+    state = _state_with_answer("[from-research] The provider requires 3DS for EU cards.")
+    # A cache distilled under the pre-change policy: same inputs, old
+    # version, and the observation promoted the way v1 promoted it.
+    stale = RequirementDistillation(
+        candidates=(
+            RequirementCandidate(
+                candidate_id="round-1:requirement",
+                section=RequirementSection.ACCEPTANCE_CRITERION,
+                text="[from-research] The provider requires 3DS for EU cards.",
+                content_source=CandidateContentSource.USER_STATED,
+                resolution=CandidateResolution.CONFIRMED,
+                confirmation_authority=ConfirmationAuthority.USER,
+                evidence_ids=("round-1:answer",),
+                required=True,
+            ),
+        ),
+        evidence=(
+            RequirementEvidence(
+                evidence_id="round-1:answer",
+                kind=RequirementEvidenceKind.USER_STATEMENT,
+                text="[from-research] The provider requires 3DS for EU cards.",
+            ),
+        ),
+        schema_version="requirement-distillation.v1",
+        input_revision=state.requirement_input_revision,
+        input_fingerprint=state.requirement_input_fingerprint(),
+    )
+    state.requirement_distillation = stale
+    assert REQUIREMENT_DISTILLATION_SCHEMA_VERSION != "requirement-distillation.v1"
+
+    rebuilt = build_requirement_distillation(state)
+
+    assert rebuilt is not stale, "the pre-change cache was reused"
+    assert _round_candidates(rebuilt) == []
+    assert rebuilt.schema_version == REQUIREMENT_DISTILLATION_SCHEMA_VERSION
+
+
+def test_round76_a_current_cache_is_still_reused() -> None:
+    """The bump must not disable the cache — a v2 cache stays a cache."""
+    state = _state_with_answer("We must ship the reporting lane this quarter.")
+    first = build_requirement_distillation(state)
+    state.requirement_distillation = first
+
+    assert build_requirement_distillation(state) is first
+
+
+def test_round80_questions_after_an_observation_are_withheld() -> None:
+    """The reviewer's probe: a later question restates the withheld observation.
+
+    The interviewer legitimately sees observations in conversational context,
+    so a question generated after one can carry it verbatim — and the
+    extractors derive requirements from the whole conversation. Taint
+    provenance is the decidable line: questions before the first observation
+    keep their interpretive value; every question after it is withheld.
+    """
+    from ouroboros.bigbang.seed_generator import SeedGenerator
+    from ouroboros.core.requirement_candidate import (
+        OBSERVATION_WITHHELD_NOTE,
+        QUESTION_WITHHELD_NOTE,
+    )
+
+    state = _state_with_answer("[from-data] 42 enterprise accounts require SSO.")
+    state.rounds[0].question = "What does the data show about SSO?"
+    state.rounds.append(
+        InterviewRound(
+            round_number=2,
+            question="Given that 42 enterprise accounts require SSO, what tier is needed?",
+            user_response="Enterprise tier must include SSO.",
+        )
+    )
+
+    generator = SeedGenerator.__new__(SeedGenerator)
+    context = generator._build_interview_context(state)
+
+    # The pre-observation question keeps its interpretive value.
+    assert "What does the data show about SSO?" in context
+    # The post-observation question — which restates the observation — is out.
+    assert "42 enterprise accounts" not in context
+    assert QUESTION_WITHHELD_NOTE in context
+    assert OBSERVATION_WITHHELD_NOTE in context
+    # The user's own decision survives verbatim.
+    assert "Enterprise tier must include SSO." in context
+
+
+def test_round80_pm_and_plugin_paths_withhold_tainted_questions() -> None:
+    """All three extraction surfaces apply the same taint rule."""
+    from ouroboros.bigbang.pm_interview import PMInterviewEngine
+    from ouroboros.core.requirement_candidate import QUESTION_WITHHELD_NOTE
+    from ouroboros.mcp.tools.authoring_handlers import _format_extraction_transcript
+
+    state = _state_with_answer("[from-research] The provider requires 3DS.")
+    state.rounds.append(
+        InterviewRound(
+            round_number=2,
+            question="Since the provider requires 3DS, how should checkout flow?",
+            user_response="Checkout must support 3DS redirects.",
+        )
+    )
+
+    pm_engine = PMInterviewEngine.__new__(PMInterviewEngine)
+    for label, transcript in (
+        ("pm", pm_engine._build_interview_context(state)),
+        ("plugin", _format_extraction_transcript(state)),
+    ):
+        assert "provider requires 3DS, how should checkout" not in transcript, label
+        assert QUESTION_WITHHELD_NOTE in transcript, label
+        assert "Checkout must support 3DS redirects." in transcript, label
+
+
+def test_round80_observation_free_interviews_keep_every_question() -> None:
+    """No observation, no taint — the interpretive context is untouched."""
+    from ouroboros.bigbang.seed_generator import SeedGenerator
+    from ouroboros.core.requirement_candidate import QUESTION_WITHHELD_NOTE
+
+    state = _state_with_answer("We must ship the reporting lane this quarter.")
+    state.rounds.append(
+        InterviewRound(
+            round_number=2,
+            question="What is the acceptance bar?",
+            user_response="All exports finish under a minute.",
+        )
+    )
+
+    generator = SeedGenerator.__new__(SeedGenerator)
+    context = generator._build_interview_context(state)
+
+    assert QUESTION_WITHHELD_NOTE not in context
+    assert "What is the acceptance bar?" in context
+
+
+def test_round81_summary_answers_cannot_bypass_the_withholding() -> None:
+    """The oversized-context path substitutes the summary ANSWER for the
+    initial context — the fourth entrance to the extraction contexts.
+
+    The reviewer's probe: a summary answer leading with [from-data] reached
+    both the Seed and PM extraction contexts verbatim, and — because the
+    summary round is skipped in the loop — never set the question taint.
+    """
+    from ouroboros.bigbang.interview import (
+        INITIAL_CONTEXT_SUMMARY_QUESTION,
+        MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
+    )
+    from ouroboros.bigbang.pm_interview import PMInterviewEngine
+    from ouroboros.bigbang.seed_generator import SeedGenerator
+    from ouroboros.core.requirement_candidate import (
+        OBSERVATION_WITHHELD_NOTE,
+        QUESTION_WITHHELD_NOTE,
+    )
+
+    state = InterviewState(
+        interview_id="iv_81",
+        # Oversized, so prompt_safe_initial_context falls through to the
+        # summary answer.
+        initial_context="x" * (MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS + 1),
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response=("[from-data] Confirmed: 42 enterprise accounts require SSO today."),
+            ),
+            InterviewRound(
+                round_number=2,
+                question="Given the 42 enterprise accounts, what tier is needed?",
+                user_response="Enterprise tier must include SSO.",
+            ),
+        ],
+    )
+
+    dev = SeedGenerator.__new__(SeedGenerator)._build_interview_context(state)
+    pm = PMInterviewEngine.__new__(PMInterviewEngine)._build_interview_context(state)
+
+    for label, context in (("dev", dev), ("pm", pm)):
+        assert "42 enterprise accounts" not in context, label
+        assert OBSERVATION_WITHHELD_NOTE in context, label
+        # The summary was the observation, so every question is tainted.
+        assert QUESTION_WITHHELD_NOTE in context, label
+        assert "Enterprise tier must include SSO." in context, label
+
+
+def test_round81_plugin_initial_context_is_sanitized() -> None:
+    """The plugin transcript's own header applies the same rule."""
+    from ouroboros.core.requirement_candidate import OBSERVATION_WITHHELD_NOTE
+    from ouroboros.mcp.tools.authoring_handlers import _format_extraction_transcript
+
+    state = _state_with_answer("Enterprise tier must include SSO.")
+    state.initial_context = "[from-data] 42 enterprise accounts require SSO."
+
+    transcript = _format_extraction_transcript(state)
+
+    assert "42 enterprise accounts" not in transcript
+    assert OBSERVATION_WITHHELD_NOTE in transcript
+
+
+def test_round82_observation_context_is_not_promoted_as_the_goal() -> None:
+    """The initial context takes the same provenance gate as every answer.
+
+    An observation-marked context was promoted as a CONFIRMED goal with user
+    authority, so [from-data] observations became the runnable Seed goal
+    through the reference-aware path while every extraction surface withheld
+    them — the fifth entrance.
+    """
+    state = _state_with_answer("Enterprise tier must include SSO.")
+    state.initial_context = "[from-data] 42 enterprise accounts require SSO today."
+
+    distillation = build_requirement_distillation(state)
+
+    assert all(c.candidate_id != "initial-goal" for c in distillation.candidates)
+
+    # An ordinary user-authored context still yields the goal candidate.
+    plain = _state_with_answer("Enterprise tier must include SSO.")
+    plain.initial_context = "Build SSO for enterprise accounts"
+    assert any(
+        c.candidate_id == "initial-goal" for c in build_requirement_distillation(plain).candidates
+    )
+
+
+def test_round84_observation_only_input_is_not_runnable() -> None:
+    """Nothing user-authored promoted → explicitly non-runnable, not empty.
+
+    After the provenance gate withholds the initial goal, a resolved
+    reference with an ordinary (non-promoting) follow-up used to fall back
+    to the generic goal and produce a runnable Seed with no constraints and
+    no acceptance criteria.
+    """
+    state = _reference_state(confirmation="Thanks, that makes sense to me.")
+    state.initial_context = "[from-data] 42 enterprise accounts require SSO."
+
+    applied = apply_requirement_distillation(
+        {"goal": "llm-extracted"}, build_requirement_distillation(state)
+    )
+
+    reasons = [b.reason for b in applied.promotion.blockers]
+    assert "no_user_authored_requirement_promoted" in reasons
+    # And nothing pretended to be a runnable confirmed contract.
+    assert applied.requirements.get("goal") != "Confirmed interview requirements"
+
+    # The gate is about EMPTINESS, not observations: a promoting user answer
+    # keeps the reference path runnable exactly as before.
+    promoted_state = _reference_state(
+        confirmation="Confirmed requirement: keyboard-first triage must ship."
+    )
+    promoted = apply_requirement_distillation(
+        {"goal": "llm-extracted"}, build_requirement_distillation(promoted_state)
+    )
+    assert not promoted.promotion.blockers
+
+
+def test_round85_observation_only_gate_covers_every_generation_path() -> None:
+    """ONE readiness check, asked by all three generation paths.
+
+    A plain (non-reference) observation-only interview yielded zero
+    candidates, zero blockers, and an extractor-invented Seed; the plugin
+    path bypassed the reference gate entirely; the PM path had no gate.
+    """
+    import asyncio
+
+    from ouroboros.bigbang.requirement_distillation import (
+        OBSERVATION_ONLY_INTERVIEW_MESSAGE,
+        interview_is_observation_only,
+    )
+
+    state = _state_with_answer("[from-data] Confirmed: 42 accounts require SSO.")
+    state.initial_context = "[from-research] The provider requires 3DS."
+
+    assert interview_is_observation_only(state)
+
+    # A single user-authored answer anywhere makes it generatable again.
+    state.rounds.append(
+        InterviewRound(
+            round_number=2,
+            question="So what must ship?",
+            user_response="Enterprise tier must include SSO.",
+        )
+    )
+    assert not interview_is_observation_only(state)
+
+    # Field-only observation (marker stripped) still counts as observation.
+    field_only = _state_with_answer("Confirmed: 42 accounts require SSO.")
+    field_only.initial_context = ""
+    field_only.rounds[0].answer_provenance = "data_fact"
+    assert interview_is_observation_only(field_only)
+
+    # And the dev generation path refuses end-to-end with the shared message.
+    from pathlib import Path as _Path
+    import tempfile
+    from unittest.mock import AsyncMock
+
+    from ouroboros.bigbang.ambiguity import AmbiguityScore
+    from ouroboros.bigbang.seed_generator import SeedGenerator
+
+    observation_only = _state_with_answer("[from-data] Confirmed: 42 accounts require SSO.")
+    observation_only.initial_context = "[from-data] observed context"
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        generator = SeedGenerator(llm_adapter=AsyncMock(), output_dir=_Path(tmp_dir) / "seeds")
+        outcome = asyncio.run(
+            generator.generate(
+                observation_only,
+                AmbiguityScore(overall_score=0.1, breakdown=None),
+            )
+        )
+    assert outcome.is_err
+    assert OBSERVATION_ONLY_INTERVIEW_MESSAGE in str(outcome.error)
+
+
+def test_round86_provenance_is_a_closed_enum_and_a_cache_key() -> None:
+    """Provenance authority is bounded and cache-visible.
+
+    An open str failed open: a persisted `user_verified` was neither
+    "human" nor an observation class, so it overrode marker classification
+    and un-withheld a `[from-data]` answer. And the fingerprint omitted the
+    field, so flipping a round from human to data_fact reused a cache that
+    had promoted the answer.
+    """
+    from pydantic import ValidationError as PydanticValidationError
+
+    from ouroboros.core.requirement_candidate import effective_answer_provenance
+
+    # Unknown values fail closed at model validation, before any consumer.
+    with pytest.raises(PydanticValidationError):
+        InterviewRound(
+            round_number=1,
+            question="q",
+            user_response="a",
+            answer_provenance="user_verified",
+        )
+
+    # And the shared helper grants no authority to a raw unknown string:
+    # marker classification decides, so the observation stays withheld.
+    assert effective_answer_provenance("[from-data] X", "user_verified") == "data_fact"
+    assert effective_answer_provenance("plain decision", "user_verified") == "human"
+
+    # Provenance is a semantics-bearing canonical input: flipping it must
+    # change the fingerprint so a stale promoted cache cannot be reused.
+    state = _state_with_answer("Confirmed: 42 accounts require SSO.")
+    fingerprint_as_human = state.requirement_input_fingerprint()
+    state.rounds[0].answer_provenance = "data_fact"
+    assert state.requirement_input_fingerprint() != fingerprint_as_human
+
+
+def test_round88_withheld_authority_requires_a_promoted_replacement() -> None:
+    """Phatic text is not requirement authority.
+
+    A withheld `[from-data]` goal plus the human answer `Thanks.` passed the
+    round-85 any-non-observation-text gate, and the extractor invented a
+    Seed from a transcript whose only substantive content was withheld. When
+    observations were withheld, readiness requires a PROMOTED user-authored
+    candidate — the reference-path standard — not merely any human text.
+    Interviews without observations are untouched.
+    """
+    from ouroboros.bigbang.requirement_distillation import (
+        interview_has_no_promotable_requirement,
+    )
+
+    # Withheld goal + phatic answer: blocked.
+    state = _state_with_answer("Thanks.")
+    state.initial_context = "[from-data] Confirmed: 42 accounts require SSO."
+    assert interview_has_no_promotable_requirement(state)
+
+    # A promoted user-authored requirement anywhere reopens generation.
+    state.rounds.append(
+        InterviewRound(
+            round_number=2,
+            question="So what must ship?",
+            user_response="Enterprise tier must include SSO.",
+        )
+    )
+    state.invalidate_requirement_distillation()
+    assert not interview_has_no_promotable_requirement(state)
+
+    # No observations anywhere: soft-worded interviews stay generatable.
+    plain = _state_with_answer("Thanks.")
+    plain.initial_context = "Build the reporting lane"
+    assert not interview_has_no_promotable_requirement(plain)
+
+
+def test_round91_goal_authority_is_positional_not_linguistic() -> None:
+    """A typed act — answering the designated question — is what promotes.
+
+    Rounds 88/90/91 oscillated on linguistic tests of the answer text:
+    promoted-only rejected the soft goal "Build an SSO dashboard...", and
+    two-non-phatic-words admitted "That is surprising.". The gate now
+    requires a promoted candidate, and the promotion comes from POSITION:
+    any human answer to GOAL_RESTATEMENT_QUESTION is the user's goal,
+    whatever its wording — while the same words in an ordinary round carry
+    no requirement authority.
+    """
+    from ouroboros.bigbang.interview import GOAL_RESTATEMENT_QUESTION
+    from ouroboros.bigbang.requirement_distillation import (
+        interview_has_no_promotable_requirement,
+    )
+
+    # Observation context + reaction prose in an ORDINARY round: blocked
+    # (the round-91 "That is surprising." probe), as is a soft goal that
+    # was never asked for.
+    for prose in ("That is surprising.", "Build an SSO dashboard for enterprise admins."):
+        state = _state_with_answer(prose)
+        state.initial_context = "[from-data] Confirmed: 42 accounts require SSO."
+        assert interview_has_no_promotable_requirement(state), prose
+
+    # The SAME soft wording as the answer to the designated question: the
+    # typed act promotes it, no linguistic judgment involved.
+    state = _state_with_answer("[from-data] Confirmed: 42 accounts require SSO.")
+    state.initial_context = ""
+    state.rounds.append(
+        InterviewRound(
+            round_number=2,
+            question=GOAL_RESTATEMENT_QUESTION,
+            user_response="Build an SSO dashboard for enterprise admins.",
+        )
+    )
+    assert not interview_has_no_promotable_requirement(state)
+
+    # A generated or observation-marked reply to the goal question is not a
+    # decision (round-91 blocker 4 applied to the new slot).
+    for reply, provenance in (
+        ("[from-auto] Enterprise tier must include SSO.", "generated"),
+        ("[from-data] Confirmed: 42 accounts require SSO.", "data_fact"),
+    ):
+        state = _state_with_answer("[from-data] Confirmed: 42 accounts require SSO.")
+        state.initial_context = ""
+        state.rounds.append(
+            InterviewRound(
+                round_number=2,
+                question=GOAL_RESTATEMENT_QUESTION,
+                user_response=reply,
+                answer_provenance=provenance,
+            )
+        )
+        assert interview_has_no_promotable_requirement(state), reply
+
+
+def test_round91_generated_answers_never_carry_user_authority() -> None:
+    """[from-auto] text must not become a USER_STATED candidate."""
+    state = _state_with_answer("[from-auto] Enterprise tier must include SSO.")
+    state.rounds[0].answer_provenance = "generated"
+    distillation = build_requirement_distillation(state)
+    assert all("[from-auto]" not in candidate.text for candidate in distillation.candidates)
+    assert not [
+        candidate
+        for candidate in distillation.candidates
+        if candidate.candidate_id.endswith(":requirement")
+    ]
+
+
+def test_round91_oversized_data_summary_never_promotes_the_raw_goal() -> None:
+    """The AUTHORITATIVE context value carries the goal, with its provenance.
+
+    Oversized raw context + markerless data-typed summary: extraction
+    withheld the summary, but distillation promoted the raw context as a
+    user-confirmed goal and generation produced an invented runnable Seed.
+    """
+    from ouroboros.bigbang.interview import (
+        INITIAL_CONTEXT_SUMMARY_QUESTION,
+        MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
+    )
+    from ouroboros.bigbang.requirement_distillation import (
+        interview_has_no_promotable_requirement,
+    )
+
+    state = InterviewState(
+        interview_id="iv_r91_summary",
+        initial_context="x" * (MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS + 1),
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response="Confirmed: 42 accounts require SSO.",
+                answer_provenance="data_fact",
+            )
+        ],
+    )
+    distillation = build_requirement_distillation(state)
+    assert not [c for c in distillation.candidates if c.candidate_id == "initial-goal"]
+    assert interview_has_no_promotable_requirement(state)
+
+    # A HUMAN summary carries the goal with the summary text, not the raw blob.
+    human = InterviewState(
+        interview_id="iv_r91_summary_h",
+        initial_context="x" * (MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS + 1),
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response="Build the reporting lane for enterprise admins.",
+            )
+        ],
+    )
+    goal = next(
+        c
+        for c in build_requirement_distillation(human).candidates
+        if c.candidate_id == "initial-goal"
+    )
+    assert goal.text == "Build the reporting lane for enterprise admins."
+
+
+def test_round94_pm_decoration_does_not_launder_provenance(tmp_path) -> None:
+    """Provenance is classified from the ORIGINAL answer, not the bundle.
+
+    The PM layer prepends "PM answer:" to reframed answers before recording;
+    that pushed a leading [from-data] marker off the front, the round was
+    stamped human, and the observation earned a promoted requirement and
+    passed the readiness gate.
+    """
+    import asyncio
+
+    from ouroboros.bigbang.interview import InterviewEngine
+    from ouroboros.bigbang.pm_interview import PMInterviewEngine
+    from ouroboros.bigbang.question_classifier import QuestionClassifier
+    from ouroboros.bigbang.requirement_distillation import (
+        interview_has_no_promotable_requirement,
+    )
+
+    inner = InterviewEngine(llm_adapter=AsyncMock(), state_dir=tmp_path)
+    engine = PMInterviewEngine(
+        inner=inner,
+        classifier=QuestionClassifier(llm_adapter=AsyncMock()),
+        llm_adapter=AsyncMock(),
+    )
+    reframed = "How many enterprise accounts need SSO?"
+    engine._reframe_map[reframed] = "What is the SSO adoption metric?"
+
+    state = InterviewState(
+        interview_id="iv_r94",
+        initial_context="[from-data] Confirmed: 42 accounts require SSO.",
+        rounds=[],
+    )
+    observation = "[from-data] Confirmed: 42 enterprise accounts require SSO today."
+    outcome = asyncio.run(engine.record_response(state, observation, reframed))
+    assert outcome.is_ok
+
+    recorded = state.rounds[-1]
+    assert recorded.user_response.startswith("PM answer:")
+    assert recorded.answer_provenance == "data_fact"
+
+    distillation = build_requirement_distillation(state)
+    assert not [c for c in distillation.candidates if "42 enterprise accounts" in c.text]
+    assert interview_has_no_promotable_requirement(state)
+
+
+def test_round100_generated_only_interviews_are_not_generatable() -> None:
+    """Human authority must exist somewhere — auto is unaffected.
+
+    A probe whose every contentful input was [from-auto]/[from-safe-default]
+    passed the gate and produced a runnable Seed. `ooo auto` still works:
+    it always carries the user's own goal as initial_context, and safe
+    defaults fill in what the user left unspecified.
+    """
+    from ouroboros.bigbang.requirement_distillation import (
+        interview_has_no_promotable_requirement,
+    )
+
+    generated_only = _state_with_answer("[from-auto] Use a conservative retry policy.")
+    generated_only.initial_context = "[from-safe-default] Assume a single-tenant deployment."
+    assert interview_has_no_promotable_requirement(generated_only)
+
+    # Auto's real shape: a human goal plus generated detail answers.
+    auto_like = _state_with_answer("[from-auto] Use a conservative retry policy.")
+    auto_like.initial_context = "Build a rate-limited ingestion API."
+    assert not interview_has_no_promotable_requirement(auto_like)

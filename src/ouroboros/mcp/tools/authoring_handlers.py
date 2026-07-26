@@ -6,6 +6,7 @@ Contains handlers for interview and seed generation tools:
 """
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -40,17 +41,31 @@ from ouroboros.bigbang.interview import (
     InterviewEngine,
     InterviewState,
     InterviewStatus,
+    prompt_safe_initial_context_with_provenance,
 )
 from ouroboros.bigbang.requirement_distillation import (
+    OBSERVATION_ONLY_INTERVIEW_MESSAGE,
     build_promoted_reference_seed,
     build_requirement_distillation,
+    interview_has_no_promotable_requirement,
     is_reference_aware_distillation,
     seed_readiness_details,
 )
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
+from ouroboros.contracts.data_evidence import (
+    _identifier_carries_payload,
+    _identifier_looks_secret,
+    _mutating_tool_verb,
+)
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.initial_context import resolve_initial_context_input
+from ouroboros.core.owner_only import secure_directory, write_owner_only
+from ouroboros.core.requirement_candidate import (
+    classify_answer_provenance,
+    extraction_safe_answer,
+    extraction_safe_question,
+)
 from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
     InterviewTurnContext,
@@ -65,8 +80,10 @@ from ouroboros.mcp.tools.subagent import (
     build_interview_question_advisory_subagents,
     build_interview_subagent,
     dispatch_plugin_terminal,
+    lanes_with_published_contracts,
     lateral_persona_panel_metadata_from_capability_definitions,
     register_question_advisory_fanout,
+    register_question_advisory_fanout_from_lanes,
     resolve_subagent_dispatch,
     should_dispatch_via_plugin,
     stamp_fanout_meta,
@@ -709,8 +726,13 @@ def _build_question_advisory_request(
         "advisory_goal": "help_human_answer_interview_question",
         "parallel_preference": advisory["parallel_preference"],
         "sequential_fallback": dict(advisory["sequential_fallback"]),
-        "allowed_capabilities": ["inspect_code", "web_research", "run_lateral_review"],
-        "lanes": list(advisory["lanes"]),
+        "allowed_capabilities": [
+            "inspect_code",
+            "web_research",
+            "run_lateral_review",
+            "call_mcp",
+        ],
+        "lanes": _advisory_lanes_with_known_data_tools(advisory),
         "synthesis_contract": dict(advisory["synthesis_contract"]),
         "mcp_tool_capability": mcp_tool_capability,
     }
@@ -719,6 +741,80 @@ def _build_question_advisory_request(
     if code_investigation_request is not None:
         request["code_investigation_request"] = code_investigation_request
     return request
+
+
+# Known data tools from the environment are identifiers, not free text.
+# Aligned with the safe-identifier grammar used at re-entry (round-34): a
+# colon would read as a credential assignment there, so it is not part of
+# the tool-name grammar.
+_KNOWN_DATA_TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+_MAX_KNOWN_DATA_TOOLS = 16
+
+
+def _admissible_data_tool_names(raw: str) -> list[str]:
+    """Filter a comma-separated env value down to safe tool identifiers.
+
+    Env values are untrusted prompt input: each entry must be a plain tool
+    identifier (no whitespace/newlines that could smuggle prompt text), and
+    the list is bounded. A hint whose identifier carries a mutating verb is
+    rejected BEFORE dispatch (bot-review round-10): the plugin bridge
+    grants the child broad permissions, and post-execution validation
+    cannot undo a mutation the hint steered it into.
+    Credential-shaped names are filtered with the SAME classifier the
+    re-entry boundary applies (round-37): a hint that survives
+    configuration must never be rejected when a child later reports it as
+    a source — the two identifier contracts stay aligned.
+    """
+    return [
+        item.strip()
+        for item in raw.split(",")
+        if item.strip()
+        and _KNOWN_DATA_TOOL_NAME.match(item.strip())
+        and _mutating_tool_verb(item.strip()) is None
+        and not _identifier_looks_secret(item.strip())
+        and not _identifier_carries_payload(item.strip())
+    ][:_MAX_KNOWN_DATA_TOOLS]
+
+
+def _advisory_lanes_with_known_data_tools(advisory: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Copy advisory lanes, injecting configured data-tool hints.
+
+    ``OUROBOROS_KNOWN_DATA_TOOLS`` (comma-separated MCP tool names) advertises
+    tools the child may PROPOSE queries against; the parent runs them after
+    user confirmation. ``OUROBOROS_KNOWN_DATA_TOOLS_READONLY`` is the
+    operator's explicit declaration that a tool is read-only, and is the ONLY
+    way a configured name earns direct-execution steering. Lane dicts are
+    copied so the cached capability metadata is never mutated.
+    """
+    # Advertised IFF enforced, on EVERY public surface (round-38): the lanes
+    # returned here ride both the parent response metadata and the plugin
+    # transport, so an unenforceable contract is published as its non-enforced
+    # marker exactly as the child prompt and registration already treat it.
+    lanes = lanes_with_published_contracts(advisory.get("lanes") or ())
+    # NO name heuristic grants direct execution. Round-85 granted it on a
+    # read-shaped token and round-86 promoted migrate_query through the
+    # `query` token: a name cannot prove read-onlyness, in either the deny
+    # or the admit direction, because names are an open world. Deleting the
+    # classifier is the fix — direct-execution steering now requires the
+    # operator's explicit READONLY declaration (authoritative metadata),
+    # and everything else a hint can express stays proposal-only, the
+    # channel that runs only after user confirmation. The mutator/credential
+    # identifier filters above remain as admission hygiene for BOTH lists,
+    # not as the read-only proof.
+    declared_read_only = _admissible_data_tool_names(
+        os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS_READONLY", "")
+    )
+    hinted = _admissible_data_tool_names(os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS", ""))
+    known_tools = declared_read_only
+    proposal_only = [item for item in hinted if item not in declared_read_only]
+    for lane in lanes:
+        if lane.get("lane_id") != "data_context":
+            continue
+        if known_tools and "known_data_tools" not in lane:
+            lane["known_data_tools"] = known_tools
+        if proposal_only and "proposal_only_data_tools" not in lane:
+            lane["proposal_only_data_tools"] = proposal_only
+    return lanes
 
 
 def _attach_question_assist_requests(
@@ -810,11 +906,15 @@ def _attach_question_assist_requests(
         # round-trips through ``ouroboros_submit_fanout_results`` successfully
         # (#1578 registered a ``code_facts`` code-investigation record here,
         # which rejected contract-following submissions as a mismatch).
-        meta["question_advisory_fanout_id"] = register_question_advisory_fanout(
+        # ``None`` means the record could not be persisted: an id that cannot
+        # be redeemed at re-entry must not be advertised.
+        advisory_fanout_id = register_question_advisory_fanout(
             fanout_registry,
             session_id=session_id,
             payloads=advisory_payloads,
         )
+        if advisory_fanout_id is not None:
+            meta["question_advisory_fanout_id"] = advisory_fanout_id
 
 
 def _is_initial_context_length_guard_question(question: str) -> bool:
@@ -948,15 +1048,14 @@ def _interview_reasoning_meta(
 
 
 def _classify_interview_answer_source(answer: str) -> str:
-    """Return a coarse provenance class for an ``ooo interview`` answer."""
-    lowered = str(answer).lstrip().casefold()
-    if lowered.startswith("[from-code]") or lowered.startswith("[from-repo]"):
-        return "repo_fact"
-    if lowered.startswith("[from-auto]") or lowered.startswith("[from-safe-default]"):
-        return "generated"
-    if lowered.startswith("[from-assumption]") or lowered.startswith("[from-inference]"):
-        return "generated"
-    return "human"
+    """Provenance class for an ``ooo interview`` answer.
+
+    Delegates to the single definition in ``core.requirement_candidate``
+    (round-73): the deterministic requirement promotion reads the same
+    classifier, so an answer cannot be an observation to the guard and a
+    decision to the distiller.
+    """
+    return classify_answer_provenance(answer)
 
 
 def _guard_interview_answer(
@@ -1185,7 +1284,13 @@ def _stored_ambiguity_snapshot_is_degraded(state: InterviewState) -> bool:
 
 
 def _format_interview_transcript(state: InterviewState) -> str:
-    """Format persisted interview rounds as a readable transcript for subagent context."""
+    """Format persisted interview rounds as a readable transcript for subagent context.
+
+    CONVERSATIONAL context only — the interview child helping the user answer
+    legitimately sees the whole history, observations included. A transcript
+    heading for requirement extraction goes through
+    :func:`_format_extraction_transcript` instead (round-75).
+    """
     if not state.rounds:
         return ""
     lines: list[str] = []
@@ -1196,6 +1301,54 @@ def _format_interview_transcript(state: InterviewState) -> str:
         lines.append(f"**Q{r.round_number}:** {r.question}")
         if r.user_response:
             lines.append(f"**A{r.round_number}:** {r.user_response}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _format_extraction_transcript(state: InterviewState) -> str:
+    """The transcript form that may be handed to a requirement extractor.
+
+    The plugin Seed path formats the transcript for a child instructed to
+    "extract all requirements" — the third extraction surface, after the
+    in-process and PM extractors fixed in round 74 (round-75). Same rule,
+    same reason: an extractor paraphrases, a paraphrase cannot be
+    provenance-checked afterwards, so an observation's content must not
+    reach it at all.
+    """
+    if not state.rounds:
+        return ""
+    lines: list[str] = []
+    observation_seen = False
+    if state.initial_context:
+        # The initial context itself can lead with an observation marker
+        # (round-81) — the same rule every answer gets, and a withheld one
+        # taints every question. The AUTHORITATIVE context value with its
+        # typed provenance (round-92): an oversized raw context can carry
+        # the observation mid-text where no marker leads, and the in-process
+        # and PM extractors already substitute the user's summary — this
+        # transport rendered the raw blob.
+        raw_context, context_provenance = prompt_safe_initial_context_with_provenance(state)
+        safe_context = extraction_safe_answer(raw_context, context_provenance)
+        observation_seen = safe_context != raw_context
+        lines.append(f"**Initial Context:** {safe_context}")
+        lines.append("")
+    for r in state.rounds:
+        if r.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
+            # The summary is the context line above (same rule as the
+            # in-process extractors); rendering the round too would
+            # duplicate it outside the context's withholding decision.
+            continue
+        # Question withholding by taint provenance (round-80), answers by
+        # marker (round-74) — see extraction_safe_question.
+        lines.append(
+            f"**Q{r.round_number}:** "
+            f"{extraction_safe_question(r.question, observation_seen=observation_seen)}"
+        )
+        if r.user_response:
+            safe = extraction_safe_answer(r.user_response, r.answer_provenance)
+            if safe != r.user_response:
+                observation_seen = True
+            lines.append(f"**A{r.round_number}:** {safe}")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -1211,10 +1364,23 @@ async def _plugin_save_state(state_dir: Path, state: InterviewState) -> Result[P
         state.mark_updated()
         content = state.model_dump_json(indent=2)
 
-        def _sync_write() -> None:
-            file_path.write_text(content, encoding="utf-8")
+        def _sync_write() -> bool:
+            # The plugin transport persists the same transcript the stdio one
+            # does, including confirmed [from-data] answers, so it uses the
+            # same owner-only writer (round-62: this fourth site was still on
+            # write_text and produced 0644 under a 022 umask).
+            secure_directory(file_path.parent)
+            return write_owner_only(file_path, content)
 
-        await asyncio.to_thread(_sync_write)
+        durability_confirmed = await asyncio.to_thread(_sync_write)
+        if not durability_confirmed:
+            # The stdio writer logs this state; discarding it here reported a
+            # durability the filesystem never confirmed (round-78).
+            log.warning(
+                "plugin.state_save_durability_uncertain",
+                interview_id=state.interview_id,
+                file_path=str(file_path),
+            )
         return Result.ok(file_path)
     except (OSError, ValueError) as e:
         return Result.err(f"Failed to save interview state: {e}")
@@ -1459,13 +1625,32 @@ class GenerateSeedHandler:
                         )
                     )
 
-            transcript = _format_interview_transcript(interview_state)
+            if interview_has_no_promotable_requirement(interview_state):
+                # The same single readiness check the in-process generator
+                # runs (round-85): this path called evaluate_promotion
+                # directly and bypassed the gate.
+                return Result.err(
+                    MCPToolError(
+                        OBSERVATION_ONLY_INTERVIEW_MESSAGE,
+                        tool_name="ouroboros_generate_seed",
+                    )
+                )
+            transcript = _format_extraction_transcript(interview_state)
             distillation = build_requirement_distillation(interview_state)
-            from ouroboros.core.requirement_candidate import evaluate_promotion
+            from ouroboros.bigbang.requirement_distillation import (
+                apply_requirement_distillation,
+            )
 
-            promotion = evaluate_promotion(distillation)
-            if promotion.blockers:
-                details = seed_readiness_details(promotion)
+            # ONE promotion authority (round-88): this gate previously used
+            # bare evaluate_promotion while build_promoted_reference_seed
+            # preflights the APPLIED promotion, whose blockers are a
+            # superset — a state that passed here then raised an uncaught
+            # ValueError inside the builder. Gating on the same applied
+            # result the builder recomputes makes the builder's raise
+            # unreachable from this route.
+            applied = apply_requirement_distillation({}, distillation)
+            if applied.promotion.blockers:
+                details = seed_readiness_details(applied.promotion)
                 return Result.err(
                     MCPToolError(
                         f"Interview must be reopened before Seed generation: {details}",
@@ -2391,6 +2576,11 @@ class InterviewHandler:
                     if last_question:
                         state.rounds[-1].question = last_question
                     state.rounds[-1].user_response = answer
+                    # Ingestion-time provenance stamp, same as the engine's
+                    # record_response (round-85): the field is the record and
+                    # the marker only its display projection, so a plugin-
+                    # filled round must not stay "human" by omission.
+                    state.rounds[-1].answer_provenance = classify_answer_provenance(answer)
                     state.record_adapter_answer(question_text, answer)
                 else:
                     # No rounds yet or all answered — append new round.
@@ -2417,6 +2607,7 @@ class InterviewHandler:
                             round_number=len(state.rounds) + 1,
                             question=question_text,
                             user_response=answer,
+                            answer_provenance=classify_answer_provenance(answer),
                         )
                     )
                     state.record_adapter_answer(question_text, answer)
@@ -2437,6 +2628,38 @@ class InterviewHandler:
                         MCPToolError(str(save_result.error), tool_name="ouroboros_interview")
                     )
 
+        # Transport parity (PR #1703 bot review rounds 4-5): the plugin child
+        # generates the question itself, so per-question lane payloads cannot
+        # be pre-built here — but the plugin transport must still receive the
+        # SAME machine-readable advisory contract as host-driven mode. The
+        # bridge dispatches ONLY ``_subagent.prompt`` to the child, so the
+        # ACTUAL fan-out id and the data lane's answer contract are embedded
+        # in the child prompt itself (round 5 B1: parent response meta alone
+        # never reaches the child); the parent meta carries them too for the
+        # host side of re-entry.
+        plugin_advisory_meta: dict[str, Any] = {}
+        plugin_fanout_id: str | None = None
+        plugin_advisory_contract: dict[str, Any] | None = None
+        plugin_registry = self._resolved_fanout_registry()
+        if plugin_registry is not None:
+            advisory_metadata = ouroboros_tool_capability_metadata("ouroboros_interview")[
+                "orchestration"
+            ]["question_advisory_fanout"]
+            plugin_advisory_contract = {
+                **advisory_metadata,
+                "lanes": _advisory_lanes_with_known_data_tools(advisory_metadata),
+            }
+            plugin_fanout_id = register_question_advisory_fanout_from_lanes(
+                plugin_registry,
+                session_id=real_session_id or "new",
+                lanes=plugin_advisory_contract["lanes"],
+            )
+            plugin_advisory_meta["question_advisory_fanout"] = plugin_advisory_contract
+            plugin_advisory_meta["question_advisory_result_correlation_key"] = "context.lane_id"
+            # None means the record could not be persisted: never advertise a
+            # fan-out id that cannot be redeemed at re-entry.
+            if plugin_fanout_id is not None:
+                plugin_advisory_meta["question_advisory_fanout_id"] = plugin_fanout_id
         payload = build_interview_subagent(
             session_id=real_session_id or "new",
             action=action,
@@ -2446,6 +2669,8 @@ class InterviewHandler:
             transcript=transcript,
             turn_context=turn_context,
             adapter_question=adapter_question,
+            advisory_fanout_id=plugin_fanout_id,
+            advisory_fanout_contract=plugin_advisory_contract,
         )
         return await dispatch_plugin_terminal(
             self.event_store,
@@ -2458,6 +2683,7 @@ class InterviewHandler:
                 "dispatch_mode": "plugin",
                 "question_advisory_strategy": "plugin_child_question_first_advisory",
                 "question_advisory_recommended": True,
+                **plugin_advisory_meta,
                 **_interview_reasoning_meta(
                     state=plugin_state,
                     session_id=real_session_id,
@@ -3007,6 +3233,7 @@ class InterviewHandler:
                             round_number=len(state.rounds) + 1,
                             question=last_question or "[driver safe-default finalization]",
                             user_response=answer,
+                            answer_provenance=classify_answer_provenance(answer),
                         )
                     )
                     state.clear_stored_ambiguity()

@@ -5,6 +5,31 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+# The data-evidence contract, its policy, and its enforcement are one subject
+# and live in one module (round-49): schema and validator drifted three times
+# while they were apart — a percentile field the schema advertised and the
+# validator rejected, an aggregation vocabulary maintained twice, a source
+# grammar stated at 120 and enforced at 64. Re-exported here because this
+# module is the capability-metadata surface hosts read.
+from ouroboros.contracts.data_evidence import (  # noqa: F401
+    DATA_EVIDENCE_AUTH_HEADER_PATTERN,
+    DATA_EVIDENCE_AWS_KEY_PATTERN,
+    DATA_EVIDENCE_CREDENTIAL_ASSIGNMENT_PATTERN,
+    DATA_EVIDENCE_EMAIL_PATTERN,
+    DATA_EVIDENCE_MEASUREMENT_PATTERN,
+    DATA_EVIDENCE_MULTILINE_PATTERN,
+    DATA_EVIDENCE_PASSWORD_PATTERN,
+    DATA_EVIDENCE_PHONE_PATTERN,
+    DATA_EVIDENCE_ROW_SHAPE_PATTERN,
+    DATA_EVIDENCE_SECRET_PATTERN,
+    DATA_EVIDENCE_SSN_PATTERN,
+    DATA_EVIDENCE_URI_USERINFO_PATTERN,
+    DATA_EVIDENCE_VENDOR_TOKEN_PREFIX,
+    _data_context_answer_contract,
+    _data_context_lane_policy,
+    data_evidence_structural_schema,
+)
+
 
 def _builtin_semantics_for(tool_name: str):  # noqa: ANN202
     from ouroboros.orchestrator.capabilities import _BUILTIN_SEMANTICS
@@ -567,7 +592,14 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "minItems": 1,
                 "items": {
                     "type": "string",
-                    "enum": ["inspect_code", "web_research", "run_lateral_review"],
+                    "minLength": 1,
+                    "description": (
+                        "Open capability identifier so v1 stays forward-compatible "
+                        "with additive lanes (Q00/ouroboros#1671). Well-known values: "
+                        "inspect_code, web_research, run_lateral_review, call_mcp. "
+                        "Hosts dispatch unsupported capabilities and return the "
+                        "no-op finding per lane_compatibility_rules."
+                    ),
                 },
             },
             "lanes": {
@@ -575,29 +607,116 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "minItems": 1,
                 "items": {
                     "type": "object",
-                    "additionalProperties": False,
+                    # Additive lane evolution is the v1 compatibility promise:
+                    # unknown lane ids, capabilities, and lane-specific blocks
+                    # (data_policy arrived exactly this way) must validate.
+                    "additionalProperties": True,
                     "required": ["lane_id", "purpose", "capability", "required"],
                     "properties": {
                         "lane_id": {
                             "type": "string",
-                            "enum": [
-                                "code_context",
-                                "web_context",
-                                "ambiguity_contrarian",
-                                "answer_simplifier",
-                                "architecture_implications",
-                            ],
+                            "minLength": 1,
+                            # Lane ids ride re-entry as results[*].key and
+                            # must survive the transport input validator
+                            # (round-33): the grammar is the same opaque
+                            # identifier shape re-entry accepts — no shell
+                            # metacharacters, no whitespace.
+                            "pattern": r"^[A-Za-z0-9_.-]{1,64}$",
+                            "description": (
+                                "Open lane identifier (see lane_compatibility_rules); "
+                                "identifier-shaped ([A-Za-z0-9_.-], max 64) so it "
+                                "round-trips re-entry as results[*].key. Well-known "
+                                "values: code_context, web_context, data_context, "
+                                "ambiguity_contrarian, answer_simplifier, "
+                                "architecture_implications."
+                            ),
                         },
                         "purpose": {"type": "string", "minLength": 1},
                         "capability": {
                             "type": "string",
-                            "enum": ["inspect_code", "web_research", "run_lateral_review"],
+                            "minLength": 1,
+                            "description": (
+                                "Open capability identifier; unsupported capabilities "
+                                "are dispatched and answered with the no-op finding."
+                            ),
                         },
                         "persona": {
                             "type": "string",
-                            "enum": ["researcher", "contrarian", "simplifier", "architect"],
+                            "minLength": 1,
+                            "description": (
+                                "Open persona identifier. Well-known values: "
+                                "researcher, contrarian, simplifier, architect."
+                            ),
                         },
                         "required": {"type": "boolean"},
+                        "data_policy": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "required": ["read_only", "aggregate_only"],
+                            "properties": {
+                                "read_only": {"const": True},
+                                "aggregate_only": {"const": True},
+                            },
+                            "description": (
+                                "Machine-readable read-only policy for data lanes; "
+                                "hosts with permission systems can enforce it, the "
+                                "lane prompt is the fallback."
+                            ),
+                        },
+                        "known_data_tools": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                            "description": (
+                                "Tools the operator explicitly declared read-only "
+                                "(OUROBOROS_KNOWN_DATA_TOOLS_READONLY) — the only "
+                                "list that grants DIRECT-execution steering."
+                            ),
+                        },
+                        "proposal_only_data_tools": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                            "description": (
+                                "Configured hints WITHOUT a read-only declaration: "
+                                "the child never executes these directly — it "
+                                "returns proposed_queries against them for the "
+                                "parent to run after user confirmation. Re-entry "
+                                "rejects executed evidence naming them."
+                            ),
+                        },
+                        "answer_contract": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "required": ["contract_id", "response_model_schema"],
+                            "properties": {
+                                "contract_id": {"type": "string", "minLength": 1},
+                                # A contract's schema must itself be an object:
+                                # a string (or otherwise malformed) schema is
+                                # unenforceable, and an advertised contract
+                                # that cannot be enforced is a lie (round-12).
+                                # Registration additionally validates it with
+                                # check_schema before enforcement.
+                                "response_model_schema": {"type": "object"},
+                            },
+                            "description": (
+                                "Structured lane answer form (data_context ships "
+                                "data_evidence_answer.v1). Lane outputs are "
+                                "validated against response_model_schema at fanout "
+                                "re-entry; violations surface as contract_violations. "
+                                "ENFORCEABLE ROOT GRAMMAR (a contract is advertised "
+                                "and enforced IFF its root provably describes an "
+                                "object through one of): literal type 'object' or "
+                                "['object']; a chain of LOCAL root $refs to one; an "
+                                "allOf with any such branch; a oneOf/anyOf whose "
+                                "branches ALL qualify; a const mapping or all-mapping "
+                                "enum. Combinator nesting is enforceable to depth 128 "
+                                "(ref-chain length is unbounded). Every $ref/$dynamicRef "
+                                "must resolve inside the "
+                                "document as a plain JSON pointer; $id rebasing is "
+                                "not supported. Any other form is NOT advertised and the "
+                                "lane falls back to the generic output shape — by "
+                                "contract, not omission."
+                            ),
+                        },
                     },
                 },
             },
@@ -631,6 +750,20 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                     "include_recommended_draft": {"type": "boolean"},
                     "preserve_user_agency": {"const": True},
                     "forward_to_mcp_only_after_user_or_auto_confirm": {"const": True},
+                    # Per-lane confirmation exceptions: lanes listed here have
+                    # NO auto-confirm path (the data lane is confirmation-only
+                    # by contract).
+                    "confirmation_overrides": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    # Per-lane output role: lanes listed here produce material
+                    # for the user's judgment that is never forwarded as the
+                    # interview answer.
+                    "lane_output_role": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
                 },
             },
             "mcp_tool_capability": {
@@ -683,6 +816,17 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
             "required": False,
         },
         {
+            "lane_id": "data_context",
+            "purpose": (
+                "Fetch data evidence (metrics, DB/warehouse facts) only when "
+                "the answer is a data-driven decision."
+            ),
+            "capability": "call_mcp",
+            "required": False,
+            "data_policy": _data_context_lane_policy(),
+            "answer_contract": _data_context_answer_contract(),
+        },
+        {
             "lane_id": "ambiguity_contrarian",
             "purpose": "Name hidden assumptions, missing decisions, and risky vague words.",
             "capability": "run_lateral_review",
@@ -720,27 +864,76 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
         },
         "request_model_schema": _interview_question_advisory_request_schema(),
         "lanes": lanes,
+        "lane_compatibility_rules": {
+            # v1-in-place lane additions (Q00/ouroboros#1671): hosts must not
+            # break on lanes or capabilities they do not recognise. Skipping
+            # is legal only for OPTIONAL unknown lanes — a required unknown
+            # lane gates completion, so it must be dispatched generically (or
+            # answered with a no-op finding), never dropped.
+            "unknown_lane_id": "dispatch_with_generic_prompt_or_skip",
+            "unknown_required_lane": "dispatch_generic_or_return_noop_finding_never_skip",
+            "unsupported_capability": "dispatch_and_return_noop_finding",
+            "noop_finding_is_completion_signal": True,
+        },
         "synthesis_contract": {
             "output_shape": "answer_advisory",
             "max_options": 3,
             "include_recommended_draft": True,
             "preserve_user_agency": True,
             "forward_to_mcp_only_after_user_or_auto_confirm": True,
+            # Machine-readable per-lane exception (round-7): the generic
+            # auto-confirm path NEVER applies to data output —
+            # data_evidence_answer.v1 pins requires_user_confirmation const
+            # true, so synthesis must route data-derived answers through
+            # explicit user confirmation only.
+            "confirmation_overrides": {
+                "data_context": "user_confirm_only_no_auto_confirm",
+            },
+            # The ISOLATION statement (user decision, 2026-07-26): lane
+            # output listed here is material for the user's judgment and is
+            # NEVER forwarded as the interview answer, marked or otherwise —
+            # the user's own words are the answer, and the durable record of
+            # what was consulted is the fan-out record, not the transcript.
+            # Downstream provenance machinery remains as defense-in-depth
+            # for out-of-contract arrivals; this field is what makes the
+            # official flow one-directional.
+            "lane_output_role": {
+                "data_context": "material_for_user_answer_never_the_answer",
+            },
         },
         "response_payload_refs": {
             "plugin": "parent_runtime.ouroboros_dispatch.children",
-            "result_correlation_key": "lane_id",
+            # The PATH a host reads the correlation value from (round-105):
+            # emitted payloads carry it at context.lane_id, registration
+            # keys on that path, and the stamped re-entry contract requires
+            # it — advertising the bare field name left capability-driven
+            # hosts unable to resolve it.
+            "result_correlation_key": "context.lane_id",
             "requires_prose_parsing": False,
             "synthesis_owner": "parent_session",
         },
         "runtime_instruction": (
             "Show the MCP interview question to the user first, then fan out "
             "advisory lanes for code context, current web facts when needed, "
+            "data evidence when the answer is a data-driven decision, "
             "ambiguity critique, simplification, and architecture implications. "
+            "A lane whose capability this runtime cannot support must still "
+            "return its no-op finding — the no-op is the completion signal. "
             "Read child task results as they complete and synthesize them into "
             "two or three answer options or one recommended draft. Do not forward advisory text to "
             "ouroboros_interview until the user approves, edits, or explicitly "
-            "chooses auto-confirm."
+            "chooses auto-confirm — and data_context output is NEVER forwarded "
+            "at all: data evidence is material for the user's judgment, not an "
+            "answer (synthesis_contract.lane_output_role). Present the evidence "
+            "beside the question with its point-in-time caveat; execute a data "
+            "lane's proposed_queries only after the user confirms; and when the "
+            "user decides, forward the USER'S OWN WORDS as the answer. Do not "
+            "forward lane output, quoted evidence, or [from-data]-prefixed text "
+            "as an interview answer. The fan-out record durably notes THAT a "
+            "consultation occurred — lanes, counts, and a content digest that "
+            "binds any terminal resubmission — while the evidence itself is "
+            "shown to the user in the moment and is not retained; the "
+            "transcript carries only the user's decision."
         ),
     }
 

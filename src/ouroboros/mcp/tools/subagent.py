@@ -33,12 +33,16 @@ Payload structure:
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
+import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import threading
 from typing import Any
 from uuid import uuid4
 
@@ -49,6 +53,20 @@ from ouroboros.backends.capabilities import (
     SubagentDispatchMode,
     resolve_subagent_dispatch,
 )
+from ouroboros.contracts.data_evidence import (
+    _DATA_EVIDENCE_CONTRACT_ID,
+    DATA_EVIDENCE_SECRET_PATTERN,
+    _data_context_answer_contract,
+    _data_evidence_boundary_violations,
+    _data_evidence_fallback_schema,
+    _identifier_carries_payload,
+    _identifier_looks_secret,
+    data_evidence_content_digest,
+    data_evidence_retained_schema,
+    redact_prose_for_persistence,
+)
+from ouroboros.core.owner_only import fsync_parent_directory, secure_directory, write_owner_only
+from ouroboros.core.requirement_candidate import redacted_segment
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.assignment import AssignmentMessage
@@ -69,6 +87,33 @@ _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS = 220
 _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS = 300
 _INTERVIEW_ADVISORY_MAX_QUESTION_CHARS = 900
 _INTERVIEW_ADVISORY_MAX_JSON_CHARS = 2_400
+# The data_context answer contract must reach the subagent WHOLE — a torn form
+# defeats its informed-consent purpose (the code contract is truncated at the
+# generic budget above; see Q00/ouroboros#1671 follow-ups). Pinned by tests.
+# The number is a DELIVERY budget, not a design constraint: what it protects
+# is the whole-form invariant (a torn contract defeats informed consent), and
+# that invariant is pinned by test independently of the figure. It was sized
+# when the evidence policy lived in the schema as regex patterns; the typed
+# structure that replaced them is larger and buys the guarantees those
+# patterns only approximated, so the budget follows the contract rather than
+# the contract being trimmed to fit the budget.
+_INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS = 14_000
+# Round-100 raised this from 12,000 for the same reason round-96 raised the
+# policy budget: the figure is a DELIVERY budget and the budget follows the
+# contract. The value-returning metric rule moved INTO the published schema
+# (max(credit_card_number) was schema-valid), and a grammar that carries the
+# rule is larger than a comment that describes it. Silently crossing the
+# budget is the failure mode this constant must never cause: the canonical
+# contract would fall back to the structural schema and the lane would lose
+# the very rules just added — which is exactly what the metadata-parity test
+# caught before this change.
+# The data policy is the machine-readable ENFORCEMENT block ("enforce, do
+# not just read") — a torn render advertises fewer forbidden operations and
+# category heads than re-entry enforces, which is the same informed-consent
+# defect as a torn contract. Same rule as the contract budget above: the
+# budget follows the policy. The plugin transport already renders the policy
+# unbounded; this bound only keeps the host-driven prompt honest.
+_INTERVIEW_ADVISORY_MAX_POLICY_CHARS = 6_000
 _LATERAL_PANEL_FALLBACK_ID = "lateral_persona_panel.v1"
 _LATERAL_PANEL_FALLBACK_TOOL = "ouroboros_lateral_think"
 _LATERAL_PANEL_FALLBACK_SEQUENTIAL_MODE = "sequential_persona_payload_dispatch"
@@ -1145,6 +1190,126 @@ Return ONLY the JSON verdict object. No other text."""
     )
 
 
+def _plugin_advisory_contract_section(
+    advisory_fanout_id: str | None,
+    advisory_fanout_contract: Mapping[str, Any] | None,
+    session_id: str = "",
+) -> str:
+    """Render the ACTUAL advisory re-entry contract into the child prompt.
+
+    The OpenCode bridge dispatches only ``_subagent.prompt`` to the child —
+    parent response meta never reaches it — so the concrete fan-out id, the
+    lane table, the data policy, and the COMPLETE ``data_evidence_answer.v1``
+    contract must ride the prompt itself (PR #1703 round 5 B1). The data
+    contract is rendered whole: a torn form defeats informed consent.
+    """
+    if not advisory_fanout_contract:
+        return ""
+    lane_lines = []
+    data_policy: Any = None
+    known_data_tools: Any = None
+    proposal_only_tools: Any = None
+    contract_blocks: list[str] = []
+    for lane in advisory_fanout_contract.get("lanes") or ():
+        if not isinstance(lane, Mapping):
+            continue
+        lane_id = str(lane.get("lane_id") or "")
+        lane_lines.append(
+            f"- {lane_id} (capability={lane.get('capability')}, "
+            f"required={bool(lane.get('required'))})"
+        )
+        # EVERY lane contract is rendered, not just the data lane's
+        # (bot-review round-9 probe): re-entry enforces any registered
+        # contract, so an additive lane's contract omitted here would make
+        # the promised v1 path unsatisfiable for the plugin child. Oversized
+        # contracts are excluded WHOLE (round-11): registration skips them
+        # too, so nothing enforced was ever torn.
+        lane_contract = declared_lane_contract(lane)
+        declared_mapping = lane_contract if isinstance(lane_contract, Mapping) else None
+        # The plugin child sees what re-entry enforces, through the same
+        # decision as every other surface (round-75). Run even with NO
+        # declaration: an undeclared data lane is bound to the canonical
+        # contract at registration, and gating this block on a declaration
+        # was the same parity gap round 74 closed on payload.context.
+        plugin_enforced = effective_lane_contract(lane_id, declared_mapping)
+        if plugin_enforced is not None:
+            enforced_id = str(plugin_enforced.get("contract_id") or "unversioned")
+            contract_blocks.append(
+                f"{lane_id} answer contract ({enforced_id}, complete — fill this "
+                "form exactly; it is validated server-side at re-entry):\n"
+                + (_canonical_contract_json(plugin_enforced) or "{}")
+            )
+        elif declared_mapping:
+            contract_id = str(declared_mapping.get("contract_id") or "unversioned")
+            contract_blocks.append(
+                f"{lane_id} answer contract ({contract_id}): OMITTED — it "
+                "exceeds the whole-form delivery budget or carries an "
+                "invalid schema, and is therefore NOT enforced at "
+                "re-entry; return the generic output shape for this lane."
+            )
+        if lane_id == "data_context":
+            data_policy = lane.get("data_policy")
+            known_data_tools = lane.get("known_data_tools")
+            proposal_only_tools = lane.get("proposal_only_data_tools")
+    fanout_line = (
+        f"fanout_id: {advisory_fanout_id}"
+        if advisory_fanout_id
+        else "fanout_id: (registration unavailable — skip re-entry this turn)"
+    )
+    policy_json = json.dumps(data_policy, ensure_ascii=False) if data_policy else "{}"
+    contracts_section = (
+        "\n\n".join(contract_blocks) if contract_blocks else "(no lane carries an answer contract)"
+    )
+    known_tools_line = (
+        (
+            f"\ndata_context known_data_tools: {json.dumps(known_data_tools, ensure_ascii=False)}"
+            if isinstance(known_data_tools, list) and known_data_tools
+            else ""
+        )
+        + (
+            "\ndata_context proposal_only_data_tools (unverified — NEVER "
+            "execute directly; return proposed_queries against them for the "
+            "parent to run after user confirmation): "
+            f"{json.dumps(proposal_only_tools, ensure_ascii=False)}"
+            if isinstance(proposal_only_tools, list) and proposal_only_tools
+            else ""
+        )
+        if (isinstance(known_data_tools, list) and known_data_tools)
+        or (isinstance(proposal_only_tools, list) and proposal_only_tools)
+        else ""
+    )
+    # session_id is part of the re-entry identity: the record is registered
+    # with it and correlation is strict, so a recipe omitting it would send
+    # a contract-following child straight into correlation_mismatch
+    # (bot-review round-8 probe).
+    session_line = f"session_id: {session_id}" if session_id else "session_id: (none registered)"
+    return f"""
+### Advisory Re-entry Contract (actual values)
+{fanout_line}
+{session_line}
+result_correlation_key: context.lane_id
+lanes:
+{chr(10).join(lane_lines)}{known_tools_line}
+
+data_context data_policy (enforce, do not just read):
+{policy_json}
+
+data_context output role (synthesis_contract.lane_output_role =
+material_for_user_answer_never_the_answer): data evidence is material for
+the user's judgment, NEVER the interview answer. Show it beside the
+question with its point-in-time caveat; when the user decides, forward the
+USER'S OWN WORDS as the answer. Never forward lane output, quoted
+evidence, or [from-data]-prefixed text as an interview answer.
+
+{contracts_section}
+
+After the advisory lanes run, submit one {{"key": <lane_id>, "content":
+<lane output>}} per dispatched lane via `ouroboros_submit_fanout_results`,
+passing ALL THREE identity arguments exactly as above: the fanout_id, the
+session_id, and correlation_key `context.lane_id` (omitting session_id or
+the correlation key is a correlation_mismatch, not a skipped check)."""
+
+
 def build_interview_subagent(
     *,
     session_id: str,
@@ -1155,6 +1320,8 @@ def build_interview_subagent(
     transcript: str = "",
     turn_context: Any | None = None,
     adapter_question: str | None = None,
+    advisory_fanout_id: str | None = None,
+    advisory_fanout_contract: Mapping[str, Any] | None = None,
 ) -> SubagentPayload:
     """Build subagent payload for Socratic interview.
 
@@ -1164,6 +1331,12 @@ def build_interview_subagent(
     Args:
         transcript: Full conversation history (Q&A pairs) for context
             continuity across subagent invocations.
+        advisory_fanout_id: Registered advisory fan-out id for this turn;
+            embedded VERBATIM in the child prompt so the plugin child can
+            perform re-entry (the bridge dispatches only the prompt).
+        advisory_fanout_contract: The versioned ``question_advisory_fanout``
+            block; its lane table, data policy, and complete data answer
+            contract are rendered into the prompt.
     """
     from ouroboros.agents.loader import load_agent_prompt
 
@@ -1172,9 +1345,22 @@ def build_interview_subagent(
     plugin_question_advisory = """
 ## Question-first Advisory Fanout
 1. Show the interview question first.
-2. Then add a compact helper from: code_context, web_context, ambiguity_contrarian,
-   answer_simplifier, architecture_implications.
-3. Offer options, a draft, or unresolved ambiguities; preserve user agency."""
+2. Then add a compact helper from: code_context, web_context, data_context,
+   ambiguity_contrarian, answer_simplifier, architecture_implications.
+3. Offer options, a draft, or unresolved ambiguities; preserve user agency.
+4. EVERY lane marked required=true below must come back — run it, or return
+   its no-op finding. The no-op IS the completion signal; skipping a required
+   lane leaves re-entry permanently partial. Optional lanes may be omitted
+   and are reported as missing_optional_keys.
+5. An unknown lane_id or an unsupported capability is dispatched with the
+   generic prompt and answered with the no-op finding. A REQUIRED unknown
+   lane is never skipped — it gates completion; an optional unknown lane may
+   be omitted, exactly as the versioned lane_compatibility_rules say.
+6. Follow each lane's contract below — `data_context` is a read-only
+   proposer whose answers always require user confirmation — and submit
+   lane outputs back via `ouroboros_submit_fanout_results`.""" + _plugin_advisory_contract_section(
+        advisory_fanout_id, advisory_fanout_contract, session_id
+    )
 
     transcript_section = ""
     if transcript:
@@ -1336,10 +1522,14 @@ def build_interview_question_advisory_subagents(
 
         persona = str(raw_lane.get("persona") or "").strip()
         agent = persona or (
-            "researcher" if capability in {"inspect_code", "web_research"} else "general"
+            "researcher"
+            if capability in {"inspect_code", "web_research", "call_mcp"}
+            else "general"
         )
         purpose = str(raw_lane.get("purpose") or "Help answer the interview question.").strip()
         required = bool(raw_lane.get("required"))
+        data_policy = raw_lane.get("data_policy")
+        lane_answer_contract = declared_lane_contract(raw_lane)
 
         if lane_id == "code_context":
             lane_task = (
@@ -1355,6 +1545,145 @@ def build_interview_question_advisory_subagents(
                 "If no current web facts are needed, return that no-op finding."
             )
             extra = "Use web research only when the answer depends on current external facts."
+        elif lane_id == "data_context":
+            # Read-only proposer lane (Q00/ouroboros#1671): relevance is decided
+            # before any tool call, direct execution covers only local free
+            # read-only lookups, and everything metered or side-effect-ambiguous
+            # comes back as proposed queries for the parent session to run
+            # after user confirmation.
+            lane_task = (
+                "Decide from the question text alone, BEFORE any tool call, "
+                "whether the answer depends on data evidence (metrics, database "
+                "or warehouse facts, usage numbers). If it does not, return the "
+                "no-op finding immediately. If it does, discover data-related "
+                "MCP tools available in this runtime by their names and "
+                "descriptions. Directly execute only obviously local, free, "
+                "read-only lookups. For metered, external, or "
+                "side-effect-ambiguous sources, do NOT execute: return the "
+                "lookups you would run as proposed_queries so the parent "
+                "session can run them after user confirmation. Never run "
+                "mutating operations. "
+                "Report results as TYPED structures, not prose: each evidence "
+                "item and each proposal carries a read_request naming what to "
+                "measure (operation 'read', metric, aggregation, optional "
+                "filters/grouping), and evidence adds the resulting aggregate "
+                "as a count of rows. Group or slice only by categorical "
+                "attributes: a grouping or dimension key must end in one of "
+                "data_policy.category_dimension_heads (plan_tier, month, "
+                "region, ...) — never by an identifier. There is no free-text "
+                "value or query "
+                "field, so anything you cannot express as an aggregate — a row "
+                "list, a name, an identifier, an error message — is a "
+                "no-evidence finding, not evidence. "
+                "Treat error-shaped tool output (for example an HTTP 200 body "
+                "carrying an error envelope) as no evidence: every evidence "
+                "item must declare execution_status 'succeeded', and a failed, "
+                "denied, timed-out, or partial lookup belongs in the finding as "
+                "a no-evidence result. Narrative for the human goes in finding "
+                "and caveats — at most four sentences, no lists, line breaks, "
+                "or table-like separators (data_policy.prose_constraints); "
+                "keep PII out of it. "
+                "If this runtime has no MCP or data-tool access, answer "
+                "according to what you already decided about relevance, not "
+                "according to what you can reach. If the question does not "
+                "depend on data, that is the no-op finding. If it DOES, keep "
+                "data_needed=true with confidence=no_evidence and both lists "
+                "empty, and say in the finding that this runtime has no data "
+                "tool access — never flip data_needed to false because you "
+                "could not look. Either way you must return a result: it IS "
+                "your completion signal, so never skip it."
+            )
+            data_policy_json = _bounded_json(data_policy, _INTERVIEW_ADVISORY_MAX_POLICY_CHARS)
+            # Rendering uses the SAME enforceability decision as registration
+            # (bot-review round-13): an undeliverable contract is never
+            # rendered truncated while claiming to supersede the generic
+            # shape — instead the child is told the schema is unenforced but
+            # the data policy still binds (registration keeps a minimal
+            # object contract, so the boundary scan stays active).
+            declared_contract = (
+                lane_answer_contract if isinstance(lane_answer_contract, Mapping) else None
+            )
+            enforced_contract = effective_lane_contract(lane_id, declared_contract)
+            # The prompt renders what re-entry will ENFORCE, decided by the
+            # same function registration and publication use (round-75). This
+            # branch used to render the DECLARED contract when it was
+            # enforceable — so a data lane declaring some other enforceable
+            # contract showed the child that weaker form while re-entry
+            # enforced the canonical schema, and the probe stayed partial.
+            if enforced_contract is not None and (
+                declared_contract == enforced_contract
+                or _is_canonical_data_declaration(declared_contract)
+            ):
+                answer_contract_json = _canonical_contract_json(enforced_contract) or "{}"
+                contract_block = f"## Answer Contract\n```json\n{answer_contract_json}\n```\n"
+                output_rule = (
+                    "For this lane the generic Output section below is superseded: "
+                    "return EXACTLY one JSON object matching the answer contract's "
+                    "response_model_schema. It exists so the confirming user can "
+                    "decide with full context — executed evidence, deliberately "
+                    "unexecuted proposed_queries with their source_class, and "
+                    "caveats."
+                )
+            else:
+                # What the child is told must be what re-entry does
+                # (round-47): registration substitutes the PUBLISHED data
+                # contract for an undeliverable declared one, so saying "not
+                # enforced" made a compliant child permanently partial.
+                # The enforced form is DELIVERED, not paraphrased (round-57):
+                # registration substitutes the published contract, and a prose
+                # summary of it omitted required fields, so a child following
+                # the fallback was rejected. Prose about a schema drifts from
+                # the schema; the schema does not drift from itself.
+                contract_block = (
+                    "## Answer Contract\n"
+                    "The declared data answer contract is not what re-entry "
+                    "enforces (absent, oversized, invalid, or naming another "
+                    "form). The contract below is what re-entry enforces in "
+                    "its place — fill this form exactly:\n"
+                    f"```json\n{_canonical_contract_json(enforced_contract) or '{}'}\n```\n"
+                )
+                output_rule = (
+                    "Return EXACTLY one JSON object matching the contract "
+                    "above. The Data Access Policy binds and is enforced."
+                )
+            raw_known_tools = raw_lane.get("known_data_tools")
+            known_tools = (
+                [str(tool) for tool in raw_known_tools if str(tool).strip()]
+                if isinstance(raw_known_tools, (list, tuple))
+                else []
+            )
+            raw_proposal_only = raw_lane.get("proposal_only_data_tools")
+            proposal_only_tools = (
+                [str(tool) for tool in raw_proposal_only if str(tool).strip()]
+                if isinstance(raw_proposal_only, (list, tuple))
+                else []
+            )
+            known_tools_hint = (
+                (
+                    "## Known Data Tools Hint\n"
+                    "Prefer these host-known data MCP tools before free discovery: "
+                    f"{', '.join(known_tools)}\n"
+                )
+                if known_tools
+                else ""
+            ) + (
+                (
+                    "## Proposal-Only Data Tools\n"
+                    "These host-configured tools are UNVERIFIED for direct "
+                    "execution — never execute them yourself; return "
+                    "proposed_queries against them so the parent session can "
+                    f"run them after user confirmation: {', '.join(proposal_only_tools)}\n"
+                )
+                if proposal_only_tools
+                else ""
+            )
+            extra = (
+                "## Data Access Policy\n"
+                f"```json\n{data_policy_json}\n```\n"
+                f"{contract_block}"
+                f"{known_tools_hint}"
+                f"{output_rule}"
+            )
         elif lane_id == "ambiguity_contrarian":
             lane_task = (
                 "Challenge the question and the likely answer. Identify hidden "
@@ -1377,6 +1706,44 @@ def build_interview_question_advisory_subagents(
         else:
             lane_task = "Help the parent session answer this interview question."
             extra = ""
+
+        # EVERY enforceable lane contract is rendered irrespective of lane id
+        # (bot-review rounds 8 and 30): re-entry enforcement is lane-agnostic,
+        # so an additive contract attached to a RECOGNIZED lane (code_context,
+        # web_context, ...) must reach its child exactly like an unknown
+        # lane's. The data lane keeps its custom rendering above. Oversized or
+        # invalid contracts are rejected whole instead of rendered torn
+        # (round-11): registration skips them too, so the lane falls back to
+        # the generic shape consistently on both sides.
+        if lane_id != "data_context" and isinstance(lane_answer_contract, Mapping):
+            # Rendered from the ENFORCED contract (round-75): an additive lane
+            # declaring the reserved data contract id is bound to the
+            # canonical schema at registration (round-70), and showing the
+            # child its weaker declaration left it submitting a form re-entry
+            # rejects.
+            generic_enforced = effective_lane_contract(lane_id, lane_answer_contract)
+            if generic_enforced is not None:
+                lane_contract_json = _bounded_json(
+                    generic_enforced,
+                    _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
+                )
+                contract_extra = (
+                    "## Answer Contract\n"
+                    f"```json\n{lane_contract_json}\n```\n"
+                    "This lane carries an answer contract: the generic Output "
+                    "section below is superseded — return EXACTLY one JSON "
+                    "object matching the contract's response_model_schema; it "
+                    "is validated server-side at re-entry."
+                )
+            else:
+                contract_extra = (
+                    "## Answer Contract\n"
+                    "This lane declared an answer contract that exceeds the "
+                    "whole-form delivery budget or carries an invalid "
+                    "schema; it is OMITTED and NOT enforced at re-entry. "
+                    "Return the generic Output shape below."
+                )
+            extra = f"{extra}\n\n{contract_extra}" if extra else contract_extra
 
         prompt = f"""## Task
 You are an Ouroboros interview advisory subagent.
@@ -1421,25 +1788,43 @@ Return a compact JSON object with:
 Keep it brief. The parent session will synthesize multiple advisory lanes before
 forwarding anything back to ouroboros_interview."""
 
+        lane_context: dict[str, Any] = {
+            "session_id": session_id,
+            "question_identity": question_identity,
+            "question": question,
+            "lane_id": lane_id,
+            "capability": capability,
+            "required": required,
+            "persona": persona or None,
+            "user_question_first": bool(request.get("user_question_first")),
+            "synthesis_contract": dict(synthesis_contract)
+            if isinstance(synthesis_contract, Mapping)
+            else {},
+        }
+        if isinstance(data_policy, Mapping):
+            lane_context["data_policy"] = dict(data_policy)
+        # Unconditional (round-74): gating this on an EXISTING declaration
+        # meant a data lane that declared nothing was bound to the canonical
+        # contract at registration and told about it in the prompt, while the
+        # machine-readable payload.context carried no contract at all — a
+        # context-driven consumer then submits the generic shape re-entry
+        # rejects. The decision function handles absent declarations itself.
+        lane_context.update(published_lane_contract_fields(lane_answer_contract, lane_id))
+        raw_lane_known_tools = raw_lane.get("known_data_tools")
+        if isinstance(raw_lane_known_tools, (list, tuple)) and raw_lane_known_tools:
+            lane_context["known_data_tools"] = [str(tool) for tool in raw_lane_known_tools]
+        raw_lane_proposal_only = raw_lane.get("proposal_only_data_tools")
+        if isinstance(raw_lane_proposal_only, (list, tuple)) and raw_lane_proposal_only:
+            lane_context["proposal_only_data_tools"] = [
+                str(tool) for tool in raw_lane_proposal_only
+            ]
         payloads.append(
             build_subagent_payload(
                 tool_name="ouroboros_interview",
                 title=f"Interview advisory: {lane_id}",
                 agent=agent,
                 prompt=prompt,
-                context={
-                    "session_id": session_id,
-                    "question_identity": question_identity,
-                    "question": question,
-                    "lane_id": lane_id,
-                    "capability": capability,
-                    "required": required,
-                    "persona": persona or None,
-                    "user_question_first": bool(request.get("user_question_first")),
-                    "synthesis_contract": dict(synthesis_contract)
-                    if isinstance(synthesis_contract, Mapping)
-                    else {},
-                },
+                context=lane_context,
             )
         )
 
@@ -2630,6 +3015,13 @@ class FanoutRecord:
     correlation_key: str
     expected_keys: tuple[str, ...]
     synthesizer_input: dict[str, Any]
+    required_keys: tuple[str, ...] = ()
+    received_results: dict[str, Any] = field(default_factory=dict)
+    completed: bool = False
+    # The full completion response, persisted with the terminal record so a
+    # replay can return the immutable outcome instead of an unrecoverable
+    # "already_complete" error when the first response was lost in transit.
+    terminal_response: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2638,20 +3030,84 @@ class FanoutRecord:
             "session_id": self.session_id,
             "correlation_key": self.correlation_key,
             "expected_keys": list(self.expected_keys),
+            "required_keys": list(self.required_keys),
             "synthesizer_input": self.synthesizer_input,
+            "received_results": self.received_results,
+            "completed": self.completed,
+            "terminal_response": self.terminal_response,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> FanoutRecord:
         raw_input = data.get("synthesizer_input")
+        expected_keys = tuple(str(key) for key in data.get("expected_keys") or ())
+        raw_required = data.get("required_keys")
+        # Records persisted before the required/optional split (Q00/ouroboros
+        # #1671) carry no required_keys field: treat every expected key as
+        # required, preserving the original all-keys completion gate.
+        required_keys = (
+            tuple(str(key) for key in raw_required)
+            if isinstance(raw_required, (list, tuple))
+            else expected_keys
+        )
+        raw_received = data.get("received_results")
+        raw_terminal = data.get("terminal_response")
         return cls(
             fanout_id=str(data["fanout_id"]),
             kind=str(data["kind"]),
             session_id=str(data.get("session_id") or ""),
             correlation_key=str(data.get("correlation_key") or ""),
-            expected_keys=tuple(str(key) for key in data.get("expected_keys") or ()),
+            expected_keys=expected_keys,
             synthesizer_input=dict(raw_input) if isinstance(raw_input, Mapping) else {},
+            required_keys=required_keys,
+            received_results=dict(raw_received) if isinstance(raw_received, Mapping) else {},
+            completed=bool(data.get("completed")),
+            terminal_response=dict(raw_terminal) if isinstance(raw_terminal, Mapping) else None,
         )
+
+
+#: Process-local per-fanout locks (round-82). flock excludes processes; two
+#: THREADS in one process open distinct descriptors, and on a platform
+#: without fcntl the section previously yielded with no exclusion at all — a
+#: synchronized two-thread probe produced two divergent complete responses.
+#: The thread lock is held around every yield path, so the documented
+#: process-local guarantee holds everywhere, and flock adds the
+#: cross-process half where the platform provides it.
+#: STRIPED, not per-id (round-83): a dict keyed by caller-supplied ids grew
+#: one permanent Lock per probe — 25 unknown ids left 25 cached locks — and
+#: reclamation logic would be its own race. A fixed stripe array is bounded
+#: forever; a collision merely serializes two unrelated fan-outs for the
+#: duration of one submission, which is correctness-neutral.
+_LOCAL_FANOUT_LOCK_STRIPES: tuple[threading.Lock, ...] = tuple(threading.Lock() for _ in range(256))
+
+
+def _local_fanout_lock(fanout_id: str) -> threading.Lock:
+    digest = hashlib.sha256(fanout_id.encode("utf-8", "surrogatepass")).digest()
+    return _LOCAL_FANOUT_LOCK_STRIPES[digest[0]]
+
+
+@dataclass(frozen=True, slots=True)
+class RecordWrite:
+    """Outcome of persisting a fan-out record.
+
+    ``written`` and ``durable`` are different facts and the recovery for each
+    is different (round-66). A record that was never written is recovered by
+    resubmitting it. A record whose content reached disk but whose directory
+    entry the OS did not confirm is ALREADY readable and, once terminal,
+    already replayable — resubmitting it cannot improve anything, because the
+    next call short-circuits on the completed record. What helps there is
+    flushing the directory again.
+
+    Truthiness stays "fully persisted" so existing accumulation call sites
+    keep their meaning: for a non-terminal record, resubmission genuinely is
+    the recovery, so an unconfirmed write should read as not persisted.
+    """
+
+    written: bool
+    durable: bool
+
+    def __bool__(self) -> bool:
+        return self.written and self.durable
 
 
 class FanoutRegistry:
@@ -2662,9 +3118,12 @@ class FanoutRegistry:
     handlers that know the resolved interview state dir thread it in via
     :meth:`rebase_default`; until then the zero-arg default falls back to
     ``~/.ouroboros/data/fanout``.
-    Each record is a single ``{fanout_id}.json`` file. Writes are best-effort:
-    a persistence failure degrades re-entry (submissions report the fan-out as
-    unknown) but never breaks the fan-out request path.
+    Each record is a single ``{fanout_id}.json`` file. Write failures have
+    explicit, caller-visible outcomes rather than a uniform degradation:
+    a failed registration returns ``None`` (no fan-out id is advertised), a
+    failed accumulation reports ``accumulation_persisted=false``, and a
+    failed terminal write returns ``completion_not_persisted`` — the request
+    path itself never breaks.
     """
 
     def __init__(self, directory: Path | None = None) -> None:
@@ -2688,6 +3147,181 @@ class FanoutRegistry:
         if self._dir == _DEFAULT_FANOUT_DIR:
             self._dir = directory
 
+    # Fan-out ids are opaque basenames, never paths: this is enforced INSIDE
+    # the registry (independently of any outer input validation) so a caller
+    # supplied absolute or traversal-shaped id can never make ``Path`` joining
+    # escape the configured fan-out root.
+    _ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+    # Completed and orphaned records are retained for a bounded replay window,
+    # then swept opportunistically on the next registration — the directory
+    # never grows without bound, and replay of a recently completed fan-out
+    # keeps working.
+    _RECORD_RETENTION_SECONDS = 7 * 24 * 3600
+
+    def _gc_stale_records(self) -> None:
+        """Best-effort retention sweep; never fails the registration path."""
+        import time
+
+        cutoff = time.time() - self._RECORD_RETENTION_SECONDS
+        try:
+            entries = [
+                *self._dir.glob("*.json"),
+                *self._dir.glob(".*.lock"),
+                # Atomic-save leftovers: a crash between temp write and
+                # replace strands record contents in a temp file (bot-review
+                # round-11) — aged ones are crash artifacts, never live
+                # state, so they sweep without the lock protocol.
+                *self._dir.glob(".*.tmp-*"),
+            ]
+        except OSError:
+            return
+        for path in entries:
+            try:
+                if path.stat().st_mtime >= cutoff:
+                    continue
+            except OSError:
+                continue
+            if ".tmp-" in path.name:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            elif path.name.endswith(".lock"):
+                self._unlink_lock_if_unheld(path)
+            else:
+                self._unlink_record_if_unlocked(path, cutoff)
+
+    def _unlink_record_if_unlocked(self, path: Path, cutoff: float) -> None:
+        """Delete an aged record only under its per-fanout lock (non-blocking).
+
+        Deleting outside the submission lock can vaporize the only durable
+        retry state while a submission is mid-flight (bot-review round-8
+        probe). A held lock skips this sweep, and age is re-checked under the
+        lock because an in-flight submission may have just refreshed the
+        record.
+        """
+        fanout_id = path.name[: -len(".json")]
+        if not self.valid_fanout_id(fanout_id):
+            # Not one of ours (no lock protocol applies): sweep directly.
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        try:
+            import fcntl
+        except ImportError:
+            # Without fcntl the CROSS-PROCESS half of the lock protocol is
+            # unavailable, but retention still applies (round-83): returning
+            # here meant stale records were NEVER deleted on such platforms
+            # and storage grew without bound, contradicting the seven-day
+            # contract. The process-local stripe lock covers in-process
+            # submissions, age is re-checked under it, and the OS itself
+            # refuses to unlink a file another process holds open on the
+            # platforms that lack fcntl — a refusal the suppression treats
+            # as "retry next sweep".
+            with _local_fanout_lock(fanout_id):
+                try:
+                    if path.stat().st_mtime < cutoff:
+                        path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return
+        lock_path = self._dir / f".{fanout_id}.lock"
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError:
+            return
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return
+            # The lock path may have been unlinked/recreated by a concurrent
+            # sweep between open and flock (round-14): a lock on a dead inode
+            # excludes nobody, so acting on it could delete a record whose
+            # REPLACEMENT lock a submission currently holds. Skip this sweep.
+            if not self._lock_inode_matches(fd, lock_path):
+                return
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        finally:
+            os.close(fd)
+
+    @classmethod
+    def _unlink_lock_if_unheld(cls, path: Path) -> None:
+        """Unlink an aged lock file only while holding its flock.
+
+        Unlinking a HELD lock reopens the divergent-terminalization race
+        (bot-review round-7 probe): a new locker would create a fresh inode
+        and enter the exclusive section alongside the current holder. A
+        non-blocking flock proves no holder exists, and unlinking while
+        holding it forces any concurrent waiter through the acquisition-side
+        inode re-verification.
+        """
+        try:
+            import fcntl
+        except ImportError:
+            return
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except OSError:
+            return
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return
+            # Same dead-inode guard as record sweeping (round-14): only the
+            # holder of the LIVE lock inode may unlink the lock path.
+            if not cls._lock_inode_matches(fd, path):
+                return
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _lock_inode_matches(fd: int, path: Path) -> bool:
+        """Whether ``fd`` still refers to the live file at ``path``.
+
+        A lock acquired on an inode that was unlinked/recreated between open
+        and flock excludes nobody (bot-review rounds 7 and 14): the holder of
+        such a dead inode must never act on it.
+        """
+        try:
+            fd_stat = os.fstat(fd)
+            path_stat = os.stat(path)
+        except OSError:
+            return False
+        return fd_stat.st_ino == path_stat.st_ino and fd_stat.st_dev == path_stat.st_dev
+
+    @classmethod
+    def valid_fanout_id(cls, fanout_id: str) -> bool:
+        """Whether ``fanout_id`` matches the registry's identifier grammar.
+
+        Public because the submission door has to reject a malformed id
+        BEFORE routing it (round-64): the rejection path used to echo the
+        submitted value, so a 100,000-character id produced a
+        100,000-character error. Callers must not restate the grammar — this
+        predicate is the single definition of it.
+        """
+        return bool(cls._ID_PATTERN.match(fanout_id))
+
     def _path(self, fanout_id: str) -> Path:
         return self._dir / f"{fanout_id}.json"
 
@@ -2700,13 +3334,22 @@ class FanoutRegistry:
         expected_keys: list[str],
         synthesizer_input: dict[str, Any],
         fanout_id: str | None = None,
-    ) -> str:
+        required_keys: list[str] | None = None,
+    ) -> str | None:
         """Persist a fan-out record and return its ``fanout_id``.
 
         A ``fanout_id`` is generated (uuid4-backed, deterministic-friendly when
         supplied by the caller) and stamped into the returned value so the
-        producer can echo it into the emitted meta. Persistence is best-effort.
+        producer can echo it into the emitted meta. Returns ``None`` when the
+        record could NOT be persisted (or a caller-supplied id is not an
+        opaque basename): a fan-out id that cannot be redeemed at re-entry
+        must never be advertised — producers skip stamping instead of handing
+        the host an id whose first submission is ``unknown_fanout_id``.
+        ``required_keys`` names the subset of ``expected_keys`` that gates
+        completion; when omitted every expected key is required (the original
+        all-keys gate).
         """
+        self._gc_stale_records()
         resolved_id = fanout_id or f"fanout_{uuid4().hex}"
         record = FanoutRecord(
             fanout_id=resolved_id,
@@ -2715,27 +3358,211 @@ class FanoutRegistry:
             correlation_key=correlation_key,
             expected_keys=tuple(expected_keys),
             synthesizer_input=synthesizer_input,
+            required_keys=tuple(required_keys if required_keys is not None else expected_keys),
         )
-        try:
-            self._dir.mkdir(parents=True, exist_ok=True)
-            self._path(resolved_id).write_text(
-                json.dumps(record.to_dict(), ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            log.warning(
-                "fanout.registry.persist_failed",
-                fanout_id=resolved_id,
-                kind=kind,
-                error=str(exc),
-            )
+        if not self.save(record):
+            return None
         return resolved_id
 
+    def save(self, record: FanoutRecord) -> RecordWrite:
+        """Persist ``record``, overwriting any prior state.
+
+        Used both by :meth:`register` and by partial-submission accumulation:
+        ``submit_fanout_results`` merges newly submitted lane results into the
+        record's ``received_results`` and re-saves, so a later resubmission of
+        only the remaining lanes completes the fan-out as the public contract
+        documents.
+
+        Returns ``True`` on success. A failed write is logged AND reported to
+        the caller so a partial submission does not claim its keys were
+        accumulated when they were lost (disk-full/read-only degradation):
+        the re-entry response surfaces it as ``accumulation_persisted=false``,
+        telling the host to resubmit those lanes together with the remainder.
+
+        The write is atomic (temp file + ``os.replace`` in the same
+        directory): a failure mid-write leaves the PRIOR record intact and
+        replayable instead of tearing the live JSON file, so the documented
+        resubmission path still finds the fan-out.
+        """
+        if not self.valid_fanout_id(record.fanout_id):
+            log.warning(
+                "fanout.registry.invalid_fanout_id",
+                fanout_id=record.fanout_id,
+                kind=record.kind,
+            )
+            return RecordWrite(written=False, durable=False)
+        target = self._path(record.fanout_id)
+        try:
+            # Secure the directory FIRST (round-49): mkdir's mode is ignored
+            # when the directory already exists, so an inherited 0755 left a
+            # write window during which the record was world-readable.
+            secure_directory(self._dir)
+            # Written straight to the target: write_owner_only is already
+            # temp-file + atomic rename, so the prior record still survives a
+            # failure mid-write. Staging into a second temp and replacing it
+            # again (round-64 merge) renamed the file a second time WITHOUT
+            # fsyncing that directory entry, so the durable-persistence claim
+            # covered a rename that could still be lost (round-65).
+            durable = write_owner_only(
+                target,
+                # allow_nan=False: NaN/Infinity are not JSON. A record that
+                # would serialize to a non-standard document fails the write
+                # (reported as a persistence failure) instead of producing a
+                # file no compliant parser can read back (round-43).
+                json.dumps(record.to_dict(), ensure_ascii=False, allow_nan=False),
+            )
+            if not durable:
+                # Surfaced, never swallowed — but as its own fact. Reporting
+                # it as "not written" sent the host down a recovery that
+                # cannot work for a terminal record (round-66).
+                log.warning(
+                    "fanout.registry.durability_unconfirmed",
+                    fanout_id=record.fanout_id,
+                    kind=record.kind,
+                )
+        # UnicodeError: json.dumps happily escapes a lone surrogate, but
+        # utf-8 encoding at write time raises UnicodeEncodeError — that is a
+        # persistence failure to report (accumulation_persisted=false /
+        # completion_not_persisted), never an uncaught crash.
+        except (OSError, UnicodeError, ValueError) as exc:
+            log.warning(
+                "fanout.registry.persist_failed",
+                fanout_id=record.fanout_id,
+                kind=record.kind,
+                error=str(exc),
+            )
+            # No temp to clean up here: write_owner_only removes its own on
+            # every failure path, so a partial record never survives.
+            return RecordWrite(written=False, durable=False)
+        return RecordWrite(written=True, durable=durable)
+
+    @contextmanager
+    def exclusive(self, fanout_id: str) -> Iterator[None]:
+        """Cross-process exclusive section for one fan-out record.
+
+        Terminalization is load → synthesize → replace: without mutual
+        exclusion two concurrent submissions can both observe an open record
+        and both return ``complete`` with divergent outcomes (bot-review
+        round-6 probe). An flock'd sidecar lock file serializes submissions
+        per ``fanout_id`` — the second submission then reloads the terminal
+        record and replays it. Where ``fcntl`` or the lock file are
+        unavailable the section degrades to best-effort (never an error).
+
+        Acquisition verifies inode identity after locking (bot-review
+        round-7 probe): the retention GC may unlink an aged lock path, and a
+        lock held on a deleted inode excludes nobody — on mismatch the open
+        is retried against the recreated path. The GC side only unlinks a
+        lock it can flock itself, so a HELD lock is never deleted.
+        """
+        if not self.valid_fanout_id(fanout_id):
+            yield
+            return
+        if not self._path(fanout_id).exists():
+            # Nothing exists to protect (round-83): taking locks and creating
+            # sidecar lock files for a never-registered id let a probe mint
+            # durable artifacts from thin air — 25 unknown ids produced 25
+            # lock files with no records. A record appearing between this
+            # check and the load is indistinguishable from submitting a
+            # moment earlier and yields the same clean unknown_fanout_id.
+            yield
+            return
+        # The process-local half is unconditional (round-82): it wraps every
+        # path below, including the degraded ones, so two threads can never
+        # both terminalize whatever the platform lacks.
+        with _local_fanout_lock(fanout_id):
+            yield from self._exclusive_cross_process(fanout_id)
+
+    def _exclusive_cross_process(self, fanout_id: str) -> Iterator[None]:
+        lock_path = self._dir / f".{fanout_id}.lock"
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            yield
+            return
+        try:
+            import fcntl
+        except ImportError:
+            # PLATFORM QUALIFICATION (rounds 26 and 82): without fcntl (e.g.
+            # native Windows) the CROSS-PROCESS half is unavailable and the
+            # guarantee is the process-local lock already held by the caller.
+            # That limitation is the documented contract for such platforms.
+            log.warning(
+                "fanout.registry.exclusive_unavailable_no_fcntl",
+                fanout_id=fanout_id,
+            )
+            yield
+            return
+        locked_fd: int | None = None
+        for _attempt in range(16):
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            except OSError:
+                break
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError:
+                os.close(fd)
+                break
+            if self._lock_inode_matches(fd, lock_path):
+                locked_fd = fd
+                break
+            # The path was unlinked/recreated while we waited: this lock
+            # excludes nobody. Release and retry against the live path.
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(fd)
+        try:
+            yield
+        finally:
+            if locked_fd is not None:
+                try:
+                    fcntl.flock(locked_fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                os.close(locked_fd)
+
+    def confirm_durability(self, fanout_id: str) -> bool:
+        """Re-flush a record's directory entry and report whether it took.
+
+        The retry that actually helps an unconfirmed write (round-66). The
+        content is already on disk — rewriting it would change nothing — so
+        what is retried is the one step that failed. Called on the terminal
+        replay path, which is where the host lands when it follows the
+        "resubmit" instruction, so that instruction now establishes the
+        durability it promises instead of short-circuiting to a no-op.
+        """
+        if not self.valid_fanout_id(fanout_id):
+            return False
+        path = self._path(fanout_id)
+        if not path.exists():
+            return False
+        return fsync_parent_directory(path)
+
     def load(self, fanout_id: str) -> FanoutRecord | None:
-        """Load a persisted fan-out record, or ``None`` if unknown/corrupt."""
+        """Load a persisted fan-out record, or ``None`` if unknown/invalid/corrupt.
+
+        The 7-day retention contract is enforced HERE too (bot-review
+        round-25), not only at sweep time: an expired record is
+        indistinguishable from an unknown id, so stale terminal results are
+        never re-exposed between GC passes. Saves refresh mtime, so active
+        records never expire mid-flight.
+        """
+        if not self.valid_fanout_id(fanout_id):
+            return None
+        import time
+
+        try:
+            if self._path(fanout_id).stat().st_mtime < time.time() - self._RECORD_RETENTION_SECONDS:
+                return None
+        except OSError:
+            return None
         try:
             content = self._path(fanout_id).read_text(encoding="utf-8")
-        except OSError:
+        # UnicodeError: a corrupt or legacy-torn record must degrade to the
+        # documented clean unknown/corrupt outcome, never an internal crash.
+        except (OSError, UnicodeError):
             return None
         try:
             data = json.loads(content)
@@ -2747,6 +3574,731 @@ class FanoutRegistry:
             return FanoutRecord.from_dict(data)
         except (KeyError, TypeError, ValueError):
             return None
+
+
+def _canonical_contract_json(contract: Mapping[str, Any]) -> str | None:
+    """THE serialization for lane contracts — budgeting, delivery, plugin.
+
+    Budget and delivery previously used different serializations (compact vs
+    sorted+indented), so a contract could pass the budget yet render torn
+    (bot-review round-12). One canonical form, measured and delivered
+    identically everywhere, removes that class of drift.
+    """
+    try:
+        return json.dumps(contract, ensure_ascii=False, sort_keys=True, indent=2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
+    """Whether a lane answer contract may be enforced at re-entry.
+
+    Invariant (bot-review rounds 11-12): a contract is enforced IFF it was
+    deliverable to the child WHOLE and its ``response_model_schema`` is a
+    VALID JSON Schema object. An oversized or invalid contract is rejected
+    explicitly on both sides — never rendered truncated, never registered
+    for enforcement (an advertised contract that cannot be enforced, or
+    enforced against a form the child never received, is a lie) — so the
+    lane falls back to the generic output shape consistently.
+    """
+    rendered = _canonical_contract_json(contract)
+    if rendered is None or len(rendered) > _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS:
+        return False
+    schema = contract.get("response_model_schema")
+    if not isinstance(schema, Mapping):
+        return False
+    # $id rebasing is outside the declared self-contained grammar
+    # (round-25): our pointer-walk preflight cannot mirror standards
+    # reference-scope resolution, and a contract that registers but fails
+    # every submission is worse than one declared unsupported.
+    if _schema_uses_keyword(schema, "$id"):
+        return False
+    # Answer forms are OBJECTS: re-entry rejects non-object outputs before
+    # schema validation, so a valid scalar schema ({"type": "string"}) would
+    # be advertised yet unsatisfiable — a required lane following it would
+    # stay permanently partial (bot-review round-13). The root may be
+    # expressed through a LOCAL $ref (round-20): the effective root after
+    # bounded resolution is what must declare the object type.
+    if not _declares_object_root(schema, schema, depth=0):
+        return False
+    try:
+        Draft202012Validator.check_schema(dict(schema))
+    except Exception:
+        return False
+    # Every $ref must resolve WITHIN the document (bot-review round-17): a
+    # meta-schema-valid contract referencing missing #/$defs passes
+    # check_schema but explodes only when validation reaches the ref —
+    # advertising it would make enforcement silently fail open at re-entry.
+    # External/anchor refs are rejected conservatively (contracts must be
+    # self-contained; nothing resolves over the network at re-entry).
+    return _schema_local_refs_resolve(schema)
+
+
+#: Lane field carrying a declared-but-unenforceable contract. It sits
+#: OUTSIDE ``answer_contract`` (round-39) because the public v1 lane schema
+#: requires ``answer_contract`` to carry a ``response_model_schema`` — a
+#: marker in that slot would be an invalid lane, breaking the additive
+#: compatibility promise it was meant to keep honest. A lane with no
+#: enforceable contract simply carries no ``answer_contract``, plus this
+#: sibling saying why.
+UNENFORCED_CONTRACT_FIELD = "answer_contract_unenforced"
+
+
+def published_lane_contract_fields(contract: Any, lane_id: str = "") -> dict[str, Any]:
+    """PUBLIC lane fields for a declared contract — advertised IFF enforced.
+
+    The enforceability decision is made once and must reach every public
+    surface identically (round-38 probe: an oversized contract was correctly
+    omitted from the child prompt and from registry enforcement, yet its full
+    form survived under ``payload.context.answer_contract``, so a host reading
+    the payload would follow a form re-entry silently ignores).
+
+    For the data lane an undeliverable declared contract does not mean
+    "nothing is enforced": registration substitutes the published contract, so
+    THAT is what the metadata publishes (round-59). Saying ``enforced: false``
+    while enforcing something left a host following the metadata permanently
+    partial — the same divergence the prompts carried in rounds 57 and 58, one
+    surface over.
+    """
+    # Publication asks registration what it will enforce rather than deciding
+    # again (round-71). Two decisions meant a foreign lane declaring the
+    # reserved id was PUBLISHED its own weak schema while registration bound
+    # the canonical one, so a child that followed the advertised contract was
+    # rejected and a required lane stayed permanently partial — advertised
+    # IFF enforced, broken one surface over for the third time (57, 59, 71).
+    enforced = effective_lane_contract(lane_id, contract if isinstance(contract, Mapping) else None)
+    if enforced is not None:
+        return {"answer_contract": enforced}
+    if not isinstance(contract, Mapping) or not contract:
+        # Nothing declared and nothing bound by identity: the generic output
+        # shape applies and there is no contract to publish — an "unenforced"
+        # notice about a declaration that never existed would be its own lie.
+        return {}
+    return {
+        UNENFORCED_CONTRACT_FIELD: {
+            "contract_id": str(contract.get("contract_id") or "unversioned"),
+            "enforced": False,
+            "reason": (
+                "exceeds the whole-form delivery budget or carries an invalid "
+                "schema; it is NOT enforced at re-entry"
+            ),
+        }
+    }
+
+
+def lanes_with_published_contracts(lanes: Iterable[Any]) -> list[dict[str, Any]]:
+    """Copy lanes with every declared contract in its publishable form."""
+    published: list[dict[str, Any]] = []
+    for lane in lanes:
+        if not isinstance(lane, Mapping):
+            continue
+        lane_copy = dict(lane)
+        contract = lane_copy.pop("answer_contract", None)
+        if isinstance(contract, Mapping):
+            lane_copy.update(
+                published_lane_contract_fields(contract, str(lane_copy.get("lane_id") or ""))
+            )
+        published.append(lane_copy)
+    return published
+
+
+def _is_canonical_data_declaration(declared: Any) -> bool:
+    """Whether a data lane declared exactly the contract it will be bound to.
+
+    The whole contract is compared, not just ``contract_id``. A declaration
+    naming ``data_evidence_answer.v1`` while carrying a degenerate schema like
+    ``{"type": "object"}`` enforces nothing, and treating it as canonical
+    would leave the substitution unlogged — the predicate would then disagree
+    with what the code actually does, which is the drift this PR keeps paying
+    for elsewhere.
+    """
+    return isinstance(declared, Mapping) and dict(declared) == canonical_data_lane_contract()
+
+
+def canonical_data_lane_contract() -> dict[str, Any]:
+    """The contract the ``data_context`` lane is bound to, whatever it declared.
+
+    The lane's IDENTITY determines its contract — not a field inside the
+    caller-supplied metadata (round-67). Reading it from the declaration made
+    the lane fail OPEN in two ways that a probe walked straight through: a
+    lane with no ``answer_contract`` at all, and a lane declaring some other
+    ``contract_id``, both registered with nothing bound, so raw rows, an
+    email, and ``requires_user_confirmation=false`` were accepted, reported
+    no violations, and persisted.
+
+    Deriving it from the lane id instead makes those cases unrepresentable
+    rather than detected: there is no declaration a caller can write that
+    changes what ``data_context`` means. This is the same rule rounds 50 and
+    62 established for consent — the state is chosen outside the value.
+
+    The full published contract is used when it is deliverable whole; when it
+    is not, the structural fallback keeps confirmation and the typed
+    evidence/proposal shapes, which are what the lane means.
+    """
+    canonical = _data_context_answer_contract()
+    if _enforceable_lane_contract(canonical):
+        return dict(canonical)
+    return {
+        "contract_id": _DATA_EVIDENCE_CONTRACT_ID,
+        "response_model_schema": _data_evidence_fallback_schema(),
+    }
+
+
+def effective_lane_contract(lane_id: str, declared: Any) -> dict[str, Any] | None:
+    """The contract re-entry will ENFORCE for this lane.
+
+    One definition for both surfaces. Registration and publication used to
+    decide separately, which is how the data lane came to publish a canonical
+    contract it had not bound (rounds 57-59 were the same divergence, one
+    surface over).
+    """
+    if lane_id == "data_context":
+        return canonical_data_lane_contract()
+    if isinstance(declared, Mapping):
+        # A RESERVED contract id means exactly one thing (round-70). Round 67
+        # bound the canonical schema by lane id, but every downstream
+        # behaviour — the evidence boundary scan, retained-state selection,
+        # prose redaction on persistence, and replay consent — keys off
+        # contract_id instead. So an additive lane under any other lane_id
+        # could declare `data_evidence_answer.v1` with a schema of
+        # `{"type": "object"}` and be treated as a data lane everywhere
+        # EXCEPT where its content is checked: raw person rows completed with
+        # no violations. The id now carries its schema with it.
+        if str(declared.get("contract_id") or "") == _DATA_EVIDENCE_CONTRACT_ID:
+            return canonical_data_lane_contract()
+        if _enforceable_lane_contract(declared):
+            return dict(declared)
+    return None
+
+
+def loaded_lane_contracts(raw: Any, expected_keys: Iterable[str] = ()) -> dict[str, Any]:
+    """Persisted lane contracts, resolved exactly as registration resolves them.
+
+    Registration cannot be the only place this holds. A record persisted
+    before this PR is read back on every submission, replay, and
+    resubmission, and it may carry a weak contract under the reserved id —
+    or, for a ``data_context`` lane, no contract at all. Round 70 normalized
+    only the first case, so a legacy data lane whose contract was absent or
+    named something else stayed fail-open: raw rows completed with no
+    violations (round-71).
+
+    ``expected_keys`` is what closes that: a lane the record EXPECTS is
+    resolved even when the contract map has no entry for it, so an old record
+    cannot enforce less than a new one. The resolution itself is
+    :func:`effective_lane_contract`, so load, registration, and publication
+    cannot drift apart.
+    """
+    declared = raw if isinstance(raw, Mapping) else {}
+    lane_ids = [str(key) for key in declared]
+    lane_ids.extend(str(key) for key in expected_keys if str(key) not in lane_ids)
+    normalized: dict[str, Any] = {}
+    for lane_id in lane_ids:
+        contract = declared.get(lane_id)
+        reserved = (
+            isinstance(contract, Mapping)
+            and str(contract.get("contract_id") or "") == _DATA_EVIDENCE_CONTRACT_ID
+        )
+        if lane_id == "data_context" or reserved:
+            normalized[lane_id] = canonical_data_lane_contract()
+        elif isinstance(contract, Mapping):
+            # Preserved EXACTLY, enforceable or not. Registration skips a
+            # contract it cannot enforce, but load must not: a legacy record
+            # may hold a contract that was ADVERTISED and is broken — an
+            # unresolvable $ref, say — and round 17 established that such a
+            # lane fails closed, its violation reported and the lane left
+            # missing. Dropping it here would hand the lane no schema at all
+            # and complete it unvalidated, turning that fail-closed into the
+            # fail-open it was written to prevent.
+            normalized[lane_id] = dict(contract)
+    return normalized
+
+
+def declared_lane_contract(lane: Mapping[str, Any]) -> Any:
+    """The contract a lane DECLARES, enforceable or not.
+
+    Registration and prompt rendering both need the declaration itself — the
+    data lane's fail-closed minimal contract and the child's explicit
+    "not enforced" notice depend on knowing a contract was declared at all —
+    so they read through the publication split.
+    """
+    contract = lane.get("answer_contract")
+    if isinstance(contract, Mapping):
+        return contract
+    return lane.get(UNENFORCED_CONTRACT_FIELD)
+
+
+def _declares_object_root(
+    schema: Mapping[str, Any],
+    node: Any,
+    depth: int,
+    seen: frozenset[str] = frozenset(),
+) -> bool:
+    """Whether the effective root necessarily describes an OBJECT.
+
+    Covers every object form the public lane schema accepts (bot-review
+    rounds 20-22): a literal root ``type: object``, a LOCAL root ``$ref`` to
+    one, an ``allOf`` conjunction ANY branch of which declares one (a
+    conjunct forces object instances), and a ``oneOf``/``anyOf`` disjunction
+    ALL of whose branches declare one (a disjunction forces objects only
+    when every alternative does). Refs are followed ONE hop at a time so
+    every intermediate node's conjunctive $ref siblings are consulted
+    (round-36 probe: an intermediate ``{"type": "object", "$ref": ...}``
+    forces objects even when the final target does not). Cycle safety comes
+    from the visited ref set — the combinator depth cap never bounds chain
+    length (round-35). The combinator nesting bound below is DECLARED in
+    the public ENFORCEABLE ROOT GRAMMAR (round-37: an undocumented cap of
+    32 silently dropped a valid 33-deep allOf contract) — deeper nesting is
+    rejected by contract, not omission.
+    """
+    if depth > 128:
+        return False
+    if not isinstance(node, Mapping):
+        return False
+    # Signals on the node ITSELF are evaluated first and independently of
+    # any $ref sibling (rounds 25 and 29): Draft 2020-12 $ref siblings
+    # combine conjunctively, so a literal type, const/enum, or an
+    # object-forcing combinator alongside the ref already forces objects.
+    declared_type = node.get("type")
+    if declared_type == "object" or declared_type == ["object"]:
+        return True
+    if isinstance(node.get("const"), Mapping):
+        return True
+    enum_values = node.get("enum")
+    if isinstance(enum_values, list) and enum_values:
+        if all(isinstance(value, Mapping) for value in enum_values):
+            return True
+    all_of = node.get("allOf")
+    if isinstance(all_of, list) and any(
+        _declares_object_root(schema, branch, depth + 1, seen) for branch in all_of
+    ):
+        return True
+    for disjunction_key in ("oneOf", "anyOf"):
+        branches = node.get(disjunction_key)
+        if (
+            isinstance(branches, list)
+            and branches
+            and all(_declares_object_root(schema, branch, depth + 1, seen) for branch in branches)
+        ):
+            return True
+    ref = node.get("$ref")
+    if isinstance(ref, str) and ref not in seen:
+        target = _resolve_local_pointer(schema, ref)
+        if target is not None and _declares_object_root(schema, target, depth, seen | {ref}):
+            return True
+    return False
+
+
+def _resolve_local_root(schema: Mapping[str, Any]) -> Any:
+    """Follow a chain of LOCAL root ``$ref``s to the effective root schema."""
+    return _resolve_local_root_from(schema, schema)
+
+
+def _resolve_local_root_from(schema: Mapping[str, Any], start: Any) -> Any:
+    """Resolve ``start`` (a node of ``schema``) through local ``$ref`` hops.
+
+    Bounded and cycle-safe; returns the node itself when it carries no
+    ``$ref``, and ``None`` when a hop cannot be resolved locally.
+    """
+    node: Any = start
+    seen: set[str] = set()
+    # Visited-based with NO hop bound (rounds 34-35: an eight-hop, then a
+    # 64-hop, valid chain was silently dropped by numeric caps): each
+    # iteration either returns or consumes a distinct ref string, so the
+    # visited set alone guarantees termination — the advertised "chain of
+    # local root refs" grammar has no length limit and neither does this.
+    while True:
+        if not isinstance(node, Mapping) or "$ref" not in node:
+            return node
+        ref = node.get("$ref")
+        if not isinstance(ref, str) or ref in seen:
+            return None
+        seen.add(ref)
+        target = _resolve_local_pointer(schema, ref)
+        if target is None:
+            return None
+        node = target
+
+
+def _resolve_local_pointer(schema: Mapping[str, Any], ref: str) -> Any:
+    """Resolve ONE local ``#/``-pointer hop, without following further refs.
+
+    Returns the direct target node (which may itself carry a ``$ref`` and
+    sibling constraints — the caller decides how to combine them), or
+    ``None`` when the pointer is non-local or does not resolve.
+    """
+    if not ref.startswith("#/"):
+        return None
+    target: Any = schema
+    for raw_part in ref[2:].split("/"):
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if isinstance(target, Mapping) and part in target:
+            target = target[part]
+        elif isinstance(target, list) and part.isdigit() and int(part) < len(target):
+            target = target[int(part)]
+        else:
+            return None
+    return target
+
+
+# Schema traversal is WHITELIST-based (bot-review rounds 26-28): only
+# keywords that actually carry subschemas are descended into. Everything
+# else — const/enum/default/examples payloads, property NAMES, and unknown
+# extension annotations like x-output-example — is data and must never be
+# mistaken for schema content.
+_SCHEMA_NAME_MAP_KEYWORDS = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+)
+_SCHEMA_SUBSCHEMA_KEYWORDS = frozenset(
+    {
+        "additionalProperties",
+        "unevaluatedProperties",
+        "propertyNames",
+        "items",
+        "prefixItems",
+        "unevaluatedItems",
+        "contains",
+        "contentSchema",
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "not",
+        "if",
+        "then",
+        "else",
+    }
+)
+
+
+def _iter_subschemas(node: Mapping[str, Any]) -> list[Any]:
+    """Return every DIRECT subschema of a schema object (whitelist walk)."""
+    subs: list[Any] = []
+    for key, value in node.items():
+        if key in _SCHEMA_NAME_MAP_KEYWORDS:
+            if isinstance(value, Mapping):
+                subs.extend(value.values())
+        elif key in _SCHEMA_SUBSCHEMA_KEYWORDS:
+            if isinstance(value, list):
+                subs.extend(value)
+            else:
+                subs.append(value)
+    return subs
+
+
+def _schema_uses_keyword(node: Any, needle: str) -> bool:
+    """Whether ``needle`` appears as a SCHEMA KEYWORD (not as data)."""
+    if not isinstance(node, Mapping):
+        return False
+    if needle in node:
+        return True
+    return any(_schema_uses_keyword(sub, needle) for sub in _iter_subschemas(node))
+
+
+def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
+    """Whether every ``$ref`` in ``schema`` resolves inside the document.
+
+    Traversal is SCHEMA-AWARE like the ``$id`` check (bot-review round-27):
+    a ``$ref`` key inside literal ``const``/``enum`` data is instance
+    content, not a reference, so a contract matching outputs that contain a
+    field named ``$ref`` stays enforceable.
+    """
+    refs: list[str] = []
+
+    def _walk(node: Any) -> None:
+        if not isinstance(node, Mapping):
+            return
+        # Every Draft 2020-12 reference form is preflighted (round-18):
+        # $dynamicRef (and legacy $recursiveRef) explode at validation
+        # exactly like $ref. Only schema-bearing keywords are descended
+        # (round-28), so annotation payloads never register as refs.
+        for ref_key in ("$ref", "$dynamicRef", "$recursiveRef"):
+            ref_value = node.get(ref_key)
+            if isinstance(ref_value, str):
+                refs.append(ref_value)
+        for sub in _iter_subschemas(node):
+            _walk(sub)
+
+    _walk(schema)
+
+    def _resolve_pointer(ref: str) -> Any:
+        node: Any = schema
+        for raw_part in ref[2:].split("/"):
+            part = raw_part.replace("~1", "/").replace("~0", "~")
+            if isinstance(node, Mapping) and part in node:
+                node = node[part]
+            elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+                node = node[int(part)]
+            else:
+                return _UNRESOLVED
+        return node
+
+    def _refs_within(node: Any) -> list[str]:
+        found: list[str] = []
+
+        def _collect(inner: Any) -> None:
+            if not isinstance(inner, Mapping):
+                return
+            for ref_key in ("$ref", "$dynamicRef", "$recursiveRef"):
+                candidate = inner.get(ref_key)
+                if isinstance(candidate, str):
+                    found.append(candidate)
+            for sub in _iter_subschemas(inner):
+                _collect(sub)
+
+        _collect(node)
+        return found
+
+    # Reference edges form a GRAPH, not just chains (round-33: a cycle
+    # routed through an allOf branch — a → b → a — recursed at validation
+    # while chain-only detection missed it). Every pointer must resolve to
+    # a schema, and the pointer graph must be acyclic.
+    for ref in refs:
+        if ref == "#":
+            # Root-recursive "#" is outside the declared grammar (round-31).
+            return False
+        if not ref.startswith("#/"):
+            return False
+        target = _resolve_pointer(ref)
+        if target is _UNRESOLVED or not isinstance(target, (Mapping, bool)):
+            return False
+
+    edges: dict[str, list[str]] = {}
+    for ref in refs:
+        target = _resolve_pointer(ref)
+        edges[ref] = _refs_within(target) if isinstance(target, Mapping) else []
+
+    visiting: set[str] = set()
+    settled: set[str] = set()
+
+    def _cyclic(pointer: str) -> bool:
+        if pointer in settled:
+            return False
+        if pointer in visiting:
+            return True
+        visiting.add(pointer)
+        for nxt in edges.get(pointer, ()):
+            if nxt == "#" or not nxt.startswith("#/"):
+                return True
+            if nxt not in edges:
+                target = _resolve_pointer(nxt)
+                if target is _UNRESOLVED or not isinstance(target, (Mapping, bool)):
+                    return True
+                edges[nxt] = _refs_within(target) if isinstance(target, Mapping) else []
+            if _cyclic(nxt):
+                return True
+        visiting.discard(pointer)
+        settled.add(pointer)
+        return False
+
+    return not any(_cyclic(pointer) for pointer in list(edges))
+
+
+_UNRESOLVED = object()
+
+
+# Standalone secrets that ARE syntactically identifiers (round-31):
+# unambiguous vendor prefixes, or a credential word whose suffix is not
+# made of recognizable words/tags (fail-closed since round-36).
+# token_usage_v2 keeps its exemption — "usage" is a word, not entropy.
+
+
+# Lane ids (and correlation values generally) are short identifiers; an
+# unexpected key that does not look like one is untrusted freeform content.
+_LANE_KEY_SHAPE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _reportable_unexpected_key(key: str) -> str:
+    """Return a safe-to-echo form of a rejected submission key.
+
+    Lane-id shaped keys are echoed verbatim (they are plain identifiers the
+    host needs to recognize its own mistake); anything else could be PII or a
+    secret masquerading as a key, so only a digest is reported.
+    """
+    # Lane-id shape is not enough (round-54: a GitHub token matches it): the
+    # same classifiers every other identifier field gets are applied before a
+    # key is echoed back into a response.
+    if (
+        _LANE_KEY_SHAPE.match(key)
+        and not _identifier_looks_secret(key)
+        and not _identifier_carries_payload(key)
+    ):
+        return key
+    return _redacted_segment(key)
+
+
+def _redacted_segment(text: str) -> str:
+    """Digest form of a value that may not ride a report.
+
+    Delegates to the single definition in ``core.requirement_candidate``
+    (round-76): the contract's semantic diagnostics redact through the same
+    function, so the two report forms cannot drift.
+    """
+    return redacted_segment(text)
+
+
+def _schema_declared_property_names(schema: Any) -> frozenset[str]:
+    """Every property name the CONTRACT declares.
+
+    Violation locations are the contract's own vocabulary; a name that only
+    the submission introduced is content (round-38 probe: a property literally
+    named ``alice@example.com``), and violations ride both the response and
+    the persisted terminal record. Collecting the declared names lets the path
+    renderer echo structure while redacting anything the submitter invented.
+    """
+    names: set[str] = set()
+    stack: list[Any] = [schema]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if isinstance(node, Mapping):
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            properties = node.get("properties")
+            if isinstance(properties, Mapping):
+                names.update(str(key) for key in properties)
+            stack.extend(node.values())
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+    return frozenset(names)
+
+
+def _redacted_error_path(path_parts: Any, declared: frozenset[str]) -> str:
+    """Render a violation location without echoing submitter-chosen names.
+
+    Array indices and property names the contract DECLARES are structure and
+    are echoed; every other segment is digested. Built from
+    ``absolute_path`` rather than ``json_path`` so the redaction cannot be
+    bypassed by the library's own path formatting.
+    """
+    rendered = "$"
+    for part in path_parts:
+        if isinstance(part, int):
+            rendered += f"[{part}]"
+        elif str(part) in declared:
+            rendered += f".{part}"
+        else:
+            rendered += f".{_redacted_segment(str(part))}"
+    return rendered
+
+
+def _lane_answer_contract_violations(
+    contracts: Mapping[str, Any],
+    provided: Mapping[str, Any],
+    policies: Mapping[str, Any] | None = None,
+    *,
+    carried_forward: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    """Validate submitted lane outputs against their registered answer contracts.
+
+    Returns one ``{"lane_id", "contract_id", "errors"}`` entry per violating
+    lane. Lanes without a registered contract are not checked; a submitted
+    output that is not a JSON object is itself a violation when a contract
+    exists (the contract's response_model_schema describes an object form).
+    Data-evidence lanes additionally get the semantic boundary scan, keyed on
+    the contract id so records persisted with an older schema still get it.
+    """
+    violations: list[dict[str, Any]] = []
+    for lane_id, contract in contracts.items():
+        if lane_id not in provided or not isinstance(contract, Mapping):
+            continue
+        contract_id = str(contract.get("contract_id") or "")
+        output = provided[lane_id]
+        if not isinstance(output, Mapping):
+            violations.append(
+                {
+                    "lane_id": lane_id,
+                    "contract_id": contract_id,
+                    "errors": ["lane output is not a JSON object"],
+                }
+            )
+            continue
+        # The data boundary scan runs INDEPENDENTLY of schema shape AND
+        # validity (rounds 14 and 16): the data lane's fail-closed guarantee
+        # is keyed on the contract identity, so a legacy record whose
+        # persisted schema is missing, non-mapping, or invalid still gets the
+        # policy scan — schema unenforceability never disables it.
+        lane_policy = (policies or {}).get(lane_id)
+        boundary_errors = (
+            _data_evidence_boundary_violations(
+                output,
+                policy=lane_policy if isinstance(lane_policy, Mapping) else None,
+                retained=lane_id in carried_forward,
+            )
+            if contract_id == _DATA_EVIDENCE_CONTRACT_ID
+            else []
+        )
+        # A result carried forward from an earlier submission is in the
+        # RETAINED lifecycle state, so it is validated against that state's
+        # schema (round-49): re-checking the server's own durable form against
+        # the submission schema would reject it and drop the lane.
+        schema = (
+            data_evidence_retained_schema()
+            if (contract_id == _DATA_EVIDENCE_CONTRACT_ID and lane_id in carried_forward)
+            else contract.get("response_model_schema")
+        )
+        if not isinstance(schema, Mapping):
+            # Fail CLOSED (round-83): a persisted contract whose schema is
+            # missing or not an object cannot validate anything, and
+            # continuing without a violation accepted arbitrary content into
+            # terminal state. Round 17 established the rule for a broken
+            # $ref; a schema that is absent entirely is more broken, not
+            # less. The lane stays incomplete until a conforming result —
+            # or a repaired registration — arrives.
+            violations.append(
+                {
+                    "lane_id": lane_id,
+                    "contract_id": contract_id,
+                    "errors": [
+                        *boundary_errors,
+                        "persisted answer contract carries no usable "
+                        "response_model_schema; the result cannot be "
+                        "validated and is not accepted",
+                    ],
+                }
+            )
+            continue
+        # Belt for records persisted before registration validated schemas
+        # (round-12): an invalid registered schema must degrade to
+        # "unenforced" — the child never received an enforceable form — not
+        # crash re-entry with UnknownType.
+        try:
+            validator = Draft202012Validator(dict(schema))
+            # Redacted messages for EVERY lane (rounds 12 and 24): jsonschema
+            # echoes the offending instance value into ``error.message``, and
+            # violations ride the response AND the persisted terminal record —
+            # so any lane's rejected value would otherwise leak into durable
+            # state through its own violation report. Report the location and
+            # the violated keyword, never the content.
+            #
+            # The LOCATION is content too when the submitter chose the
+            # property name (round-38 probe: ``{"alice@example.com": ...}``
+            # under an additive lane) — so path segments are echoed only when
+            # the contract declares them.
+            declared_names = _schema_declared_property_names(schema)
+            errors = sorted(
+                f"{_redacted_error_path(error.absolute_path, declared_names)}: "
+                f"violates {error.validator!r}"
+                for error in validator.iter_errors(dict(output))
+            )
+        except Exception:
+            # An ADVERTISED contract whose validation explodes must fail
+            # CLOSED (bot-review round-17): content that cannot be verified
+            # is not accepted into durable state. Registration now rejects
+            # unresolvable schemas, so this belt only fires for legacy
+            # records — whose retention window expires them.
+            log.warning(
+                "fanout.lane_contract.validation_failed_closed",
+                lane_id=lane_id,
+                contract_id=contract_id,
+            )
+            errors = [
+                "contract validation failed (unresolvable or broken schema); "
+                "the output cannot be verified and is not accepted"
+            ]
+        errors = [*errors, *boundary_errors]
+        if errors:
+            violations.append({"lane_id": lane_id, "contract_id": contract_id, "errors": errors})
+    return violations
 
 
 def _fanout_identity_synthesis(aggregated_outputs: list[Mapping[str, Any]]) -> dict[str, Any]:
@@ -2772,7 +4324,7 @@ def register_lateral_persona_fanout(
     payloads: list[SubagentPayload],
     correlation_key: str = "context.persona",
     fanout_id: str | None = None,
-) -> str:
+) -> str | None:
     """Register a lateral persona-panel fan-out for later result re-entry.
 
     Expected keys are the payload personas (``context.persona``); the persisted
@@ -2803,7 +4355,7 @@ def register_code_investigation_fanout(
     request: Mapping[str, Any],
     correlation_key: str = "code_facts",
     fanout_id: str | None = None,
-) -> str:
+) -> str | None:
     """Register a code-investigation fan-out for later result re-entry.
 
     Expected keys default to the request's ``required_result_ids`` (or the
@@ -2833,7 +4385,7 @@ def register_question_advisory_fanout(
     payloads: list[SubagentPayload],
     correlation_key: str = "context.lane_id",
     fanout_id: str | None = None,
-) -> str:
+) -> str | None:
     """Register an interview question-advisory fan-out for later result re-entry.
 
     The advisory lanes are stamped to correlate by ``context.lane_id`` (a lane's
@@ -2848,20 +4400,351 @@ def register_question_advisory_fanout(
     the human's answer easier), so submission routes to a deterministic
     aggregation that returns the correlated lane outputs in dispatch order for
     the host to synthesize.
+
+    Only ``required: true`` lanes gate completion (Q00/ouroboros#1671): a host
+    that cannot run an optional lane (for example ``data_context`` on a runtime
+    without MCP access) must not pin the fan-out at ``status="partial"``
+    forever. Optional lanes that were submitted still aggregate; missing ones
+    are reported as ``missing_optional_keys`` on the complete outcome.
+    """
+    lanes: list[dict[str, Any]] = []
+    for payload in payloads:
+        payload_dict = payload.to_dict()
+        lane_id = _payload_lane_id(payload_dict)
+        if not lane_id:
+            continue
+        context = payload_dict.get("context")
+        lane = dict(context) if isinstance(context, Mapping) else {}
+        lane["lane_id"] = lane_id
+        lanes.append(lane)
+    return register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id=session_id,
+        lanes=lanes,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+    )
+
+
+def register_question_advisory_fanout_from_lanes(
+    registry: FanoutRegistry,
+    *,
+    session_id: str,
+    lanes: list[Mapping[str, Any]],
+    correlation_key: str = "context.lane_id",
+    fanout_id: str | None = None,
+) -> str | None:
+    """Register a question-advisory fan-out directly from lane metadata.
+
+    The plugin (OpenCode passive) transport cannot pre-build per-question
+    lane payloads server-side — the plugin child generates the question — but
+    it must still receive the SAME machine-readable re-entry contract as the
+    host-driven transport: registered lane ids, required/optional gating, and
+    each lane's answer contract for door validation. Lane dicts are the
+    versioned ``question_advisory_fanout`` metadata lanes (or payload
+    contexts, which carry the same fields). Returns ``None`` when nothing was
+    registered or persistence failed — the caller must then skip stamping a
+    fan-out id.
     """
     expected_keys: list[str] = []
-    for payload in payloads:
-        lane_id = _payload_lane_id(payload.to_dict())
-        if lane_id and lane_id not in expected_keys:
-            expected_keys.append(lane_id)
+    required_keys: list[str] = []
+    lane_answer_contracts: dict[str, Any] = {}
+    lane_data_policies: dict[str, Any] = {}
+    for lane in lanes:
+        if not isinstance(lane, Mapping):
+            continue
+        lane_id = str(lane.get("lane_id") or "")
+        if not lane_id or lane_id in expected_keys:
+            continue
+        # The public grammar and re-entry validation agree (round-33): a
+        # lane id that could not round-trip as results[*].key (shell
+        # metacharacters, whitespace) is never registered as an expected
+        # key it could not complete.
+        if not _LANE_KEY_SHAPE.match(lane_id):
+            log.warning("fanout.lane_id.invalid_shape_skipped", lane_id=lane_id)
+            continue
+        expected_keys.append(lane_id)
+        if bool(lane.get("required")):
+            required_keys.append(lane_id)
+        # Persist the lane's answer contract so re-entry can validate the
+        # submitted output against it BEFORE synthesis — a data lane result
+        # is otherwise arbitrary content flowing toward user confirmation and
+        # persisted interview state.
+        # The ADVERTISED policy is persisted with the record (round-43):
+        # re-entry happens after the advertising turn is gone, so a policy
+        # that is not snapshotted cannot be replayed — and caps it declares
+        # (max_evidence_items/chars) were advertised but never enforced.
+        lane_policy = lane.get("data_policy")
+        if isinstance(lane_policy, Mapping):
+            lane_data_policies[lane_id] = dict(lane_policy)
+        # The tool CLASSIFICATION is part of the advertised policy and rides
+        # the same snapshot (round-97): registration persisted data_policy
+        # but dropped the rosters, so re-entry accepted executed evidence
+        # from a tool the same fan-out had advertised proposal-only.
+        for roster_key in ("known_data_tools", "proposal_only_data_tools"):
+            roster = lane.get(roster_key)
+            if isinstance(roster, (list, tuple)) and roster:
+                lane_data_policies.setdefault(lane_id, {})[roster_key] = [
+                    str(tool) for tool in roster
+                ]
+        answer_contract = declared_lane_contract(lane)
+        # Enforced IFF deliverable whole (round-11): an oversized contract is
+        # skipped so re-entry never validates against a schema the child could
+        # only have received torn. For data_context the lane's IDENTITY, not
+        # its declaration, decides — see effective_lane_contract (round-67).
+        effective = effective_lane_contract(lane_id, answer_contract)
+        if effective is not None:
+            lane_answer_contracts[lane_id] = effective
+        if isinstance(answer_contract, Mapping) and not _enforceable_lane_contract(answer_contract):
+            log.warning(
+                "fanout.lane_contract.unenforceable_not_enforced",
+                lane_id=lane_id,
+                contract_id=str(answer_contract.get("contract_id") or ""),
+            )
+        if lane_id == "data_context" and not _is_canonical_data_declaration(answer_contract):
+            # The declaration was absent, or named another contract. Both used
+            # to leave the lane with nothing bound, which is how a probe got
+            # raw rows, an email, and requires_user_confirmation=false past
+            # re-entry. The substitution is logged because the host is being
+            # given something other than what it declared — and it is
+            # published on every surface, so the child is told the same.
+            log.warning(
+                "fanout.data_lane_contract.substituted",
+                lane_id=lane_id,
+                declared_contract_id=(
+                    str(answer_contract.get("contract_id") or "")
+                    if isinstance(answer_contract, Mapping)
+                    else ""
+                ),
+                bound_contract_id=_DATA_EVIDENCE_CONTRACT_ID,
+            )
+    if not expected_keys:
+        return None
+    synthesizer_input: dict[str, Any] = {"lane_ids": list(expected_keys)}
+    if lane_answer_contracts:
+        synthesizer_input["lane_answer_contracts"] = lane_answer_contracts
+    if lane_data_policies:
+        synthesizer_input["lane_data_policies"] = lane_data_policies
     return registry.register(
         kind=FANOUT_KIND_QUESTION_ADVISORY,
         session_id=session_id,
         correlation_key=correlation_key,
         expected_keys=expected_keys,
-        synthesizer_input={"lane_ids": list(expected_keys)},
+        synthesizer_input=synthesizer_input,
         fanout_id=fanout_id,
+        required_keys=required_keys,
     )
+
+
+def _normalize_contracted_text(submitted: dict[str, Any], contracts: Mapping[str, Any]) -> None:
+    """Decode JSON-serialized text into the object a contract validates.
+
+    The public tool accepts ``content`` as object OR text (round-25): a
+    text-transport child submitting its answer as JSON text must validate as
+    the decoded object rather than be rejected for not being one. Shared by
+    the initial and the resubmission paths, because a second copy of this rule
+    drifted from the first within one round (round-61).
+    """
+    for lane_key in list(submitted):
+        if lane_key in contracts and isinstance(submitted[lane_key], str):
+            try:
+                decoded = json.loads(submitted[lane_key])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(decoded, dict):
+                submitted[lane_key] = decoded
+
+
+def _is_transportable(content: Any) -> bool:
+    """Whether content can cross the MCP transport at all.
+
+    A lone unpaired surrogate is valid in a Python str and in JSON text,
+    but cannot be encoded to UTF-8 — so it fails the durable write AND the
+    serialization of the failure report that would describe it, turning a
+    reportable persistence failure into an uncaught transport error
+    (round-52). Content that cannot round-trip is rejected at the door, where
+    a malformed key is already the documented answer.
+    """
+    try:
+        json.dumps(content, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError):
+        return False
+    return True
+
+
+def _redact_legacy_data_prose(payload: Any, data_lane_ids: frozenset[str]) -> bool:
+    """Redact any un-redacted data-lane SUBMISSION inside a persisted payload.
+
+    Rounds 100-102 rewrote this twice by chasing envelope key names — first
+    ``lane_id`` sniffed anywhere (which matched the envelope itself), then
+    ``result_id``/``key`` (the generic aggregator's shape, while
+    question-advisory synthesis stores ``{"lane_id", "output"}``). Both
+    times a fixture using the wrong shape hid the leak.
+
+    Key names are not the signal. A data SUBMISSION is recognizable by its
+    own shape — it carries the contract's content fields — while every
+    envelope shape carries only an identifier and a nested payload. So the
+    walk redacts values that ARE data content, wherever they sit and under
+    whatever key, and no future envelope shape can evade it.
+
+    Returns whether anything was redacted, so the caller can classify
+    consent from the fact rather than from a marker legacy state lacks.
+    """
+    redacted = False
+    content_fields = ("evidence", "proposed_queries", "finding", "caveats")
+
+    def _is_unredacted_data_submission(value: Any) -> bool:
+        return (
+            isinstance(value, Mapping)
+            and str(value.get("lane_id") or "") in data_lane_ids
+            and value.get("content_retained") is not False
+            and any(field in value for field in content_fields)
+        )
+
+    def _walk(node: Any, depth: int = 0) -> None:
+        nonlocal redacted
+        if depth > 8:
+            return
+        if isinstance(node, dict):
+            for key, value in list(node.items()):
+                if _is_unredacted_data_submission(value):
+                    node[key] = redact_prose_for_persistence(value)
+                    redacted = True
+                    continue
+                _walk(value, depth + 1)
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                if _is_unredacted_data_submission(value):
+                    node[index] = redact_prose_for_persistence(value)
+                    redacted = True
+                    continue
+                _walk(value, depth + 1)
+
+    if _is_unredacted_data_submission(payload):
+        # Defensive: the payload itself is never a submission today, but the
+        # rule is about shape, not position.
+        redacted = True
+    _walk(payload)
+    return redacted
+
+
+def _carries_redacted_data(
+    results: Mapping[str, Any] | None, contracts: Mapping[str, Any] | None = None
+) -> bool:
+    """Whether a data result present here has already lost its prose.
+
+    The consent marker follows the ACTUAL retained result (round-49
+    suggestion): a completion whose optional data lane never arrived has no
+    consent to qualify, and a completion assembled from lanes accumulated in
+    earlier calls has lost the narrative just as a replay has (round-49 B2).
+    """
+    for lane_id, output in (results or {}).items():
+        contract = (contracts or {}).get(lane_id)
+        contract_id = (
+            str(contract.get("contract_id") or "") if isinstance(contract, Mapping) else ""
+        )
+        # Scoped to the data contract (round-50): a generic lane that happens
+        # to carry the field is not a redacted data result.
+        if (
+            contract_id == _DATA_EVIDENCE_CONTRACT_ID
+            and isinstance(output, Mapping)
+            and output.get("prose_retained") is False
+        ):
+            return True
+    return False
+
+
+def _unretained_keys(contracts: Mapping[str, Any], provided: Mapping[str, Any]) -> frozenset[str]:
+    """Lanes whose content will NOT survive this write.
+
+    Computed from what will be STORED, not from what was submitted: at
+    accumulation time the submitted content is still intact, and reporting it
+    as received is a claim the next call cannot honour (round-58).
+    """
+    stored = _durable_results(contracts, provided)
+    return frozenset(
+        key
+        for key, value in stored.items()
+        # The marker is the DATA lane's lifecycle flag, so it only means
+        # "not retained" for a lane registered with that contract
+        # (round-104): a generic lane whose own output happens to carry
+        # content_retained: false was reported unretained, discarded, and
+        # its required slot could never be filled again.
+        if _is_data_contract_lane(contracts, key)
+        and isinstance(value, Mapping)
+        and value.get("content_retained") is False
+    )
+
+
+def _is_data_contract_lane(contracts: Mapping[str, Any], lane_id: str) -> bool:
+    """Whether ``lane_id`` is registered with the data-evidence contract."""
+    contract = contracts.get(lane_id)
+    return (
+        isinstance(contract, Mapping)
+        and str(contract.get("contract_id") or "") == _DATA_EVIDENCE_CONTRACT_ID
+    )
+
+
+def _durable_results(contracts: Mapping[str, Any], provided: Mapping[str, Any]) -> dict[str, Any]:
+    """Lane results as they are STORED — data-lane prose is not retained.
+
+    The response returns what the host submitted; the record keeps the typed
+    facts. See ``redact_prose_for_persistence`` for why the prose cannot stay.
+    """
+    stored: dict[str, Any] = {}
+    for lane_id, output in provided.items():
+        if _is_data_contract_lane(contracts, lane_id):
+            stored[lane_id] = redact_prose_for_persistence(output)
+            continue
+        # Generic lanes DO retain their content — that is how synthesis
+        # works for code_context and its peers — but retention is not a
+        # licence to store a secret (round-104: credential-shaped text
+        # submitted through code_context survived verbatim in
+        # received_results and on disk). Credential-shaped tokens are
+        # replaced by their digest on the way to durable state; everything
+        # else, including code quotations, is untouched.
+        stored[lane_id] = _scrub_credentials_for_persistence(output)
+    return stored
+
+
+def _scrub_credentials_for_persistence(value: Any, _depth: int = 0) -> Any:
+    """Replace credential-shaped tokens in child content with their digest."""
+    if _depth > 8:
+        return value
+    if isinstance(value, str):
+        return _redact_credential_tokens(value)
+    if isinstance(value, Mapping):
+        return {
+            key: _scrub_credentials_for_persistence(item, _depth + 1) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_scrub_credentials_for_persistence(item, _depth + 1) for item in value]
+    return value
+
+
+def _redact_credential_tokens(text: str) -> str:
+    """Digest every credential-shaped token in ``text``.
+
+    Token-level rather than whole-value rejection: a code_context finding
+    legitimately quotes configuration and code, so the finding survives with
+    only the secret replaced.
+    """
+    if not text:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        return redacted_segment(token) if _identifier_looks_secret(token) else token
+
+    scrubbed = _CREDENTIAL_TOKEN_CANDIDATE.sub(_replace, text)
+    return _DATA_EVIDENCE_SECRET_RE.sub(lambda m: redacted_segment(m.group(0)), scrubbed)
+
+
+#: Token shapes worth asking the credential classifier about: assignment
+#: right-hand sides and standalone identifier-like runs.
+_CREDENTIAL_TOKEN_CANDIDATE = re.compile(r"[A-Za-z0-9_.\-]{8,}")
+#: The published vendor-token vocabulary, compiled once here.
+_DATA_EVIDENCE_SECRET_RE = re.compile(DATA_EVIDENCE_SECRET_PATTERN, re.IGNORECASE)
 
 
 def submit_fanout_results(
@@ -2871,6 +4754,7 @@ def submit_fanout_results(
     correlation_key: str,
     results: list[Mapping[str, Any]],
     fanout_id: str,
+    finalize: bool | None = None,
 ) -> dict[str, Any]:
     """Validate + route a batch of correlated fan-out results back to synthesis.
 
@@ -2879,86 +4763,607 @@ def submit_fanout_results(
     * Unknown ``fanout_id`` → ``status="unknown_fanout_id"`` (clean error).
     * A ``session_id`` / ``correlation_key`` that disagrees with the persisted
       record → ``status="correlation_mismatch"`` (clean error).
-    * Missing expected keys → ``status="partial"`` + ``missing_keys`` (the host
-      may resubmit with the remaining lanes).
-    * Complete set → route to the revived synthesizer for the record ``kind``
-      and return its structured outcome under ``status="complete"``.
+    * A fan-out that already completed → ``status="already_complete"``: the
+      record is terminal, so a replay cannot mutate the synthesized outcome.
+      The persisted terminal outcome is replayed on the response, so a caller
+      that lost the first completion response can still recover the synthesis.
+    * Submitted keys that are not in the record's ``expected_keys`` are
+      rejected at the door and reported under ``unexpected_keys`` — an
+      unregistered key is arbitrary content and never enters durable state.
+    * Missing required keys → ``status="partial"`` + ``missing_keys`` (the host
+      may resubmit with the remaining lanes). Lanes with a registered answer
+      contract are validated BEFORE anything is persisted — a violating
+      output never enters durable state, is reported under
+      ``contract_violations``, and (if required) stays missing until a
+      conforming output is resubmitted. ``accumulation_persisted=false``
+      means the received keys could NOT be saved (I/O failure): resubmit
+      them together with the remaining lanes.
+    * All required keys present → route to the revived synthesizer for the
+      record ``kind``. The synthesizer's own content validation gates
+      terminalization: outputs it rejects (e.g. a ``code_facts`` result bound
+      to a different session) come back as ``status="partial"`` with
+      ``synthesis_rejected_keys`` so a corrected retry stays possible, instead
+      of freezing an unusable outcome behind ``already_complete``.
+    * A synthesizable outcome is persisted as the terminal record BEFORE
+      completion is claimed: if that write fails the response is
+      ``status="completion_not_persisted"`` (the fan-out stays open — retry
+      the submission), never a claimed-durable ``complete``. On success the
+      structured outcome returns under ``status="complete"``; optional keys
+      that never arrived are reported as ``missing_optional_keys`` instead of
+      pinning the fan-out at ``partial`` (Q00/ouroboros#1671); records
+      persisted without a required/optional split treat every expected key as
+      required.
+
+    ``finalize`` is the sequential-host escape from eager completion
+    (bot-review round-7): completion normally fires as soon as every
+    required lane is present, which would permanently discard optional
+    results a host submits one at a time AFTER the required set. Passing
+    ``finalize=False`` accumulates the batch without terminalizing
+    (``status="accumulated"``); the host closes the fan-out with a final
+    ``finalize``-omitted (or ``finalize=True``) submission. Single-batch
+    hosts never need the parameter.
+
+    The whole load → validate → synthesize → persist sequence runs inside a
+    per-fanout exclusive section: concurrent submissions serialize, so
+    exactly one can terminalize a record and the other replays the terminal
+    outcome instead of double-completing with a divergent result.
     """
-    record = registry.load(fanout_id)
-    if record is None:
+    if not registry.valid_fanout_id(fanout_id):
+        # A malformed id is rejected HERE, at the one door both transports
+        # share, rather than in each handler (round-64). It is reported as
+        # unknown because it is: an id that cannot match the grammar can
+        # never have been registered. Crucially the submitted value is NOT
+        # echoed — the previous path put it verbatim into the error, so a
+        # 100,000-character id produced a 100,000-character error that every
+        # log and MCP frame downstream then had to carry.
         return {
             "status": "unknown_fanout_id",
-            "fanout_id": fanout_id,
-            "error": f"No pending fan-out is registered for fanout_id={fanout_id!r}.",
+            "error": (
+                "fanout_id does not match the registry identifier grammar "
+                "(1-128 characters, A-Z a-z 0-9 _ -), so no record can exist "
+                "for it. The submitted value is not echoed back."
+            ),
         }
-    if record.session_id and session_id and record.session_id != session_id:
-        return {
-            "status": "correlation_mismatch",
-            "fanout_id": fanout_id,
-            "error": "session_id does not match the registered fan-out.",
-            "expected_session_id": record.session_id,
-        }
-    if record.correlation_key and correlation_key and record.correlation_key != correlation_key:
-        return {
-            "status": "correlation_mismatch",
-            "fanout_id": fanout_id,
-            "error": "correlation_key does not match the registered fan-out.",
-            "expected_correlation_key": record.correlation_key,
-        }
+    with registry.exclusive(fanout_id):
+        return _submit_fanout_results_locked(
+            registry,
+            session_id=session_id,
+            correlation_key=correlation_key,
+            results=results,
+            fanout_id=fanout_id,
+            finalize=finalize,
+        )
 
-    provided: dict[str, Any] = {}
+
+def _submit_fanout_results_locked(
+    registry: FanoutRegistry,
+    *,
+    session_id: str,
+    correlation_key: str,
+    results: list[Mapping[str, Any]],
+    fanout_id: str,
+    finalize: bool | None = None,
+) -> dict[str, Any]:
+    record = registry.load(fanout_id)
+    if record is None:
+        # The id is digested rather than echoed (round-69). Bounding it to
+        # the registry grammar bounded its LENGTH, which was the round-64
+        # finding, and I argued from that bound that echoing a well-formed id
+        # was safe. The grammar admits `ghp_abcdef1234567890` — the harm is
+        # the CONTENT, not the size, and an unknown id is by definition one
+        # the registry never issued, so it is caller text heading for host
+        # logs. The digest still lets a host correlate which id it sent,
+        # which is what the echo was for, and uses the same form the
+        # unexpected-key path already reports rejected values in.
+        return {
+            "status": "unknown_fanout_id",
+            "fanout_id": _redacted_segment(fanout_id),
+            "error": (
+                "No fan-out record exists for the submitted fanout_id "
+                f"({_redacted_segment(fanout_id)}); the value itself is not "
+                "echoed back. Records (including completed ones held for "
+                "replay) are retained for 7 days after their last update, so "
+                "an expired id and a never-registered id are "
+                "indistinguishable here."
+            ),
+        }
+    # Correlation is validated BEFORE terminal replay, and STRICTLY: when the
+    # record was registered with a session/correlation identity, the caller
+    # must present it — omitting the parameters does not skip the boundary
+    # (bot-review round-5 probe). Only records registered WITHOUT an identity
+    # (legacy/empty) accept an omitted value.
+    if record.session_id and session_id != record.session_id:
+        return {
+            "status": "correlation_mismatch",
+            "fanout_id": fanout_id,
+            "error": (
+                "session_id does not match the registered fan-out "
+                "(required — omitting it does not bypass the check)."
+            ),
+            # The registered values are NOT echoed (round-44): a mismatch
+            # reply that names what was expected turns the check into an
+            # oracle — one empty submission yields the session, a second
+            # yields the correlation key, and the third completes the fan-out
+            # from outside. A mismatch reports only that it mismatched.
+            "mismatched_field": "session_id",
+        }
+    if record.correlation_key and correlation_key != record.correlation_key:
+        return {
+            "status": "correlation_mismatch",
+            "fanout_id": fanout_id,
+            "error": (
+                "correlation_key does not match the registered fan-out "
+                "(required — omitting it does not bypass the check)."
+            ),
+            "mismatched_field": "correlation_key",
+        }
+    if record.completed:
+        replay: dict[str, Any] = (
+            dict(record.terminal_response) if record.terminal_response is not None else {}
+        )
+        # A terminal response persisted BEFORE redaction existed can still
+        # hold full data-lane prose, and copying it replayed that content
+        # verbatim (round-99/100). Legacy state is sanitized on the way out
+        # with the same server-owned summary every fresh record gets, so the
+        # retention guarantee is a property of what leaves the door rather
+        # than of when the record happened to be written.
+        replay_data_lanes = frozenset(
+            lane_id
+            for lane_id, contract in loaded_lane_contracts(
+                record.synthesizer_input.get("lane_answer_contracts"), record.expected_keys
+            ).items()
+            if isinstance(contract, Mapping)
+            and str(contract.get("contract_id") or "") == _DATA_EVIDENCE_CONTRACT_ID
+        )
+        legacy_data_redacted = _redact_legacy_data_prose(replay, replay_data_lanes)
+        # This is where a host lands after being told to resubmit an
+        # unconfirmed completion, so it is where the flush is retried
+        # (round-66). Retrying the CONTENT would be pointless — it is already
+        # on disk and the record is terminal — and reporting the outcome here
+        # is what makes the documented recovery able to establish durability.
+        replay["durability_confirmed"] = registry.confirm_durability(fanout_id)
+        # A completed fan-out still ACCEPTS a lane whose content was never
+        # retained (round-57). Refusing it made the host stuck: the content is
+        # not recoverable from the record by design, so the only way back is
+        # to submit it again, and `already_complete` was closing that door
+        # too. Terminal immutability is preserved for everything the record
+        # actually holds — this admits only what it never held.
+        #
+        # The resubmission goes through the SAME door as a first submission
+        # (round-58): echoing it ahead of contract, malformed-content, and
+        # transport checks made this path a validation bypass, which is worse
+        # than the dead end it replaced.
+        # Scoped by the lane's REGISTERED contract, never by a field inside
+        # the stored value (round-62): reading content_retained off the output
+        # let a generic lane's resend flip the whole response to confirmable
+        # while the data lane stayed redacted. This is the same rule as
+        # round-50 — what a value is, is decided outside the value.
+        replay_lane_contracts = loaded_lane_contracts(
+            record.synthesizer_input.get("lane_answer_contracts"), record.expected_keys
+        )
+        replay_lane_contracts = (
+            replay_lane_contracts if isinstance(replay_lane_contracts, Mapping) else {}
+        )
+
+        def _is_redacted_data_lane(lane_id: str) -> bool:
+            contract = replay_lane_contracts.get(lane_id)
+            if not isinstance(contract, Mapping):
+                return False
+            if str(contract.get("contract_id") or "") != _DATA_EVIDENCE_CONTRACT_ID:
+                return False
+            stored = record.received_results.get(lane_id)
+            return isinstance(stored, Mapping) and stored.get("content_retained") is False
+
+        resubmittable = {
+            str(result.get("key"))
+            for result in results
+            if isinstance(result, Mapping)
+            and str(result.get("key")) in record.expected_keys
+            and _is_redacted_data_lane(str(result.get("key")))
+        }
+        if resubmittable:
+            resent: dict[str, Any] = {}
+            rejected: list[str] = []
+            for result in results:
+                if not isinstance(result, Mapping):
+                    continue
+                key = str(result.get("key"))
+                if key not in resubmittable:
+                    continue
+                content = result.get("content")
+                if (
+                    content is None
+                    or (isinstance(content, str) and not content.strip())
+                    or not isinstance(content, (str, Mapping))
+                    or (isinstance(content, Mapping) and not content)
+                    or not _is_transportable(content)
+                ):
+                    rejected.append(key)
+                    continue
+                resent[key] = content
+            replay_contracts = loaded_lane_contracts(
+                record.synthesizer_input.get("lane_answer_contracts"), record.expected_keys
+            )
+            _normalize_contracted_text(resent, replay_contracts)
+            raw_policies_replay = record.synthesizer_input.get("lane_data_policies")
+            replay_policies = (
+                raw_policies_replay if isinstance(raw_policies_replay, Mapping) else {}
+            )
+            violations = _lane_answer_contract_violations(replay_contracts, resent, replay_policies)
+            for violation in violations:
+                resent.pop(violation["lane_id"], None)
+            # Terminal resubmission is BOUND to what the fan-out completed
+            # with (round-99): a completed record returned accounts=42 once,
+            # and a later schema-valid resubmission of payments=999 was
+            # labeled confirmable with nothing tying it to the original.
+            # The retained summary carries a server-derived content digest;
+            # a resubmission is confirmable only when it hashes to that
+            # commitment. Records persisted before the digest existed cannot
+            # verify anything and fail closed — re-run the fan-out.
+            mismatched: list[str] = []
+            for key in list(resent):
+                contract = replay_contracts.get(key)
+                contract_id = (
+                    str(contract.get("contract_id") or "") if isinstance(contract, Mapping) else ""
+                )
+                if contract_id != _DATA_EVIDENCE_CONTRACT_ID:
+                    continue
+                retained_summary = record.received_results.get(key)
+                stored_digest = (
+                    retained_summary.get("content_digest")
+                    if isinstance(retained_summary, Mapping)
+                    else None
+                )
+                if (
+                    not isinstance(stored_digest, str)
+                    or not stored_digest
+                    or data_evidence_content_digest(resent[key]) != stored_digest
+                ):
+                    resent.pop(key)
+                    mismatched.append(key)
+            if resent or rejected or violations or mismatched:
+                replay["resubmitted_keys"] = sorted(resent)
+                replay["resubmitted_results"] = resent
+                if mismatched:
+                    replay["resubmission_mismatch_keys"] = sorted(mismatched)
+                if rejected:
+                    replay["resubmission_malformed_keys"] = sorted(rejected)
+                if violations:
+                    replay["resubmission_contract_violations"] = violations
+                replay["resubmission_note"] = (
+                    "These lanes' content was delivered once and is not "
+                    "retained, so the record could not replay it. What you "
+                    "just sent was validated exactly as a first submission "
+                    "and the conforming lanes are returned unchanged; nothing "
+                    "was added to durable state."
+                )
+        # A replayed data completion is NOT confirmable (round-48): the
+        # advisory narrative the user would consent to was delivered once and
+        # is deliberately not durable, so the replay carries the server-owned
+        # summary and says plainly that consent must be re-obtained by
+        # re-running the fan-out. Silently returning a consent-shaped payload
+        # without its consent context would be the worse failure.
+        # Consent follows what THIS response carries, not what the record
+        # kept (round-61): a conforming resubmission puts the full, validated
+        # narrative back in the caller's hands, so stamping it unconfirmable
+        # would force the host to discard what it just supplied.
+        restored = set(replay.get("resubmitted_keys") or ())
+        if restored:
+            replay["consent_status"] = "confirmable_resubmitted"
+            replay["consent_note"] = (
+                "The lanes listed under resubmitted_keys were validated "
+                "exactly as a first submission AND digest-verified against "
+                "the completed record's retained commitment, so this content "
+                "is what the fan-out completed with — show it to the user as "
+                "display material. Lane output is never forwarded as an "
+                "interview answer (synthesis_contract.lane_output_role): when "
+                "the user decides, forward the user's own words. Nothing was "
+                "added to durable state; a later replay without a "
+                "resubmission will be unconfirmable again."
+            )
+        elif legacy_data_redacted or _carries_redacted_data(
+            record.received_results,
+            loaded_lane_contracts(
+                record.synthesizer_input.get("lane_answer_contracts"), record.expected_keys
+            ),
+        ):
+            # A legacy record has no redaction marker in received_results, so
+            # consent is classified from the FACT that this replay carried
+            # data content the server had to redact (round-101).
+            replay["consent_status"] = "not_confirmable_prose_not_retained"
+            replay["consent_note"] = (
+                "This replay carries the server-owned summary of the data "
+                "lane — its lifecycle flags, item counts, and content digest, "
+                "not the measured numbers, which are not retained (round-65). "
+                "There is nothing here to show the user as evidence: re-run "
+                "the advisory fan-out to obtain display material, or resubmit "
+                "the original content to have it digest-verified. Lane output "
+                "is never forwarded as an interview answer either way "
+                "(synthesis_contract.lane_output_role)."
+            )
+        replay.update(
+            {
+                "status": "already_complete",
+                "fanout_id": fanout_id,
+                "kind": record.kind,
+                "error": (
+                    "This fan-out already completed; its record is terminal and "
+                    "late results cannot mutate the synthesized outcome."
+                    + (
+                        " The persisted terminal outcome is replayed on this response."
+                        if record.terminal_response is not None
+                        else ""
+                    )
+                ),
+            }
+        )
+        return replay
+
+    # Unknown keys are rejected at the door, BEFORE any merge or write: a key
+    # the record never registered is arbitrary content with no lane contract,
+    # so accepting it would smuggle unvalidated data into durable state. The
+    # rejected key VALUES are themselves untrusted content: only lane-id
+    # shaped keys are echoed back verbatim; anything else (an email, a token,
+    # freeform text) is reported as a redacted digest so the report and the
+    # terminal record never carry it.
+    submitted: dict[str, Any] = {}
+    unexpected_keys: list[str] = []
+    malformed_keys: list[str] = []
     for result in results:
         key = result.get("key")
         if key is None:
             continue
-        provided[str(key)] = result.get("content")
+        resolved_key = str(key)
+        if resolved_key not in record.expected_keys:
+            reportable = _reportable_unexpected_key(resolved_key)
+            if reportable not in unexpected_keys:
+                unexpected_keys.append(reportable)
+            continue
+        # A keyed result without usable content is NOT a submission
+        # (bot-review round-14): counting it toward completion would
+        # terminalize a fan-out around None outputs. The lane stays missing
+        # and is reported under malformed_keys. The public tool contract
+        # accepts content as object OR text, so any other JSON type
+        # (round-35 probe: False, []) is malformed too — accepting it would
+        # persist and synthesize values no contract can ever validate. An
+        # EMPTY object is the object-form blank string (round-36 probe: {}
+        # terminalized both required lanes): no fields means no finding.
+        raw_content = result.get("content")
+        if (
+            "content" not in result
+            or raw_content is None
+            or (isinstance(raw_content, str) and not raw_content.strip())
+            or not isinstance(raw_content, (str, Mapping))
+            or (isinstance(raw_content, Mapping) and not raw_content)
+            or not _is_transportable(raw_content)
+        ):
+            if resolved_key not in malformed_keys:
+                malformed_keys.append(resolved_key)
+            continue
+        submitted[resolved_key] = result.get("content")
+    unexpected_keys.sort()
+    malformed_keys.sort()
+
+    # Contract validation happens at the door, BEFORE anything is merged or
+    # persisted: a violating data-lane output (raw rows, PII-shaped evidence,
+    # skipped confirmation) must never enter the durable record.
+    contracts = loaded_lane_contracts(
+        record.synthesizer_input.get("lane_answer_contracts"), record.expected_keys
+    )
+    raw_policies = record.synthesizer_input.get("lane_data_policies")
+    policies = raw_policies if isinstance(raw_policies, Mapping) else {}
+    # The public tool accepts ``content`` as object OR text (round-25): a
+    # text-transport child submitting its answer as JSON-serialized text is
+    # normalized here so contracted lanes validate the decoded object
+    # instead of rejecting every textual result.
+    _normalize_contracted_text(submitted, contracts)
+    # Door validation is always against the SUBMISSION schema: a fresh result
+    # is a submission whatever it claims about itself (round-50).
+    contract_violations = _lane_answer_contract_violations(contracts, submitted, policies)
+    violating_lanes = {item["lane_id"] for item in contract_violations}
+    accepted = {key: value for key, value in submitted.items() if key not in violating_lanes}
+
+    # Accumulate across calls: earlier partial submissions were persisted on
+    # the record, so "submit lane A, then submit the remaining lane B" reaches
+    # completion exactly as the partial-retry contract documents. The latest
+    # accepted submission wins on a per-key conflict.
+    # A carried-forward result whose CONTENT was not retained is bookkeeping,
+    # not an answer (round-56): claiming it as received would complete a
+    # fan-out around a summary and hand the host a result it never got. It
+    # stays missing until the lane is resent, which the tool description and
+    # the skill both say is the normal single-call path anyway.
+    carried = {
+        key: value
+        for key, value in record.received_results.items()
+        # Same scoping as _unretained_keys (round-104): the lifecycle marker
+        # belongs to the data contract, so a generic lane is never dropped
+        # for carrying the field in its own output.
+        if not (
+            _is_data_contract_lane(contracts, key)
+            and isinstance(value, Mapping)
+            and value.get("content_retained") is False
+        )
+    }
+    provided: dict[str, Any] = {**carried, **accepted}
+
+    # Accumulated state is validated BEFORE every durable write, not only at
+    # synthesis (bot-review round-15): a legacy violating value must not ride
+    # a partial or finalize=false re-save. Violations found in the
+    # accumulated mapping are scrubbed here, reported alongside the
+    # current-call ones, and their required lanes reopen as missing.
+    # Scrubbing considers the accumulated value INDEPENDENTLY of the current
+    # call (bot-review round-21): when a lane's replacement ALSO violates,
+    # the old violating value it failed to replace must still be scrubbed —
+    # only the violation REPORT is deduplicated per lane.
+    # Only results the SERVER carried forward may be validated as retained
+    # state (round-50): the lifecycle is chosen from where a value came from,
+    # never from a field inside it.
+    carried_forward = frozenset(carried) - frozenset(accepted)
+    accumulated_violations = _lane_answer_contract_violations(
+        contracts, provided, policies, carried_forward=carried_forward
+    )
+    if accumulated_violations:
+        scrubbed_lanes = {item["lane_id"] for item in accumulated_violations}
+        provided = {key: value for key, value in provided.items() if key not in scrubbed_lanes}
+        contract_violations = [
+            *contract_violations,
+            *[item for item in accumulated_violations if item["lane_id"] not in violating_lanes],
+        ]
+
+    # Kind-specific content validation runs before even PARTIAL persistence
+    # for code investigations (round-20 follow-up, dormant-hardening): a
+    # wrong-session code_facts result never rides an early partial into
+    # durable state. Lateral personas are content-blind, and advisory lanes
+    # are door-validated above.
+    early_rejected: list[str] = []
+    if record.kind == FANOUT_KIND_CODE_INVESTIGATION and provided:
+        code_request = record.synthesizer_input.get("request") or {}
+        probe = synthesize_code_investigation_when_complete(
+            code_request, provided, _fanout_identity_synthesis
+        )
+        valid_ids = {str(item["result_id"]) for item in probe.get("aggregated_outputs") or ()}
+        early_rejected = sorted(key for key in provided if key not in valid_ids)
+        provided = {key: value for key, value in provided.items() if key in valid_ids}
 
     missing_keys = [key for key in record.expected_keys if key not in provided]
-    if missing_keys:
+    missing_required = [key for key in record.required_keys if key not in provided]
+    if finalize is False and record.kind != FANOUT_KIND_QUESTION_ADVISORY:
+        # Non-advisory kinds validate content only at synthesis (e.g. a
+        # code_facts result is checked against its embedded session there), so
+        # accumulating them early would persist unvalidated content
+        # (bot-review round-13). Advisory lanes are door-validated, which is
+        # why they alone support sequential accumulation.
+        return {
+            "status": "finalize_unsupported",
+            "fanout_id": fanout_id,
+            "kind": record.kind,
+            "error": (
+                "finalize=false accumulation is supported only for question-"
+                "advisory fan-outs; this kind validates content at synthesis, "
+                "so submit the full result set in one finalizing call."
+            ),
+        }
+    if finalize is False:
+        # Sequential accumulation (bot-review round-7): the host is still
+        # submitting lanes one at a time, so even a required-complete set
+        # must NOT terminalize yet — optional results still in flight would
+        # be permanently discarded behind already_complete.
+        persisted = registry.save(
+            replace(record, received_results=_durable_results(contracts, provided))
+        )
+        return {
+            "status": "accumulated",
+            "fanout_id": fanout_id,
+            "kind": record.kind,
+            "missing_keys": missing_keys,
+            "missing_required_keys": missing_required,
+            "received_keys": sorted(
+                key for key in provided if key not in _unretained_keys(contracts, provided)
+            ),
+            # Reported separately, because saying "accumulated" about content
+            # the next call will not find is a lie the host acts on
+            # (round-58): these lanes must be sent again in the finalizing
+            # call.
+            "not_retained_keys": sorted(_unretained_keys(contracts, provided)),
+            "expected_keys": list(record.expected_keys),
+            "contract_violations": contract_violations,
+            "unexpected_keys": unexpected_keys,
+            "malformed_keys": malformed_keys,
+            "accumulation_persisted": bool(persisted),
+            "note": (
+                "Results accumulated; the fan-out stays open. Submit the "
+                "remaining lanes, then close with a finalizing submission "
+                "(finalize omitted or true)."
+            ),
+        }
+    if missing_required:
+        persisted = registry.save(
+            replace(record, received_results=_durable_results(contracts, provided))
+        )
         return {
             "status": "partial",
             "fanout_id": fanout_id,
             "kind": record.kind,
             "missing_keys": missing_keys,
-            "received_keys": sorted(provided),
+            "missing_required_keys": missing_required,
+            "received_keys": sorted(
+                key for key in provided if key not in _unretained_keys(contracts, provided)
+            ),
+            # Reported separately, because saying "accumulated" about content
+            # the next call will not find is a lie the host acts on
+            # (round-58): these lanes must be sent again in the finalizing
+            # call.
+            "not_retained_keys": sorted(_unretained_keys(contracts, provided)),
             "expected_keys": list(record.expected_keys),
+            "contract_violations": contract_violations,
+            "unexpected_keys": unexpected_keys,
+            "malformed_keys": malformed_keys,
+            "synthesis_rejected_keys": early_rejected,
+            "accumulation_persisted": bool(persisted),
         }
+    # Every remaining missing key is optional: proceed to synthesis without it
+    # instead of pinning the fan-out at "partial" (Q00/ouroboros#1671).
+    missing_optional = missing_keys
 
+    # Run the kind's synthesizer BEFORE terminalizing: key presence alone is
+    # not completion. A synthesizer that rejects submitted content (e.g. a
+    # code_facts output bound to a different session) must leave the record
+    # open so a corrected retry can still land, and the rejected content must
+    # never persist as an accepted result.
+    completion_extra: dict[str, Any] = {}
+    durable_outcome: dict[str, Any] | None = None
     if record.kind == FANOUT_KIND_LATERAL_PERSONA_PANEL:
         entries = record.synthesizer_input.get("entries") or []
-        outcome = continue_interview_after_lateral_persona_synthesis(
+        outcome: dict[str, Any] = continue_interview_after_lateral_persona_synthesis(
             entries,
             provided,
             _fanout_identity_synthesis,
             _fanout_identity_continuation,
         )
-        return {
-            "status": "complete",
-            "fanout_id": fanout_id,
-            "kind": record.kind,
-            "correlation_key": record.correlation_key,
-            "result": outcome,
-        }
-
-    if record.kind == FANOUT_KIND_CODE_INVESTIGATION:
+        ready = bool(outcome.get("ready_for_synthesis"))
+        rejected_keys = [str(key) for key in outcome.get("missing_personas") or ()]
+    elif record.kind == FANOUT_KIND_CODE_INVESTIGATION:
         request = record.synthesizer_input.get("request") or {}
         outcome = synthesize_code_investigation_when_complete(
             request,
             provided,
             _fanout_identity_synthesis,
         )
-        return {
-            "status": "complete",
-            "fanout_id": fanout_id,
-            "kind": record.kind,
-            "correlation_key": record.correlation_key,
-            "result": outcome,
-        }
-
-    if record.kind == FANOUT_KIND_QUESTION_ADVISORY:
+        kind_violation_ids = [
+            str(item.get("result_id")) for item in outcome.get("contract_violations") or ()
+        ]
+        ready = bool(outcome.get("ready_for_synthesis")) and not kind_violation_ids
+        rejected_keys = [
+            str(key) for key in outcome.get("missing_result_ids") or ()
+        ] + kind_violation_ids
+    elif record.kind == FANOUT_KIND_QUESTION_ADVISORY:
         # Advisory lanes are independent advice with no gating synthesizer, so
         # aggregate the correlated outputs deterministically in dispatch (lane)
-        # order and hand them back for the host to synthesize.
+        # order and hand them back for the host to synthesize. Exclusion from
+        # the aggregation is decided by validating what is ACTUALLY in the
+        # accumulated state (bot-review round-12): a rejected duplicate in the
+        # current call is reported under contract_violations, but it must not
+        # suppress an earlier CONFORMING value already accumulated for that
+        # lane — door validation kept the bad duplicate out of ``provided``,
+        # so the provided value is the one to judge. This same pass is the
+        # belt against records persisted before door validation existed.
+        provided_violations = _lane_answer_contract_violations(
+            contracts, provided, policies, carried_forward=carried_forward
+        )
+        excluded_lanes = {item["lane_id"] for item in provided_violations}
+        reported_lanes = {item["lane_id"] for item in contract_violations}
+        contract_violations = [
+            *contract_violations,
+            *[item for item in provided_violations if item["lane_id"] not in reported_lanes],
+        ]
+        # Accumulated violations FAIL CLOSED (bot-review round-14): a
+        # violating value that reached durable state (legacy records) is
+        # scrubbed from it here — never re-persisted by the terminal write —
+        # and a REQUIRED lane it occupied reopens as missing instead of
+        # terminalizing around an empty aggregation.
+        rejected_keys = sorted(key for key in excluded_lanes if key in provided)
+        provided = {key: value for key, value in provided.items() if key not in excluded_lanes}
+        missing_optional = [key for key in record.expected_keys if key not in provided]
         lane_ids = record.synthesizer_input.get("lane_ids") or list(record.expected_keys)
         aggregated = [
             {"lane_id": lane_id, "output": provided[lane_id]}
@@ -2966,20 +5371,127 @@ def submit_fanout_results(
             if lane_id in provided
         ]
         outcome = _fanout_identity_synthesis(aggregated)
+        # The same synthesis over the DURABLE (prose-free) outputs — the host
+        # gets the full form in the response, the record keeps this one.
+        durable_provided = _durable_results(contracts, provided)
+        durable_outcome = _fanout_identity_synthesis(
+            [
+                {"lane_id": lane_id, "output": durable_provided[lane_id]}
+                for lane_id in lane_ids
+                if lane_id in durable_provided
+            ]
+        )
+        ready = all(key in provided for key in record.required_keys)
+        completion_extra["contract_violations"] = contract_violations
+    else:
         return {
-            "status": "complete",
+            "status": "unknown_kind",
             "fanout_id": fanout_id,
             "kind": record.kind,
-            "correlation_key": record.correlation_key,
-            "result": outcome,
+            "error": f"No synthesizer is registered for fan-out kind={record.kind!r}.",
         }
 
-    return {
-        "status": "unknown_kind",
+    if not ready:
+        rejected_present = sorted(set(rejected_keys))
+        retained = {
+            key: value for key, value in provided.items() if key not in set(rejected_present)
+        }
+        persisted = registry.save(
+            replace(record, received_results=_durable_results(contracts, retained))
+        )
+        return {
+            "status": "partial",
+            "fanout_id": fanout_id,
+            "kind": record.kind,
+            "missing_keys": [key for key in record.expected_keys if key not in retained],
+            "missing_required_keys": [key for key in record.required_keys if key not in retained],
+            "received_keys": sorted(retained),
+            "expected_keys": list(record.expected_keys),
+            "contract_violations": contract_violations,
+            "unexpected_keys": unexpected_keys,
+            "malformed_keys": malformed_keys,
+            "synthesis_rejected_keys": rejected_present,
+            "result": outcome,
+            "accumulation_persisted": bool(persisted),
+        }
+
+    completion = {
+        "status": "complete",
         "fanout_id": fanout_id,
         "kind": record.kind,
-        "error": f"No synthesizer is registered for fan-out kind={record.kind!r}.",
+        "correlation_key": record.correlation_key,
+        "missing_optional_keys": missing_optional,
+        "unexpected_keys": unexpected_keys,
+        "malformed_keys": malformed_keys,
+        **completion_extra,
+        "result": outcome,
     }
+    # Persist the terminal record (with its outcome, for replay recovery)
+    # BEFORE claiming completion: a failed terminal write means the fan-out is
+    # NOT durably complete and a later submission could still replace the
+    # outcome, so the caller must be told to retry, never handed "complete".
+    # ``unexpected_keys`` is per-call rejection feedback, not part of the
+    # outcome: it is stripped from the persisted terminal response so even a
+    # redacted trace of rejected keys never enters durable state.
+    # The synthesis carries the submitted outputs back to the host, so the
+    # PERSISTED copy is rebuilt from the durable (prose-free) results
+    # (round-46): the response the host receives is complete, while the record
+    # and every later replay of it hold only the typed facts.
+    terminal_snapshot = {
+        key: value
+        for key, value in completion.items()
+        if key not in ("unexpected_keys", "malformed_keys")
+    }
+    if durable_outcome is not None:
+        terminal_snapshot["result"] = durable_outcome
+    if _carries_redacted_data(provided, contracts):
+        completion["consent_status"] = "not_confirmable_prose_not_retained"
+        completion["consent_note"] = (
+            "A data result accumulated in an earlier submission is present "
+            "without the advisory narrative a user confirms; it is not "
+            "retained in durable state. Re-run the advisory fan-out to obtain "
+            "a confirmable data answer."
+        )
+    terminal_persisted = registry.save(
+        replace(
+            record,
+            received_results=_durable_results(contracts, provided),
+            completed=True,
+            terminal_response=terminal_snapshot,
+        )
+    )
+    if not terminal_persisted.written:
+        return {
+            **completion,
+            "status": "completion_not_persisted",
+            "error": (
+                "All required results were accepted and synthesized, but the "
+                "terminal fan-out record could not be persisted; completion is "
+                "not durable and the fan-out remains open. Resubmit the same "
+                "results to complete durably."
+            ),
+        }
+    if not terminal_persisted.durable:
+        # The record IS written, terminal, and replayable — calling this
+        # "not persisted" sent the host into a recovery that cannot work,
+        # because the resubmission short-circuits on the completed record
+        # (round-66). What is uncertain is only the directory flush, so the
+        # completion stands and the uncertainty is reported as its own fact.
+        # Resubmitting is still useful, but for a different reason: the
+        # replay path retries the flush.
+        return {
+            **completion,
+            "durability_confirmed": False,
+            "durability_note": (
+                "The fan-out completed and the terminal record is written and "
+                "replayable, but the filesystem did not confirm the directory "
+                "flush, so a machine crash could still lose it. The synthesis "
+                "above stands. Resubmitting the same results returns "
+                "already_complete and retries the flush; it will not and need "
+                "not rewrite the record."
+            ),
+        }
+    return completion
 
 
 # ---------------------------------------------------------------------------

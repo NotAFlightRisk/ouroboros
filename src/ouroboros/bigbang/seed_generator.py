@@ -25,17 +25,24 @@ from ouroboros.bigbang.interview import (
     INITIAL_CONTEXT_SUMMARY_QUESTION,
     InterviewState,
     initial_context_summary_missing,
-    prompt_safe_initial_context,
+    prompt_safe_initial_context_with_provenance,
 )
 from ouroboros.bigbang.requirement_distillation import (
+    OBSERVATION_ONLY_INTERVIEW_MESSAGE,
     apply_requirement_distillation,
     build_promoted_reference_seed,
     build_requirement_distillation,
+    interview_has_no_promotable_requirement,
     is_reference_aware_distillation,
     seed_readiness_details,
 )
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
+from ouroboros.core.owner_only import write_owner_only
+from ouroboros.core.requirement_candidate import (
+    extraction_safe_answer,
+    extraction_safe_question,
+)
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     BrownfieldContext,
@@ -319,6 +326,17 @@ class SeedGenerator:
                 )
             )
 
+        if interview_has_no_promotable_requirement(state):
+            # ONE readiness check for every generation path (round-85): with
+            # every contentful input withheld, the extractor would invent a
+            # Seed from nothing the user authored.
+            return Result.err(
+                ValidationError(
+                    OBSERVATION_ONLY_INTERVIEW_MESSAGE,
+                    field="rounds",
+                    details={"interview_id": state.interview_id},
+                )
+            )
         distillation = build_requirement_distillation(state)
         preflight = apply_requirement_distillation({}, distillation)
         if preflight.promotion.blockers:
@@ -681,7 +699,19 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
         Returns:
             Formatted context string.
         """
-        parts = [f"Initial Context: {prompt_safe_initial_context(state)}"]
+        # The oversized-context path substitutes the user's SUMMARY ANSWER for
+        # the initial context, and that answer can lead with an observation
+        # marker — it bypassed the withholding entirely and, because the
+        # summary round is skipped below, never set the question taint
+        # (round-81). The same marker rule applies here, and a withheld
+        # summary taints every question: they were all generated with the
+        # observation in play. The summary's TYPED provenance rides along
+        # (round-90): a markerless summary typed data_fact is still an
+        # observation.
+        raw_context, context_provenance = prompt_safe_initial_context_with_provenance(state)
+        safe_context = extraction_safe_answer(raw_context, context_provenance)
+        observation_seen = safe_context != raw_context
+        parts = [f"Initial Context: {safe_context}"]
 
         # Brownfield priming: carry the auto-explore codebase summary and the
         # referenced paths into the extraction context so the seed architect
@@ -701,9 +731,21 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
         for round_data in state.rounds:
             if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
                 continue
-            parts.append(f"\nQ: {round_data.question}")
+            # Questions generated after an observation entered the history
+            # may restate it (round-80), so they are withheld by taint
+            # provenance; answers are withheld by their marker (round-74).
+            # Either way an LLM paraphrase cannot be provenance-checked
+            # afterwards — the content is withheld at the input.
+            parts.append(
+                f"\nQ: {extraction_safe_question(round_data.question, observation_seen=observation_seen)}"
+            )
             if round_data.user_response:
-                parts.append(f"A: {round_data.user_response}")
+                safe = extraction_safe_answer(
+                    round_data.user_response, round_data.answer_provenance
+                )
+                if safe != round_data.user_response:
+                    observation_seen = True
+                parts.append(f"A: {safe}")
 
         return "\n".join(parts)
 
@@ -1047,7 +1089,13 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                 sort_keys=False,
             )
 
-            file_path.write_text(content, encoding="utf-8")
+            if not write_owner_only(file_path, content):
+                # Reported like every other artifact writer (round-83).
+                log.warning(
+                    "seed.save_durability_uncertain",
+                    seed_id=seed.metadata.seed_id,
+                    file_path=str(file_path),
+                )
 
             log.info(
                 "seed.saved",
@@ -1155,7 +1203,12 @@ def save_seed_sync(seed: Seed, file_path: Path) -> Result[Path, ValidationError]
             sort_keys=False,
         )
 
-        file_path.write_text(content, encoding="utf-8")
+        if not write_owner_only(file_path, content):
+            log.warning(
+                "seed.save_durability_uncertain",
+                seed_id=seed.metadata.seed_id,
+                file_path=str(file_path),
+            )
 
         log.info(
             "seed.saved.sync",

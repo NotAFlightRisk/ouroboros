@@ -1455,3 +1455,56 @@ class TestSystemPromptBrownfield:
         prompt = engine._build_system_prompt(state)
 
         assert len(prompt) <= engine._MAX_SYSTEM_PROMPT_CHARS
+
+
+def test_prefix_glossary_survives_header_truncation() -> None:
+    """The [from-data] glossary is never the truncation victim (round-29).
+
+    The glossary was appended last and hard-truncation under history
+    pressure cut it mid-entry ("- [from-d"); under pressure it is now
+    swapped for a compact one-liner that preserves EVERY prefix meaning,
+    and the retained initial context keeps priority.
+    """
+    from ouroboros.bigbang.interview import InterviewEngine, InterviewState
+
+    engine = InterviewEngine.__new__(InterviewEngine)
+    engine.suppress_tool_use_prompt_cues = False
+    state = InterviewState(
+        interview_id="glossary-budget",
+        initial_context="x" * 4000,
+    )
+    # A budget where instructions + retained context + COMPACT glossary fit
+    # but the full glossary does not — the round-29 pressure window.
+    prompt = engine._build_system_prompt(state, initial_context="x" * 4000, max_chars=2450)
+    assert len(prompt) <= 2450
+    # The retained (capped) initial context keeps priority…
+    assert engine._initial_context_for_system_prompt("x" * 4000) in prompt
+    # …and the glossary survives as the compact form with FULL semantics —
+    # never a mid-entry tear like "- [from-d".
+    assert "[from-data]=point-in-time data description" in prompt
+    assert "- [from-d" not in prompt
+
+
+def test_prefix_glossary_survives_hard_cut() -> None:
+    """The compact glossary is RESERVED even under the hard cut (round-35).
+
+    With a long initial context and a 1,200-char budget the header was
+    hard-truncated before the glossary, so [from-data] answers in history
+    lost their point-in-time meaning. The hard cut now trims the context
+    tail instead and re-appends the compact glossary.
+    """
+    from ouroboros.bigbang.interview import InterviewEngine, InterviewState
+
+    engine = InterviewEngine.__new__(InterviewEngine)
+    engine.suppress_tool_use_prompt_cues = False
+    state = InterviewState(
+        interview_id="glossary-hard-cut",
+        initial_context="x" * 3500,
+    )
+    prompt = engine._build_system_prompt(state, initial_context="x" * 3500, max_chars=1200)
+    assert len(prompt) <= 1200
+    # Instructions keep first priority, the context keeps its (trimmed)
+    # slot, and every prefix keeps its semantics.
+    assert prompt.startswith("You are an expert requirements engineer")
+    assert "Initial context: x" in prompt
+    assert "[from-data]=point-in-time data description" in prompt

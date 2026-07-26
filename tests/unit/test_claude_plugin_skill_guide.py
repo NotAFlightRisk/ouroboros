@@ -49,3 +49,22 @@ def test_claude_plugin_unstuck_skill_includes_sequential_dispatch_contract() -> 
     assert "result_correlation_key" in skill_text
     assert 'legacy_dispatch_mode="inline_fallback"` as compatibility' in skill_text
     assert 'Debate response (`dispatch_mode = "inline_fallback"`)' not in skill_text
+
+
+def test_claude_plugin_interview_skill_is_byte_identical_to_canonical() -> None:
+    """The shipped plugin copy IS the canonical skill (round-99).
+
+    The two copies were maintained by parallel edits and drifted: the
+    canonical skill said data evidence is never forwarded while the plugin
+    copy still instructed forwarding [from-data] answers —
+    transport-dependent interview semantics. Byte equality closes the whole
+    drift class, not one diff.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    canonical = (root / "skills" / "interview" / "SKILL.md").read_text(encoding="utf-8")
+    plugin = (root / ".claude-plugin" / "skills" / "interview" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert canonical == plugin

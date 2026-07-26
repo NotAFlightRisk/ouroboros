@@ -17,9 +17,132 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-REQUIREMENT_DISTILLATION_SCHEMA_VERSION = "requirement-distillation.v1"
+# v3 (round-82): the initial-goal candidate now takes the provenance gate
+# too — a v2 cache may carry an observation-marked context promoted as a
+# confirmed goal. v2 (round-76): the derivation policy changed — observation-marked answers
+# ([from-data]/[from-research]) are no longer promoted to requirement
+# candidates (round-73). The version participates in is_current(), so a
+# cache distilled under v1 with an observation-derived candidate is
+# invalidated by this bump instead of being reused past the new gate.
+REQUIREMENT_DISTILLATION_SCHEMA_VERSION = "requirement-distillation.v3"
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def redacted_segment(text: str) -> str:
+    """Digest form of a value that may not ride a report.
+
+    The single definition (round-76): the transport's error paths and the
+    contract's semantic diagnostics both need it, and the round-69 lesson was
+    that a value rejected FOR BEING secret-shaped must not then appear
+    verbatim in the rejection.
+    """
+    digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return f"<redacted-key sha256:{digest}>"
+
+
+def classify_answer_provenance(answer: str) -> str:
+    """Return a coarse provenance class for an interview answer.
+
+    The marker an answer LEADS with is its provenance stamp: ``data_fact`` /
+    ``research_fact`` are user-adopted external facts — the human confirmed
+    them before forwarding, but confirmed them AS OBSERVATIONS. This is the
+    single definition (round-73): the intent guard and the deterministic
+    requirement promotion both key off it, and a second prefix list in either
+    place is how the two would drift.
+    """
+    lowered = str(answer).lstrip().casefold()
+    if lowered.startswith("[from-code]") or lowered.startswith("[from-repo]"):
+        return "repo_fact"
+    if lowered.startswith("[from-data]"):
+        return "data_fact"
+    if lowered.startswith("[from-research]"):
+        return "research_fact"
+    if lowered.startswith("[from-auto]") or lowered.startswith("[from-safe-default]"):
+        return "generated"
+    if lowered.startswith("[from-assumption]") or lowered.startswith("[from-inference]"):
+        return "generated"
+    return "human"
+
+
+#: What a withheld observation is replaced with in extraction inputs. A fixed
+#: string: nothing of the observation survives to be paraphrased.
+OBSERVATION_WITHHELD_NOTE = (
+    "[point-in-time observation withheld from requirement extraction: "
+    "data/research observations are not requirements. Any requirement the "
+    "user derived from it appears in their own words in their own answers.]"
+)
+
+
+#: What a withheld interviewer question is replaced with in extraction inputs.
+QUESTION_WITHHELD_NOTE = (
+    "[interviewer question withheld from requirement extraction: it was "
+    "generated after a data/research observation entered the conversation "
+    "and may restate it. Requirements derive from the user's answers.]"
+)
+
+
+def extraction_safe_question(question: str, *, observation_seen: bool) -> str:
+    """The form of an interviewer QUESTION that may enter requirement extraction.
+
+    Withholding answers was not enough (round-80): the interviewer legitimately
+    sees observations in conversational context, so a question generated AFTER
+    an observation entered the history can restate it verbatim — and the
+    extractors are told to derive requirements from the conversation. A
+    paraphrase in a question is as unmatchable as one in a Seed AC, so the
+    decidable line is taint provenance: a question generated BEFORE the first
+    observation cannot contain it and keeps its interpretive value; every
+    question after it is withheld.
+    """
+    if observation_seen:
+        return QUESTION_WITHHELD_NOTE
+    return question
+
+
+#: The closed range of classify_answer_provenance. Shared so the declared
+#: field's authority is bounded by the same set the classifier can produce.
+_KNOWN_PROVENANCE = frozenset({"human", "data_fact", "research_fact", "repo_fact", "generated"})
+
+
+def effective_answer_provenance(answer: str, declared: str = "human") -> str:
+    """Field-first provenance: the ingestion-time field wins when set.
+
+    The marker is the display/legacy projection; the field is the record
+    (round-85). A round whose field says data_fact is an observation even if
+    the marker was stripped from the text.
+
+    A declared value OUTSIDE the closed range carries no authority and falls
+    back to marker classification — an open passthrough failed open: any
+    unknown string was neither "human" nor an observation class, so it
+    overrode the marker and un-withheld a `[from-data]` answer. The
+    InterviewRound field is enum-constrained at model validation; this
+    fallback bounds every other caller the same way.
+    """
+    if declared in _KNOWN_PROVENANCE and declared != "human":
+        return declared
+    return classify_answer_provenance(answer)
+
+
+def extraction_safe_answer(answer: str, declared_provenance: str = "human") -> str:
+    """The form of an answer that may enter requirement extraction.
+
+    A ``[from-data]`` / ``[from-research]`` answer is an observation the user
+    confirmed AS AN OBSERVATION. The deterministic promotion gate skips it
+    (round-73), but the ordinary interview path hands the whole transcript to
+    an LLM extractor, which paraphrases — `[from-data] Confirmed: 42
+    enterprise accounts require SSO today` came back as the Seed AC
+    "Support SSO for enterprise accounts" (round-74). A paraphrase cannot be
+    matched against the marker afterwards, so the enforcement point is the
+    extraction INPUT: the observation's content is replaced with a fixed
+    note, and what the extractor never receives it cannot promote. A Seed is
+    a durable artifact; a point-in-time measurement decays inside it.
+    """
+    if effective_answer_provenance(answer, declared_provenance) in {
+        "data_fact",
+        "research_fact",
+    }:
+        return OBSERVATION_WITHHELD_NOTE
+    return answer
 
 
 class CandidateContentSource(StrEnum):

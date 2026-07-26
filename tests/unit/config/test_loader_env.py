@@ -124,9 +124,63 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_EXECUTION_MODEL",
         "OUROBOROS_MODEL_TIER_ROUTING",
         "OUROBOROS_SHADOW_REPLAY",
+        # Data-lane tool steering — an untrusted repo .env must not choose
+        # which MCP tools the data_context advisory child prefers (PR #1703).
+        "OUROBOROS_KNOWN_DATA_TOOLS",
+        # The read-only declaration grants DIRECT execution — strictly more
+        # privilege than the hint above, so at least as trust-gated
+        # (round-88: an untrusted .env declared migrate_query read-only and
+        # it appeared under known_data_tools).
+        "OUROBOROS_KNOWN_DATA_TOOLS_READONLY",
     }
     missing = required - _UNTRUSTED_ENV_DENYLIST
     assert not missing, f"denylist regressed, missing: {sorted(missing)}"
+
+
+def test_untrusted_env_cannot_steer_known_data_tools(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A project .env must not point the data lane at attacker tools."""
+    # NOT monkeypatch.delenv for the final cleanup: _load_env_file writes
+    # os.environ directly (untracked), and a trailing monkeypatch.delenv
+    # records the leaked value as "original" and RESTORES it at teardown —
+    # round-89 caught exfiltrate_tool leaking into later test modules.
+    monkeypatch.delenv("OUROBOROS_KNOWN_DATA_TOOLS", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("OUROBOROS_KNOWN_DATA_TOOLS=exfiltrate_tool\n")
+
+    try:
+        _load_env_file(env_file, trusted=False)
+        assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS") is None
+
+        _load_env_file(env_file, trusted=True)
+        assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS") == "exfiltrate_tool"
+    finally:
+        os.environ.pop("OUROBOROS_KNOWN_DATA_TOOLS", None)
+    assert "OUROBOROS_KNOWN_DATA_TOOLS" not in os.environ
+
+
+def test_untrusted_env_cannot_declare_read_only_tools(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A project .env must not grant direct-execution steering (round-88)."""
+    # Same cleanup rule as the plain-hint test above: direct os.environ.pop,
+    # never a trailing monkeypatch.delenv (it restores the leak at teardown).
+    monkeypatch.delenv("OUROBOROS_KNOWN_DATA_TOOLS_READONLY", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("OUROBOROS_KNOWN_DATA_TOOLS_READONLY=migrate_query\n")
+
+    try:
+        _load_env_file(env_file, trusted=False)
+        assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS_READONLY") is None
+
+        _load_env_file(env_file, trusted=True)
+        assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS_READONLY") == "migrate_query"
+    finally:
+        os.environ.pop("OUROBOROS_KNOWN_DATA_TOOLS_READONLY", None)
+    assert "OUROBOROS_KNOWN_DATA_TOOLS_READONLY" not in os.environ
 
 
 def test_untrusted_env_cannot_set_bare_opencode_alias(

@@ -8,13 +8,9 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-import errno
 import functools
-import os
 from pathlib import Path
-import stat
-import tempfile
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 import structlog
@@ -22,8 +18,10 @@ import structlog
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.file_lock import file_lock as _file_lock
+from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.requirement_candidate import (
     RequirementDistillation,
+    classify_answer_provenance,
     compute_requirement_input_fingerprint,
 )
 from ouroboros.core.security import InputValidator
@@ -67,6 +65,17 @@ INITIAL_CONTEXT_SUMMARY_REQUIRED = (
     "recorded yet. Ask the user to provide a concise summary before scoring or "
     "generating a seed.]"
 )
+#: The designated goal-restatement question (round-91). When every
+#: substantive input was a withheld observation, generation refuses and the
+#: host asks THIS question verbatim; a human answer to it is a structured
+#: goal act — authority comes from the user answering the designated
+#: question, not from any linguistic judgment of the answer's wording.
+GOAL_RESTATEMENT_QUESTION = (
+    "The interview so far contains only adopted observations, which are "
+    "never promoted into requirements. In your own words: what should be "
+    "built, and what must it guarantee? Your answer to this question is "
+    "recorded as your goal decision."
+)
 PROMPT_SAFE_CONTEXT_TRUNCATION_NOTICE = "\n\n[Context truncated for prompt safety.]"
 # Empirically, the local Agent SDK CLI path can return empty completions when
 # interview question prompts grow beyond roughly this serialized prompt size.
@@ -103,72 +112,6 @@ _TOOLLESS_INTERVIEW_BASE_PROMPT = """## Role Boundaries
 - Prefer scope, non-goal, success criteria, ownership, risk, and verification questions.
 - For brownfield work, focus on intent and decisions rather than discovering what exists.
 """
-
-
-def _fsync_parent_directory(file_path: Path) -> bool:
-    if os.name != "posix":
-        return True
-
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    try:
-        directory_fd = os.open(file_path.parent, flags)
-    except OSError as error:
-        return error.errno in (errno.EINVAL, errno.ENOTSUP)
-    durability_confirmed = True
-    try:
-        try:
-            os.fsync(directory_fd)
-        except OSError as error:
-            if error.errno not in (errno.EINVAL, errno.ENOTSUP):
-                durability_confirmed = False
-    finally:
-        try:
-            os.close(directory_fd)
-        except OSError:
-            durability_confirmed = False
-    return durability_confirmed
-
-
-def _atomic_write_text(file_path: Path, content: str) -> bool:
-    try:
-        existing_mode = stat.S_IMODE(file_path.stat().st_mode)
-    except FileNotFoundError:
-        existing_mode = None
-
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{file_path.name}.",
-        suffix=".tmp",
-        dir=str(file_path.parent),
-    )
-    raw_fd: int | None = fd
-    tmp_path = Path(tmp_name)
-    try:
-        if existing_mode is not None:
-            if os.name == "posix":
-                os.fchmod(fd, existing_mode)
-            else:
-                tmp_path.chmod(existing_mode)
-
-        handle = os.fdopen(fd, "w", encoding="utf-8")
-        raw_fd = None
-        with handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, file_path)
-        return _fsync_parent_directory(file_path)
-    finally:
-        if raw_fd is not None:
-            try:
-                os.close(raw_fd)
-            except OSError:
-                pass
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
 
 
 class InterviewPerspective(StrEnum):
@@ -240,6 +183,22 @@ class InterviewRound(BaseModel):
     round_number: int = Field(ge=1)  # No upper limit - user decides when to stop
     question: str
     user_response: str | None = None
+    # Provenance as a TYPED FIELD, decided once at ingestion (round-85).
+    # The `[from-data]` string prefix is in-band provenance — the exact
+    # anti-pattern rounds 50 and 62 eliminated at the fan-out layer (state
+    # read from inside the value) — and re-classifying it at every consumer
+    # is how the extraction entrances kept multiplying. The field is set
+    # when the answer is recorded; the marker remains the display/legacy
+    # projection. A field that says data_fact withholds the answer from
+    # extraction even if the marker was stripped from the text.
+    # The type is the CLOSED range of classify_answer_provenance — an open
+    # str failed open: any unknown persisted value (`user_verified`) was
+    # neither "human" nor an observation class, so it overrode marker
+    # classification and un-withheld a `[from-data]` answer. Unknown values
+    # now fail closed at model validation, before any consumer reads them.
+    answer_provenance: Literal["human", "data_fact", "research_fact", "repo_fact", "generated"] = (
+        "human"
+    )
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -353,6 +312,11 @@ class InterviewState(BaseModel):
                         "round_number": round_data.round_number,
                         "question": round_data.question,
                         "user_response": round_data.user_response,
+                        # Provenance changes candidate promotion, so it is a
+                        # semantics-bearing canonical input: a round flipped
+                        # from human to data_fact must not reuse a cache that
+                        # promoted the answer.
+                        "answer_provenance": round_data.answer_provenance,
                     }
                     for round_data in self.rounds
                 ],
@@ -492,12 +456,28 @@ class InterviewState(BaseModel):
 
 def prompt_safe_initial_context(state: InterviewState) -> str:
     """Return initial context safe for LLM prompts across interview consumers."""
+    return prompt_safe_initial_context_with_provenance(state)[0]
+
+
+def prompt_safe_initial_context_with_provenance(state: InterviewState) -> tuple[str, str]:
+    """``prompt_safe_initial_context`` plus the ingestion-time provenance.
+
+    The oversized-context substitute is a ROUND answer, and its typed
+    ``answer_provenance`` is the record (round-90): both extraction
+    consumers sanitized the substitute by marker only and then skipped the
+    summary round, so a markerless summary typed ``data_fact`` reached the
+    Dev and PM extractors verbatim. Callers that feed an extractor must
+    sanitize with the returned provenance, not the default.
+    """
     if len(state.initial_context) <= MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS:
-        return state.initial_context
+        return state.initial_context, "human"
     for round_data in reversed(state.rounds):
         if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION and round_data.user_response:
-            return _truncate_prompt_safe_context(round_data.user_response)
-    return INITIAL_CONTEXT_SUMMARY_REQUIRED
+            return (
+                _truncate_prompt_safe_context(round_data.user_response),
+                round_data.answer_provenance,
+            )
+    return INITIAL_CONTEXT_SUMMARY_REQUIRED, "human"
 
 
 def _truncate_prompt_safe_context(context: str) -> str:
@@ -729,7 +709,7 @@ class InterviewEngine:
         self.model_is_explicit = self.model is not None
         if self.model is None:
             self.model = get_llm_model_for_role("interview")
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        secure_directory(self.state_dir)
 
     def _state_file_path(self, interview_id: str) -> Path:
         """Get the path to the state file for an interview.
@@ -1017,14 +997,25 @@ class InterviewEngine:
         return [candidate for candidate in results if candidate is not None]
 
     async def record_response(
-        self, state: InterviewState, user_response: str, question: str
+        self,
+        state: InterviewState,
+        user_response: str,
+        question: str,
+        *,
+        original_response: str | None = None,
     ) -> Result[InterviewState, ValidationError]:
         """Record the user's response to the current question.
 
         Args:
             state: Current interview state.
-            user_response: The user's response.
+            user_response: The user's response, possibly decorated by a
+                wrapping engine (e.g. the PM layer's ``PM answer:`` bundle).
             question: The question that was asked.
+            original_response: The response as the user actually gave it,
+                BEFORE any decoration. Provenance is classified from this
+                (round-94): a ``PM answer:`` prefix pushed the
+                ``[from-data]`` marker off the front and the observation was
+                stamped human — decoration must never launder provenance.
 
         Returns:
             Result containing updated state or ValidationError.
@@ -1062,11 +1053,18 @@ class InterviewEngine:
 
         state.record_adapter_answer(question, user_response)
 
-        # Create new round
+        # Create new round. Provenance is classified ONCE, here at ingestion,
+        # and carried as a typed field (round-85) — consumers read the field
+        # instead of re-parsing the marker at every surface. Classification
+        # reads the ORIGINAL response when a wrapper decorated the stored
+        # form (round-94).
         round_data = InterviewRound(
             round_number=state.current_round_number,
             question=question,
             user_response=user_response,
+            answer_provenance=classify_answer_provenance(
+                original_response if original_response is not None else user_response
+            ),
         )
 
         state.rounds.append(round_data)
@@ -1108,8 +1106,16 @@ class InterviewEngine:
             content = state.model_dump_json(indent=2)
 
             def _sync_write() -> bool:
+                # Secure the directory at every write, not only at
+                # construction: a state directory created by an older version
+                # keeps its permissions otherwise.
+                secure_directory(file_path.parent)
                 with _file_lock(file_path, exclusive=True):
-                    return _atomic_write_text(file_path, content)
+                    # Owner-only: the transcript holds confirmed data answers
+                    # and lives indefinitely, so it must not inherit the
+                    # umask default the way it did before. The write is still
+                    # atomic and fsync'd, so the durability signal is kept.
+                    return write_owner_only(file_path, content)
 
             durability_confirmed = await asyncio.to_thread(_sync_write)
 
@@ -1251,20 +1257,37 @@ class InterviewEngine:
 
         # Answer prefix hints — always present so the question generator
         # can interpret enriched answers regardless of brownfield status.
+        # Under budget pressure the FULL glossary is swapped for the compact
+        # one-liner below (bot-review round-29): hard truncation used to cut
+        # the last entry mid-token ("- [from-d"), silently dropping the
+        # [from-data] semantics while its answers stayed in history. The
+        # compact form preserves EVERY prefix meaning; the retained initial
+        # context is never the victim.
         if self.suppress_tool_use_prompt_cues:
-            dynamic_header += (
-                "\n\nAnswer prefixes the caller may use:\n"
+            answer_prefix_hints = (
+                "Answer prefixes the caller may use:\n"
                 "- [from-code]: Caller-supplied existing-system context (factual).\n"
                 "- [from-user]: Human decisions/judgments.\n"
-                "- [from-research]: Caller-supplied external context."
+                "- [from-research]: Caller-supplied external context.\n"
+                "- [from-data]: Caller-supplied data evidence "
+                "(factual at query time, may be stale)."
             )
         else:
-            dynamic_header += (
-                "\n\nAnswer prefixes the caller may use:\n"
+            answer_prefix_hints = (
+                "Answer prefixes the caller may use:\n"
                 "- [from-code]: Existing codebase state (factual, read from files).\n"
                 "- [from-user]: Human decisions/judgments.\n"
-                "- [from-research]: Externally researched information (API docs, pricing, compatibility)."
+                "- [from-research]: Externally researched information (API docs, pricing, compatibility).\n"
+                "- [from-data]: Data evidence from metrics/DB/warehouse queries "
+                "(factual at query time, may be stale — treat as description, not decision)."
             )
+        self._answer_prefix_hints_full = answer_prefix_hints
+        self._answer_prefix_hints_compact = (
+            "Prefixes: [from-code]=existing-system fact; [from-user]=human "
+            "decision; [from-research]=external fact; [from-data]=point-in-time "
+            "data description (not a decision, may be stale)."
+        )
+        dynamic_header += f"\n\n{answer_prefix_hints}"
         # Brownfield hint: main session handles code reading, MCP just asks questions
         if state.is_brownfield:
             if self.suppress_tool_use_prompt_cues:
@@ -1293,7 +1316,30 @@ class InterviewEngine:
         # prompt before falling back to hard-truncating the header.
         available_after_header = max_prompt_chars - len(dynamic_header) - _OVERHEAD
         if available_after_header <= 0:
-            dynamic_header = dynamic_header[: max_prompt_chars - _OVERHEAD]
+            # Swap the full prefix glossary for its compact one-liner BEFORE
+            # any hard cut (round-29): every prefix keeps its semantics and
+            # the retained initial context keeps priority.
+            full_hints = getattr(self, "_answer_prefix_hints_full", None)
+            compact_hints = getattr(self, "_answer_prefix_hints_compact", None)
+            if full_hints and compact_hints and full_hints in dynamic_header:
+                dynamic_header = dynamic_header.replace(full_hints, compact_hints, 1)
+                available_after_header = max_prompt_chars - len(dynamic_header) - _OVERHEAD
+        if available_after_header <= 0:
+            # Even the hard cut RESERVES the compact glossary (round-35: a
+            # 1,200-char budget under a long initial context truncated the
+            # header before the glossary, so [from-data] answers in history
+            # lost their point-in-time meaning). Instructions and the front
+            # of the retained context keep priority; the glossary is
+            # re-appended after the cut so every prefix keeps its semantics.
+            header_budget = max_prompt_chars - _OVERHEAD
+            compact_hints = getattr(self, "_answer_prefix_hints_compact", None)
+            if compact_hints and len(compact_hints) + 2 < header_budget:
+                head = dynamic_header.replace(compact_hints, "", 1)[
+                    : header_budget - len(compact_hints) - 2
+                ]
+                dynamic_header = f"{head}\n\n{compact_hints}"
+            else:
+                dynamic_header = dynamic_header[:header_budget]
             perspective_panel = ""
             base_budget = 0
         elif len(perspective_panel) > available_after_header:

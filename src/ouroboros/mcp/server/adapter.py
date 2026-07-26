@@ -1462,10 +1462,12 @@ def create_ouroboros_server(
         StartEvolveStepHandler,
         StartExecuteSeedHandler,
         StartRalphHandler,
+        SubmitFanoutResultsHandler,
     )
     from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
+    from ouroboros.mcp.tools.subagent import FanoutRegistry
     from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler, SynapseTargetsHandler
     from ouroboros.orchestrator import create_agent_runtime, resolve_agent_runtime_backend
     from ouroboros.orchestrator.runner import (
@@ -2093,6 +2095,11 @@ def create_ouroboros_server(
         agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
     )
+    # Shared fan-out registry rooted on the interview state dir: the advisory
+    # producers (interview handlers) and the ``ouroboros_submit_fanout_results``
+    # re-entry tool must read and write the same record files, and
+    # ``InterviewHandler.resolved_state_dir()`` resolves to this same directory.
+    fanout_registry = FanoutRegistry(state_dir_path / "fanout")
     interview = InterviewHandler(
         event_store=event_store,
         llm_adapter=llm_adapter,
@@ -2100,6 +2107,7 @@ def create_ouroboros_server(
         agent_runtime_backend=interview_runtime_backend,
         opencode_mode=opencode_mode,
         suppress_tool_use_prompt_cues=interview_envelope_sealed,
+        fanout_registry=fanout_registry,
     )
     generate_seed = GenerateSeedHandler(
         event_store=event_store,
@@ -2194,6 +2202,7 @@ def create_ouroboros_server(
             agent_runtime_backend=interview_runtime_backend,
             opencode_mode=opencode_mode,
             suppress_tool_use_prompt_cues=interview_envelope_sealed,
+            fanout_registry=fanout_registry,
         ),
         PMInterviewHandler(
             data_dir=state_dir_path,
@@ -2220,7 +2229,9 @@ def create_ouroboros_server(
         LateralThinkHandler(
             agent_runtime_backend=reflect_runtime_backend,
             opencode_mode=opencode_mode,
+            fanout_registry=fanout_registry,
         ),
+        SubmitFanoutResultsHandler(fanout_registry=fanout_registry),
         evolve_step,
         StartEvolveStepHandler(
             evolve_handler=evolve_step,
