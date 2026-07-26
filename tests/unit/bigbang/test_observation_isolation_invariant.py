@@ -507,3 +507,116 @@ def test_legacy_round_without_the_field_is_classified_on_load() -> None:
     )
 
     assert legacy.answer_provenance == "research_fact"
+
+
+# ---------------------------------------------------------------------------
+# The oversized-context substitute inherits what it substitutes for
+# ---------------------------------------------------------------------------
+#
+# The engine hands consumers a user-written summary in place of an oversized
+# `initial_context`. That substitute is not an independent answer, so it
+# cannot carry more authority than the context it replaces — otherwise the
+# same observation is an observation when short and a requirement when long,
+# and the difference is a character count.
+
+
+def _oversized(marker: str, observation: str) -> str:
+    return (marker + observation + " " + ("padding. " * 3000)).strip()
+
+
+_SUBSTITUTE_CASES = [
+    ("[from-data] ", "data_fact", True),
+    ("[from-research] ", "research_fact", True),
+    ("", "human", False),
+]
+
+
+@pytest.mark.parametrize(
+    ("marker", "expected", "gated"),
+    _SUBSTITUTE_CASES,
+    ids=[expected for _, expected, _ in _SUBSTITUTE_CASES],
+)
+def test_summary_substitute_inherits_context_provenance(
+    marker: str, expected: str, gated: bool
+) -> None:
+    """A markerless summary of an observation is still an observation."""
+    import asyncio
+
+    from ouroboros.bigbang.interview import (
+        InterviewEngine,
+        prompt_safe_initial_context_with_provenance,
+    )
+    from ouroboros.bigbang.requirement_distillation import (
+        interview_has_no_promotable_requirement,
+    )
+
+    observation = "Enterprise plan has 412 active accounts and 37 SSO requests."
+    state = InterviewState(
+        interview_id="substitute-provenance",
+        initial_context=_oversized(marker, observation),
+    )
+    engine = InterviewEngine(llm_adapter=AsyncMock())
+
+    asyncio.run(engine.record_response(state, observation, INITIAL_CONTEXT_SUMMARY_QUESTION))
+
+    _, authoritative = prompt_safe_initial_context_with_provenance(state)
+
+    assert state.rounds[-1].answer_provenance == expected
+    assert authoritative == expected
+    assert interview_has_no_promotable_requirement(state) is gated
+
+
+def test_a_summary_may_still_declare_a_stronger_class_than_its_context() -> None:
+    """Inheritance raises authority-withholding, it never lowers it.
+
+    A human-authored context summarized with an explicit `[from-data]` answer
+    stays an observation: the substitute's own marker is not overridden by
+    the milder class of what it replaces.
+    """
+    import asyncio
+
+    from ouroboros.bigbang.interview import InterviewEngine
+
+    state = InterviewState(
+        interview_id="substitute-stronger",
+        initial_context=_oversized("", "Build an SSO dashboard for enterprise admins."),
+    )
+    engine = InterviewEngine(llm_adapter=AsyncMock())
+
+    asyncio.run(
+        engine.record_response(
+            state,
+            "[from-data] Enterprise plan has 412 active accounts.",
+            INITIAL_CONTEXT_SUMMARY_QUESTION,
+        )
+    )
+
+    assert state.rounds[-1].answer_provenance == "data_fact"
+
+
+def test_inheritance_is_scoped_to_the_summary_question() -> None:
+    """An ordinary answer in an observation-context interview stays human.
+
+    The substitute rule is about standing in for `initial_context`. A normal
+    round is the user's own decision and keeps its own class, which is what
+    lets a withheld interview become generatable again.
+    """
+    import asyncio
+
+    from ouroboros.bigbang.interview import InterviewEngine
+
+    state = InterviewState(
+        interview_id="substitute-scope",
+        initial_context="[from-data] Enterprise plan has 412 active accounts.",
+    )
+    engine = InterviewEngine(llm_adapter=AsyncMock())
+
+    asyncio.run(
+        engine.record_response(
+            state,
+            "Build an SSO dashboard for enterprise admins.",
+            "What should we build?",
+        )
+    )
+
+    assert state.rounds[-1].answer_provenance == "human"

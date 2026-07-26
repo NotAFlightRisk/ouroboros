@@ -493,6 +493,36 @@ class InterviewState(BaseModel):
             self.reference_resolutions = tuple(updated)
 
 
+#: Provenance classes that mark an adopted external observation. A summary
+#: standing in for one of these is standing in for an observation.
+_OBSERVATION_PROVENANCE = frozenset({"data_fact", "research_fact"})
+
+
+def _ingested_provenance(state: InterviewState, question: str, answer: str) -> str:
+    """The provenance a new round carries, decided at the door.
+
+    Normally the answer's own class. The exception is the oversized-context
+    summary, which is not an independent answer: it is the SUBSTITUTE the
+    engine hands to every consumer in place of ``initial_context``. A
+    substitute cannot carry more authority than the thing it replaces, so an
+    observation-marked context stays an observation once summarized.
+
+    Without this, the same observation was treated differently by LENGTH. A
+    short `[from-data]` context is an observation and blocks generation; the
+    same content over the prompt-safe bound was restated by the user without
+    the marker, typed `human`, and promoted. Deriving the substitute happens
+    inside the door, so an entrance check on the raw answer cannot see it —
+    the inheritance has to be applied where the substitute is created.
+    """
+    classified = classify_answer_provenance(answer)
+    if question != INITIAL_CONTEXT_SUMMARY_QUESTION:
+        return classified
+    if classified in _OBSERVATION_PROVENANCE:
+        return classified
+    context_provenance = state.initial_context_provenance
+    return context_provenance if context_provenance in _OBSERVATION_PROVENANCE else classified
+
+
 def prompt_safe_initial_context(state: InterviewState) -> str:
     """Return initial context safe for LLM prompts across interview consumers."""
     return prompt_safe_initial_context_with_provenance(state)[0]
@@ -1106,8 +1136,10 @@ class InterviewEngine:
             round_number=state.current_round_number,
             question=question,
             user_response=user_response,
-            answer_provenance=classify_answer_provenance(
-                original_response if original_response is not None else user_response
+            answer_provenance=_ingested_provenance(
+                state,
+                question,
+                original_response if original_response is not None else user_response,
             ),
         )
 
