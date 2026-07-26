@@ -189,7 +189,10 @@ _DECLARED_REJECTIONS: list[tuple[str, dict[str, Any], str]] = [
     # email_hash) or a classification standard (naics_code — categorical,
     # in the accepted corpus above) is cross-token semantics the pattern
     # cannot express, so it stays declared residue.
-    ("entity-modified-code", _answer(filters=["customer_code=zx123456"]), "keys an entity"),
+    # (Value shortened in round-91: the long concatenated form became
+    # schema-invalid under the positive value grammar; the KEY residue this
+    # row pins is unchanged.)
+    ("entity-modified-code", _answer(filters=["customer_code=zx12"]), "keys an entity"),
     # Round-89: a category KEY with an identity-LABELED value is one
     # person's row — the label names what the digits index.
     (
@@ -265,6 +268,11 @@ def test_the_scope_grammars_absorbed_the_positive_classification() -> None:
         "user_id=541511",
         "ip=192.168.1.1",
         "client=10.0.0.7",
+        # Round-91: concatenated indexed-entity values are not representable
+        # under the positive value-token grammar, whatever the key.
+        "segment=employee123456",
+        "employee_code=zx123456",
+        "cohort=a1b2c3d4e5",
     ):
         assert not _READ_REQUEST_FILTER.match(scope), scope
         violations = _data_evidence_boundary_violations(_answer(filters=[scope]))

@@ -1660,6 +1660,23 @@ _WINDOW_TOKEN = r"[0-9]{1,4}[dhwmy]"
 #: retained path, whose relaxed bare-key grammar cannot carry the rule.
 _CATEGORY_HEAD_ALTERNATION = "|".join(sorted(_CATEGORY_HEADS))
 _FILTER_KEY_HEAD_ALTERNATION = "|".join(sorted(_FILTER_KEY_HEADS))
+#: POSITIVE value-token forms (round-91). A category label is a WORD, a
+#: bounded digit run, or a word with a short ordinal suffix — `enterprise`,
+#: `202607`, `beta7`, `windows11`, `v2`. A letters-then-long-digits
+#: concatenation (`employee123456`, `zx123456`) is an indexed-entity shape
+#: with no categorical reading, so it is not representable: the round-90
+#: separable-token rule was bypassed by removing the separator, which a
+#: token-shape definition cannot be. Values remain compounds of these
+#: tokens (`checkout_started`, `tier_2`, `2026-01-01`); pure digit runs
+#: keep their semantic calendar/opaque classification (rounds 80-82) as
+#: declared residue.
+_VALUE_TOKEN = r"(?:[a-z]+[0-9]{0,2}|[0-9]{1,8})"
+FILTER_VALUE_PATTERN = (
+    _HEX_ID_VALUE_EXCLUSION + _VALUE_TOKEN + r"(?:[_.:+-]" + _VALUE_TOKEN + r"){0,4}"
+)
+DIMENSION_VALUE_PATTERN = (
+    _HEX_ID_VALUE_EXCLUSION + _VALUE_TOKEN + r"(?:[_.-]" + _VALUE_TOKEN + r"){0,4}"
+)
 GROUPING_TOKEN_PATTERN = (
     r"^(?=[a-z][a-z0-9_]{0,31}$)(?:[a-z0-9]+_)*(?:" + _CATEGORY_HEAD_ALTERNATION + r")$"
 )
@@ -1668,16 +1685,18 @@ FILTER_TOKEN_PATTERN = (
     + _FILTER_KEY_HEAD_ALTERNATION
     + r"|"
     + _WINDOW_TOKEN
-    + r")(=|!=|<|>|<=|>=)"
-    + _HEX_ID_VALUE_EXCLUSION
-    + r"[a-z0-9][a-z0-9_.:+-]{0,21}$"
+    + r")(=|!=|<|>|<=|>=)(?="
+    + r"[a-z0-9][a-z0-9_.:+-]{0,21}$)"
+    + FILTER_VALUE_PATTERN
+    + r"$"
 )
 DIMENSION_TOKEN_PATTERN = (
     r"^(?=[a-z][a-z0-9_]{0,23}=)(?:[a-z0-9]+_)*(?:"
     + _CATEGORY_HEAD_ALTERNATION
-    + r")="
-    + _HEX_ID_VALUE_EXCLUSION
-    + r"[a-z0-9][a-z0-9_.-]{0,21}$"
+    + r")=(?="
+    + r"[a-z0-9][a-z0-9_.-]{0,21}$)"
+    + DIMENSION_VALUE_PATTERN
+    + r"$"
 )
 
 _AGGREGATE_DIMENSION = re.compile(DIMENSION_TOKEN_PATTERN)

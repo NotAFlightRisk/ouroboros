@@ -6,7 +6,13 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
-from ouroboros.bigbang.interview import INITIAL_CONTEXT_SUMMARY_QUESTION, InterviewState
+from ouroboros.bigbang.interview import (
+    GOAL_RESTATEMENT_QUESTION,
+    INITIAL_CONTEXT_SUMMARY_QUESTION,
+    INITIAL_CONTEXT_SUMMARY_REQUIRED,
+    InterviewState,
+    prompt_safe_initial_context_with_provenance,
+)
 from ouroboros.core.requirement_candidate import (
     CandidateContentSource,
     CandidateResolution,
@@ -114,97 +120,27 @@ def interview_is_observation_only(state: InterviewState) -> bool:
 
 OBSERVATION_ONLY_INTERVIEW_MESSAGE = (
     "Interview carries only withheld data/research observations; no "
-    "user-authored requirement exists to generate from. State the goal and "
-    "requirements in your own words, then generate again."
+    "user-authored requirement was promoted to generate from. Ask the user "
+    "the goal-restatement question VERBATIM and record their answer as a "
+    "round (pass it as last_question), then generate again: "
+    f'"{GOAL_RESTATEMENT_QUESTION}"'
 )
-
-
-#: Discourse tokens that carry acknowledgement, not content. Unlike identity
-#: nouns or mutating verbs, phatic markers are a CLOSED class in the
-#: linguistic sense — new ones are coined about as often as new pronouns —
-#: which is why a vocabulary is the right tool on this boundary and not on
-#: those (round-90).
-_PHATIC_TOKENS = frozenset(
-    {
-        "thanks",
-        "thank",
-        "you",
-        "ok",
-        "okay",
-        "kk",
-        "sure",
-        "great",
-        "good",
-        "nice",
-        "cool",
-        "fine",
-        "alright",
-        "yes",
-        "yep",
-        "yeah",
-        "no",
-        "nope",
-        "got",
-        "it",
-        "please",
-        "proceed",
-        "continue",
-        "go",
-        "ahead",
-        "sounds",
-        "perfect",
-        "awesome",
-        "감사",
-        "감사합니다",
-        "고마워",
-        "고맙습니다",
-        "네",
-        "예",
-        "응",
-        "좋아",
-        "좋아요",
-        "좋습니다",
-        "알겠습니다",
-        "알겠어요",
-        "진행해",
-        "진행해줘",
-        "진행해주세요",
-        "오케이",
-        "ㅇㅋ",
-        "はい",
-        "了解",
-        "了解です",
-        "ありがとう",
-        "ありがとうございます",
-        "お願いします",
-    }
-)
-
-
-def _substantive_human_answer(answer: str) -> bool:
-    """Whether a human answer carries content beyond acknowledgement.
-
-    `Thanks.` is discourse; `Build an SSO dashboard for enterprise admins.`
-    is a goal. At least two non-phatic word tokens make an answer
-    substantive — one alone ("perfect!", "SSO?") is reaction or echo.
-    """
-    tokens = re.findall(r"[0-9A-Za-z가-힣ぁ-んァ-ヶ一-龥]+", answer.lower())
-    return sum(1 for token in tokens if token not in _PHATIC_TOKENS) >= 2
 
 
 def interview_has_no_promotable_requirement(state: InterviewState) -> bool:
     """THE readiness question every generation route asks before extracting.
 
-    Round-88 deepened round-85's gate: "is any non-observation text present"
-    let a withheld `[from-data]` goal plus the human answer `Thanks.` reach
-    the extractor, which then invented a Seed from a transcript whose only
-    substantive content was withheld. Round-90 restored the gate's
-    precision: requiring a regex-PROMOTED candidate rejected the ordinary
-    user decision "Build an SSO dashboard for enterprise admins." — the
-    explicit-requirement vocabulary is deliberately narrow, and soft-worded
-    goals are what LLM extraction exists for. The standard is therefore: a
-    promoted user-authored candidate OR a substantive (non-phatic) human
-    answer. Interviews with no observations anywhere are untouched: their
+    When observations were withheld, the replacement authority must be a
+    PROMOTED user-authored candidate. Rounds 88/90/91 oscillated between
+    precision and recall on linguistic tests of the answer text (explicit-
+    requirement regex rejected soft goals; two-non-phatic-words admitted
+    "That is surprising.") — the oscillation itself was the finding: whether
+    prose constitutes a decision is not decidable from its wording. The
+    typed act decides instead: the refusal message carries the designated
+    GOAL_RESTATEMENT_QUESTION, and a human answer to that question promotes
+    positionally (see build_requirement_distillation), so any wording the
+    user chooses becomes their goal by virtue of having been asked for it.
+    Interviews with no observations anywhere are untouched: their
     substantive authority was never withheld.
     """
     if interview_is_observation_only(state):
@@ -220,16 +156,7 @@ def interview_has_no_promotable_requirement(state: InterviewState) -> bool:
     )
     if not has_observation:
         return False
-    promotion = evaluate_promotion(build_requirement_distillation(state))
-    if promotion.promoted:
-        return False
-    return not any(
-        _substantive_human_answer(answer)
-        for round_data in state.rounds
-        if (answer := (round_data.user_response or "").strip())
-        and effective_answer_provenance(answer, round_data.answer_provenance)
-        not in {"data_fact", "research_fact"}
-    )
+    return not evaluate_promotion(build_requirement_distillation(state)).promoted
 
 
 def build_requirement_distillation(state: InterviewState) -> RequirementDistillation:
@@ -245,13 +172,19 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
     evidence: list[RequirementEvidence] = []
     candidates: list[RequirementCandidate] = []
 
+    # The goal candidate comes from the AUTHORITATIVE context value
+    # (round-91): when the raw context is oversized, the user's summary
+    # answer — with its typed provenance — IS the context, and promoting
+    # the raw text instead let a data-typed summary's session promote a
+    # user-confirmed goal the extractors were correctly withholding.
+    goal_text, goal_provenance = prompt_safe_initial_context_with_provenance(state)
     if state.initial_context.strip():
         evidence_id = "initial-context"
         evidence.append(
             RequirementEvidence(
                 evidence_id=evidence_id,
                 kind=RequirementEvidenceKind.USER_STATEMENT,
-                text=state.initial_context.strip(),
+                text=goal_text.strip() or state.initial_context.strip(),
             )
         )
         # The initial context takes the same provenance gate as every round
@@ -260,16 +193,18 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
         # became the runnable Seed goal through the reference-aware path even
         # while every extraction surface withheld them. Without a candidate
         # the promoted Seed falls back to its generic goal; the user states
-        # the real goal in their own words.
-        if classify_answer_provenance(state.initial_context) not in {
-            "data_fact",
-            "research_fact",
-        }:
+        # the real goal in their own words. USER authority requires HUMAN
+        # provenance (round-91): generated text is not a user decision.
+        if (
+            goal_text.strip()
+            and goal_text != INITIAL_CONTEXT_SUMMARY_REQUIRED
+            and effective_answer_provenance(goal_text, goal_provenance) == "human"
+        ):
             candidates.append(
                 RequirementCandidate(
                     candidate_id="initial-goal",
                     section=RequirementSection.GOAL,
-                    text=state.initial_context.strip(),
+                    text=goal_text.strip(),
                     content_source=CandidateContentSource.USER_STATED,
                     resolution=CandidateResolution.CONFIRMED,
                     confirmation_authority=ConfirmationAuthority.USER,
@@ -317,6 +252,31 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
                 text=answer,
             )
         )
+        # POSITIONAL goal authority (round-91): an answer to the designated
+        # goal-restatement question is a structured goal act — the system
+        # asked "state your goal", the user answered. No linguistic judgment
+        # of the wording is involved, which is what ended the
+        # phatic-versus-substantive oscillation (rounds 88/90/91: promoted-
+        # only rejected soft goals; two-non-phatic-words admitted "That is
+        # surprising."). Human provenance is still required: a generated or
+        # observation-marked reply to the goal question is not a decision.
+        if (
+            round_data.question == GOAL_RESTATEMENT_QUESTION
+            and effective_answer_provenance(answer, round_data.answer_provenance) == "human"
+        ):
+            candidates.append(
+                RequirementCandidate(
+                    candidate_id=f"round-{round_data.round_number}:restated-goal",
+                    section=RequirementSection.GOAL,
+                    text=answer,
+                    content_source=CandidateContentSource.USER_STATED,
+                    resolution=CandidateResolution.CONFIRMED,
+                    confirmation_authority=ConfirmationAuthority.USER,
+                    evidence_ids=(evidence_id,),
+                    required=True,
+                )
+            )
+            continue
         explicitly_required = bool(_EXPLICIT_REQUIREMENT_RE.search(answer))
         if not explicitly_required:
             continue
@@ -330,11 +290,12 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
         # `[from-research]` is the same class (the intent guard already
         # groups them). The requirement path stays open: the user states the
         # decision in their own words, in an unmarked answer, and that
-        # promotes exactly as before.
-        if effective_answer_provenance(answer, round_data.answer_provenance) in {
-            "data_fact",
-            "research_fact",
-        }:
+        # promotes exactly as before. Round-91 completed the rule from the
+        # positive side: USER_STATED + ConfirmationAuthority.USER is a claim
+        # about WHO decided, so only HUMAN provenance may make it —
+        # `[from-auto]` safe-defaults and other generated text promoted as
+        # user decisions the user never made.
+        if effective_answer_provenance(answer, round_data.answer_provenance) != "human":
             continue
 
         referenced = tuple(

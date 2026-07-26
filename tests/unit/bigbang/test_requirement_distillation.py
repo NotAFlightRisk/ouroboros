@@ -872,26 +872,121 @@ def test_round88_withheld_authority_requires_a_promoted_replacement() -> None:
     assert not interview_has_no_promotable_requirement(plain)
 
 
-def test_round90_substantive_goals_pass_the_gate_and_phatic_text_does_not() -> None:
-    """The gate distinguishes acknowledgement from authority.
+def test_round91_goal_authority_is_positional_not_linguistic() -> None:
+    """A typed act — answering the designated question — is what promotes.
 
-    Round-88's promoted-candidate standard rejected the ordinary user
-    decision "Build an SSO dashboard for enterprise admins." — soft-worded
-    goals are what LLM extraction exists for. Phatic markers are a CLOSED
-    class, so a vocabulary is the right tool on this boundary; the round-88
-    Thanks.-only probe stays blocked.
+    Rounds 88/90/91 oscillated on linguistic tests of the answer text:
+    promoted-only rejected the soft goal "Build an SSO dashboard...", and
+    two-non-phatic-words admitted "That is surprising.". The gate now
+    requires a promoted candidate, and the promotion comes from POSITION:
+    any human answer to GOAL_RESTATEMENT_QUESTION is the user's goal,
+    whatever its wording — while the same words in an ordinary round carry
+    no requirement authority.
     """
+    from ouroboros.bigbang.interview import GOAL_RESTATEMENT_QUESTION
     from ouroboros.bigbang.requirement_distillation import (
         interview_has_no_promotable_requirement,
     )
 
-    # Soft-worded imperative goal after an observation: generatable.
-    state = _state_with_answer("Build an SSO dashboard for enterprise admins.")
-    state.initial_context = "[from-data] Confirmed: 42 accounts require SSO."
+    # Observation context + reaction prose in an ORDINARY round: blocked
+    # (the round-91 "That is surprising." probe), as is a soft goal that
+    # was never asked for.
+    for prose in ("That is surprising.", "Build an SSO dashboard for enterprise admins."):
+        state = _state_with_answer(prose)
+        state.initial_context = "[from-data] Confirmed: 42 accounts require SSO."
+        assert interview_has_no_promotable_requirement(state), prose
+
+    # The SAME soft wording as the answer to the designated question: the
+    # typed act promotes it, no linguistic judgment involved.
+    state = _state_with_answer("[from-data] Confirmed: 42 accounts require SSO.")
+    state.initial_context = ""
+    state.rounds.append(
+        InterviewRound(
+            round_number=2,
+            question=GOAL_RESTATEMENT_QUESTION,
+            user_response="Build an SSO dashboard for enterprise admins.",
+        )
+    )
     assert not interview_has_no_promotable_requirement(state)
 
-    # Phatic-only (round-88 probe) stays blocked, in several spellings.
-    for phatic in ("Thanks.", "ok, go ahead", "sounds good, proceed.", "좋아요 진행해주세요"):
-        blocked = _state_with_answer(phatic)
-        blocked.initial_context = "[from-data] Confirmed: 42 accounts require SSO."
-        assert interview_has_no_promotable_requirement(blocked), phatic
+    # A generated or observation-marked reply to the goal question is not a
+    # decision (round-91 blocker 4 applied to the new slot).
+    for reply, provenance in (
+        ("[from-auto] Enterprise tier must include SSO.", "generated"),
+        ("[from-data] Confirmed: 42 accounts require SSO.", "data_fact"),
+    ):
+        state = _state_with_answer("[from-data] Confirmed: 42 accounts require SSO.")
+        state.initial_context = ""
+        state.rounds.append(
+            InterviewRound(
+                round_number=2,
+                question=GOAL_RESTATEMENT_QUESTION,
+                user_response=reply,
+                answer_provenance=provenance,
+            )
+        )
+        assert interview_has_no_promotable_requirement(state), reply
+
+
+def test_round91_generated_answers_never_carry_user_authority() -> None:
+    """[from-auto] text must not become a USER_STATED candidate."""
+    state = _state_with_answer("[from-auto] Enterprise tier must include SSO.")
+    state.rounds[0].answer_provenance = "generated"
+    distillation = build_requirement_distillation(state)
+    assert all("[from-auto]" not in candidate.text for candidate in distillation.candidates)
+    assert not [
+        candidate
+        for candidate in distillation.candidates
+        if candidate.candidate_id.endswith(":requirement")
+    ]
+
+
+def test_round91_oversized_data_summary_never_promotes_the_raw_goal() -> None:
+    """The AUTHORITATIVE context value carries the goal, with its provenance.
+
+    Oversized raw context + markerless data-typed summary: extraction
+    withheld the summary, but distillation promoted the raw context as a
+    user-confirmed goal and generation produced an invented runnable Seed.
+    """
+    from ouroboros.bigbang.interview import (
+        INITIAL_CONTEXT_SUMMARY_QUESTION,
+        MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
+    )
+    from ouroboros.bigbang.requirement_distillation import (
+        interview_has_no_promotable_requirement,
+    )
+
+    state = InterviewState(
+        interview_id="iv_r91_summary",
+        initial_context="x" * (MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS + 1),
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response="Confirmed: 42 accounts require SSO.",
+                answer_provenance="data_fact",
+            )
+        ],
+    )
+    distillation = build_requirement_distillation(state)
+    assert not [c for c in distillation.candidates if c.candidate_id == "initial-goal"]
+    assert interview_has_no_promotable_requirement(state)
+
+    # A HUMAN summary carries the goal with the summary text, not the raw blob.
+    human = InterviewState(
+        interview_id="iv_r91_summary_h",
+        initial_context="x" * (MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS + 1),
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response="Build the reporting lane for enterprise admins.",
+            )
+        ],
+    )
+    goal = next(
+        c
+        for c in build_requirement_distillation(human).candidates
+        if c.candidate_id == "initial-goal"
+    )
+    assert goal.text == "Build the reporting lane for enterprise admins."

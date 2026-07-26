@@ -65,6 +65,17 @@ INITIAL_CONTEXT_SUMMARY_REQUIRED = (
     "recorded yet. Ask the user to provide a concise summary before scoring or "
     "generating a seed.]"
 )
+#: The designated goal-restatement question (round-91). When every
+#: substantive input was a withheld observation, generation refuses and the
+#: host asks THIS question verbatim; a human answer to it is a structured
+#: goal act — authority comes from the user answering the designated
+#: question, not from any linguistic judgment of the answer's wording.
+GOAL_RESTATEMENT_QUESTION = (
+    "The interview so far contains only adopted observations, which are "
+    "never promoted into requirements. In your own words: what should be "
+    "built, and what must it guarantee? Your answer to this question is "
+    "recorded as your goal decision."
+)
 PROMPT_SAFE_CONTEXT_TRUNCATION_NOTICE = "\n\n[Context truncated for prompt safety.]"
 # Empirically, the local Agent SDK CLI path can return empty completions when
 # interview question prompts grow beyond roughly this serialized prompt size.
