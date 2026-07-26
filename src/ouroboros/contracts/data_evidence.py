@@ -1732,7 +1732,25 @@ _IDENTITY_KEYS = frozenset(
 #: category. Contrast customer_segment, whose head REDUCES cardinality, which
 #: is why the round-54 head-last rule admits it.
 _IDENTITY_PRESERVING_HEADS = frozenset(
-    {"hash", "hashes", "digest", "digests", "checksum", "fingerprint", "uuid", "guid"}
+    {
+        "hash",
+        "hashes",
+        "digest",
+        "digests",
+        "checksum",
+        "fingerprint",
+        "uuid",
+        "guid",
+        # A code is the same shape (round-88 probe: customer_code=zx123456
+        # completed re-entry): an entity-modified code is a per-entity
+        # pseudonym — customer_code names one customer as surely as
+        # email_hash names one person — while naics_code's modifier names a
+        # classification STANDARD, not an entity, and stays categorical.
+        # The filter grammar admits the head; the modifier semantics live
+        # here, in the declared entity-key residue.
+        "code",
+        "codes",
+    }
 )
 
 

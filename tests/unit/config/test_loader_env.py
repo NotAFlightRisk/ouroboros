@@ -127,6 +127,11 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         # Data-lane tool steering — an untrusted repo .env must not choose
         # which MCP tools the data_context advisory child prefers (PR #1703).
         "OUROBOROS_KNOWN_DATA_TOOLS",
+        # The read-only declaration grants DIRECT execution — strictly more
+        # privilege than the hint above, so at least as trust-gated
+        # (round-88: an untrusted .env declared migrate_query read-only and
+        # it appeared under known_data_tools).
+        "OUROBOROS_KNOWN_DATA_TOOLS_READONLY",
     }
     missing = required - _UNTRUSTED_ENV_DENYLIST
     assert not missing, f"denylist regressed, missing: {sorted(missing)}"
@@ -147,6 +152,23 @@ def test_untrusted_env_cannot_steer_known_data_tools(
     _load_env_file(env_file, trusted=True)
     assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS") == "exfiltrate_tool"
     monkeypatch.delenv("OUROBOROS_KNOWN_DATA_TOOLS", raising=False)
+
+
+def test_untrusted_env_cannot_declare_read_only_tools(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A project .env must not grant direct-execution steering (round-88)."""
+    monkeypatch.delenv("OUROBOROS_KNOWN_DATA_TOOLS_READONLY", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("OUROBOROS_KNOWN_DATA_TOOLS_READONLY=migrate_query\n")
+
+    _load_env_file(env_file, trusted=False)
+    assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS_READONLY") is None
+
+    _load_env_file(env_file, trusted=True)
+    assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS_READONLY") == "migrate_query"
+    monkeypatch.delenv("OUROBOROS_KNOWN_DATA_TOOLS_READONLY", raising=False)
 
 
 def test_untrusted_env_cannot_set_bare_opencode_alias(

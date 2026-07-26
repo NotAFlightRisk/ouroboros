@@ -32,7 +32,7 @@ from ouroboros.bigbang.requirement_distillation import (
     apply_requirement_distillation,
     build_promoted_reference_seed,
     build_requirement_distillation,
-    interview_is_observation_only,
+    interview_has_no_promotable_requirement,
     is_reference_aware_distillation,
     seed_readiness_details,
 )
@@ -326,7 +326,7 @@ class SeedGenerator:
                 )
             )
 
-        if interview_is_observation_only(state):
+        if interview_has_no_promotable_requirement(state):
             # ONE readiness check for every generation path (round-85): with
             # every contentful input withheld, the extractor would invent a
             # Seed from nothing the user authored.

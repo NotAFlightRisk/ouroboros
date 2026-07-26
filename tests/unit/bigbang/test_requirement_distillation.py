@@ -834,3 +834,39 @@ def test_round86_provenance_is_a_closed_enum_and_a_cache_key() -> None:
     fingerprint_as_human = state.requirement_input_fingerprint()
     state.rounds[0].answer_provenance = "data_fact"
     assert state.requirement_input_fingerprint() != fingerprint_as_human
+
+
+def test_round88_withheld_authority_requires_a_promoted_replacement() -> None:
+    """Phatic text is not requirement authority.
+
+    A withheld `[from-data]` goal plus the human answer `Thanks.` passed the
+    round-85 any-non-observation-text gate, and the extractor invented a
+    Seed from a transcript whose only substantive content was withheld. When
+    observations were withheld, readiness requires a PROMOTED user-authored
+    candidate — the reference-path standard — not merely any human text.
+    Interviews without observations are untouched.
+    """
+    from ouroboros.bigbang.requirement_distillation import (
+        interview_has_no_promotable_requirement,
+    )
+
+    # Withheld goal + phatic answer: blocked.
+    state = _state_with_answer("Thanks.")
+    state.initial_context = "[from-data] Confirmed: 42 accounts require SSO."
+    assert interview_has_no_promotable_requirement(state)
+
+    # A promoted user-authored requirement anywhere reopens generation.
+    state.rounds.append(
+        InterviewRound(
+            round_number=2,
+            question="So what must ship?",
+            user_response="Enterprise tier must include SSO.",
+        )
+    )
+    state.invalidate_requirement_distillation()
+    assert not interview_has_no_promotable_requirement(state)
+
+    # No observations anywhere: soft-worded interviews stay generatable.
+    plain = _state_with_answer("Thanks.")
+    plain.initial_context = "Build the reporting lane"
+    assert not interview_has_no_promotable_requirement(plain)

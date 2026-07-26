@@ -46,7 +46,7 @@ from ouroboros.bigbang.requirement_distillation import (
     OBSERVATION_ONLY_INTERVIEW_MESSAGE,
     build_promoted_reference_seed,
     build_requirement_distillation,
-    interview_is_observation_only,
+    interview_has_no_promotable_requirement,
     is_reference_aware_distillation,
     seed_readiness_details,
 )
@@ -1614,7 +1614,7 @@ class GenerateSeedHandler:
                         )
                     )
 
-            if interview_is_observation_only(interview_state):
+            if interview_has_no_promotable_requirement(interview_state):
                 # The same single readiness check the in-process generator
                 # runs (round-85): this path called evaluate_promotion
                 # directly and bypassed the gate.
@@ -1626,11 +1626,20 @@ class GenerateSeedHandler:
                 )
             transcript = _format_extraction_transcript(interview_state)
             distillation = build_requirement_distillation(interview_state)
-            from ouroboros.core.requirement_candidate import evaluate_promotion
+            from ouroboros.bigbang.requirement_distillation import (
+                apply_requirement_distillation,
+            )
 
-            promotion = evaluate_promotion(distillation)
-            if promotion.blockers:
-                details = seed_readiness_details(promotion)
+            # ONE promotion authority (round-88): this gate previously used
+            # bare evaluate_promotion while build_promoted_reference_seed
+            # preflights the APPLIED promotion, whose blockers are a
+            # superset — a state that passed here then raised an uncaught
+            # ValueError inside the builder. Gating on the same applied
+            # result the builder recomputes makes the builder's raise
+            # unreachable from this route.
+            applied = apply_requirement_distillation({}, distillation)
+            if applied.promotion.blockers:
+                details = seed_readiness_details(applied.promotion)
                 return Result.err(
                     MCPToolError(
                         f"Interview must be reopened before Seed generation: {details}",

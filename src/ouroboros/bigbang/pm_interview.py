@@ -51,7 +51,7 @@ from ouroboros.bigbang.question_classifier import (
 )
 from ouroboros.bigbang.requirement_distillation import (
     OBSERVATION_ONLY_INTERVIEW_MESSAGE,
-    interview_is_observation_only,
+    interview_has_no_promotable_requirement,
 )
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
@@ -1103,7 +1103,7 @@ class PMInterviewEngine:
                     field="rounds",
                 )
             )
-        if interview_is_observation_only(state):
+        if interview_has_no_promotable_requirement(state):
             # Same single readiness check as the dev paths (round-85): the
             # prompt withheld the observation correctly, and the extractor
             # then INVENTED a PMSeed from nothing — which pm_seed_to_dev_context

@@ -25,14 +25,18 @@ This module pins the population. Three properties:
    * identity-metric — a value-returning aggregation over an identity metric
                        (round 48)
 
-   The round-85 unverified-grouping class and the round-54 entity-KEY class
+   * entity-key      — an identity-MODIFIED preserving head the grammar
+                       cannot see (round-88: customer_code — the pattern
+                       admits the head, the modifier semantics are
+                       cross-token English)
+
+   The round-85 unverified-grouping class and the entity-NAMED keys
    (user_id, ip, passport_number as scope keys) were ABSORBED into the
    grouping, dimension, and filter grammars, like the metric's credential
    rules in round 79: the published patterns compile from the positive head
    sets, so an unverified or identity-named key is schema-invalid rather
-   than schema-valid-but-rejected, and those classes no longer appear in
-   the declared residue below. Entity-name detection remains in the
-   validator for the retained path and as depth behind the grammar.
+   than schema-valid-but-rejected. What remains of the round-54 entity-key
+   class is the modifier direction only.
 
 A rejection outside these classes is this test failing, not a future review
 round.
@@ -157,6 +161,12 @@ def test_schema_valid_scopes_are_accepted(label: str, output: dict[str, Any]) ->
 #: Property 3 corpus: schema-valid but rejected — each row names its declared
 #: class via a stable message fragment.
 _DECLARED_REJECTIONS: list[tuple[str, dict[str, Any], str]] = [
+    # Round-88: the grammar admits the `code` HEAD; whether the MODIFIER
+    # names an entity (customer_code — a per-customer pseudonym, like
+    # email_hash) or a classification standard (naics_code — categorical,
+    # in the accepted corpus above) is cross-token semantics the pattern
+    # cannot express, so it stays declared residue.
+    ("entity-modified-code", _answer(filters=["customer_code=zx123456"]), "keys an entity"),
     ("opaque-7-digits", _answer(filters=["cohort=9999999"]), "opaque entity identifier"),
     ("opaque-bad-date", _answer(filters=["day=20260231"]), "opaque entity identifier"),
     (

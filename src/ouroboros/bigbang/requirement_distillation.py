@@ -119,6 +119,36 @@ OBSERVATION_ONLY_INTERVIEW_MESSAGE = (
 )
 
 
+def interview_has_no_promotable_requirement(state: InterviewState) -> bool:
+    """THE readiness question every generation route asks before extracting.
+
+    Round-88 deepened round-85's gate: "is any non-observation text present"
+    let a withheld `[from-data]` goal plus the human answer `Thanks.` reach
+    the extractor, which then invented a Seed from a transcript whose only
+    substantive content was withheld. When observations were withheld, the
+    replacement authority must be a PROMOTED user-authored candidate — the
+    same standard the reference-aware path already enforces — not merely any
+    human text. Interviews with no observations anywhere are untouched:
+    their substantive authority was never withheld, and ordinary LLM
+    extraction from soft-worded answers remains the product behavior.
+    """
+    if interview_is_observation_only(state):
+        return True
+    has_observation = classify_answer_provenance(state.initial_context) in {
+        "data_fact",
+        "research_fact",
+    } or any(
+        effective_answer_provenance((round_data.user_response or ""), round_data.answer_provenance)
+        in {"data_fact", "research_fact"}
+        for round_data in state.rounds
+        if (round_data.user_response or "").strip()
+    )
+    if not has_observation:
+        return False
+    promotion = evaluate_promotion(build_requirement_distillation(state))
+    return not promotion.promoted
+
+
 def build_requirement_distillation(state: InterviewState) -> RequirementDistillation:
     """Derive a conservative candidate projection from canonical interview inputs."""
     fingerprint = state.requirement_input_fingerprint()
@@ -496,9 +526,12 @@ def seed_readiness_details(promotion: PromotionResult) -> dict[str, Any]:
 
 __all__ = [
     "AppliedRequirementDistillation",
+    "OBSERVATION_ONLY_INTERVIEW_MESSAGE",
     "apply_requirement_distillation",
     "build_promoted_reference_seed",
     "build_requirement_distillation",
+    "interview_has_no_promotable_requirement",
+    "interview_is_observation_only",
     "is_reference_aware_distillation",
     "seed_readiness_details",
 ]

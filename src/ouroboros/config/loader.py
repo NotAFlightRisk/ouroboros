@@ -311,6 +311,12 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         # round-7). Only the trusted home .env or the real environment may
         # set it.
         "OUROBOROS_KNOWN_DATA_TOOLS",
+        # The read-only declaration grants DIRECT-execution steering — a
+        # strictly higher privilege than the proposal-only hint above, so it
+        # is at least as trust-gated: an untrusted repo .env must not be able
+        # to declare an attacker-selected tool "read-only" and steer the lane
+        # into executing it without user confirmation.
+        "OUROBOROS_KNOWN_DATA_TOOLS_READONLY",
     }
 )
 
