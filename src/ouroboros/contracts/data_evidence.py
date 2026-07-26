@@ -1671,11 +1671,35 @@ _FILTER_KEY_HEAD_ALTERNATION = "|".join(sorted(_FILTER_KEY_HEADS))
 #: keep their semantic calendar/opaque classification (rounds 80-82) as
 #: declared residue.
 _VALUE_TOKEN = r"(?:[a-z]+[0-9]{0,2}|[0-9]{1,8})"
+#: In a COMPOUND value every digit segment is bounded at four digits
+#: (round-95): the round-90 semantic rule rejected any 5+-digit compound
+#: segment as an entity index, while the published grammar admitted
+#: `build_12345` — schema-valid yet unattainable, the exact parity gap the
+#: sweep exists to prevent. The restriction now lives in the grammar, so
+#: the two surfaces agree by construction. A long numeric category stays
+#: expressible in its canonical spelling — the label in the KEY, the number
+#: as a BARE value (`build=12345`); calendar partitions keep the 8-digit
+#: single-token form (`date=20260725`).
+_VALUE_COMPOUND_TOKEN = r"(?:[a-z]+[0-9]{0,2}|[0-9]{1,4})"
 FILTER_VALUE_PATTERN = (
-    _HEX_ID_VALUE_EXCLUSION + _VALUE_TOKEN + r"(?:[_.:+-]" + _VALUE_TOKEN + r"){0,4}"
+    _HEX_ID_VALUE_EXCLUSION
+    + r"(?:"
+    + _VALUE_TOKEN
+    + r"|"
+    + _VALUE_COMPOUND_TOKEN
+    + r"(?:[_.:+-]"
+    + _VALUE_COMPOUND_TOKEN
+    + r"){1,4})"
 )
 DIMENSION_VALUE_PATTERN = (
-    _HEX_ID_VALUE_EXCLUSION + _VALUE_TOKEN + r"(?:[_.-]" + _VALUE_TOKEN + r"){0,4}"
+    _HEX_ID_VALUE_EXCLUSION
+    + r"(?:"
+    + _VALUE_TOKEN
+    + r"|"
+    + _VALUE_COMPOUND_TOKEN
+    + r"(?:[_.-]"
+    + _VALUE_COMPOUND_TOKEN
+    + r"){1,4})"
 )
 GROUPING_TOKEN_PATTERN = (
     r"^(?=[a-z][a-z0-9_]{0,31}$)(?:[a-z0-9]+_)*(?:" + _CATEGORY_HEAD_ALTERNATION + r")$"
@@ -1942,6 +1966,9 @@ def _labeled_identifier_value(value: str) -> bool:
         return True
     if len(tokens) < 2:
         return False
+    # Unreachable for schema-valid submissions since round-95: the published
+    # compound grammar bounds digit segments at four, so this branch is the
+    # enforcement compile for the retained path only.
     return any(
         token.isdigit() and len(token) >= 5 and not _compact_date_partition(token)
         for token in tokens

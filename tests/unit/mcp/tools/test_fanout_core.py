@@ -8876,3 +8876,37 @@ def test_round85_prompts_state_the_proposal_only_rule() -> None:
     assert "Proposal-Only Data Tools" in prompt
     assert "never execute them yourself" in prompt
     assert payloads[0].context["proposal_only_data_tools"] == ["migrate_database"]
+
+
+def test_round95_numeric_build_categories_complete_end_to_end(tmp_path: Any) -> None:
+    """The canonical numeric-category spelling completes public re-entry.
+
+    `release=build_12345` was schema-valid yet semantically rejected — the
+    round-90 compound rule and the published grammar disagreed. The
+    restriction now lives in the grammar (compound digit segments ≤4), and
+    the canonical spelling — label in the KEY, bare number as the value —
+    completes with no violations.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-95",
+        lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+    )
+    assert fanout_id is not None
+
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-95",
+        correlation_key="context.lane_id",
+        results=[
+            {
+                "key": "data_context",
+                "content": _round77_answer("deploy_success", ["build=12345"]),
+            }
+        ],
+        fanout_id=fanout_id,
+    )
+
+    assert out.get("contract_violations") in (None, []), out.get("contract_violations")
+    assert out["status"] == "complete"

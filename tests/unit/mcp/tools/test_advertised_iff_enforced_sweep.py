@@ -153,6 +153,10 @@ _ACCEPTED: list[tuple[str, dict[str, Any]]] = [
     # word plus a numeric/hex run is a labeled identifier (round-89).
     ("filter-kind-value", _answer(filters=["type=user"])),
     ("filter-category-with-digits", _answer(filters=["cohort=tier_2"])),
+    # Round-95: a long numeric category in its canonical spelling — the
+    # label in the KEY, the number as a BARE value.
+    ("filter-build-number", _answer(filters=["build=12345"])),
+    ("filter-short-compound", _answer(filters=["release=build_1234"])),
     # Grouping is advertised on PROPOSALS only — the evidence schema itself
     # rejects a grouped executed request (round-46: one number cannot say
     # which group it came from), which this sweep's first draft rediscovered.
@@ -194,19 +198,12 @@ _DECLARED_REJECTIONS: list[tuple[str, dict[str, Any], str]] = [
     # row pins is unchanged.)
     ("entity-modified-code", _answer(filters=["customer_code=zx12"]), "keys an entity"),
     # Round-89: a category KEY with an identity-LABELED value is one
-    # person's row — the label names what the digits index.
+    # person's row — the label names what the digits index. (Long-digit
+    # compounds were absorbed into the grammar in round 95; the declared
+    # residue is the identity word beside a SHORT run the grammar admits.)
     (
         "labeled-identifier-value",
-        _answer(filters=["segment=user_1234567"]),
-        "labeled entity identifier",
-    ),
-    # Round-90: the label VOCABULARY cannot converge (employee was missing
-    # as customer and user once were) — the SHAPE decides: a compound value
-    # with a non-calendar 5+-digit run is an entity index whatever the
-    # label means.
-    (
-        "labeled-index-value",
-        _answer(filters=["segment=employee_123456"]),
+        _answer(filters=["segment=user_42"]),
         "labeled entity identifier",
     ),
     ("opaque-7-digits", _answer(filters=["cohort=9999999"]), "opaque entity identifier"),
@@ -273,6 +270,12 @@ def test_the_scope_grammars_absorbed_the_positive_classification() -> None:
         "segment=employee123456",
         "employee_code=zx123456",
         "cohort=a1b2c3d4e5",
+        # Round-95: 5+-digit COMPOUND segments joined them — the round-90
+        # semantic rule and the grammar now agree by construction, and the
+        # canonical spelling (build=12345) stays attainable above.
+        "segment=user_1234567",
+        "segment=employee_123456",
+        "release=build_12345",
     ):
         assert not _READ_REQUEST_FILTER.match(scope), scope
         violations = _data_evidence_boundary_violations(_answer(filters=[scope]))
