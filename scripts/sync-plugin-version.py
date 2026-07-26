@@ -12,6 +12,8 @@ replaced, but an uncatchable process or machine crash can leave a mixed version
 across targets; ordinary files cannot provide a durable multi-file transaction.
 """
 
+import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -118,6 +120,13 @@ def normalize_version(v: str) -> str:
     return f"{public}{canonical_label}{prerelease}"
 
 
+def require_canonical_version(v: str) -> str:
+    normalized = normalize_version(v)
+    if normalized != v:
+        raise ValueError(f"release version must be canonical: {v} (canonical: {normalized})")
+    return normalized
+
+
 def _read_version_marker(text: str, path: Path) -> str:
     """Return one well-formed marker value, rejecting malformed duplicates."""
     if text.count("<!-- ooo:VERSION:") != 1:
@@ -161,6 +170,31 @@ def _load_json(path: Path) -> object:
     return _parse_json_bytes(path.read_bytes())
 
 
+def _exchange_paths(source: Path, destination: Path) -> bool:
+    """Atomically exchange two Linux pathnames when renameat2 is available."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError:
+        return False
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 2)
+    if result == 0:
+        return True
+    error = ctypes.get_errno()
+    if error in {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP, errno.EXDEV}:
+        return False
+    raise OSError(error, os.strerror(error), destination)
+
+
 def _atomic_write_bytes(
     path: Path,
     content: bytes,
@@ -171,22 +205,42 @@ def _atomic_write_bytes(
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     temp_path = Path(temp_name)
+    preserve_temp = False
     try:
         with os.fdopen(fd, "wb") as temp_file:
             temp_file.write(content)
             temp_file.flush()
             os.fchmod(temp_file.fileno(), mode)
             os.fsync(temp_file.fileno())
-        if expected_current is not None and path.read_bytes() != expected_current:
-            raise RuntimeError(f"write conflict for {path}: file changed since preflight")
-        os.replace(temp_path, path)
+        exchanged = (
+            expected_current is not None and path.exists() and _exchange_paths(temp_path, path)
+        )
+        if exchanged:
+            if temp_path.read_bytes() != expected_current:
+                try:
+                    restored = _exchange_paths(temp_path, path)
+                except BaseException:
+                    preserve_temp = True
+                    raise
+                if not restored:
+                    preserve_temp = True
+                    raise RuntimeError(
+                        f"write conflict for {path}: could not restore exchanged target; "
+                        f"preserved original at {temp_path}"
+                    )
+                raise RuntimeError(f"write conflict for {path}: file changed since preflight")
+        else:
+            if expected_current is not None and path.read_bytes() != expected_current:
+                raise RuntimeError(f"write conflict for {path}: file changed since preflight")
+            os.replace(temp_path, path)
         directory_fd = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
     finally:
-        temp_path.unlink(missing_ok=True)
+        if not preserve_temp:
+            temp_path.unlink(missing_ok=True)
 
 
 def update_version_marker(
@@ -265,7 +319,10 @@ def _run() -> None:
 
     raw_version = explicit_version or get_version()
     try:
-        version = normalize_version(raw_version)
+        if "--require-canonical" in sys.argv:
+            version = require_canonical_version(raw_version)
+        else:
+            version = normalize_version(raw_version)
     except ValueError as exc:
         sys.exit(f"Error: {exc}")
 

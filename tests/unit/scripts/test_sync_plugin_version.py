@@ -55,6 +55,17 @@ def test_plugin_metadata_version_rejects_unsupported_versions(version: str) -> N
         sync_plugin_version.normalize_version(version)
 
 
+@pytest.mark.parametrize("version", ["01.2.3", "1.2.3alpha1", "1.2.3b01", "1.2.3.dev1"])
+def test_release_version_rejects_noncanonical_aliases(version: str) -> None:
+    with pytest.raises(ValueError, match="release version must be canonical"):
+        sync_plugin_version.require_canonical_version(version)
+
+
+@pytest.mark.parametrize("version", ["1.2.3", "1.2.3a1", "1.2.3b2", "1.2.3rc3"])
+def test_release_version_accepts_canonical_versions(version: str) -> None:
+    assert sync_plugin_version.require_canonical_version(version) == version
+
+
 def test_main_write_updates_both_setup_skill_markers(
     tmp_path: Path,
     monkeypatch,
@@ -563,6 +574,37 @@ def test_atomic_write_rejects_target_changed_since_preflight(tmp_path: Path) -> 
     assert target.read_bytes() == external
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="rename exchange is Linux-only")
+def test_atomic_exchange_restores_edit_arriving_at_commit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "target.json"
+    original = b'{"version":"1.2.3"}\n'
+    external = b'{"version":"1.2.3","note":"external"}\n'
+    target.write_bytes(original)
+    real_exchange = sync_plugin_version._exchange_paths
+    injected = False
+
+    def inject_before_exchange(source: Path, destination: Path) -> bool:
+        nonlocal injected
+        if not injected:
+            injected = True
+            destination.write_bytes(external)
+        return real_exchange(source, destination)
+
+    monkeypatch.setattr(sync_plugin_version, "_exchange_paths", inject_before_exchange)
+
+    with pytest.raises(RuntimeError, match="write conflict"):
+        sync_plugin_version._atomic_write_bytes(
+            target,
+            b'{"version":"1.2.4"}\n',
+            expected_current=original,
+        )
+
+    assert target.read_bytes() == external
+
+
 def test_main_write_rolls_back_when_later_write_fails(
     tmp_path: Path,
     monkeypatch,
@@ -924,6 +966,7 @@ def test_release_workflow_checks_tag_metadata_before_build() -> None:
 
     assert "${REF_NAME#v}" in workflow
     assert '[[ "$VERSION" == *.dev* ]]' in workflow
+    assert "--require-canonical" in workflow
     assert validation < build
     assert "needs: release" in tui_job
 

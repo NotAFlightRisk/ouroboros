@@ -43,7 +43,7 @@ jobs:
             echo "Development versions cannot be published from release tags: $VERSION" >&2
             exit 1
           fi
-          python scripts/sync-plugin-version.py --version "$VERSION"
+          python scripts/sync-plugin-version.py --require-canonical --version "$VERSION"
 
       - name: Build package
         run: |
