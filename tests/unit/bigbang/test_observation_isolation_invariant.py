@@ -380,3 +380,71 @@ def test_every_generation_path_refuses_an_observation_only_interview(
 
     assert outcome.is_err, path_name
     assert OBSERVATION_ONLY_INTERVIEW_MESSAGE in str(outcome.error), path_name
+
+
+# ---------------------------------------------------------------------------
+# One provenance authority for initial_context
+# ---------------------------------------------------------------------------
+#
+# ``InterviewRound`` decides provenance once at ingestion and carries it as a
+# typed field, so consumers read instead of re-parsing. ``initial_context``
+# never got that treatment — it enters at session creation, not through
+# ``record_response`` — so consumers re-derived it while
+# ``prompt_safe_initial_context_with_provenance`` answered a hardcoded
+# ``human`` for any context short enough to use as-is. Two authorities, two
+# answers, same string. This pins their agreement across the whole marker
+# population rather than the one marker a probe happens to use.
+
+_PROVENANCE_BY_MARKER = [
+    ("[from-data] Enterprise plan has 412 active accounts.", "data_fact"),
+    ("[from-research] The spec was ratified in 2019.", "research_fact"),
+    ("[from-code] AuthService reads the session cookie.", "repo_fact"),
+    ("[from-auto] Enterprise tier must include SSO.", "generated"),
+    ("Build an SSO dashboard for enterprise admins.", "human"),
+]
+
+
+@pytest.mark.parametrize(
+    ("context", "expected"),
+    _PROVENANCE_BY_MARKER,
+    ids=[expected for _, expected in _PROVENANCE_BY_MARKER],
+)
+def test_initial_context_provenance_authorities_agree(context: str, expected: str) -> None:
+    """The state property and the prompt-safe authority report the same class."""
+    from ouroboros.bigbang.interview import prompt_safe_initial_context_with_provenance
+
+    state = InterviewState(interview_id="provenance-authority", initial_context=context)
+
+    _, authoritative = prompt_safe_initial_context_with_provenance(state)
+
+    assert state.initial_context_provenance == expected
+    assert authoritative == expected
+
+
+def test_oversized_context_still_reports_the_summary_round_provenance() -> None:
+    """Oversized contexts keep deferring to the substitute round's typed field.
+
+    The agreement above must not be won by making the short path authoritative
+    everywhere: when a summary stands in for the raw context, the SUBSTITUTE's
+    provenance is the record, even though the raw context reads as human.
+    """
+    from ouroboros.bigbang.interview import prompt_safe_initial_context_with_provenance
+
+    state = InterviewState(
+        interview_id="provenance-authority-oversized",
+        initial_context="A" * (MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS + 1),
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response="Enterprise plan has 412 active accounts.",
+                answer_provenance="data_fact",
+            )
+        ],
+    )
+
+    text, provenance = prompt_safe_initial_context_with_provenance(state)
+
+    assert provenance == "data_fact"
+    assert "412" in text
+    assert state.initial_context_provenance == "human"

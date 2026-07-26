@@ -3392,6 +3392,21 @@ class FanoutRegistry:
                 kind=record.kind,
             )
             return RecordWrite(written=False, durable=False)
+        # ONE DOOR (round-107): sanitizing per snapshot-builder covered the
+        # question-advisory kind and missed lateral and code-investigation,
+        # whose terminal outcomes copied raw child content. Every durable
+        # write goes through here, so scrubbing at the door makes the
+        # guarantee a property of persistence itself rather than of each
+        # caller remembering — including kinds added later.
+        record = replace(
+            record,
+            received_results=_scrub_credentials_for_persistence(record.received_results),
+            terminal_response=(
+                _scrub_credentials_for_persistence(record.terminal_response)
+                if record.terminal_response is not None
+                else None
+            ),
+        )
         target = self._path(record.fanout_id)
         try:
             # Secure the directory FIRST (round-49): mkdir's mode is ignored
@@ -4686,6 +4701,21 @@ def _is_data_contract_lane(contracts: Mapping[str, Any], lane_id: str) -> bool:
     )
 
 
+def _contract_accepts_empty_object(contract: Any) -> bool:
+    """Whether a registered contract validates ``{}`` as a lane answer."""
+    if not isinstance(contract, Mapping):
+        return False
+    schema = contract.get("response_model_schema")
+    if not isinstance(schema, Mapping):
+        return False
+    try:
+        from jsonschema import Draft202012Validator
+
+        return Draft202012Validator(dict(schema)).is_valid({})
+    except Exception:  # noqa: BLE001 — an unusable schema accepts nothing
+        return False
+
+
 def _durable_results(contracts: Mapping[str, Any], provided: Mapping[str, Any]) -> dict[str, Any]:
     """Lane results as they are STORED — data-lane prose is not retained.
 
@@ -4723,10 +4753,23 @@ def _scrub_credentials_for_persistence(value: Any, _depth: int = 0) -> Any:
         return redacted_segment(json.dumps(value, ensure_ascii=False, default=str))
     if isinstance(value, str):
         return _redact_credential_tokens(value)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float) and _identifier_length_number(value):
+        # A scalar is not exempt from being a card, an account, or an SSN
+        # (round-107: a card-shaped integer persisted unchanged because the
+        # walk inspected only strings). Numbers of identifier length are
+        # digested; counts, timestamps, and ordinary metrics are not.
+        return redacted_segment(str(value))
     if isinstance(value, Mapping):
         return {
-            _redact_credential_tokens(str(key)): _scrub_credentials_for_persistence(
-                item, _depth + 1
+            # Keys get the CONTENT patterns only (round-107): a key can carry
+            # a secret (`api_key=supersecret`), but the identifier classifier
+            # calls any name ending in "key"/"token" credential-shaped, and
+            # our own envelope keys (missing_optional_keys) are names, not
+            # secrets. A name is not a secret; an assignment is.
+            _redact_credential_tokens(str(key), identifier_pass=False): (
+                _scrub_credentials_for_persistence(item, _depth + 1)
             )
             for key, item in value.items()
         }
@@ -4735,7 +4778,7 @@ def _scrub_credentials_for_persistence(value: Any, _depth: int = 0) -> Any:
     return value
 
 
-def _redact_credential_tokens(text: str) -> str:
+def _redact_credential_tokens(text: str, *, identifier_pass: bool = True) -> str:
     """Digest every credential/PII-shaped span in ``text``.
 
     ONE pass over merged spans (round-106): replacing pattern by pattern
@@ -4748,14 +4791,17 @@ def _redact_credential_tokens(text: str) -> str:
     if not text:
         return text
     spans: list[list[int]] = []
+    # A PEM block is a secret in a shape no token rule sees (round-107).
+    spans.extend([match.start(), match.end()] for match in _PEM_BLOCK.finditer(text))
     for _label, pattern in data_evidence_boundary_patterns():
         spans.extend([match.start(), match.end()] for match in pattern.finditer(text))
     spans.extend([match.start(), match.end()] for match in _SCRUB_CREDENTIAL_CONTEXT.finditer(text))
-    spans.extend(
-        [match.start(), match.end()]
-        for match in _CREDENTIAL_TOKEN_CANDIDATE.finditer(text)
-        if _identifier_looks_secret(match.group(0))
-    )
+    if identifier_pass:
+        spans.extend(
+            [match.start(), match.end()]
+            for match in _CREDENTIAL_TOKEN_CANDIDATE.finditer(text)
+            if _identifier_looks_secret(match.group(0))
+        )
     if not spans:
         return text
     spans.sort()
@@ -4773,6 +4819,24 @@ def _redact_credential_tokens(text: str) -> str:
         cursor = end_index
     pieces.append(text[cursor:])
     return "".join(pieces)
+
+
+def _identifier_length_number(value: float) -> bool:
+    """Whether a numeric scalar is long enough to BE an identifier.
+
+    Twelve digits is past any plausible count in these aggregates and is
+    where card, account, and phone widths begin.
+    """
+    if not float(value).is_integer():
+        return False
+    return len(str(abs(int(value)))) >= 12
+
+
+#: A private-key block, whole.
+_PEM_BLOCK = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+    re.DOTALL | re.IGNORECASE,
+)
 
 
 #: Persistence-side rule: the VALUE after a credential keyword goes with it.
@@ -5159,6 +5223,11 @@ def _submit_fanout_results_locked(
     # terminal record never carry it.
     submitted: dict[str, Any] = {}
     unexpected_keys: list[str] = []
+    # Loaded BEFORE the malformed check (round-107): "is this content
+    # submittable?" can depend on the lane's registered contract.
+    contracts = loaded_lane_contracts(
+        record.synthesizer_input.get("lane_answer_contracts"), record.expected_keys
+    )
     malformed_keys: list[str] = []
     for result in results:
         key = result.get("key")
@@ -5185,7 +5254,15 @@ def _submit_fanout_results_locked(
             or raw_content is None
             or (isinstance(raw_content, str) and not raw_content.strip())
             or not isinstance(raw_content, (str, Mapping))
-            or (isinstance(raw_content, Mapping) and not raw_content)
+            or (
+                isinstance(raw_content, Mapping)
+                and not raw_content
+                # …unless a REGISTERED contract validates the empty object
+                # (round-107): {"const": {}} is an advertisable contract, and
+                # rejecting {} before consulting it left a required lane
+                # permanently partial with no submittable value.
+                and not _contract_accepts_empty_object(contracts.get(resolved_key))
+            )
             or not _is_transportable(raw_content)
         ):
             if resolved_key not in malformed_keys:
@@ -5198,9 +5275,6 @@ def _submit_fanout_results_locked(
     # Contract validation happens at the door, BEFORE anything is merged or
     # persisted: a violating data-lane output (raw rows, PII-shaped evidence,
     # skipped confirmation) must never enter the durable record.
-    contracts = loaded_lane_contracts(
-        record.synthesizer_input.get("lane_answer_contracts"), record.expected_keys
-    )
     raw_policies = record.synthesizer_input.get("lane_data_policies")
     policies = raw_policies if isinstance(raw_policies, Mapping) else {}
     # The public tool accepts ``content`` as object OR text (round-25): a

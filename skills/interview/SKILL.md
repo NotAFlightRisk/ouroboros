@@ -294,8 +294,9 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    can be shown to be free of PII. Two consequences:
 
    - **Submit the data lane in the same call you finalize.** A data result
-     sent in an earlier `finalize: false` call is not carried forward: the
-     server kept only a summary of it. The accumulating response says so —
+     is discarded on ANY partial persistence, not only on `finalize: false`
+     calls — `not_retained_keys` on the response is the authoritative signal.
+     The server kept only a summary of it. The accumulating response says so —
      such a lane appears under `not_retained_keys` rather than
      `received_keys` — and the closing call reports it under
      `missing_optional_keys` until you resend it. Submitting every lane in one

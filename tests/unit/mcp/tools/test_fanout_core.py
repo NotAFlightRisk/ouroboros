@@ -9559,3 +9559,53 @@ def test_round106_generic_scrub_is_fail_closed(tmp_path: Any) -> None:
         assert secret not in on_disk, secret
     # The surrounding finding still survives — only the secrets are replaced.
     assert "settings use" in on_disk
+
+
+def test_round107_every_fanout_kind_persists_sanitized(tmp_path: Any) -> None:
+    """Sanitizing is a property of the WRITE, not of each snapshot builder.
+
+    Question-advisory terminal snapshots were scrubbed while lateral and
+    code-investigation copied raw child content into terminal_response.
+    """
+    import json as json_module
+
+    registry = FanoutRegistry(tmp_path)
+    secret = "ghp_abcdefghijklmnop1234"
+    from ouroboros.mcp.tools.subagent import FANOUT_KIND_LATERAL_PERSONA_PANEL
+
+    fanout_id = registry.register(
+        kind=FANOUT_KIND_LATERAL_PERSONA_PANEL,
+        session_id="sess-107",
+        correlation_key="context.persona",
+        expected_keys=["contrarian"],
+        synthesizer_input={"entries": [{"persona_id": "contrarian", "execution_order": 1}]},
+    )
+    assert fanout_id is not None
+    submit_fanout_results(
+        registry,
+        session_id="sess-107",
+        correlation_key="context.persona",
+        results=[{"key": "contrarian", "content": {"finding": f"config holds {secret}"}}],
+        fanout_id=fanout_id,
+    )
+    record = registry.load(fanout_id)
+    assert record is not None
+    on_disk = json_module.dumps(
+        {"received": record.received_results, "terminal": record.terminal_response}
+    )
+    assert secret not in on_disk
+
+
+def test_round107_pem_blocks_and_numeric_identifiers_are_scrubbed() -> None:
+    """Fail-closed for shapes no token rule sees."""
+    from ouroboros.mcp.tools.subagent import _scrub_credentials_for_persistence
+
+    pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAxYZ\n-----END RSA PRIVATE KEY-----"
+    scrubbed = _scrub_credentials_for_persistence(
+        {"pem": pem, "card": 4111111111111111, "count": 42, "ratio": 0.42}
+    )
+    assert "MIIEowIBAAKCAQEAxYZ" not in str(scrubbed)
+    assert scrubbed["card"] != 4111111111111111
+    # Ordinary numbers are untouched.
+    assert scrubbed["count"] == 42
+    assert scrubbed["ratio"] == 0.42
