@@ -608,6 +608,44 @@ def test_atomic_exchange_restores_edit_arriving_at_commit(
     assert target.read_bytes() == external
 
 
+@pytest.mark.skipif(
+    not (sys.platform.startswith("linux") or sys.platform == "darwin"),
+    reason="atomic pathname exchange is unavailable on this platform",
+)
+def test_atomic_exchange_preserves_newer_edit_arriving_during_restore(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "target.json"
+    original = b'{"version":"1.2.3"}\n'
+    first_external = b'{"version":"1.2.3","note":"first"}\n'
+    newer_external = b'{"version":"1.2.3","note":"newer"}\n'
+    target.write_bytes(original)
+    real_exchange = sync_plugin_version._exchange_paths
+    exchange_count = 0
+
+    def inject_edits(source: Path, destination: Path) -> bool:
+        nonlocal exchange_count
+        exchange_count += 1
+        if exchange_count == 1:
+            destination.write_bytes(first_external)
+        elif exchange_count == 2:
+            destination.write_bytes(newer_external)
+        return real_exchange(source, destination)
+
+    monkeypatch.setattr(sync_plugin_version, "_exchange_paths", inject_edits)
+
+    with pytest.raises(RuntimeError, match="write conflict"):
+        sync_plugin_version._atomic_write_bytes(
+            target,
+            b'{"version":"1.2.4"}\n',
+            expected_current=original,
+        )
+
+    assert target.read_bytes() == newer_external
+    assert list(tmp_path.iterdir()) == [target]
+
+
 def test_atomic_write_fails_closed_when_exchange_is_unavailable(
     tmp_path: Path,
     monkeypatch,

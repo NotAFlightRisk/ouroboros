@@ -32,6 +32,7 @@ SETUP_SKILL_MD = ROOT / "skills" / "setup" / "SKILL.md"
 BUNDLED_SETUP_SKILL_MD = ROOT / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
 VERSION_MARKER_RE = re.compile(r"<!-- ooo:VERSION:([0-9A-Za-z.]+) -->")
 VERSION_MARKER_ENVELOPE_RE = re.compile(r"<!-- ooo:VERSION:(.*?) -->", re.DOTALL)
+_MAX_CONFLICT_RESTORE_EXCHANGES = 8
 
 
 def get_version() -> str:
@@ -207,6 +208,24 @@ def _exchange_paths(source: Path, destination: Path) -> bool:
     raise OSError(error, os.strerror(error), destination)
 
 
+def _restore_latest_exchanged_content(
+    temp_path: Path,
+    path: Path,
+    *,
+    expected_displaced: bytes,
+) -> bool:
+    """Restore the newest observed external edit without deleting a later writer."""
+    for _ in range(_MAX_CONFLICT_RESTORE_EXCHANGES):
+        candidate = temp_path.read_bytes()
+        if not _exchange_paths(temp_path, path):
+            return False
+        displaced = temp_path.read_bytes()
+        if displaced == expected_displaced:
+            return True
+        expected_displaced = candidate
+    return False
+
+
 def _atomic_write_bytes(
     path: Path,
     content: bytes,
@@ -232,17 +251,21 @@ def _atomic_write_bytes(
                     f"write conflict for {path}: atomic path exchange is unavailable"
                 )
             if temp_path.read_bytes() != expected_current:
+                preserve_temp = True
                 try:
-                    restored = _exchange_paths(temp_path, path)
+                    restored = _restore_latest_exchanged_content(
+                        temp_path,
+                        path,
+                        expected_displaced=content,
+                    )
                 except BaseException:
-                    preserve_temp = True
                     raise
                 if not restored:
-                    preserve_temp = True
                     raise RuntimeError(
                         f"write conflict for {path}: could not restore exchanged target; "
-                        f"preserved original at {temp_path}"
+                        f"preserved displaced content at {temp_path}"
                     )
+                preserve_temp = False
                 raise RuntimeError(f"write conflict for {path}: file changed since preflight")
         else:
             os.replace(temp_path, path)
