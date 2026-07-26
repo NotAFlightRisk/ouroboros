@@ -570,11 +570,13 @@ def _data_context_lane_policy() -> dict[str, Any]:
     return {
         "read_only": True,
         "aggregate_only": True,
-        # The closed set the row-splitting grammars compile from: a grouping
-        # or dimension key is admitted because its last _-token is one of
-        # these heads. Advertised here so hosts and children see the same
-        # boundary the schema patterns enforce.
+        # The closed sets the scope grammars compile from: a grouping or
+        # dimension key is admitted because its last _-token names a
+        # category; a filter key may also name a measurement. Advertised
+        # here so hosts and children see the same boundary the schema
+        # patterns enforce.
         "category_dimension_heads": sorted(_CATEGORY_HEADS),
+        "filter_key_heads": sorted(_CATEGORY_HEADS | _MEASUREMENT_HEADS),
         "relevance_gate": "decide_from_question_text_before_any_tool_call",
         "direct_execution_scope": "local_free_read_only_lookups_only",
         "metered_or_uncertain_sources": "return_proposed_queries_without_executing",
@@ -1573,6 +1575,7 @@ _CATEGORY_HEADS = frozenset(
         "timezone",
         "environment",
         "env",
+        "event",
     }
 )
 
@@ -1590,22 +1593,68 @@ def _category_dimension_key(key: str) -> bool:
     return bool(tokens) and tokens[-1] in _CATEGORY_HEADS
 
 
-#: The category rule lives in the PUBLISHED row-splitting grammars,
+#: Heads that name a MEASUREMENT rather than a category (round-86): a filter
+#: like latency_ms>200 or build=v2_1 narrows an aggregate by a measured or
+#: versioned attribute, not by a category label. Filter keys are classified
+#: positively against categories ∪ measurements — an open filter-key grammar
+#: admitted passport_number=zx123456, which turned the aggregate into a
+#: per-person membership fact and echoed the identifier back in the
+#: response. Grouping and dimensions stay category-only: a measurement head
+#: does not reduce row cardinality.
+_MEASUREMENT_HEADS = frozenset(
+    {
+        "code",
+        "build",
+        "ms",
+        "seconds",
+        "minutes",
+        "hours",
+        "days",
+        "weeks",
+        "bytes",
+        "count",
+        "total",
+        "rate",
+        "ratio",
+        "percent",
+        "pct",
+        "score",
+        "latency",
+        "duration",
+        # Timestamp-column suffix: created_at / updated_at / occurred_at
+        # range filters narrow by time, not by identity.
+        "at",
+    }
+)
+
+_FILTER_KEY_HEADS = _CATEGORY_HEADS | _MEASUREMENT_HEADS
+
+#: A trailing window token (key_metrics_30d, errors_7d) is a time-range
+#: qualifier — measurement-shaped, so it is a valid filter-key head but
+#: never a row-splitting one.
+_WINDOW_TOKEN = r"[0-9]{1,4}[dhwmy]"
+
+
+#: The positive-classification rules live in the PUBLISHED scope grammars,
 #: following the round-79 (metric) and round-81 (hex values) absorption
 #: precedent: a rule the validator enforces but the schema does not
 #: advertise is exactly the advertised-iff-enforced gap the sweep exists to
 #: prevent — under the shape-only grammar, ``naics_code`` grouping was
-#: schema-valid yet re-entry-rejected. Both grammars compile from
-#: ``_CATEGORY_HEADS``, so the published schema and the enforcement cannot
-#: disagree; the semantic ``_category_dimension_key`` checks below remain
-#: for the retained-dimension path, whose relaxed bare-key grammar cannot
-#: carry the rule.
+#: schema-valid yet re-entry-rejected. Every grammar compiles from the head
+#: sets above, so the published schema and the enforcement cannot disagree;
+#: the semantic ``_category_dimension_key`` checks below remain for the
+#: retained path, whose relaxed bare-key grammar cannot carry the rule.
 _CATEGORY_HEAD_ALTERNATION = "|".join(sorted(_CATEGORY_HEADS))
+_FILTER_KEY_HEAD_ALTERNATION = "|".join(sorted(_FILTER_KEY_HEADS))
 GROUPING_TOKEN_PATTERN = (
     r"^(?=[a-z][a-z0-9_]{0,31}$)(?:[a-z0-9]+_)*(?:" + _CATEGORY_HEAD_ALTERNATION + r")$"
 )
 FILTER_TOKEN_PATTERN = (
-    r"^[a-z][a-z0-9_]{0,23}(=|!=|<|>|<=|>=)"
+    r"^(?=[a-z][a-z0-9_]{0,23}[=!<>])(?:[a-z0-9]+_)*(?:"
+    + _FILTER_KEY_HEAD_ALTERNATION
+    + r"|"
+    + _WINDOW_TOKEN
+    + r")(=|!=|<|>|<=|>=)"
     + _HEX_ID_VALUE_EXCLUSION
     + r"[a-z0-9][a-z0-9_.:+-]{0,21}$"
 )

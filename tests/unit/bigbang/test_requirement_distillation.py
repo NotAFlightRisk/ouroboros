@@ -799,3 +799,38 @@ def test_round85_observation_only_gate_covers_every_generation_path() -> None:
         )
     assert outcome.is_err
     assert OBSERVATION_ONLY_INTERVIEW_MESSAGE in str(outcome.error)
+
+
+def test_round86_provenance_is_a_closed_enum_and_a_cache_key() -> None:
+    """Provenance authority is bounded and cache-visible.
+
+    An open str failed open: a persisted `user_verified` was neither
+    "human" nor an observation class, so it overrode marker classification
+    and un-withheld a `[from-data]` answer. And the fingerprint omitted the
+    field, so flipping a round from human to data_fact reused a cache that
+    had promoted the answer.
+    """
+    from pydantic import ValidationError as PydanticValidationError
+
+    from ouroboros.core.requirement_candidate import effective_answer_provenance
+
+    # Unknown values fail closed at model validation, before any consumer.
+    with pytest.raises(PydanticValidationError):
+        InterviewRound(
+            round_number=1,
+            question="q",
+            user_response="a",
+            answer_provenance="user_verified",
+        )
+
+    # And the shared helper grants no authority to a raw unknown string:
+    # marker classification decides, so the observation stays withheld.
+    assert effective_answer_provenance("[from-data] X", "user_verified") == "data_fact"
+    assert effective_answer_provenance("plain decision", "user_verified") == "human"
+
+    # Provenance is a semantics-bearing canonical input: flipping it must
+    # change the fingerprint so a stale promoted cache cannot be reused.
+    state = _state_with_answer("Confirmed: 42 accounts require SSO.")
+    fingerprint_as_human = state.requirement_input_fingerprint()
+    state.rounds[0].answer_provenance = "data_fact"
+    assert state.requirement_input_fingerprint() != fingerprint_as_human

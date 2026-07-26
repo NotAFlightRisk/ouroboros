@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 import functools
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 import structlog
@@ -180,7 +180,14 @@ class InterviewRound(BaseModel):
     # when the answer is recorded; the marker remains the display/legacy
     # projection. A field that says data_fact withholds the answer from
     # extraction even if the marker was stripped from the text.
-    answer_provenance: str = "human"
+    # The type is the CLOSED range of classify_answer_provenance — an open
+    # str failed open: any unknown persisted value (`user_verified`) was
+    # neither "human" nor an observation class, so it overrode marker
+    # classification and un-withheld a `[from-data]` answer. Unknown values
+    # now fail closed at model validation, before any consumer reads them.
+    answer_provenance: Literal["human", "data_fact", "research_fact", "repo_fact", "generated"] = (
+        "human"
+    )
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -294,6 +301,11 @@ class InterviewState(BaseModel):
                         "round_number": round_data.round_number,
                         "question": round_data.question,
                         "user_response": round_data.user_response,
+                        # Provenance changes candidate promotion, so it is a
+                        # semantics-bearing canonical input: a round flipped
+                        # from human to data_fact must not reuse a cache that
+                        # promoted the answer.
+                        "answer_provenance": round_data.answer_provenance,
                     }
                     for round_data in self.rounds
                 ],

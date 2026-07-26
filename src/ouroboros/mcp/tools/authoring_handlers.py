@@ -750,89 +750,62 @@ _KNOWN_DATA_TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 _MAX_KNOWN_DATA_TOOLS = 16
 
 
-#: Tokens that positively evidence a read-side tool name. The admit
-#: direction: a name earns direct-execution steering by carrying one, rather
-#: than by not carrying a known mutator (round-85).
-_READ_SHAPED_TOKENS = frozenset(
-    {
-        "get",
-        "list",
-        "read",
-        "query",
-        "search",
-        "fetch",
-        "find",
-        "describe",
-        "show",
-        "select",
-        "count",
-        "view",
-        "browse",
-        "inspect",
-        "lookup",
-        "scan",
-        "stat",
-        "stats",
-        "report",
-        "aggregate",
-        "metrics",
-        "usage",
-        "logs",
-        "events",
-        "analytics",
-    }
-)
+def _admissible_data_tool_names(raw: str) -> list[str]:
+    """Filter a comma-separated env value down to safe tool identifiers.
 
-
-def _read_shaped_tool_name(name: str) -> bool:
-    decamelled = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", name)
-    tokens = [tok for tok in re.split(r"[^A-Za-z0-9]+", decamelled.lower()) if tok]
-    return any(token in _READ_SHAPED_TOKENS for token in tokens)
-
-
-def _advisory_lanes_with_known_data_tools(advisory: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Copy advisory lanes, injecting configured ``known_data_tools``.
-
-    ``OUROBOROS_KNOWN_DATA_TOOLS`` (comma-separated MCP tool names) is the
-    public configuration source for the data lane's known tools — without it
-    only manually constructed lane metadata could exercise the contract
-    field. Lane dicts are copied so the cached capability metadata is never
-    mutated.
+    Env values are untrusted prompt input: each entry must be a plain tool
+    identifier (no whitespace/newlines that could smuggle prompt text), and
+    the list is bounded. A hint whose identifier carries a mutating verb is
+    rejected BEFORE dispatch (bot-review round-10): the plugin bridge
+    grants the child broad permissions, and post-execution validation
+    cannot undo a mutation the hint steered it into.
+    Credential-shaped names are filtered with the SAME classifier the
+    re-entry boundary applies (round-37): a hint that survives
+    configuration must never be rejected when a child later reports it as
+    a source — the two identifier contracts stay aligned.
     """
-    # Advertised IFF enforced, on EVERY public surface (round-38): the lanes
-    # returned here ride both the parent response metadata and the plugin
-    # transport, so an unenforceable contract is published as its non-enforced
-    # marker exactly as the child prompt and registration already treat it.
-    lanes = lanes_with_published_contracts(advisory.get("lanes") or ())
-    # Env values are untrusted prompt input: each entry must be a plain tool
-    # identifier (no whitespace/newlines that could smuggle prompt text), and
-    # the list is bounded. A hint whose identifier carries a mutating verb is
-    # rejected BEFORE dispatch (bot-review round-10): the plugin bridge
-    # grants the child broad permissions, and post-execution validation
-    # cannot undo a mutation the hint steered it into.
-    # Credential-shaped names are filtered with the SAME classifier the
-    # re-entry boundary applies (round-37): a hint that survives
-    # configuration must never be rejected when a child later reports it as
-    # a source — the two identifier contracts stay aligned.
-    admissible = [
+    return [
         item.strip()
-        for item in os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS", "").split(",")
+        for item in raw.split(",")
         if item.strip()
         and _KNOWN_DATA_TOOL_NAME.match(item.strip())
         and _mutating_tool_verb(item.strip()) is None
         and not _identifier_looks_secret(item.strip())
         and not _identifier_carries_payload(item.strip())
     ][:_MAX_KNOWN_DATA_TOOLS]
-    # POSITIVE read admission (round-85): passing the mutator denylist proves
-    # an absence, and migrate/archive/provision proved the absence proof
-    # wrong. A hint steers DIRECT execution, so direct-execution steering is
-    # granted only on positive evidence — a read-shaped token in the name.
-    # Everything else stays advertised, but proposal-only: the child may
-    # propose queries against it for the parent to run after user
-    # confirmation, which is the channel that was always safe for unverified
-    # tools.
-    known_tools = [item for item in admissible if _read_shaped_tool_name(item)]
-    proposal_only = [item for item in admissible if not _read_shaped_tool_name(item)]
+
+
+def _advisory_lanes_with_known_data_tools(advisory: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Copy advisory lanes, injecting configured data-tool hints.
+
+    ``OUROBOROS_KNOWN_DATA_TOOLS`` (comma-separated MCP tool names) advertises
+    tools the child may PROPOSE queries against; the parent runs them after
+    user confirmation. ``OUROBOROS_KNOWN_DATA_TOOLS_READONLY`` is the
+    operator's explicit declaration that a tool is read-only, and is the ONLY
+    way a configured name earns direct-execution steering. Lane dicts are
+    copied so the cached capability metadata is never mutated.
+    """
+    # Advertised IFF enforced, on EVERY public surface (round-38): the lanes
+    # returned here ride both the parent response metadata and the plugin
+    # transport, so an unenforceable contract is published as its non-enforced
+    # marker exactly as the child prompt and registration already treat it.
+    lanes = lanes_with_published_contracts(advisory.get("lanes") or ())
+    # NO name heuristic grants direct execution. Round-85 granted it on a
+    # read-shaped token and round-86 promoted migrate_query through the
+    # `query` token: a name cannot prove read-onlyness, in either the deny
+    # or the admit direction, because names are an open world. Deleting the
+    # classifier is the fix — direct-execution steering now requires the
+    # operator's explicit READONLY declaration (authoritative metadata),
+    # and everything else a hint can express stays proposal-only, the
+    # channel that runs only after user confirmation. The mutator/credential
+    # identifier filters above remain as admission hygiene for BOTH lists,
+    # not as the read-only proof.
+    declared_read_only = _admissible_data_tool_names(
+        os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS_READONLY", "")
+    )
+    hinted = _admissible_data_tool_names(os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS", ""))
+    known_tools = declared_read_only
+    proposal_only = [item for item in hinted if item not in declared_read_only]
     for lane in lanes:
         if lane.get("lane_id") != "data_context":
             continue

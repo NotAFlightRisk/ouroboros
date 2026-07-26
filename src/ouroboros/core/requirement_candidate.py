@@ -99,14 +99,26 @@ def extraction_safe_question(question: str, *, observation_seen: bool) -> str:
     return question
 
 
+#: The closed range of classify_answer_provenance. Shared so the declared
+#: field's authority is bounded by the same set the classifier can produce.
+_KNOWN_PROVENANCE = frozenset({"human", "data_fact", "research_fact", "repo_fact", "generated"})
+
+
 def effective_answer_provenance(answer: str, declared: str = "human") -> str:
     """Field-first provenance: the ingestion-time field wins when set.
 
     The marker is the display/legacy projection; the field is the record
     (round-85). A round whose field says data_fact is an observation even if
     the marker was stripped from the text.
+
+    A declared value OUTSIDE the closed range carries no authority and falls
+    back to marker classification — an open passthrough failed open: any
+    unknown string was neither "human" nor an observation class, so it
+    overrode the marker and un-withheld a `[from-data]` answer. The
+    InterviewRound field is enum-constrained at model validation; this
+    fallback bounds every other caller the same way.
     """
-    if declared and declared != "human":
+    if declared in _KNOWN_PROVENANCE and declared != "human":
         return declared
     return classify_answer_provenance(answer)
 

@@ -1743,11 +1743,11 @@ def test_known_data_tools_env_is_bounded_and_identifier_validated(monkeypatch: A
         runtime_backend="codex",
     )
     lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
-    # metabase carries no read-shaped token, so it is advertised
-    # proposal-only since round 85 — admission filtering (bounds,
-    # identifier validation) is unchanged.
-    assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query"]
-    assert lanes["data_context"]["proposal_only_data_tools"] == ["metabase"]
+    # Hints are proposal-only without the READONLY declaration (round-86);
+    # the property under test — bounds and identifier validation — applies
+    # before either list.
+    assert "known_data_tools" not in lanes["data_context"]
+    assert lanes["data_context"]["proposal_only_data_tools"] == ["clickhouse_query", "metabase"]
 
 
 def test_finalize_false_preserves_late_optional_results(tmp_path: Any) -> None:
@@ -2113,6 +2113,12 @@ def test_mutating_known_data_tool_hint_is_rejected_before_dispatch(monkeypatch: 
         "OUROBOROS_KNOWN_DATA_TOOLS",
         "clickhouse_query,delete_database,DropTables,metabase_card",
     )
+    # The mutator filter applies to the READONLY declaration too: an
+    # operator typo must not turn a mutator into a direct-execution hint.
+    monkeypatch.setenv(
+        "OUROBOROS_KNOWN_DATA_TOOLS_READONLY",
+        "clickhouse_query,delete_database",
+    )
     meta: dict[str, Any] = {}
     _attach_question_assist_requests(
         meta,
@@ -2124,8 +2130,7 @@ def test_mutating_known_data_tool_hint_is_rejected_before_dispatch(monkeypatch: 
         runtime_backend="codex",
     )
     lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
-    # metabase_card is proposal-only since round 85 (no read token);
-    # the property under test — the mutating hint never appears on ANY
+    # The property under test — the mutating hint never appears on ANY
     # advertised list — is asserted below.
     assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query"]
     assert lanes["data_context"]["proposal_only_data_tools"] == ["metabase_card"]
@@ -4137,9 +4142,10 @@ def test_known_tool_grammar_matches_safe_identifier_grammar(monkeypatch: Any) ->
         runtime_backend="codex",
     )
     lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
-    # The colon form is filtered out; the aligned form survives and is NOT
-    # credential-shaped at re-entry.
-    assert lanes["data_context"]["known_data_tools"] == ["token_usage_v2"]
+    # The colon form is filtered out; the aligned form survives (as a
+    # proposal-only hint since round 86) and is NOT credential-shaped at
+    # re-entry.
+    assert lanes["data_context"]["proposal_only_data_tools"] == ["token_usage_v2"]
 
 
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
@@ -4314,6 +4320,7 @@ def test_known_data_tools_env_reaches_the_data_lane(monkeypatch: Any) -> None:
     could exercise the contract field's prompt/context propagation.
     """
     monkeypatch.setenv("OUROBOROS_KNOWN_DATA_TOOLS", "clickhouse_query, metabase_card")
+    monkeypatch.setenv("OUROBOROS_KNOWN_DATA_TOOLS_READONLY", "clickhouse_query")
     meta: dict[str, Any] = {}
     _attach_question_assist_requests(
         meta,
@@ -4325,9 +4332,9 @@ def test_known_data_tools_env_reaches_the_data_lane(monkeypatch: Any) -> None:
         runtime_backend="codex",
     )
     lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
-    # metabase_card carries no read-shaped token, so since round 85 it is
-    # advertised proposal-only; the env var remains the public source for
-    # both lists.
+    # Since round 86 direct-execution steering requires the operator's
+    # explicit READONLY declaration; undeclared hints are proposal-only.
+    # The env vars remain the public source for both lists.
     assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query"]
     assert lanes["data_context"]["proposal_only_data_tools"] == ["metabase_card"]
 
@@ -4513,7 +4520,8 @@ def test_destructive_tool_hints_are_filtered(monkeypatch: Any) -> None:
         runtime_backend="codex",
     )
     lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
-    assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query"]
+    assert "known_data_tools" not in lanes["data_context"]
+    assert lanes["data_context"]["proposal_only_data_tools"] == ["clickhouse_query"]
 
 
 def test_long_alphabetic_credential_suffixes_fail_closed(monkeypatch: Any) -> None:
@@ -5571,7 +5579,7 @@ def test_round48_request_fields_and_replay_consent(tmp_path: Any) -> None:
             "operation": "read",
             "metric": "u",
             "aggregation": "count",
-            "filters": ["access_token!=huntertwo"],
+            "filters": ["password_tier!=huntertwo"],
         },
     ):
         assert any("credential" in problem for problem in _read_request_shape_problems(request)), (
@@ -6428,7 +6436,7 @@ def test_round56_configured_tools_round_trip_to_evidence(monkeypatch: Any) -> No
     ]
     lanes = _advisory_lanes_with_known_data_tools(advisory)
     data_lane = next(lane for lane in lanes if lane["lane_id"] == "data_context")
-    assert data_lane["known_data_tools"] == ["clickhouse_query"]
+    assert data_lane["proposal_only_data_tools"] == ["clickhouse_query"]
 
 
 def test_round57_delivery_is_not_recovery_but_is_not_a_dead_end(tmp_path: Any) -> None:
@@ -8340,7 +8348,11 @@ def test_round79_uppercase_vendor_prefix_is_caught_at_both_layers(
         {"lanes": [{"lane_id": "data_context", "capability": "data_context"}]}
     )
     tools = next(
-        (lane.get("known_data_tools") for lane in lanes if lane.get("lane_id") == "data_context"),
+        (
+            lane.get("proposal_only_data_tools")
+            for lane in lanes
+            if lane.get("lane_id") == "data_context"
+        ),
         None,
     )
     assert tools == ["clickhouse_query"]
@@ -8733,7 +8745,11 @@ def test_round84_state_transition_verbs_are_mutators(
         {"lanes": [{"lane_id": "data_context", "capability": "data_context"}]}
     )
     tools = next(
-        (lane.get("known_data_tools") for lane in lanes if lane.get("lane_id") == "data_context"),
+        (
+            lane.get("proposal_only_data_tools")
+            for lane in lanes
+            if lane.get("lane_id") == "data_context"
+        ),
         None,
     )
     assert tools == ["clickhouse_query"]
@@ -8791,37 +8807,49 @@ def test_round85_grouping_is_positively_classified(tmp_path: Any) -> None:
         assert grouping_problems(admitted) == [], admitted
 
 
-def test_round85_unverified_tools_are_proposal_only(monkeypatch: Any) -> None:
-    """Direct-execution steering is granted on positive read evidence only.
+def test_round86_direct_execution_requires_operator_declaration(monkeypatch: Any) -> None:
+    """No name heuristic grants direct execution — only the READONLY var does.
 
-    migrate/archive/provision carry no recognized mutator — the absence
-    proof admitted them as preferred tools. They are now advertised
-    proposal-only: the channel that runs after user confirmation.
+    Round-85 granted direct execution on a read-shaped token and
+    migrate_query walked through on `query`: a name cannot prove
+    read-onlyness in either the deny or the admit direction. Every hint in
+    the plain variable is proposal-only (the channel that runs after user
+    confirmation); direct-execution steering exists only for tools the
+    operator explicitly declared read-only.
     """
     from ouroboros.mcp.tools.authoring_handlers import (
         _advisory_lanes_with_known_data_tools,
     )
 
-    monkeypatch.setenv(
-        "OUROBOROS_KNOWN_DATA_TOOLS",
-        "migrate_database,archive_customers,provision_tenant,clickhouse_query,"
-        "token_usage_v2,reset_database",
-    )
-    lanes = _advisory_lanes_with_known_data_tools(
-        {"lanes": [{"lane_id": "data_context", "capability": "data_context"}]}
-    )
-    lane = next(entry for entry in lanes if entry.get("lane_id") == "data_context")
+    def data_lane(env_plain: str, env_ro: str) -> dict[str, Any]:
+        monkeypatch.setenv("OUROBOROS_KNOWN_DATA_TOOLS", env_plain)
+        monkeypatch.setenv("OUROBOROS_KNOWN_DATA_TOOLS_READONLY", env_ro)
+        lanes = _advisory_lanes_with_known_data_tools(
+            {"lanes": [{"lane_id": "data_context", "capability": "data_context"}]}
+        )
+        return next(entry for entry in lanes if entry.get("lane_id") == "data_context")
 
-    assert lane.get("known_data_tools") == ["clickhouse_query", "token_usage_v2"]
+    # Read-shaped and mixed names alike are proposal-only without the
+    # declaration — including the round-86 probes migrate_query and
+    # archive_search, which carry a read token on a mutator-shaped name.
+    lane = data_lane("migrate_query,archive_search,clickhouse_query,reset_database", "")
+    assert "known_data_tools" not in lane
     assert lane.get("proposal_only_data_tools") == [
-        "migrate_database",
-        "archive_customers",
-        "provision_tenant",
+        "migrate_query",
+        "archive_search",
+        "clickhouse_query",
     ]
-    # A recognized mutator is not even proposal-only — it is dropped.
-    assert "reset_database" not in (
-        lane.get("known_data_tools", []) + lane.get("proposal_only_data_tools", [])
-    )
+
+    # The explicit declaration is what direct-execution steering requires.
+    lane = data_lane("migrate_query,clickhouse_query,metabase_card", "clickhouse_query")
+    assert lane.get("known_data_tools") == ["clickhouse_query"]
+    assert lane.get("proposal_only_data_tools") == ["migrate_query", "metabase_card"]
+
+    # A recognized mutator is dropped from BOTH lists, even when the
+    # operator declares it read-only by mistake.
+    lane = data_lane("reset_database", "reset_database")
+    assert "known_data_tools" not in lane
+    assert "proposal_only_data_tools" not in lane
 
 
 def test_round85_prompts_state_the_proposal_only_rule() -> None:

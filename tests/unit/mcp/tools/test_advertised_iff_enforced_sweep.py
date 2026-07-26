@@ -15,10 +15,9 @@ This module pins the population. Three properties:
    semantic class, asserted by its message. The declared classes are the
    deliberate residue the grammar cannot express, each with its reason:
 
-   * entity-key      — grouping/filtering BY an identity column
-                       (cross-token English-head rule, round 54)
    * opaque-value    — a 7+-digit / letter-hex identifier under an innocent
                        key (rounds 80-82 boundaries)
+   * network-address — a dotted-quad value under any key (round 84)
    * mutating-verb   — a tool identifier naming a mutator (round 8)
    * credential-name — a source/tool name shaped like a credential
                        (rounds 29-40; metric absorbed its rules in round 79,
@@ -26,12 +25,14 @@ This module pins the population. Three properties:
    * identity-metric — a value-returning aggregation over an identity metric
                        (round 48)
 
-   The round-85 unverified-grouping class (a row-splitting key whose head
-   does not positively name a category) was ABSORBED into the grouping and
-   dimension grammars, like the metric's credential rules in round 79: the
-   published patterns compile from _CATEGORY_HEADS, so an unverified head is
-   schema-invalid rather than schema-valid-but-rejected, and the class no
-   longer appears in the declared residue below.
+   The round-85 unverified-grouping class and the round-54 entity-KEY class
+   (user_id, ip, passport_number as scope keys) were ABSORBED into the
+   grouping, dimension, and filter grammars, like the metric's credential
+   rules in round 79: the published patterns compile from the positive head
+   sets, so an unverified or identity-named key is schema-invalid rather
+   than schema-valid-but-rejected, and those classes no longer appear in
+   the declared residue below. Entity-name detection remains in the
+   validator for the retained path and as depth behind the grammar.
 
 A rejection outside these classes is this test failing, not a future review
 round.
@@ -156,7 +157,6 @@ def test_schema_valid_scopes_are_accepted(label: str, output: dict[str, Any]) ->
 #: Property 3 corpus: schema-valid but rejected — each row names its declared
 #: class via a stable message fragment.
 _DECLARED_REJECTIONS: list[tuple[str, dict[str, Any], str]] = [
-    ("entity-filter-key", _answer(filters=["user_id=541511"]), "keys an entity"),
     ("opaque-7-digits", _answer(filters=["cohort=9999999"]), "opaque entity identifier"),
     ("opaque-bad-date", _answer(filters=["day=20260231"]), "opaque entity identifier"),
     (
@@ -164,9 +164,10 @@ _DECLARED_REJECTIONS: list[tuple[str, dict[str, Any], str]] = [
         _answer(metric="user_id", aggregation="max"),
         "identity metric may only be counted",
     ),
-    # Round-84 additions to the declared classes.
-    ("network-address-value", _answer(filters=["client=10.0.0.7"]), "network address"),
-    ("network-key", _answer(filters=["ip=192.168.1.1"]), "keys an entity"),
+    # Round-84 addition to the declared classes. (The key is category-headed
+    # so the VALUE rule is what rejects it; entity-named keys like `ip` or
+    # `client` are grammar-invalid since round 86.)
+    ("network-address-value", _answer(filters=["region=10.0.0.7"]), "network address"),
 ]
 
 
@@ -186,14 +187,17 @@ def test_every_semantic_rejection_belongs_to_a_declared_class(
     assert any(declared_class in violation for violation in violations), (label, violations)
 
 
-def test_the_row_splitting_grammars_absorbed_the_category_rule() -> None:
-    """The round-85 positive classification lives in the published patterns.
+def test_the_scope_grammars_absorbed_the_positive_classification() -> None:
+    """Rounds 85-86: positive key classification lives in the published patterns.
 
-    An unverified or identity-preserving head (credit_card_number, imei,
-    email_address, email_hash) is schema-INVALID for grouping and dimension —
-    not schema-valid-but-semantically-rejected — so the advertised and
-    enforced surfaces agree by construction. Rejection messages never echo
-    the key. Category-headed keys remain fully attainable end-to-end.
+    An unverified or identity-named key (credit_card_number, imei,
+    email_hash, passport_number, user_id, ip) is schema-INVALID for
+    grouping, dimension, AND filters — not schema-valid-but-semantically-
+    rejected — so the advertised and enforced surfaces agree by
+    construction. Rejection messages never echo the key or value.
+    Category-headed keys remain fully attainable end-to-end, and filter
+    keys may also be measurement-headed (latency_ms, naics_code,
+    created_at, key_metrics_30d).
     """
     for key in ("credit_card_number", "passport_number", "imei", "email_address", "email_hash"):
         assert not _READ_REQUEST_GROUPING.match(key), key
@@ -201,18 +205,37 @@ def test_the_row_splitting_grammars_absorbed_the_category_rule() -> None:
         violations = _data_evidence_boundary_violations(_proposal_answer(grouping=[key]))
         assert violations, key
         assert key not in " ".join(violations), "the rejected key was echoed"
+    for scope in (
+        "passport_number=zx123456",
+        "user_id=541511",
+        "ip=192.168.1.1",
+        "client=10.0.0.7",
+    ):
+        assert not _READ_REQUEST_FILTER.match(scope), scope
+        violations = _data_evidence_boundary_violations(_answer(filters=[scope]))
+        assert violations, scope
+        assert scope.split("=", 1)[1] not in " ".join(violations), "the rejected value was echoed"
     for key in ("plan_tier", "customer_segment", "month", "region", "device_type"):
         assert _READ_REQUEST_GROUPING.match(key), key
         assert _data_evidence_boundary_violations(_proposal_answer(grouping=[key])) == [], key
+    for scope in ("latency_ms>200", "naics_code=541511", "created_at>2026-01-01", "build=v2_1"):
+        assert _READ_REQUEST_FILTER.match(scope), scope
+        assert _data_evidence_boundary_violations(_answer(filters=[scope])) == [], scope
 
 
 def test_the_category_heads_are_advertised_in_the_policy() -> None:
-    """Hosts and children see the same closed set the grammars compile from."""
-    from ouroboros.contracts.data_evidence import _CATEGORY_HEADS, _data_context_lane_policy
+    """Hosts and children see the same closed sets the grammars compile from."""
+    from ouroboros.contracts.data_evidence import (
+        _CATEGORY_HEADS,
+        _MEASUREMENT_HEADS,
+        _data_context_lane_policy,
+    )
 
-    advertised = _data_context_lane_policy()["category_dimension_heads"]
-    assert advertised == sorted(_CATEGORY_HEADS)
-    assert "tier" in advertised and "month" in advertised
+    policy = _data_context_lane_policy()
+    assert policy["category_dimension_heads"] == sorted(_CATEGORY_HEADS)
+    assert policy["filter_key_heads"] == sorted(_CATEGORY_HEADS | _MEASUREMENT_HEADS)
+    assert "tier" in policy["category_dimension_heads"]
+    assert "ms" in policy["filter_key_heads"]
 
 
 def test_the_metric_field_never_needs_the_declared_residue() -> None:
