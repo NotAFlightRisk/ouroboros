@@ -332,3 +332,27 @@ def test_the_metric_field_never_needs_the_declared_residue() -> None:
         assert _READ_REQUEST_METRIC.match(metric), metric
         violations = _data_evidence_boundary_violations(_answer(metric=metric))
         assert violations == [], (metric, violations)
+
+
+def test_round98_version_quads_and_analytics_heads_are_attainable() -> None:
+    """Key-aware address detection and head-last credential reading.
+
+    version=1.2.3.4 was schema-valid yet classified as a network address;
+    access_token_usage had no valid spelling at all (schema accepted,
+    classifier rejected). The version-key exemption is narrow — region keeps
+    the round-84 address rule — and the analytics-head exemption is
+    fail-closed: round-40's refresh_token_alphabetic stays rejected.
+    """
+    from ouroboros.contracts.data_evidence import _identifier_looks_secret
+
+    for scope in ("version=1.2.3.4", "release=1.2.3.4", "build=1.2.3.4"):
+        _assert_schema_valid(_answer(filters=[scope]))
+        assert _data_evidence_boundary_violations(_answer(filters=[scope])) == [], scope
+    violations = _data_evidence_boundary_violations(_answer(filters=["region=10.0.0.7"]))
+    assert any("network address" in violation for violation in violations)
+
+    assert not _identifier_looks_secret("access_token_usage")
+    assert not _identifier_looks_secret("api_key_metrics")
+    assert _identifier_looks_secret("refresh_token_alphabetic")
+    assert _identifier_looks_secret("access_token")
+    assert _identifier_looks_secret("access_key_abcd1234")

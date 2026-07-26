@@ -1379,6 +1379,19 @@ def _data_evidence_boundary_violations(
                 f"caveats[{index}]: describes a failed lookup; a failed call "
                 "is a no-evidence finding, not evidence with a caveat"
             )
+        # The no-lookup mirror applies to EVERY consent prose field
+        # (round-98: round-97 added it to finding only, and the same
+        # contradiction completed when it rode a caveat instead).
+        if (
+            isinstance(evidence_items, list)
+            and evidence_items
+            and _DATA_EVIDENCE_NO_LOOKUP_SHAPE.search(caveat)
+        ):
+            errors.append(
+                f"caveats[{index}]: claims no lookup ran while carrying "
+                "executed evidence; the consent narrative must match the "
+                "typed record"
+            )
     return errors
 
 
@@ -2006,7 +2019,16 @@ def _identity_scope_problem(text: str, label: str) -> str | None:
     # the same credential classification every other identifier field has.
     if _identifier_looks_secret(key) or (value and _identifier_looks_secret(value)):
         return f"{label} names or compares a credential; it may not ride a data request"
-    if value and _IPV4_VALUE.match(value):
+    if (
+        value
+        and _IPV4_VALUE.match(value)
+        # A dotted quad under a VERSION-naming head is a version string
+        # (round-98: version=1.2.3.4 was schema-valid yet rejected). The
+        # shape is genuinely ambiguous with an address, so the key decides —
+        # every other key keeps the round-84 rule, and the confirming human
+        # sees the value beside the request either way.
+        and _key_head(key) not in {"version", "release", "build"}
+    ):
         # A device address identifies its holder whatever the key is called
         # (round-84): the dotted quad is the identifier shape itself.
         return f"{label} scopes to a network address; aggregate by category instead"
@@ -2131,6 +2153,29 @@ _ABSOLUTE_CREDENTIAL_WORDS = frozenset(
 
 _QUALIFIABLE_CREDENTIAL_WORDS = frozenset({"token", "tokens", "key", "keys"})
 
+#: Analytics heads that make a qualified credential word a MODIFIER
+#: (round-98): access_token_usage measures access tokens — the final token
+#: is the compound's head (round-54's rule). Granted fail-closed: a head
+#: outside this set keeps the round-40 rejection.
+_ANALYTICS_HEADS = frozenset(
+    {
+        "usage",
+        "usages",
+        "metrics",
+        "stats",
+        "count",
+        "counts",
+        "rate",
+        "rates",
+        "total",
+        "totals",
+        "volume",
+        "events",
+        "errors",
+        "latency",
+    }
+)
+
 
 _CREDENTIAL_WORDS = _ABSOLUTE_CREDENTIAL_WORDS | _QUALIFIABLE_CREDENTIAL_WORDS
 
@@ -2208,8 +2253,18 @@ def _identifier_looks_secret(value: str) -> bool:
     # refresh_token_*, access_key_*, private_key_* are credential names, not
     # tool names (round-38: access_key_abcd1234; round-40:
     # refresh_token_alphabetic, whose word-like tail carried the exemption).
+    # ONE exception, from the same head-last reading the metric grammar
+    # absorbed in round-79 (primary_key_count): when the compound's FINAL
+    # token names an analytics measurement, the credential word is a
+    # modifier of that head — access_token_usage measures access tokens.
+    # The exemption is granted only for an analytics head, so round-40's
+    # refresh_token_alphabetic (arbitrary word tail) stays rejected.
     if credential_index > 0:
-        return True
+        return not (
+            credential_index < len(tokens) - 1
+            and lowered[-1] in _ANALYTICS_HEADS
+            and all(re.fullmatch(r"[A-Za-z]{1,12}", tok) for tok in tokens[credential_index + 1 :])
+        )
     # A LEADING credential word is a modifier, and the identifier stays
     # exempt only while every remaining token is recognizably word-like —
     # the fail-closed rule from round-36 (api_key_staging_XYZ12345, whose

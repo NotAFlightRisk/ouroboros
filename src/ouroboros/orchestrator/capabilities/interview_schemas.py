@@ -667,8 +667,20 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                             "type": "array",
                             "items": {"type": "string", "minLength": 1},
                             "description": (
-                                "Optional host/config-provided hint list of data MCP "
-                                "tool names for tool-dense sessions."
+                                "Tools the operator explicitly declared read-only "
+                                "(OUROBOROS_KNOWN_DATA_TOOLS_READONLY) — the only "
+                                "list that grants DIRECT-execution steering."
+                            ),
+                        },
+                        "proposal_only_data_tools": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                            "description": (
+                                "Configured hints WITHOUT a read-only declaration: "
+                                "the child never executes these directly — it "
+                                "returns proposed_queries against them for the "
+                                "parent to run after user confirmation. Re-entry "
+                                "rejects executed evidence naming them."
                             ),
                         },
                         "answer_contract": {

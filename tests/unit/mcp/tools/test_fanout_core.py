@@ -9044,3 +9044,30 @@ def test_round97_source_classification_and_consent_narrative_bind(tmp_path: Any)
     )
     assert out.get("contract_violations") in (None, []), out.get("contract_violations")
     assert out["status"] == "complete"
+
+
+def test_round98_no_lookup_mirror_covers_caveats(tmp_path: Any) -> None:
+    """The consent-consistency rule applies to every prose field."""
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-98",
+        lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+    )
+    assert fanout_id is not None
+
+    contradictory = _round77_answer("logins", ["cohort=enterprise"])
+    contradictory["caveats"] = ["No lookup was required for this question."]
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-98",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": contradictory}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert any(
+        "claims no lookup" in error
+        for item in out.get("contract_violations", [])
+        for error in item.get("errors", [])
+    )
