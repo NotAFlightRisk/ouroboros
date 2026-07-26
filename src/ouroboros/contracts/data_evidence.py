@@ -177,7 +177,21 @@ def _data_context_answer_contract() -> dict[str, Any]:
         "properties": {
             "lane_id": {"const": "data_context"},
             "data_needed": {"type": "boolean"},
-            "finding": {"type": "string", "minLength": 1, "maxLength": 600},
+            "finding": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 600,
+                # Published so the enforced prose bound is representable in
+                # the contract (round-96): sentence counting is not
+                # regex-expressible, so the constraint is stated here and
+                # enforced semantically — same split as the calendar rules.
+                "description": (
+                    "Bounded advisory prose: at most four sentences, no "
+                    "record-layout separators (line breaks, pipes, spaced "
+                    "slashes, bullets). Numbers and rows belong in typed "
+                    "evidence, never in prose."
+                ),
+            },
             "confidence": {"enum": ["reported_by_tool", "inferred", "no_evidence"]},
             "evidence": {
                 "type": "array",
@@ -581,6 +595,14 @@ def _data_context_lane_policy() -> dict[str, Any]:
         # machine-readable rule rather than a hidden validator (round-89):
         # customer_code passes the published pattern but keys an entity —
         # hosts and children see the vocabularies enforcement will apply.
+        # The enforced prose bound, machine-readably (round-96): sentence
+        # counting is not regex-expressible, so the schema documents it and
+        # this block names the enforceable numbers.
+        "prose_constraints": {
+            "fields": ["finding", "caveats", "expected_decision"],
+            "max_sentences": 4,
+            "forbidden_layout": "line breaks, pipes, spaced slashes, bullets",
+        },
         "identity_scope_rules": {
             "identity_tokens": sorted(_IDENTITY_KEYS),
             "identity_preserving_heads": sorted(_IDENTITY_PRESERVING_HEADS),
@@ -885,8 +907,13 @@ def _prose_layout_problem(text: str) -> str | None:
             "slashes); an advisory statement is one sentence, and the numbers "
             "belong in typed evidence"
         )
-    if len(re.findall(r"[.!?](?=\s|$)", text)) > 2:
-        return "is more than two sentences; state one advisory finding"
+    # Four sentences bounds enumeration while leaving room for an ordinary
+    # no-op explanation (round-96: a three-sentence finding left a required
+    # lane partial under the old two-sentence bound, and the bound was
+    # advertised nowhere — it is now published in the schema descriptions,
+    # the data policy, and the lane prompt).
+    if len(re.findall(r"[.!?](?=\s|$)", text)) > 4:
+        return "is more than four sentences; state one bounded advisory finding"
     return None
 
 
@@ -1905,6 +1932,12 @@ def _cardinality_aggregations() -> frozenset[str]:
     return frozenset(_schema_defs()["cardinality_aggregation"]["enum"])
 
 
+def _key_head(key: str) -> str:
+    """The last separator-delimited token — what the key NAMES (round-54)."""
+    tokens = [token for token in re.split(r"[-_.]", key.lower()) if token]
+    return tokens[-1] if tokens else ""
+
+
 def _identity_scope_problem(text: str, label: str) -> str | None:
     """Whether ``key<op>value`` scopes an aggregate to an identified entity."""
     match = _FILTER_OPERATOR.search(text)
@@ -1928,7 +1961,16 @@ def _identity_scope_problem(text: str, label: str) -> str | None:
         # A device address identifies its holder whatever the key is called
         # (round-84): the dotted quad is the identifier shape itself.
         return f"{label} scopes to a network address; aggregate by category instead"
-    if value and _OPAQUE_ENTITY_VALUE.match(value) and not _compact_date_partition(value):
+    if (
+        value
+        and _OPAQUE_ENTITY_VALUE.match(value)
+        and not _compact_date_partition(value)
+        # A bare number under a MEASUREMENT head IS the measurement's value
+        # (round-96): build=1234567 names a build, not a person — the
+        # opaque-digit rule exists for numbers hiding under CATEGORY keys
+        # (cohort=9999999), where a long run is an account in disguise.
+        and _key_head(key) not in _MEASUREMENT_HEADS
+    ):
         return f"{label} scopes to an opaque entity identifier; aggregate by category instead"
     if value and _labeled_identifier_value(value):
         # Round-88 probe: segment=user_1234567 — a category KEY with an

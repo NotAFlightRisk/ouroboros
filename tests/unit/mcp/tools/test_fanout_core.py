@@ -8910,3 +8910,51 @@ def test_round95_numeric_build_categories_complete_end_to_end(tmp_path: Any) -> 
 
     assert out.get("contract_violations") in (None, []), out.get("contract_violations")
     assert out["status"] == "complete"
+
+
+def test_round96_measurement_numbers_and_bounded_prose_complete(tmp_path: Any) -> None:
+    """Published contract and re-entry agree on long build numbers and prose.
+
+    `build=1234567` was schema-valid yet opaque-rejected — a bare number
+    under a MEASUREMENT head is the measurement's value; the opaque-digit
+    rule guards CATEGORY keys. And a three-sentence no-op finding was
+    rejected by an unadvertised two-sentence bound — the bound is now four,
+    published in the schema description, the data policy
+    (prose_constraints), and the lane prompt.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-96",
+        lanes=[{"lane_id": "data_context", "capability": "data_context", "required": True}],
+    )
+    assert fanout_id is not None
+
+    answer = _round77_answer("deploy_success", ["build=1234567"])
+    answer["finding"] = (
+        "No lookup was required. The question concerns naming only. No data source was consulted."
+    )
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-96",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": answer}],
+        fanout_id=fanout_id,
+    )
+    assert out.get("contract_violations") in (None, []), out.get("contract_violations")
+    assert out["status"] == "complete"
+
+    # The documented bound still binds: five sentences are rejected with
+    # the published message, and category keys keep the opaque guard.
+    from ouroboros.contracts.data_evidence import (
+        _data_evidence_boundary_violations,
+        _prose_layout_problem,
+    )
+
+    assert _prose_layout_problem("One. Two. Three. Four. Five.")
+    assert any(
+        "opaque entity identifier" in violation
+        for violation in _data_evidence_boundary_violations(
+            _round77_answer("logins", ["cohort=9999999"])
+        )
+    )

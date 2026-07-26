@@ -157,6 +157,11 @@ _ACCEPTED: list[tuple[str, dict[str, Any]]] = [
     # label in the KEY, the number as a BARE value.
     ("filter-build-number", _answer(filters=["build=12345"])),
     ("filter-short-compound", _answer(filters=["release=build_1234"])),
+    # Round-96: a bare number under a MEASUREMENT head is the measurement's
+    # value — the opaque-digit rule guards CATEGORY keys (cohort=9999999,
+    # still in the declared residue below).
+    ("filter-seven-digit-build", _answer(filters=["build=1234567"])),
+    ("filter-eight-digit-code", _answer(filters=["naics_code=54151100"])),
     # Grouping is advertised on PROPOSALS only — the evidence schema itself
     # rejects a grouped executed request (round-46: one number cannot say
     # which group it came from), which this sweep's first draft rediscovered.
