@@ -4457,6 +4457,16 @@ def register_question_advisory_fanout_from_lanes(
         lane_policy = lane.get("data_policy")
         if isinstance(lane_policy, Mapping):
             lane_data_policies[lane_id] = dict(lane_policy)
+        # The tool CLASSIFICATION is part of the advertised policy and rides
+        # the same snapshot (round-97): registration persisted data_policy
+        # but dropped the rosters, so re-entry accepted executed evidence
+        # from a tool the same fan-out had advertised proposal-only.
+        for roster_key in ("known_data_tools", "proposal_only_data_tools"):
+            roster = lane.get(roster_key)
+            if isinstance(roster, (list, tuple)) and roster:
+                lane_data_policies.setdefault(lane_id, {})[roster_key] = [
+                    str(tool) for tool in roster
+                ]
         answer_contract = declared_lane_contract(lane)
         # Enforced IFF deliverable whole (round-11): an oversized contract is
         # skipped so re-entry never validates against a schema the child could

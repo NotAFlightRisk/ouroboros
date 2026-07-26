@@ -8930,9 +8930,14 @@ def test_round96_measurement_numbers_and_bounded_prose_complete(tmp_path: Any) -
     )
     assert fanout_id is not None
 
+    # Three sentences, CONSISTENT with the executed evidence they accompany
+    # (round-97 caught this fixture's first draft claiming no lookup ran
+    # beside succeeded warehouse evidence).
     answer = _round77_answer("deploy_success", ["build=1234567"])
     answer["finding"] = (
-        "No lookup was required. The question concerns naming only. No data source was consulted."
+        "Deploy successes were counted for the requested build. "
+        "The count is scoped to that build only. "
+        "Treat it as point-in-time."
     )
     out = submit_fanout_results(
         registry,
@@ -8958,3 +8963,84 @@ def test_round96_measurement_numbers_and_bounded_prose_complete(tmp_path: Any) -
             _round77_answer("logins", ["cohort=9999999"])
         )
     )
+
+
+def test_round97_source_classification_and_consent_narrative_bind(tmp_path: Any) -> None:
+    """The advertised tool classification and the narrative bind at re-entry.
+
+    Registration snapshotted data_policy but dropped the rosters, so a tool
+    advertised proposal-only completed as an executed evidence source. And a
+    finding claiming no lookup ran completed beside succeeded warehouse
+    evidence.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-97",
+        lanes=[
+            {
+                "lane_id": "data_context",
+                "capability": "data_context",
+                "required": True,
+                "proposal_only_data_tools": ["metered_query"],
+            }
+        ],
+    )
+    assert fanout_id is not None
+
+    # A proposal-only tool as EXECUTED evidence: rejected with the roster
+    # violation; the same tool as a proposed query is the sanctioned channel.
+    executed = _round77_answer("logins", ["cohort=enterprise"])
+    executed["evidence"][0]["source"] = "metered_query"
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-97",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": executed}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert any(
+        "proposal-only" in error
+        for item in out.get("contract_violations", [])
+        for error in item.get("errors", [])
+    )
+
+    # No-lookup narrative beside executed evidence: rejected.
+    contradictory = _round77_answer("logins", ["cohort=enterprise"])
+    contradictory["finding"] = "No lookup was required for this question."
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-97",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": contradictory}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert any(
+        "claims no lookup" in error
+        for item in out.get("contract_violations", [])
+        for error in item.get("errors", [])
+    )
+
+    # The consistent forms complete: the tool as a proposed query, and the
+    # no-lookup narrative on an actual no-op.
+    noop = {
+        "lane_id": "data_context",
+        "data_needed": False,
+        "finding": "No lookup was required for this question.",
+        "confidence": "no_evidence",
+        "evidence": [],
+        "proposed_queries": [],
+        "caveats": [],
+        "requires_user_confirmation": True,
+    }
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-97",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": noop}],
+        fanout_id=fanout_id,
+    )
+    assert out.get("contract_violations") in (None, []), out.get("contract_violations")
+    assert out["status"] == "complete"

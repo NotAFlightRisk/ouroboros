@@ -602,6 +602,10 @@ def _data_context_lane_policy() -> dict[str, Any]:
             "fields": ["finding", "caveats", "expected_decision"],
             "max_sentences": 4,
             "forbidden_layout": "line breaks, pipes, spaced slashes, bullets",
+            "consistency": (
+                "a narrative claiming no lookup ran, or describing a failed "
+                "call, may not accompany executed evidence"
+            ),
         },
         "identity_scope_rules": {
             "identity_tokens": sorted(_IDENTITY_KEYS),
@@ -802,6 +806,22 @@ def _mutating_tool_verb(tool_name: str) -> str | None:
 # evidence value means the tool call FAILED — the policy requires a
 # no-evidence finding, never evidence ("error rate 0.2%" prose stays valid;
 # only the envelope shapes match).
+# No-op-claim shapes (round-97), the error-shape's mirror: a narrative
+# declaring that nothing was looked up may not accompany EXECUTED evidence —
+# the confirming human reads the finding beside the typed record, and a
+# probe completed with succeeded warehouse evidence under "No lookup was
+# required". Like the error shapes, this is bounded depth behind the typed
+# contract: prose truth is not decidable in general, and the human
+# confirmation remains the check for what no shape matches.
+_DATA_EVIDENCE_NO_LOOKUP_SHAPE = re.compile(
+    r"\bno\s+(?:lookup|quer(?:y|ies)|call|request|data\s+source|source)s?\s+"
+    r"(?:was|were)\s+(?:run|made|executed|issued|needed|required|consulted|accessed)\b"
+    r"|\bno\s+data\s+(?:source\s+)?was\s+consulted\b"
+    r"|\bnothing\s+was\s+(?:run|queried|looked\s+up|consulted)\b"
+    r"|\bdid\s+not\s+(?:run|execute|consult|query|access)\b"
+    r"|\bwithout\s+(?:running|executing|consulting|querying)\b",
+    re.IGNORECASE,
+)
 _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     r"[\"']error[\"']\s*:|[\"']ok[\"']\s*:\s*[Ff]alse|\bHTTP[ /]?[45]\d{2}\b"
     r"|\btraceback \(most recent call last\)"
@@ -1247,6 +1267,25 @@ def _data_evidence_boundary_violations(
                 f"evidence[{index}].source: carries an identifier-length digit "
                 "run; name the read-only data tool instead"
             )
+        # A tool the SAME fan-out advertised proposal-only was, by that
+        # advertisement, never authorized for direct execution (round-97):
+        # registration now snapshots the rosters with the policy, so the
+        # classification the child was shown is the one re-entry enforces.
+        # Unknown sources remain the documented not_adjudicated residue —
+        # runtime-discovered local read-only tools are a designed capability
+        # and the confirming human sees the source beside the claim.
+        proposal_only_roster = (policy or {}).get("proposal_only_data_tools")
+        if (
+            isinstance(source, str)
+            and isinstance(proposal_only_roster, (list, tuple))
+            and source in proposal_only_roster
+        ):
+            errors.append(
+                f"evidence[{index}].source: this tool was advertised "
+                "proposal-only; it may not appear as executed evidence — "
+                "return it as a proposed query for the parent to run after "
+                "user confirmation"
+            )
 
     proposals = output.get("proposed_queries")
     for index, item in enumerate(proposals if isinstance(proposals, list) else ()):
@@ -1306,6 +1345,16 @@ def _data_evidence_boundary_violations(
         errors.append(
             "finding: describes a failed lookup; a failed call is a "
             "no-evidence finding, not evidence with a narrative"
+        )
+    if (
+        isinstance(finding, str)
+        and isinstance(evidence_items, list)
+        and evidence_items
+        and _DATA_EVIDENCE_NO_LOOKUP_SHAPE.search(finding)
+    ):
+        errors.append(
+            "finding: claims no lookup ran while carrying executed "
+            "evidence; the consent narrative must match the typed record"
         )
     caveats = output.get("caveats")
     for index, caveat in enumerate(caveats if isinstance(caveats, list) else ()):
