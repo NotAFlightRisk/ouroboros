@@ -104,11 +104,16 @@ def _answer(
     }
 
 
-def _proposal_answer(*, grouping: list[str] | None = None) -> dict[str, Any]:
+def _proposal_answer(
+    *,
+    grouping: list[str] | None = None,
+    metric: str = "logins",
+    aggregation: str = "count",
+) -> dict[str, Any]:
     request: dict[str, Any] = {
         "operation": "read",
-        "metric": "logins",
-        "aggregation": "count",
+        "metric": metric,
+        "aggregation": aggregation,
     }
     if grouping is not None:
         request["grouping"] = grouping
@@ -123,7 +128,7 @@ def _proposal_answer(*, grouping: list[str] | None = None) -> dict[str, Any]:
                 "tool_name": "clickhouse_query",
                 "request": request,
                 "expected_decision": "Whether enterprise tiers dominate logins.",
-                "source_class": "metered_or_uncertain",
+                "source_class": "metered",
             }
         ],
         "caveats": ["point-in-time"],
@@ -156,9 +161,23 @@ _ACCEPTED: list[tuple[str, dict[str, Any]]] = [
 ]
 
 
+def _assert_schema_valid(output: dict[str, Any]) -> None:
+    """Both corpora claim schema-validity — assert it with the real validator.
+
+    Round-90: the proposal fixture carried a schema-invalid ``source_class``
+    and the sweep never noticed, so "schema-valid but rejected" was being
+    asserted about outputs the schema rejects.
+    """
+    from jsonschema import Draft202012Validator
+
+    schema = _data_context_answer_contract()["response_model_schema"]
+    Draft202012Validator(schema).validate(output)
+
+
 @pytest.mark.parametrize(("label", "output"), _ACCEPTED, ids=[label for label, _ in _ACCEPTED])
 def test_schema_valid_scopes_are_accepted(label: str, output: dict[str, Any]) -> None:
     """Property 2: what the grammar advertises, enforcement accepts."""
+    _assert_schema_valid(output)
     assert _data_evidence_boundary_violations(output) == [], label
 
 
@@ -178,11 +197,25 @@ _DECLARED_REJECTIONS: list[tuple[str, dict[str, Any], str]] = [
         _answer(filters=["segment=user_1234567"]),
         "labeled entity identifier",
     ),
+    # Round-90: the label VOCABULARY cannot converge (employee was missing
+    # as customer and user once were) — the SHAPE decides: a compound value
+    # with a non-calendar 5+-digit run is an entity index whatever the
+    # label means.
+    (
+        "labeled-index-value",
+        _answer(filters=["segment=employee_123456"]),
+        "labeled entity identifier",
+    ),
     ("opaque-7-digits", _answer(filters=["cohort=9999999"]), "opaque entity identifier"),
     ("opaque-bad-date", _answer(filters=["day=20260231"]), "opaque entity identifier"),
+    # Executed evidence absorbed this rule into the schema long ago
+    # (round-46: aggregation is enum count/distinct_count) — the declared
+    # residue survives only on PROPOSALS, whose requests may aggregate
+    # freely (round-90 made the sweep schema-validate its own corpus and
+    # caught the executed form asserting an unreachable path).
     (
         "identity-metric-max",
-        _answer(metric="user_id", aggregation="max"),
+        _proposal_answer(metric="user_id", aggregation="max"),
         "identity metric may only be counted",
     ),
     # Round-84 addition to the declared classes. (The key is category-headed
@@ -203,6 +236,7 @@ def test_every_semantic_rejection_belongs_to_a_declared_class(
     declared_class: str,
 ) -> None:
     """Property 3: the residue beyond the grammar is named, bounded, and stable."""
+    _assert_schema_valid(output)
     violations = _data_evidence_boundary_violations(output)
     assert violations, label
     assert any(declared_class in violation for violation in violations), (label, violations)

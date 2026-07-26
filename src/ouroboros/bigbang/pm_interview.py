@@ -40,7 +40,7 @@ from ouroboros.bigbang.interview import (
     InterviewEngine,
     InterviewState,
     initial_context_summary_missing,
-    prompt_safe_initial_context,
+    prompt_safe_initial_context_with_provenance,
 )
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.bigbang.question_classifier import (
@@ -1254,9 +1254,10 @@ class PMInterviewEngine:
         Returns:
             Formatted context string.
         """
-        # Same summary-answer sanitization as the dev Seed path (round-81).
-        raw_context = prompt_safe_initial_context(state)
-        safe_context = extraction_safe_answer(raw_context)
+        # Same summary-answer sanitization as the dev Seed path (rounds 81
+        # and 90): marker rule plus the summary round's typed provenance.
+        raw_context, context_provenance = prompt_safe_initial_context_with_provenance(state)
+        safe_context = extraction_safe_answer(raw_context, context_provenance)
         observation_seen = safe_context != raw_context
         parts = [f"Initial Context: {safe_context}"]
 

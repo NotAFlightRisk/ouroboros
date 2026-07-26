@@ -870,3 +870,28 @@ def test_round88_withheld_authority_requires_a_promoted_replacement() -> None:
     plain = _state_with_answer("Thanks.")
     plain.initial_context = "Build the reporting lane"
     assert not interview_has_no_promotable_requirement(plain)
+
+
+def test_round90_substantive_goals_pass_the_gate_and_phatic_text_does_not() -> None:
+    """The gate distinguishes acknowledgement from authority.
+
+    Round-88's promoted-candidate standard rejected the ordinary user
+    decision "Build an SSO dashboard for enterprise admins." — soft-worded
+    goals are what LLM extraction exists for. Phatic markers are a CLOSED
+    class, so a vocabulary is the right tool on this boundary; the round-88
+    Thanks.-only probe stays blocked.
+    """
+    from ouroboros.bigbang.requirement_distillation import (
+        interview_has_no_promotable_requirement,
+    )
+
+    # Soft-worded imperative goal after an observation: generatable.
+    state = _state_with_answer("Build an SSO dashboard for enterprise admins.")
+    state.initial_context = "[from-data] Confirmed: 42 accounts require SSO."
+    assert not interview_has_no_promotable_requirement(state)
+
+    # Phatic-only (round-88 probe) stays blocked, in several spellings.
+    for phatic in ("Thanks.", "ok, go ahead", "sounds good, proceed.", "좋아요 진행해주세요"):
+        blocked = _state_with_answer(phatic)
+        blocked.initial_context = "[from-data] Confirmed: 42 accounts require SSO."
+        assert interview_has_no_promotable_requirement(blocked), phatic

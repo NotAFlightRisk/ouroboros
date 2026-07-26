@@ -445,12 +445,28 @@ class InterviewState(BaseModel):
 
 def prompt_safe_initial_context(state: InterviewState) -> str:
     """Return initial context safe for LLM prompts across interview consumers."""
+    return prompt_safe_initial_context_with_provenance(state)[0]
+
+
+def prompt_safe_initial_context_with_provenance(state: InterviewState) -> tuple[str, str]:
+    """``prompt_safe_initial_context`` plus the ingestion-time provenance.
+
+    The oversized-context substitute is a ROUND answer, and its typed
+    ``answer_provenance`` is the record (round-90): both extraction
+    consumers sanitized the substitute by marker only and then skipped the
+    summary round, so a markerless summary typed ``data_fact`` reached the
+    Dev and PM extractors verbatim. Callers that feed an extractor must
+    sanitize with the returned provenance, not the default.
+    """
     if len(state.initial_context) <= MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS:
-        return state.initial_context
+        return state.initial_context, "human"
     for round_data in reversed(state.rounds):
         if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION and round_data.user_response:
-            return _truncate_prompt_safe_context(round_data.user_response)
-    return INITIAL_CONTEXT_SUMMARY_REQUIRED
+            return (
+                _truncate_prompt_safe_context(round_data.user_response),
+                round_data.answer_provenance,
+            )
+    return INITIAL_CONTEXT_SUMMARY_REQUIRED, "human"
 
 
 def _truncate_prompt_safe_context(context: str) -> str:

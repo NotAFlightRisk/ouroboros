@@ -162,6 +162,32 @@ def _entrance_states() -> list[tuple[str, InterviewState]]:
             ),
         )
     )
+    states.append(
+        (
+            # Round-90: the oversized-context SUMMARY substitute is a round
+            # answer whose typed field is the record — a markerless summary
+            # typed data_fact reached the Dev and PM extractors because both
+            # sanitized the substitute by marker only.
+            "summary-field-only",
+            InterviewState(
+                interview_id="iv_inv_f",
+                initial_context="x" * (MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS + 1),
+                rounds=[
+                    InterviewRound(
+                        round_number=1,
+                        question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                        user_response=_OBSERVATION,
+                        answer_provenance="data_fact",
+                    ),
+                    InterviewRound(
+                        round_number=2,
+                        question="What must the product guarantee?",
+                        user_response=_DECISION,
+                    ),
+                ],
+            ),
+        )
+    )
     return states
 
 

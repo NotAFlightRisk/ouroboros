@@ -25,7 +25,7 @@ from ouroboros.bigbang.interview import (
     INITIAL_CONTEXT_SUMMARY_QUESTION,
     InterviewState,
     initial_context_summary_missing,
-    prompt_safe_initial_context,
+    prompt_safe_initial_context_with_provenance,
 )
 from ouroboros.bigbang.requirement_distillation import (
     OBSERVATION_ONLY_INTERVIEW_MESSAGE,
@@ -705,9 +705,11 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
         # summary round is skipped below, never set the question taint
         # (round-81). The same marker rule applies here, and a withheld
         # summary taints every question: they were all generated with the
-        # observation in play.
-        raw_context = prompt_safe_initial_context(state)
-        safe_context = extraction_safe_answer(raw_context)
+        # observation in play. The summary's TYPED provenance rides along
+        # (round-90): a markerless summary typed data_fact is still an
+        # observation.
+        raw_context, context_provenance = prompt_safe_initial_context_with_provenance(state)
+        safe_context = extraction_safe_answer(raw_context, context_provenance)
         observation_seen = safe_context != raw_context
         parts = [f"Initial Context: {safe_context}"]
 

@@ -119,18 +119,93 @@ OBSERVATION_ONLY_INTERVIEW_MESSAGE = (
 )
 
 
+#: Discourse tokens that carry acknowledgement, not content. Unlike identity
+#: nouns or mutating verbs, phatic markers are a CLOSED class in the
+#: linguistic sense — new ones are coined about as often as new pronouns —
+#: which is why a vocabulary is the right tool on this boundary and not on
+#: those (round-90).
+_PHATIC_TOKENS = frozenset(
+    {
+        "thanks",
+        "thank",
+        "you",
+        "ok",
+        "okay",
+        "kk",
+        "sure",
+        "great",
+        "good",
+        "nice",
+        "cool",
+        "fine",
+        "alright",
+        "yes",
+        "yep",
+        "yeah",
+        "no",
+        "nope",
+        "got",
+        "it",
+        "please",
+        "proceed",
+        "continue",
+        "go",
+        "ahead",
+        "sounds",
+        "perfect",
+        "awesome",
+        "감사",
+        "감사합니다",
+        "고마워",
+        "고맙습니다",
+        "네",
+        "예",
+        "응",
+        "좋아",
+        "좋아요",
+        "좋습니다",
+        "알겠습니다",
+        "알겠어요",
+        "진행해",
+        "진행해줘",
+        "진행해주세요",
+        "오케이",
+        "ㅇㅋ",
+        "はい",
+        "了解",
+        "了解です",
+        "ありがとう",
+        "ありがとうございます",
+        "お願いします",
+    }
+)
+
+
+def _substantive_human_answer(answer: str) -> bool:
+    """Whether a human answer carries content beyond acknowledgement.
+
+    `Thanks.` is discourse; `Build an SSO dashboard for enterprise admins.`
+    is a goal. At least two non-phatic word tokens make an answer
+    substantive — one alone ("perfect!", "SSO?") is reaction or echo.
+    """
+    tokens = re.findall(r"[0-9A-Za-z가-힣ぁ-んァ-ヶ一-龥]+", answer.lower())
+    return sum(1 for token in tokens if token not in _PHATIC_TOKENS) >= 2
+
+
 def interview_has_no_promotable_requirement(state: InterviewState) -> bool:
     """THE readiness question every generation route asks before extracting.
 
     Round-88 deepened round-85's gate: "is any non-observation text present"
     let a withheld `[from-data]` goal plus the human answer `Thanks.` reach
     the extractor, which then invented a Seed from a transcript whose only
-    substantive content was withheld. When observations were withheld, the
-    replacement authority must be a PROMOTED user-authored candidate — the
-    same standard the reference-aware path already enforces — not merely any
-    human text. Interviews with no observations anywhere are untouched:
-    their substantive authority was never withheld, and ordinary LLM
-    extraction from soft-worded answers remains the product behavior.
+    substantive content was withheld. Round-90 restored the gate's
+    precision: requiring a regex-PROMOTED candidate rejected the ordinary
+    user decision "Build an SSO dashboard for enterprise admins." — the
+    explicit-requirement vocabulary is deliberately narrow, and soft-worded
+    goals are what LLM extraction exists for. The standard is therefore: a
+    promoted user-authored candidate OR a substantive (non-phatic) human
+    answer. Interviews with no observations anywhere are untouched: their
+    substantive authority was never withheld.
     """
     if interview_is_observation_only(state):
         return True
@@ -146,7 +221,15 @@ def interview_has_no_promotable_requirement(state: InterviewState) -> bool:
     if not has_observation:
         return False
     promotion = evaluate_promotion(build_requirement_distillation(state))
-    return not promotion.promoted
+    if promotion.promoted:
+        return False
+    return not any(
+        _substantive_human_answer(answer)
+        for round_data in state.rounds
+        if (answer := (round_data.user_response or "").strip())
+        and effective_answer_provenance(answer, round_data.answer_provenance)
+        not in {"data_fact", "research_fact"}
+    )
 
 
 def build_requirement_distillation(state: InterviewState) -> RequirementDistillation:

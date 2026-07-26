@@ -1898,21 +1898,35 @@ def _identity_scope_problem(text: str, label: str) -> str | None:
 
 
 def _labeled_identifier_value(value: str) -> bool:
-    """Whether a scope VALUE is an identity-labeled identifier.
+    """Whether a scope VALUE is a labeled entity identifier.
 
     ``user_1234567`` names one user as surely as a bare 7-digit run does —
-    the label just says which entity space the digits index. Both halves are
-    required: a category label with digits (``tier_2``) has no identity
-    word, and an identity word alone (``role=user``) names a kind rather
-    than an individual. Calendar partitions never carry identity labels, so
-    no date exemption is needed here.
+    the label just says which entity space the digits index. Round-90
+    (``employee_123456``, the third value probe) showed the label VOCABULARY
+    cannot converge: employee was missing exactly as customer and user once
+    were. The SHAPE decides instead: in a compound value, a non-calendar
+    digit run of five or more is an entity index whatever the label word
+    means. Published category codes (naics ``541511``) arrive as BARE
+    values under code-heads — never as ``label_digits`` compounds — so the
+    round-82 six-digit bare-category allowance is untouched. Short ordinals
+    (``tier_2``), version fragments (``v2_1``), calendar pieces
+    (``2026-01-01``), and identity words alone (``role=user`` names a kind)
+    all stay attainable. The identity-word rule remains as a second net for
+    short indexes (``user_42``).
     """
     tokens = [token for token in re.split(r"[_.:+-]", value.lower()) if token]
     has_identity_label = any(token in _IDENTITY_KEYS for token in tokens)
     has_identifier_run = any(
         token.isdigit() or re.fullmatch(r"[0-9a-f]{8,}", token) for token in tokens
     )
-    return has_identity_label and has_identifier_run
+    if has_identity_label and has_identifier_run:
+        return True
+    if len(tokens) < 2:
+        return False
+    return any(
+        token.isdigit() and len(token) >= 5 and not _compact_date_partition(token)
+        for token in tokens
+    )
 
 
 # A safe identifier is one token of word/dot/dash characters — no spaces,
