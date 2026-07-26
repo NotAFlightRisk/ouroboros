@@ -923,6 +923,7 @@ def test_release_workflow_checks_tag_metadata_before_build() -> None:
     tui_job = workflow[workflow.index("  build-tui:") : workflow.index("  attach-tui-binaries:")]
 
     assert "${REF_NAME#v}" in workflow
+    assert '[[ "$VERSION" == *.dev* ]]' in workflow
     assert validation < build
     assert "needs: release" in tui_job
 
