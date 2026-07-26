@@ -633,6 +633,23 @@ class PMInterviewHandler:
                                 tool_name="ouroboros_pm_interview",
                             )
                         )
+                    # THE shared readiness gate (round-93): this transport
+                    # duplicated its own gating and skipped the promotion
+                    # check every other generation route asks, so an
+                    # observation-only PM interview dispatched Seed
+                    # generation to a child extractor.
+                    from ouroboros.bigbang.requirement_distillation import (
+                        OBSERVATION_ONLY_INTERVIEW_MESSAGE,
+                        interview_has_no_promotable_requirement,
+                    )
+
+                    if interview_has_no_promotable_requirement(state):
+                        return Result.err(
+                            MCPToolError(
+                                OBSERVATION_ONLY_INTERVIEW_MESSAGE,
+                                tool_name="ouroboros_pm_interview",
+                            )
+                        )
 
                 # Record answer into persisted state.
                 # In plugin mode each dispatch = new child session. The child
@@ -644,6 +661,10 @@ class PMInterviewHandler:
                 # question) and passes it back here so we can persist the real
                 # question text instead of a placeholder.
                 if answer:
+                    from ouroboros.core.requirement_candidate import (
+                        classify_answer_provenance,
+                    )
+
                     if state.rounds and state.rounds[-1].user_response is None:
                         # Round exists with question but no answer yet — fill it.
                         # If last_question was provided, update the question text
@@ -652,6 +673,10 @@ class PMInterviewHandler:
                         if last_question:
                             state.rounds[-1].question = last_question
                         state.rounds[-1].user_response = answer
+                        # Ingestion-time provenance stamp (rounds 85/89/93):
+                        # the field is the record, and this fill path left
+                        # every plugin-recorded answer typed "human".
+                        state.rounds[-1].answer_provenance = classify_answer_provenance(answer)
                     else:
                         # No rounds yet or all answered — append new round.
                         # Use last_question when available; fall back to a
@@ -667,6 +692,7 @@ class PMInterviewHandler:
                                 round_number=len(state.rounds) + 1,
                                 question=question_text,
                                 user_response=answer,
+                                answer_provenance=classify_answer_provenance(answer),
                             )
                         )
                     state.mark_updated()
@@ -675,8 +701,22 @@ class PMInterviewHandler:
                         return Result.err(
                             MCPToolError(str(save_result.error), tool_name="ouroboros_pm_interview")
                         )
-                # Build transcript from persisted rounds
-                transcript = _format_pm_transcript(state)
+                # Build transcript from persisted rounds. GENERATE feeds a
+                # child EXTRACTOR, so it takes the shared extraction-safe
+                # formatter — authoritative context, provenance-aware
+                # withholding, question taint (round-93: this transport
+                # duplicated its own raw formatter and exposed observations
+                # to mixed-session extraction). Conversational turns keep
+                # the raw transcript: the child interviewer legitimately
+                # sees observations (round-75 distinction).
+                if action == "generate":
+                    from ouroboros.mcp.tools.authoring_handlers import (
+                        _format_extraction_transcript,
+                    )
+
+                    transcript = _format_extraction_transcript(state)
+                else:
+                    transcript = _format_pm_transcript(state)
 
             payload = build_pm_interview_subagent(
                 session_id=real_session_id or "new",

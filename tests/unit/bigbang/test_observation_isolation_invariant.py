@@ -322,11 +322,28 @@ async def _pm_generate(state: InterviewState, tmp_path: Path) -> object:
     return await engine.generate_pm_seed(state)
 
 
+async def _pm_plugin_generate(state: InterviewState, tmp_path: Path) -> object:
+    from unittest.mock import patch
+
+    from ouroboros.core.types import Result
+    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
+
+    handler = PMInterviewHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
+    with patch(
+        "ouroboros.mcp.tools.authoring_handlers._plugin_load_state",
+        AsyncMock(return_value=Result.ok(state)),
+    ):
+        return await handler.handle({"session_id": state.interview_id, "action": "generate"})
+
+
 #: THE enumeration of generation entry points.
 _GENERATORS: list[tuple[str, Callable[..., object]]] = [
     ("dev", _dev_generate),
     ("plugin", _plugin_generate),
     ("pm", _pm_generate),
+    # Round-93: the PM plugin transport duplicated its own gating and
+    # skipped the shared readiness question entirely.
+    ("pm-plugin", _pm_plugin_generate),
 ]
 
 

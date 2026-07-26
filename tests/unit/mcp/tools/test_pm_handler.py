@@ -847,3 +847,115 @@ class TestSelectReposSessionContinuity:
             brownfield_repos=None,
         )
         assert result.value.meta["session_id"] == session_id
+
+
+class TestRound93PluginGenerateUsesTheSharedBoundary:
+    """The PM plugin generate path routes through the shared provenance
+    boundary instead of duplicating its own (round-93): the raw transcript
+    exposed observations to the child extractor, and the missing readiness
+    gate let an observation-only interview dispatch Seed generation."""
+
+    @pytest.mark.asyncio
+    async def test_generate_transcript_withholds_observations(self, tmp_path: Path) -> None:
+        state = InterviewState(
+            interview_id="pm_sess_r93",
+            initial_context="Build the reporting lane",
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="What did the data show?",
+                    user_response=(
+                        "[from-data] Confirmed: 42 enterprise accounts require SSO today."
+                    ),
+                ),
+                InterviewRound(
+                    round_number=2,
+                    question="What must the product guarantee?",
+                    user_response="Enterprise tier must include SSO.",
+                ),
+            ],
+        )
+        handler = PMInterviewHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
+        captured: dict[str, object] = {}
+
+        async def fake_dispatch(event_store, *, session_id, payload, response_shape):
+            captured["payload"] = payload
+            from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="delegated"),),
+                    is_error=False,
+                    meta={},
+                )
+            )
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers._plugin_load_state",
+                AsyncMock(return_value=Result.ok(state)),
+            ),
+            patch(
+                "ouroboros.mcp.tools.pm_handler.dispatch_plugin_terminal",
+                side_effect=fake_dispatch,
+            ),
+        ):
+            result = await handler.handle({"session_id": "pm_sess_r93", "action": "generate"})
+
+        assert result.is_ok
+        prompt = captured["payload"].prompt
+        assert "42 enterprise accounts" not in prompt
+        assert "Enterprise tier must include SSO." in prompt
+
+    @pytest.mark.asyncio
+    async def test_conversational_turns_keep_the_raw_transcript(self, tmp_path: Path) -> None:
+        """Round-75 distinction: the child interviewer legitimately sees
+        observations; only the generate/extraction turn withholds them."""
+        state = InterviewState(
+            interview_id="pm_sess_r93b",
+            initial_context="Build the reporting lane",
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="What did the data show?",
+                    user_response=(
+                        "[from-data] Confirmed: 42 enterprise accounts require SSO today."
+                    ),
+                ),
+            ],
+        )
+        handler = PMInterviewHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
+        captured: dict[str, object] = {}
+
+        async def fake_dispatch(event_store, *, session_id, payload, response_shape):
+            captured["payload"] = payload
+            from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="delegated"),),
+                    is_error=False,
+                    meta={},
+                )
+            )
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers._plugin_load_state",
+                AsyncMock(return_value=Result.ok(state)),
+            ),
+            patch(
+                "ouroboros.mcp.tools.pm_handler.dispatch_plugin_terminal",
+                side_effect=fake_dispatch,
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    "session_id": "pm_sess_r93b",
+                    "answer": "We prioritize enterprise.",
+                    "last_question": "Which segment do you prioritize?",
+                }
+            )
+
+        assert result.is_ok
+        assert "42 enterprise accounts" in captured["payload"].prompt
