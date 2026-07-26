@@ -12,7 +12,7 @@ import functools
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 import structlog
 
 from ouroboros.config import get_llm_model_for_role
@@ -201,6 +201,28 @@ class InterviewRound(BaseModel):
     )
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
+    @model_validator(mode="after")
+    def _classify_unset_provenance(self) -> "InterviewRound":
+        """Classify from the answer when the constructor did not decide.
+
+        ``record_response`` is the door and it always decides — from the
+        UNDECORATED answer, which is why an explicit value must win here. But
+        rounds are also built directly by the MCP handlers, and each of those
+        sites had to remember to classify. Deriving on the unset path makes
+        the field correct at construction whoever built it, so consumers can
+        read the field instead of re-deriving from the marker.
+
+        ``model_fields_set`` is what makes this safe: an explicit ``human``
+        (the user authored an answer that quotes an observation) is
+        distinguishable from an unset default, which the enum alone cannot
+        express.
+        """
+        if "answer_provenance" not in self.model_fields_set and self.user_response:
+            object.__setattr__(
+                self, "answer_provenance", classify_answer_provenance(self.user_response)
+            )
+        return self
+
 
 class InterviewState(BaseModel):
     """Persistent state of an interview session.
@@ -247,6 +269,23 @@ class InterviewState(BaseModel):
     def is_complete(self) -> bool:
         """Check if interview is marked complete (user-controlled)."""
         return self.status == InterviewStatus.COMPLETED
+
+    @property
+    def initial_context_provenance(self) -> str:
+        """Provenance of ``initial_context``, classified in ONE place.
+
+        ``InterviewRound`` carries a typed ``answer_provenance`` decided at
+        ingestion precisely so consumers stop re-classifying the marker.
+        ``initial_context`` never got that treatment: it enters at session
+        creation rather than through ``record_response``, so every consumer
+        that cared re-derived it, and the authoritative
+        ``prompt_safe_initial_context_with_provenance`` disagreed with them
+        by reporting a short ``[from-data]`` context as ``human``.
+
+        Derived rather than stored: the marker is in-band, so a pure function
+        of the text cannot drift from it and no caller can forge it.
+        """
+        return classify_answer_provenance(self.initial_context)
 
     @property
     def needs_initial_context_summary(self) -> bool:
@@ -468,9 +507,14 @@ def prompt_safe_initial_context_with_provenance(state: InterviewState) -> tuple[
     summary round, so a markerless summary typed ``data_fact`` reached the
     Dev and PM extractors verbatim. Callers that feed an extractor must
     sanitize with the returned provenance, not the default.
+
+    A context short enough to be used as-is reports its OWN provenance, not
+    a hardcoded ``human``: this function is the authority consumers ask, and
+    answering ``human`` for a ``[from-data]`` context contradicted the
+    consumers that classified the same string themselves.
     """
     if len(state.initial_context) <= MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS:
-        return state.initial_context, "human"
+        return state.initial_context, state.initial_context_provenance
     for round_data in reversed(state.rounds):
         if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION and round_data.user_response:
             return (

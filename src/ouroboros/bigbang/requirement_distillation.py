@@ -25,7 +25,6 @@ from ouroboros.core.requirement_candidate import (
     RequirementEvidence,
     RequirementEvidenceKind,
     RequirementSection,
-    classify_answer_provenance,
     effective_answer_provenance,
     evaluate_promotion,
 )
@@ -100,7 +99,7 @@ def interview_is_observation_only(state: InterviewState) -> bool:
     saw_content = False
     if state.initial_context.strip():
         saw_content = True
-        if classify_answer_provenance(state.initial_context) not in {
+        if state.initial_context_provenance not in {
             "data_fact",
             "research_fact",
         }:
@@ -171,7 +170,7 @@ def interview_has_no_promotable_requirement(state: InterviewState) -> bool:
     # standing in for the user's decision to build anything.
     if not _has_human_authored_content(state):
         return True
-    has_observation = classify_answer_provenance(state.initial_context) in {
+    has_observation = state.initial_context_provenance in {
         "data_fact",
         "research_fact",
     } or any(

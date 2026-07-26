@@ -368,3 +368,142 @@ def test_every_generation_path_refuses_an_observation_only_interview(
 
     assert outcome.is_err, path_name
     assert OBSERVATION_ONLY_INTERVIEW_MESSAGE in str(outcome.error), path_name
+
+
+# ---------------------------------------------------------------------------
+# One provenance authority for initial_context
+# ---------------------------------------------------------------------------
+#
+# ``InterviewRound`` decides provenance once at ingestion and carries it as a
+# typed field, so consumers read instead of re-parsing. ``initial_context``
+# never got that treatment — it enters at session creation, not through
+# ``record_response`` — so consumers re-derived it while
+# ``prompt_safe_initial_context_with_provenance`` answered a hardcoded
+# ``human`` for any context short enough to use as-is. Two authorities, two
+# answers, same string. This pins their agreement across the whole marker
+# population rather than the one marker a probe happens to use.
+
+_PROVENANCE_BY_MARKER = [
+    ("[from-data] Enterprise plan has 412 active accounts.", "data_fact"),
+    ("[from-research] The spec was ratified in 2019.", "research_fact"),
+    ("[from-code] AuthService reads the session cookie.", "repo_fact"),
+    ("[from-auto] Enterprise tier must include SSO.", "generated"),
+    ("Build an SSO dashboard for enterprise admins.", "human"),
+]
+
+
+@pytest.mark.parametrize(
+    ("context", "expected"),
+    _PROVENANCE_BY_MARKER,
+    ids=[expected for _, expected in _PROVENANCE_BY_MARKER],
+)
+def test_initial_context_provenance_authorities_agree(context: str, expected: str) -> None:
+    """The state property and the prompt-safe authority report the same class."""
+    from ouroboros.bigbang.interview import prompt_safe_initial_context_with_provenance
+
+    state = InterviewState(interview_id="provenance-authority", initial_context=context)
+
+    _, authoritative = prompt_safe_initial_context_with_provenance(state)
+
+    assert state.initial_context_provenance == expected
+    assert authoritative == expected
+
+
+def test_oversized_context_still_reports_the_summary_round_provenance() -> None:
+    """Oversized contexts keep deferring to the substitute round's typed field.
+
+    The agreement above must not be won by making the short path authoritative
+    everywhere: when a summary stands in for the raw context, the SUBSTITUTE's
+    provenance is the record, even though the raw context reads as human.
+    """
+    from ouroboros.bigbang.interview import prompt_safe_initial_context_with_provenance
+
+    state = InterviewState(
+        interview_id="provenance-authority-oversized",
+        initial_context="A" * (MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS + 1),
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response="Enterprise plan has 412 active accounts.",
+                answer_provenance="data_fact",
+            )
+        ],
+    )
+
+    text, provenance = prompt_safe_initial_context_with_provenance(state)
+
+    assert provenance == "data_fact"
+    assert "412" in text
+    assert state.initial_context_provenance == "human"
+
+
+# ---------------------------------------------------------------------------
+# The round provenance field is correct whoever built the round
+# ---------------------------------------------------------------------------
+#
+# ``record_response`` is the door and decides provenance from the UNDECORATED
+# answer. But the MCP handlers also build rounds directly, and each of those
+# sites had to remember to classify — the same "caller must remember" shape
+# that let a decorated answer be stamped human. The field now classifies
+# itself when the constructor did not decide, so forgetting is no longer
+# expressible; an explicit value still wins, which is what keeps the
+# decoration case and a user's own observation-quoting answer correct.
+
+
+def test_round_built_without_provenance_classifies_itself() -> None:
+    """A construction site that forgets still gets the right class."""
+    round_data = InterviewRound(
+        round_number=1,
+        question="How many enterprise accounts?",
+        user_response=f"{_OBSERVATION}",
+    )
+
+    assert round_data.answer_provenance == "human"
+
+    observed = InterviewRound(
+        round_number=1,
+        question="How many enterprise accounts?",
+        user_response="[from-data] 412 enterprise accounts are active.",
+    )
+
+    assert observed.answer_provenance == "data_fact"
+
+
+def test_explicit_provenance_wins_over_the_text() -> None:
+    """Decoration and user-authored citation both depend on the explicit value.
+
+    ``PM answer: [from-data] ...`` must stay ``data_fact`` (the decoration
+    must not launder it), and a human decision that QUOTES an observation
+    must stay ``human`` (the user authored the decision).
+    """
+    decorated = InterviewRound(
+        round_number=1,
+        question="Q",
+        user_response="PM answer: [from-data] 412 enterprise accounts are active.",
+        answer_provenance="data_fact",
+    )
+
+    assert decorated.answer_provenance == "data_fact"
+
+    cited = InterviewRound(
+        round_number=2,
+        question="Q",
+        user_response="412 of them, 37 asked for SSO, so this is P0. [from-data] source",
+        answer_provenance="human",
+    )
+
+    assert cited.answer_provenance == "human"
+
+
+def test_legacy_round_without_the_field_is_classified_on_load() -> None:
+    """A persisted round predating the typed field migrates on deserialization."""
+    legacy = InterviewRound.model_validate(
+        {
+            "round_number": 1,
+            "question": "Q",
+            "user_response": "[from-research] The spec was ratified in 2019.",
+        }
+    )
+
+    assert legacy.answer_provenance == "research_fact"
