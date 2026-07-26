@@ -726,6 +726,11 @@ _OUROBOROS_TOOL_CAPABILITY_SPECS: Mapping[str, _OuroborosToolCapabilitySpec] = {
             "ouroboros_pm_interview",
             "ouroboros_brownfield",
             "ouroboros_lateral_think",
+            # The fan-out this tool emits is redeemed here (round-105):
+            # generic capability discovery must expose the re-entry tool
+            # reciprocally, or a host reading only the companion list has
+            # no way to return lane results.
+            "ouroboros_submit_fanout_results",
         ),
         side_effects=("subagent_dispatch", "session_state_write"),
         retry=_OUROBOROS_DEFAULT_RETRY_METADATA,
@@ -780,7 +785,8 @@ _OUROBOROS_TOOL_CAPABILITY_SPECS: Mapping[str, _OuroborosToolCapabilitySpec] = {
     ),
     "ouroboros_lateral_think": _OuroborosToolCapabilitySpec(
         execution_mode="subagent_orchestration",
-        companions=("ouroboros_interview",),
+        # Same reciprocity as the interview producer (round-105).
+        companions=("ouroboros_interview", "ouroboros_submit_fanout_results"),
         side_effects=("subagent_dispatch", "session_state_write"),
         retry=_OUROBOROS_DEFAULT_RETRY_METADATA,
         interrupt=_OUROBOROS_DEFAULT_INTERRUPT_METADATA,

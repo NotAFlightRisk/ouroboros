@@ -306,6 +306,9 @@ _EXPECTED_OUROBOROS_TOOL_COMPANIONS = {
         "ouroboros_pm_interview",
         "ouroboros_brownfield",
         "ouroboros_lateral_think",
+        # Round-105: the fan-out this tool emits is redeemed through the
+        # re-entry tool, so discovery exposes it reciprocally.
+        "ouroboros_submit_fanout_results",
     ),
     "ouroboros_job_result": (
         "ouroboros_start_auto",
@@ -337,7 +340,10 @@ _EXPECTED_OUROBOROS_TOOL_COMPANIONS = {
         "ouroboros_job_result",
         "ouroboros_cancel_job",
     ),
-    "ouroboros_lateral_think": ("ouroboros_interview",),
+    "ouroboros_lateral_think": (
+        "ouroboros_interview",
+        "ouroboros_submit_fanout_results",
+    ),
     "ouroboros_lineage_status": (
         "ouroboros_evolve_step",
         "ouroboros_start_evolve_step",
@@ -4717,7 +4723,12 @@ async def test_owned_lateral_thinking_capability_invokes_subagent_orchestration(
     assert metadata is not None
     assert metadata.fallback_used is False
     assert metadata.execution_mode == "subagent_orchestration"
-    assert metadata.companions == ("ouroboros_interview",)
+    assert metadata.companions == (
+        "ouroboros_interview",
+        # Round-105: the re-entry tool is a reciprocal companion, so a
+        # host reading only capability discovery can return lane results.
+        "ouroboros_submit_fanout_results",
+    )
     assert metadata.required_context_keys == (
         "problem_context",
         "current_approach",
@@ -4823,7 +4834,12 @@ async def test_owned_lateral_review_tool_path_uses_explicit_metadata_and_is_call
     assert metadata.fallback_used is False
     assert metadata.input_schema == definitions["ouroboros_lateral_think"].to_input_schema()
     assert metadata.execution_mode == "subagent_orchestration"
-    assert metadata.companions == ("ouroboros_interview",)
+    assert metadata.companions == (
+        "ouroboros_interview",
+        # Round-105: the re-entry tool is a reciprocal companion, so a
+        # host reading only capability discovery can return lane results.
+        "ouroboros_submit_fanout_results",
+    )
     assert metadata.required_context_keys == (
         "problem_context",
         "current_approach",

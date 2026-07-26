@@ -9440,3 +9440,62 @@ def test_round104_retention_marker_is_scoped_to_the_data_contract(tmp_path: Any)
         fanout_id=fanout_id,
     )
     assert second["status"] == "complete", second
+
+
+def test_round105_advertised_correlation_path_matches_dispatch_and_registry(tmp_path: Any) -> None:
+    """One correlation PATH across capability, dispatch, and re-entry.
+
+    The versioned capability advertised the bare field name `lane_id` while
+    payloads carry it at `context.lane_id` and registration keys on that
+    path, so a capability-driven host could not resolve it.
+    """
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    advisory = ouroboros_tool_capability_metadata("ouroboros_interview")["orchestration"][
+        "question_advisory_fanout"
+    ]
+    advertised = advisory["response_payload_refs"]["result_correlation_key"]
+    assert advertised == "context.lane_id"
+
+    # Dispatch: the emitted meta stamps the same path.
+    meta: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id="sess-105",
+        question="Which plan tier do most active users hit?",
+        phase="answer",
+        score=None,
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+    )
+    assert meta["question_advisory_result_correlation_key"] == advertised
+
+    # Re-entry: a submission using the advertised path completes.
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-105",
+        lanes=[{"lane_id": "code_context", "capability": "inspect_code", "required": True}],
+        correlation_key=advertised,
+    )
+    assert fanout_id is not None
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-105",
+        correlation_key=advertised,
+        results=[{"key": "code_context", "content": {"lane_id": "code_context", "finding": "ok"}}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete", out
+
+
+def test_round105_reentry_tool_is_a_reciprocal_companion() -> None:
+    """Capability discovery exposes the re-entry tool from its producers."""
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    for producer in ("ouroboros_interview", "ouroboros_lateral_think"):
+        companions = ouroboros_tool_capability_metadata(producer)["companions"]
+        assert "ouroboros_submit_fanout_results" in companions, producer
+    reentry = ouroboros_tool_capability_metadata("ouroboros_submit_fanout_results")["companions"]
+    assert "ouroboros_interview" in reentry
+    assert "ouroboros_lateral_think" in reentry

@@ -903,7 +903,12 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
         },
         "response_payload_refs": {
             "plugin": "parent_runtime.ouroboros_dispatch.children",
-            "result_correlation_key": "lane_id",
+            # The PATH a host reads the correlation value from (round-105):
+            # emitted payloads carry it at context.lane_id, registration
+            # keys on that path, and the stamped re-entry contract requires
+            # it — advertising the bare field name left capability-driven
+            # hosts unable to resolve it.
+            "result_correlation_key": "context.lane_id",
             "requires_prose_parsing": False,
             "synthesis_owner": "parent_session",
         },
