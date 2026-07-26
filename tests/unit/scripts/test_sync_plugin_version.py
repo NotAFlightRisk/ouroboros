@@ -574,7 +574,10 @@ def test_atomic_write_rejects_target_changed_since_preflight(tmp_path: Path) -> 
     assert target.read_bytes() == external
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="rename exchange is Linux-only")
+@pytest.mark.skipif(
+    not (sys.platform.startswith("linux") or sys.platform == "darwin"),
+    reason="atomic pathname exchange is unavailable on this platform",
+)
 def test_atomic_exchange_restores_edit_arriving_at_commit(
     tmp_path: Path,
     monkeypatch,
@@ -603,6 +606,27 @@ def test_atomic_exchange_restores_edit_arriving_at_commit(
         )
 
     assert target.read_bytes() == external
+
+
+def test_atomic_write_fails_closed_when_exchange_is_unavailable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "target.json"
+    original = b'{"version":"1.2.3"}\n'
+    target.write_bytes(original)
+
+    monkeypatch.setattr(sync_plugin_version, "_exchange_paths", lambda *_args: False)
+
+    with pytest.raises(RuntimeError, match="atomic path exchange is unavailable"):
+        sync_plugin_version._atomic_write_bytes(
+            target,
+            b'{"version":"1.2.4"}\n',
+            expected_current=original,
+        )
+
+    assert target.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [target]
 
 
 def test_main_write_rolls_back_when_later_write_fails(
@@ -775,6 +799,64 @@ def test_main_write_rejects_external_edit_after_preflight(tmp_path: Path, monkey
 
     assert plugin_json.read_bytes() == external
     assert any("write conflict" in str(exc) for exc in raised.value.exceptions)
+
+
+def test_main_write_revalidates_targets_that_were_already_current(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_skill = tmp_path / "skills/setup/SKILL.md"
+    bundled_skill = tmp_path / ".claude-plugin/skills/setup/SKILL.md"
+    plugin_json = tmp_path / ".claude-plugin/plugin.json"
+    marketplace_json = tmp_path / ".claude-plugin/marketplace.json"
+    source_skill.parent.mkdir(parents=True)
+    bundled_skill.parent.mkdir(parents=True)
+    plugin_json.parent.mkdir(parents=True, exist_ok=True)
+    source_skill.write_text("<!-- ooo:VERSION:1.2.4 -->\nsource\n")
+    bundled_skill.write_text("<!-- ooo:VERSION:1.2.4 -->\nbundled\n")
+    plugin_json.write_text('{"version":"1.2.4"}\n')
+    marketplace_json.write_text('{"plugins":[{"version":"1.2.3"}]}\n')
+    original_marketplace = marketplace_json.read_bytes()
+    external_plugin = b'{"version":"external"}\n'
+    monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
+    monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
+    monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
+    monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
+    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
+    monkeypatch.setattr(
+        sync_plugin_version.sys,
+        "argv",
+        ["sync-plugin-version.py", "--write", "--version", "1.2.4"],
+    )
+    original_update_json = sync_plugin_version.update_json
+
+    def mutate_current_target_after_write(
+        path: Path,
+        version: str,
+        *,
+        nested_key=None,
+        expected_current=None,
+    ) -> bool:
+        updated = original_update_json(
+            path,
+            version,
+            nested_key=nested_key,
+            expected_current=expected_current,
+        )
+        plugin_json.write_bytes(external_plugin)
+        return updated
+
+    monkeypatch.setattr(
+        sync_plugin_version,
+        "update_json",
+        mutate_current_target_after_write,
+    )
+
+    with pytest.raises(RuntimeError, match="post-write conflict"):
+        sync_plugin_version.main()
+
+    assert plugin_json.read_bytes() == external_plugin
+    assert marketplace_json.read_bytes() == original_marketplace
 
 
 def test_main_write_rolls_back_only_successfully_replaced_targets(

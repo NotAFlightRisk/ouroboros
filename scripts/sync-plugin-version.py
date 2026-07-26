@@ -171,22 +171,34 @@ def _load_json(path: Path) -> object:
 
 
 def _exchange_paths(source: Path, destination: Path) -> bool:
-    """Atomically exchange two Linux pathnames when renameat2 is available."""
-    if not sys.platform.startswith("linux"):
+    """Atomically exchange two pathnames when the host filesystem supports it."""
+    if sys.platform.startswith("linux"):
+        function_name = "renameat2"
+        at_fdcwd = -100
+    elif sys.platform == "darwin":
+        function_name = "renameatx_np"
+        at_fdcwd = -2
+    else:
         return False
     try:
-        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+        exchange = getattr(ctypes.CDLL(None, use_errno=True), function_name)
     except AttributeError:
         return False
-    renameat2.argtypes = [
+    exchange.argtypes = [
         ctypes.c_int,
         ctypes.c_char_p,
         ctypes.c_int,
         ctypes.c_char_p,
         ctypes.c_uint,
     ]
-    renameat2.restype = ctypes.c_int
-    result = renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 2)
+    exchange.restype = ctypes.c_int
+    result = exchange(
+        at_fdcwd,
+        os.fsencode(source),
+        at_fdcwd,
+        os.fsencode(destination),
+        0x00000002,
+    )
     if result == 0:
         return True
     error = ctypes.get_errno()
@@ -212,10 +224,13 @@ def _atomic_write_bytes(
             temp_file.flush()
             os.fchmod(temp_file.fileno(), mode)
             os.fsync(temp_file.fileno())
-        exchanged = (
-            expected_current is not None and path.exists() and _exchange_paths(temp_path, path)
-        )
-        if exchanged:
+        if expected_current is not None:
+            if not path.exists():
+                raise RuntimeError(f"write conflict for {path}: file changed since preflight")
+            if not _exchange_paths(temp_path, path):
+                raise RuntimeError(
+                    f"write conflict for {path}: atomic path exchange is unavailable"
+                )
             if temp_path.read_bytes() != expected_current:
                 try:
                     restored = _exchange_paths(temp_path, path)
@@ -230,8 +245,6 @@ def _atomic_write_bytes(
                     )
                 raise RuntimeError(f"write conflict for {path}: file changed since preflight")
         else:
-            if expected_current is not None and path.read_bytes() != expected_current:
-                raise RuntimeError(f"write conflict for {path}: file changed since preflight")
             os.replace(temp_path, path)
         directory_fd = os.open(path.parent, os.O_RDONLY)
         try:
@@ -377,8 +390,10 @@ def _run() -> None:
             if not isinstance(old, str):
                 raise TypeError("version must be a string")
             target["version"] = version
-            expected_writes[path] = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode(
-                "utf-8"
+            expected_writes[path] = (
+                original
+                if old == version
+                else (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
             )
         except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
             sys.exit(f"Error: could not validate {path.relative_to(ROOT)}: {exc}")
@@ -427,6 +442,13 @@ def _run() -> None:
             else:
                 print(f"  DRIFT {path.relative_to(ROOT)} ({old_marker} != {version})")
                 changed = True
+
+        if write:
+            for path, expected in expected_writes.items():
+                if path.read_bytes() != expected:
+                    raise RuntimeError(
+                        f"post-write conflict for {path}: final content differs from preflight plan"
+                    )
     except BaseException as primary_error:
         if not write:
             raise
