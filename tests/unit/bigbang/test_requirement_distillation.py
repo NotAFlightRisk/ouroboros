@@ -990,3 +990,47 @@ def test_round91_oversized_data_summary_never_promotes_the_raw_goal() -> None:
         if c.candidate_id == "initial-goal"
     )
     assert goal.text == "Build the reporting lane for enterprise admins."
+
+
+def test_round94_pm_decoration_does_not_launder_provenance(tmp_path) -> None:
+    """Provenance is classified from the ORIGINAL answer, not the bundle.
+
+    The PM layer prepends "PM answer:" to reframed answers before recording;
+    that pushed a leading [from-data] marker off the front, the round was
+    stamped human, and the observation earned a promoted requirement and
+    passed the readiness gate.
+    """
+    import asyncio
+
+    from ouroboros.bigbang.interview import InterviewEngine
+    from ouroboros.bigbang.pm_interview import PMInterviewEngine
+    from ouroboros.bigbang.question_classifier import QuestionClassifier
+    from ouroboros.bigbang.requirement_distillation import (
+        interview_has_no_promotable_requirement,
+    )
+
+    inner = InterviewEngine(llm_adapter=AsyncMock(), state_dir=tmp_path)
+    engine = PMInterviewEngine(
+        inner=inner,
+        classifier=QuestionClassifier(llm_adapter=AsyncMock()),
+        llm_adapter=AsyncMock(),
+    )
+    reframed = "How many enterprise accounts need SSO?"
+    engine._reframe_map[reframed] = "What is the SSO adoption metric?"
+
+    state = InterviewState(
+        interview_id="iv_r94",
+        initial_context="[from-data] Confirmed: 42 accounts require SSO.",
+        rounds=[],
+    )
+    observation = "[from-data] Confirmed: 42 enterprise accounts require SSO today."
+    outcome = asyncio.run(engine.record_response(state, observation, reframed))
+    assert outcome.is_ok
+
+    recorded = state.rounds[-1]
+    assert recorded.user_response.startswith("PM answer:")
+    assert recorded.answer_provenance == "data_fact"
+
+    distillation = build_requirement_distillation(state)
+    assert not [c for c in distillation.candidates if "42 enterprise accounts" in c.text]
+    assert interview_has_no_promotable_requirement(state)

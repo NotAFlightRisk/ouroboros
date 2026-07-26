@@ -997,14 +997,25 @@ class InterviewEngine:
         return [candidate for candidate in results if candidate is not None]
 
     async def record_response(
-        self, state: InterviewState, user_response: str, question: str
+        self,
+        state: InterviewState,
+        user_response: str,
+        question: str,
+        *,
+        original_response: str | None = None,
     ) -> Result[InterviewState, ValidationError]:
         """Record the user's response to the current question.
 
         Args:
             state: Current interview state.
-            user_response: The user's response.
+            user_response: The user's response, possibly decorated by a
+                wrapping engine (e.g. the PM layer's ``PM answer:`` bundle).
             question: The question that was asked.
+            original_response: The response as the user actually gave it,
+                BEFORE any decoration. Provenance is classified from this
+                (round-94): a ``PM answer:`` prefix pushed the
+                ``[from-data]`` marker off the front and the observation was
+                stamped human — decoration must never launder provenance.
 
         Returns:
             Result containing updated state or ValidationError.
@@ -1044,12 +1055,16 @@ class InterviewEngine:
 
         # Create new round. Provenance is classified ONCE, here at ingestion,
         # and carried as a typed field (round-85) — consumers read the field
-        # instead of re-parsing the marker at every surface.
+        # instead of re-parsing the marker at every surface. Classification
+        # reads the ORIGINAL response when a wrapper decorated the stored
+        # form (round-94).
         round_data = InterviewRound(
             round_number=state.current_round_number,
             question=question,
             user_response=user_response,
-            answer_provenance=classify_answer_provenance(user_response),
+            answer_provenance=classify_answer_provenance(
+                original_response if original_response is not None else user_response
+            ),
         )
 
         state.rounds.append(round_data)

@@ -686,7 +686,16 @@ class PMInterviewEngine:
                 reframed_question=question[:100],
             )
 
-            return await self.inner.record_response(state, bundled_response, bundled_question)
+            # Provenance is classified from the ORIGINAL answer (round-94):
+            # the "PM answer:" decoration pushed a leading [from-data] marker
+            # off the front, the round was stamped human, and the observation
+            # earned a promoted requirement.
+            return await self.inner.record_response(
+                state,
+                bundled_response,
+                bundled_question,
+                original_response=user_response,
+            )
 
         return await self.inner.record_response(state, user_response, question)
 
