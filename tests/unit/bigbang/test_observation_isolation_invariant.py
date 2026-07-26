@@ -58,13 +58,18 @@ def _pm_document_context(state: InterviewState) -> str:
     the first enumeration. Its sanitizer is pinned here so the miss cannot
     recur silently.
     """
+    from ouroboros.bigbang.interview import prompt_safe_initial_context_with_provenance
     from ouroboros.bigbang.pm_document import extraction_safe_qa_pairs
 
     pairs = [(r.question, r.user_response or "") for r in state.rounds]
     provenances = [r.answer_provenance for r in state.rounds]
     if state.initial_context:
-        pairs = [("What is the initial context?", state.initial_context), *pairs]
-        provenances = ["human", *provenances]
+        # Any inclusion of interview context in a durable prompt goes
+        # through the AUTHORITATIVE value with its provenance (round-92) —
+        # the raw oversized blob can carry the observation mid-text.
+        context, context_provenance = prompt_safe_initial_context_with_provenance(state)
+        pairs = [("What is the initial context?", context), *pairs]
+        provenances = [context_provenance, *provenances]
     return "\n".join(f"Q: {q}\nA: {a}" for q, a in extraction_safe_qa_pairs(pairs, provenances))
 
 
@@ -159,6 +164,38 @@ def _entrance_states() -> list[tuple[str, InterviewState]]:
                 interview_id="iv_inv_d",
                 initial_context=f"[from-data] {_OBSERVATION}",
                 rounds=_rounds(("What must the product guarantee?", _DECISION)),
+            ),
+        )
+    )
+    states.append(
+        (
+            # Round-92: the observation sits MID-TEXT in an oversized raw
+            # context where no marker leads — only the authoritative summary
+            # substitution keeps it out, and the plugin transcript rendered
+            # the raw blob. A human decision round keeps the readiness gate
+            # out of the picture: this pins the extraction surface itself.
+            "oversized-embedded",
+            InterviewState(
+                interview_id="iv_inv_g",
+                initial_context=(
+                    "Background notes. "
+                    + _OBSERVATION
+                    + " "
+                    + "x" * MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS
+                ),
+                rounds=[
+                    InterviewRound(
+                        round_number=1,
+                        question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                        user_response="Reporting-lane context, observation adopted separately.",
+                        answer_provenance="data_fact",
+                    ),
+                    InterviewRound(
+                        round_number=2,
+                        question="What must the product guarantee?",
+                        user_response=_DECISION,
+                    ),
+                ],
             ),
         )
     )
