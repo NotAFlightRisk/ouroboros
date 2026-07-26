@@ -39,8 +39,8 @@ from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
     InterviewState,
+    extraction_safe_transcript,
     initial_context_summary_missing,
-    prompt_safe_initial_context_with_provenance,
 )
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.bigbang.question_classifier import (
@@ -57,10 +57,6 @@ from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
-from ouroboros.core.requirement_candidate import (
-    extraction_safe_answer,
-    extraction_safe_question,
-)
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -1263,29 +1259,13 @@ class PMInterviewEngine:
         Returns:
             Formatted context string.
         """
-        # Same summary-answer sanitization as the dev Seed path (rounds 81
-        # and 90): marker rule plus the summary round's typed provenance.
-        raw_context, context_provenance = prompt_safe_initial_context_with_provenance(state)
-        safe_context = extraction_safe_answer(raw_context, context_provenance)
-        observation_seen = safe_context != raw_context
-        parts = [f"Initial Context: {safe_context}"]
+        transcript = extraction_safe_transcript(state)
+        parts = [f"Initial Context: {transcript.initial_context}"]
 
-        for round_data in state.rounds:
-            if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
-                continue
-            # Same withholding as the dev Seed path (rounds 74 and 80): a
-            # PMSeed is durable too, its extractor paraphrases the same way,
-            # and a question generated after an observation may restate it.
-            parts.append(
-                f"\nQ: {extraction_safe_question(round_data.question, observation_seen=observation_seen)}"
-            )
-            if round_data.user_response:
-                safe = extraction_safe_answer(
-                    round_data.user_response, round_data.answer_provenance
-                )
-                if safe != round_data.user_response:
-                    observation_seen = True
-                parts.append(f"A: {safe}")
+        for round_data in transcript.rounds:
+            parts.append(f"\nQ: {round_data.question}")
+            if round_data.answer is not None:
+                parts.append(f"A: {round_data.answer}")
 
         return "\n".join(parts)
 

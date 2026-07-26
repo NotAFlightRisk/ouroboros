@@ -620,3 +620,87 @@ def test_inheritance_is_scoped_to_the_summary_question() -> None:
     )
 
     assert state.rounds[-1].answer_provenance == "human"
+
+
+# ---------------------------------------------------------------------------
+# Consumers render the isolated transcript; they do not compute it
+# ---------------------------------------------------------------------------
+#
+# The enumeration this file opens with named the extraction surfaces. It could
+# not stop a NEW one from being written without the rule, because the rule
+# lived in each surface: three byte-identical copies of the walk plus a fourth
+# in pair form, and round-84 found one of them a round late. There is one walk
+# now, so a surface that renders `extraction_safe_transcript` inherits the
+# rule and a surface that does not cannot see an observation to leak.
+
+_ISOLATION_INTERNALS = (
+    "extraction_safe_answer",
+    "extraction_safe_question",
+    "observation_seen",
+    "OBSERVATION_WITHHELD_NOTE",
+    "QUESTION_WITHHELD_NOTE",
+)
+
+_EXTRACTION_SURFACES = (
+    "src/ouroboros/bigbang/seed_generator.py",
+    "src/ouroboros/bigbang/pm_interview.py",
+    "src/ouroboros/bigbang/pm_document.py",
+    "src/ouroboros/mcp/tools/authoring_handlers.py",
+)
+
+
+@pytest.mark.parametrize("module_path", _EXTRACTION_SURFACES)
+def test_extraction_surface_does_not_reimplement_isolation(module_path: str) -> None:
+    """No extraction surface names the isolation internals."""
+    source = Path(module_path).read_text(encoding="utf-8")
+
+    leaked = [name for name in _ISOLATION_INTERNALS if name in source]
+
+    assert leaked == [], (
+        f"{module_path} names {leaked}: render extraction_safe_transcript "
+        f"(or isolate_observation_pairs for explicit pairs) instead of "
+        f"re-applying the rule."
+    )
+
+
+def test_the_isolation_walk_has_exactly_one_implementation() -> None:
+    """`observation_seen` is advanced in one place in the whole tree."""
+    import subprocess
+
+    hits = subprocess.run(
+        ["grep", "-rn", "observation_seen = True", "src/ouroboros/"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.splitlines()
+
+    assert len(hits) == 1, f"expected one isolation walk, found {len(hits)}:\n" + "\n".join(hits)
+
+
+def test_the_view_still_withholds_what_the_copies_withheld() -> None:
+    """An observation answer is withheld and taints the questions after it."""
+    from ouroboros.bigbang.interview import extraction_safe_transcript
+
+    state = InterviewState(
+        interview_id="view-withholds",
+        initial_context="Build an SSO dashboard for enterprise admins.",
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question="How many enterprise accounts are there?",
+                user_response=f"[from-data] {_OBSERVATION}",
+            ),
+            InterviewRound(
+                round_number=2,
+                question=f"Given {_OBSERVATION}, should SSO be P0?",
+                user_response="Yes, make it P0.",
+            ),
+        ],
+    )
+
+    transcript = extraction_safe_transcript(state)
+    rendered = "\n".join(f"{item.question}\n{item.answer or ''}" for item in transcript.rounds)
+
+    assert _OBSERVATION not in rendered
+    assert "Yes, make it P0." in rendered
+    assert transcript.rounds[0].question == "How many enterprise accounts are there?"

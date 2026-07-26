@@ -23,6 +23,8 @@ from ouroboros.core.requirement_candidate import (
     RequirementDistillation,
     classify_answer_provenance,
     compute_requirement_input_fingerprint,
+    extraction_safe_answer,
+    isolate_observation_pairs,
 )
 from ouroboros.core.security import InputValidator
 from ouroboros.core.types import Result
@@ -521,6 +523,67 @@ def _ingested_provenance(state: InterviewState, question: str, answer: str) -> s
         return classified
     context_provenance = state.initial_context_provenance
     return context_provenance if context_provenance in _OBSERVATION_PROVENANCE else classified
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractionSafeRound:
+    """One interview round in the form that may enter requirement extraction."""
+
+    round_number: int
+    question: str
+    answer: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractionSafeTranscript:
+    """The interview as an extractor may see it, observations already withheld.
+
+    Consumers render this; they do not compute it. Before this existed, the
+    Dev extractor, the PM extractor and the plugin extractor each carried
+    their own copy of the isolation walk — two of them byte-identical, the
+    third differing only in its heading strings — and the PM document surface
+    was found to be a fourth a round later. A rule that has to be re-applied
+    by every consumer is a rule that a new consumer silently misses, which is
+    exactly how the extraction entrances kept multiplying.
+    """
+
+    initial_context: str
+    rounds: tuple[ExtractionSafeRound, ...]
+
+
+def extraction_safe_transcript(state: InterviewState) -> ExtractionSafeTranscript:
+    """The interview state as requirement extraction may see it.
+
+    The initial context is taken from the AUTHORITATIVE value with its
+    provenance, so an oversized context contributes its substitute rather
+    than the raw blob, and a withheld context taints the questions that
+    follow it. The summary round itself is dropped: it is the substitute
+    already accounted for above, not a round of the interview.
+    """
+    raw_context, context_provenance = prompt_safe_initial_context_with_provenance(state)
+    safe_context = extraction_safe_answer(raw_context, context_provenance)
+
+    rounds = [
+        round_data
+        for round_data in state.rounds
+        if round_data.question != INITIAL_CONTEXT_SUMMARY_QUESTION
+    ]
+    isolated = isolate_observation_pairs(
+        [(round_data.question, round_data.user_response or "") for round_data in rounds],
+        [round_data.answer_provenance for round_data in rounds],
+        observation_seen=safe_context != raw_context,
+    )
+    return ExtractionSafeTranscript(
+        initial_context=safe_context,
+        rounds=tuple(
+            ExtractionSafeRound(
+                round_number=round_data.round_number,
+                question=question,
+                answer=answer if round_data.user_response else None,
+            )
+            for round_data, (question, answer) in zip(rounds, isolated, strict=True)
+        ),
+    )
 
 
 def prompt_safe_initial_context(state: InterviewState) -> str:

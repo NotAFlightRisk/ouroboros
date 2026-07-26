@@ -41,7 +41,7 @@ from ouroboros.bigbang.interview import (
     InterviewEngine,
     InterviewState,
     InterviewStatus,
-    prompt_safe_initial_context_with_provenance,
+    extraction_safe_transcript,
 )
 from ouroboros.bigbang.requirement_distillation import (
     OBSERVATION_ONLY_INTERVIEW_MESSAGE,
@@ -63,8 +63,6 @@ from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.requirement_candidate import (
     classify_answer_provenance,
-    extraction_safe_answer,
-    extraction_safe_question,
 )
 from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
@@ -1318,37 +1316,14 @@ def _format_extraction_transcript(state: InterviewState) -> str:
     if not state.rounds:
         return ""
     lines: list[str] = []
-    observation_seen = False
+    transcript = extraction_safe_transcript(state)
     if state.initial_context:
-        # The initial context itself can lead with an observation marker
-        # (round-81) — the same rule every answer gets, and a withheld one
-        # taints every question. The AUTHORITATIVE context value with its
-        # typed provenance (round-92): an oversized raw context can carry
-        # the observation mid-text where no marker leads, and the in-process
-        # and PM extractors already substitute the user's summary — this
-        # transport rendered the raw blob.
-        raw_context, context_provenance = prompt_safe_initial_context_with_provenance(state)
-        safe_context = extraction_safe_answer(raw_context, context_provenance)
-        observation_seen = safe_context != raw_context
-        lines.append(f"**Initial Context:** {safe_context}")
+        lines.append(f"**Initial Context:** {transcript.initial_context}")
         lines.append("")
-    for r in state.rounds:
-        if r.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
-            # The summary is the context line above (same rule as the
-            # in-process extractors); rendering the round too would
-            # duplicate it outside the context's withholding decision.
-            continue
-        # Question withholding by taint provenance (round-80), answers by
-        # marker (round-74) — see extraction_safe_question.
-        lines.append(
-            f"**Q{r.round_number}:** "
-            f"{extraction_safe_question(r.question, observation_seen=observation_seen)}"
-        )
-        if r.user_response:
-            safe = extraction_safe_answer(r.user_response, r.answer_provenance)
-            if safe != r.user_response:
-                observation_seen = True
-            lines.append(f"**A{r.round_number}:** {safe}")
+    for r in transcript.rounds:
+        lines.append(f"**Q{r.round_number}:** {r.question}")
+        if r.answer is not None:
+            lines.append(f"**A{r.round_number}:** {r.answer}")
         lines.append("")
     return "\n".join(lines).rstrip()
 

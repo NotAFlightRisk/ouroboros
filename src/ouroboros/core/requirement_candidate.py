@@ -123,6 +123,34 @@ def effective_answer_provenance(answer: str, declared: str = "human") -> str:
     return classify_answer_provenance(answer)
 
 
+def isolate_observation_pairs(
+    qa_pairs: Sequence[tuple[str, str]],
+    provenances: Sequence[str] | None = None,
+    *,
+    observation_seen: bool = False,
+) -> list[tuple[str, str]]:
+    """THE observation-isolation walk, over question/answer pairs.
+
+    Answers are withheld by their ingestion-time provenance; questions by
+    taint, because a question generated AFTER an observation entered the
+    history can restate it verbatim. The two interact in one direction only:
+    a withheld answer taints every LATER question, never the question it
+    answers, so the ordering here is part of the rule rather than an artifact
+    of it.
+    """
+    sanitized: list[tuple[str, str]] = []
+    for index, (question, answer) in enumerate(qa_pairs):
+        declared = (
+            provenances[index] if provenances is not None and index < len(provenances) else "human"
+        )
+        safe_question = extraction_safe_question(question, observation_seen=observation_seen)
+        safe_answer = extraction_safe_answer(answer, declared)
+        if safe_answer != answer:
+            observation_seen = True
+        sanitized.append((safe_question, safe_answer))
+    return sanitized
+
+
 def extraction_safe_answer(answer: str, declared_provenance: str = "human") -> str:
     """The form of an answer that may enter requirement extraction.
 

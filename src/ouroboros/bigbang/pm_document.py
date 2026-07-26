@@ -21,10 +21,7 @@ from ouroboros.bigbang.pm_seed import PMSeed
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.owner_only import write_owner_only
-from ouroboros.core.requirement_candidate import (
-    extraction_safe_answer,
-    extraction_safe_question,
-)
+from ouroboros.core.requirement_candidate import isolate_observation_pairs
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -247,18 +244,7 @@ def extraction_safe_qa_pairs(
     default to the marker fallback. Module-level so the observation-isolation
     invariant table can pin this surface next to the others.
     """
-    sanitized: list[tuple[str, str]] = []
-    observation_seen = False
-    for index, (question, answer) in enumerate(qa_pairs):
-        declared = (
-            provenances[index] if provenances is not None and index < len(provenances) else "human"
-        )
-        safe_question = extraction_safe_question(question, observation_seen=observation_seen)
-        safe_answer = extraction_safe_answer(answer, declared)
-        if safe_answer != answer:
-            observation_seen = True
-        sanitized.append((safe_question, safe_answer))
-    return sanitized
+    return isolate_observation_pairs(qa_pairs, provenances)
 
 
 @dataclass
