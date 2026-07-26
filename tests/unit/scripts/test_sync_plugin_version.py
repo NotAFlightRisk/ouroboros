@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -639,6 +640,52 @@ def test_atomic_exchange_preserves_newer_edit_arriving_during_restore(
         sync_plugin_version._atomic_write_bytes(
             target,
             b'{"version":"1.2.4"}\n',
+            expected_current=original,
+        )
+
+    assert target.read_bytes() == newer_external
+    assert list(tmp_path.iterdir()) == [target]
+
+
+@pytest.mark.skipif(
+    not (sys.platform.startswith("linux") or sys.platform == "darwin"),
+    reason="atomic pathname exchange is unavailable on this platform",
+)
+def test_atomic_exchange_preserves_timestamp_restored_same_size_edit_during_restore(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "target.json"
+    original = b'{"version":"1.2.3"}\n'
+    content = b'{"version":"1.2.4"}\n'
+    first_external = b'{"version":"1.2.5"}\n'
+    newer_external = b'{"version":"9.9.9"}\n'
+    assert len(content) == len(newer_external)
+    target.write_bytes(original)
+    real_exchange = sync_plugin_version._exchange_paths
+    exchange_count = 0
+
+    def inject_edits(source: Path, destination: Path) -> bool:
+        nonlocal exchange_count
+        exchange_count += 1
+        if exchange_count == 1:
+            destination.write_bytes(first_external)
+        elif exchange_count == 2:
+            before = destination.stat()
+            destination.write_bytes(newer_external)
+            os.utime(
+                destination,
+                ns=(before.st_atime_ns, before.st_mtime_ns),
+                follow_symlinks=False,
+            )
+        return real_exchange(source, destination)
+
+    monkeypatch.setattr(sync_plugin_version, "_exchange_paths", inject_edits)
+
+    with pytest.raises(RuntimeError, match="write conflict"):
+        sync_plugin_version._atomic_write_bytes(
+            target,
+            content,
             expected_current=original,
         )
 

@@ -33,7 +33,7 @@ BUNDLED_SETUP_SKILL_MD = ROOT / ".claude-plugin" / "skills" / "setup" / "SKILL.m
 VERSION_MARKER_RE = re.compile(r"<!-- ooo:VERSION:([0-9A-Za-z.]+) -->")
 VERSION_MARKER_ENVELOPE_RE = re.compile(r"<!-- ooo:VERSION:(.*?) -->", re.DOTALL)
 _MAX_CONFLICT_RESTORE_EXCHANGES = 8
-_PathGeneration = tuple[int, int, int, int, int, int, int, int, int, int]
+_PathGeneration = tuple[int, int, int, int, int, int, int, int, int, int, str]
 
 
 def get_version() -> str:
@@ -214,6 +214,7 @@ def _path_generation(path: Path) -> _PathGeneration:
     metadata = path.stat(follow_symlinks=False)
     # Path exchange itself updates ctime on APFS, so ctime cannot distinguish
     # an external writer from the ownership transfer being validated here.
+    content_digest = hashlib.sha256(path.read_bytes()).hexdigest()
     return (
         metadata.st_dev,
         metadata.st_ino,
@@ -225,6 +226,7 @@ def _path_generation(path: Path) -> _PathGeneration:
         metadata.st_mtime_ns,
         int(getattr(metadata, "st_flags", 0)),
         int(getattr(metadata, "st_gen", 0)),
+        content_digest,
     )
 
 
