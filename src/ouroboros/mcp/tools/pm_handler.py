@@ -667,16 +667,10 @@ class PMInterviewHandler:
 
                     if state.rounds and state.rounds[-1].user_response is None:
                         # Round exists with question but no answer yet — fill it.
-                        # If last_question was provided, update the question text
-                        # in case the existing one is a stale placeholder from a
-                        # previous partial persistence.
-                        if last_question:
-                            state.rounds[-1].question = last_question
-                        state.rounds[-1].user_response = answer
-                        # Ingestion-time provenance stamp (rounds 85/89/93):
-                        # the field is the record, and this fill path left
-                        # every plugin-recorded answer typed "human".
-                        state.rounds[-1].answer_provenance = classify_answer_provenance(answer)
+                        # ``last_question`` replaces a stale placeholder
+                        # question from a previous partial persistence; answer
+                        # and provenance are decided together by the state.
+                        state.fill_pending_answer(answer, question=last_question)
                     else:
                         # No rounds yet or all answered — append new round.
                         # Use last_question when available; fall back to a

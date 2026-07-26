@@ -704,3 +704,76 @@ def test_the_view_still_withholds_what_the_copies_withheld() -> None:
     assert _OBSERVATION not in rendered
     assert "Yes, make it P0." in rendered
     assert transcript.rounds[0].question == "How many enterprise accounts are there?"
+
+
+# ---------------------------------------------------------------------------
+# A round filled after construction still gets its provenance
+# ---------------------------------------------------------------------------
+#
+# The MCP transports emit a question, persist a round carrying only that
+# question, and fill the answer on a later call. Provenance is derived at
+# construction and pydantic does not re-validate on assignment, so assigning
+# `user_response` afterwards left the field at its `human` default while the
+# text said otherwise. Both fill sites re-stamped it by hand — the shape that
+# a third fill site would have to remember.
+
+
+def test_filling_a_placeholder_round_decides_provenance_with_the_answer() -> None:
+    """The field cannot stay `human` by omission on the fill path."""
+    state = InterviewState(
+        interview_id="fill-provenance",
+        rounds=[InterviewRound(round_number=1, question="How many accounts?")],
+    )
+
+    assert state.rounds[-1].answer_provenance == "human"
+
+    state.fill_pending_answer("[from-data] Enterprise plan has 412 active accounts.")
+
+    assert state.rounds[-1].answer_provenance == "data_fact"
+
+
+def test_filling_a_placeholder_applies_the_summary_substitute_rule() -> None:
+    """The fill path uses the door's rule, inheritance included."""
+    state = InterviewState(
+        interview_id="fill-summary",
+        initial_context=_oversized("[from-data] ", _OBSERVATION),
+        rounds=[InterviewRound(round_number=1, question=INITIAL_CONTEXT_SUMMARY_QUESTION)],
+    )
+
+    state.fill_pending_answer(_OBSERVATION)
+
+    assert state.rounds[-1].answer_provenance == "data_fact"
+
+
+def test_filling_a_placeholder_replaces_a_stale_question() -> None:
+    """A stale placeholder question is replaced, and taint follows the new one."""
+    state = InterviewState(
+        interview_id="fill-question",
+        rounds=[InterviewRound(round_number=1, question="(continued from subagent)")],
+    )
+
+    state.fill_pending_answer("Build an SSO dashboard.", question="What should we build?")
+
+    assert state.rounds[-1].question == "What should we build?"
+    assert state.rounds[-1].answer_provenance == "human"
+
+
+def test_no_transport_stamps_provenance_next_to_a_manual_answer_assignment() -> None:
+    """Fill paths go through the state, not through paired assignments.
+
+    Two sites assigned `user_response` and `answer_provenance` in sequence and
+    stayed correct only because both remembered. Pinning their absence is what
+    stops a third from being added the same way.
+    """
+    for module_path in (
+        "src/ouroboros/mcp/tools/authoring_handlers.py",
+        "src/ouroboros/mcp/tools/pm_handler.py",
+        "src/ouroboros/cli/commands/pm.py",
+        "src/ouroboros/cli/commands/init.py",
+    ):
+        source = Path(module_path).read_text(encoding="utf-8")
+        assert ".answer_provenance = " not in source, (
+            f"{module_path} stamps provenance by assignment: use "
+            f"InterviewState.fill_pending_answer so the answer and its "
+            f"provenance are decided together."
+        )

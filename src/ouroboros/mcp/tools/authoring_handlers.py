@@ -2545,17 +2545,10 @@ class InterviewHandler:
                             )
                         )
                     # Round exists with question but no answer yet — fill it.
-                    # If last_question was provided, update the question text
-                    # in case the existing one is a stale placeholder from a
-                    # previous partial persistence.
-                    if last_question:
-                        state.rounds[-1].question = last_question
-                    state.rounds[-1].user_response = answer
-                    # Ingestion-time provenance stamp, same as the engine's
-                    # record_response (round-85): the field is the record and
-                    # the marker only its display projection, so a plugin-
-                    # filled round must not stay "human" by omission.
-                    state.rounds[-1].answer_provenance = classify_answer_provenance(answer)
+                    # ``last_question`` replaces a stale placeholder question
+                    # from a previous partial persistence; answer and
+                    # provenance are decided together by the state.
+                    state.fill_pending_answer(answer, question=last_question)
                     state.record_adapter_answer(question_text, answer)
                 else:
                     # No rounds yet or all answered — append new round.

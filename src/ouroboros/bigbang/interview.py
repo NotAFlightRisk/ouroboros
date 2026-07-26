@@ -272,6 +272,28 @@ class InterviewState(BaseModel):
         """Check if interview is marked complete (user-controlled)."""
         return self.status == InterviewStatus.COMPLETED
 
+    def fill_pending_answer(self, answer: str, *, question: str | None = None) -> InterviewRound:
+        """Answer the trailing placeholder round, deciding provenance with it.
+
+        A round is not always born whole. The MCP transports emit a question,
+        persist a round carrying only that question, and fill the answer on a
+        later call. Provenance is derived at CONSTRUCTION, and pydantic does
+        not re-validate on assignment, so assigning ``user_response``
+        afterwards left the field at its ``human`` default while the text said
+        otherwise — the two fill sites each re-stamped it by hand, which is
+        one more thing a third fill site would have to remember.
+
+        Answer and provenance are decided together here, by the same rule the
+        engine's door uses, so they cannot disagree and the summary-substitute
+        inheritance applies on this path too.
+        """
+        round_data = self.rounds[-1]
+        if question:
+            round_data.question = question
+        round_data.user_response = answer
+        round_data.answer_provenance = _ingested_provenance(self, round_data.question, answer)
+        return round_data
+
     @property
     def initial_context_provenance(self) -> str:
         """Provenance of ``initial_context``, classified in ONE place.
