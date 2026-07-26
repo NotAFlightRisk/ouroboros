@@ -577,6 +577,20 @@ def _data_context_lane_policy() -> dict[str, Any]:
         # patterns enforce.
         "category_dimension_heads": sorted(_CATEGORY_HEADS),
         "filter_key_heads": sorted(_CATEGORY_HEADS | _MEASUREMENT_HEADS),
+        # The cross-token semantics the head grammars cannot express, as a
+        # machine-readable rule rather than a hidden validator (round-89):
+        # customer_code passes the published pattern but keys an entity —
+        # hosts and children see the vocabularies enforcement will apply.
+        "identity_scope_rules": {
+            "identity_tokens": sorted(_IDENTITY_KEYS),
+            "identity_preserving_heads": sorted(_IDENTITY_PRESERVING_HEADS),
+            "rule": (
+                "a scope key whose head is identity-preserving and whose "
+                "modifier carries an identity token keys an entity; a scope "
+                "value combining an identity token with a numeric or hex run "
+                "is a labeled identifier"
+            ),
+        },
         "relevance_gate": "decide_from_question_text_before_any_tool_call",
         "direct_execution_scope": "local_free_read_only_lookups_only",
         "metered_or_uncertain_sources": "return_proposed_queries_without_executing",
@@ -1873,7 +1887,32 @@ def _identity_scope_problem(text: str, label: str) -> str | None:
         return f"{label} scopes to a network address; aggregate by category instead"
     if value and _OPAQUE_ENTITY_VALUE.match(value) and not _compact_date_partition(value):
         return f"{label} scopes to an opaque entity identifier; aggregate by category instead"
+    if value and _labeled_identifier_value(value):
+        # Round-88 probe: segment=user_1234567 — a category KEY with an
+        # identity-LABELED value is still one person's row. The label names
+        # what the digits identify, so the value is judged per token like
+        # every key is: an identity word plus a numeric/hex run is an
+        # identifier however innocent the key.
+        return f"{label} scopes to a labeled entity identifier; aggregate by category instead"
     return None
+
+
+def _labeled_identifier_value(value: str) -> bool:
+    """Whether a scope VALUE is an identity-labeled identifier.
+
+    ``user_1234567`` names one user as surely as a bare 7-digit run does —
+    the label just says which entity space the digits index. Both halves are
+    required: a category label with digits (``tier_2``) has no identity
+    word, and an identity word alone (``role=user``) names a kind rather
+    than an individual. Calendar partitions never carry identity labels, so
+    no date exemption is needed here.
+    """
+    tokens = [token for token in re.split(r"[_.:+-]", value.lower()) if token]
+    has_identity_label = any(token in _IDENTITY_KEYS for token in tokens)
+    has_identifier_run = any(
+        token.isdigit() or re.fullmatch(r"[0-9a-f]{8,}", token) for token in tokens
+    )
+    return has_identity_label and has_identifier_run
 
 
 # A safe identifier is one token of word/dot/dash characters — no spaces,

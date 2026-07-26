@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import structlog
 import yaml
 
 from ouroboros.auto.interview_driver import InterviewBackend, InterviewTurn
@@ -36,6 +37,8 @@ from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 from ouroboros.resilience.lateral import ThinkingPersona
+
+log = structlog.get_logger(__name__)
 
 _SAFE_SEED_ID_FILENAME_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
@@ -1126,10 +1129,15 @@ def save_seed(seed: Seed, *, seeds_dir: Path | None = None) -> str:
     seed_id = _safe_seed_id_for_filename(seed.metadata.seed_id)
     path = directory / f"{seed_id}{_SEED_FILENAME_SUFFIX}"
     _require_path_inside_directory(path, directory)
-    write_owner_only(
+    if not write_owner_only(
         path,
         yaml.dump(seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False),
-    )
+    ):
+        # Reported like every other migrated artifact writer (round-83): the
+        # file exists but the directory flush was unconfirmed, so a crash may
+        # still lose it — the caller's success return stays, the risk is
+        # visible in the log.
+        log.warning("auto.seed_save_durability_uncertain", path=str(path))
     return str(path)
 
 

@@ -142,16 +142,23 @@ def test_untrusted_env_cannot_steer_known_data_tools(
     monkeypatch,
 ) -> None:
     """A project .env must not point the data lane at attacker tools."""
+    # NOT monkeypatch.delenv for the final cleanup: _load_env_file writes
+    # os.environ directly (untracked), and a trailing monkeypatch.delenv
+    # records the leaked value as "original" and RESTORES it at teardown —
+    # round-89 caught exfiltrate_tool leaking into later test modules.
     monkeypatch.delenv("OUROBOROS_KNOWN_DATA_TOOLS", raising=False)
     env_file = tmp_path / ".env"
     env_file.write_text("OUROBOROS_KNOWN_DATA_TOOLS=exfiltrate_tool\n")
 
-    _load_env_file(env_file, trusted=False)
-    assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS") is None
+    try:
+        _load_env_file(env_file, trusted=False)
+        assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS") is None
 
-    _load_env_file(env_file, trusted=True)
-    assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS") == "exfiltrate_tool"
-    monkeypatch.delenv("OUROBOROS_KNOWN_DATA_TOOLS", raising=False)
+        _load_env_file(env_file, trusted=True)
+        assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS") == "exfiltrate_tool"
+    finally:
+        os.environ.pop("OUROBOROS_KNOWN_DATA_TOOLS", None)
+    assert "OUROBOROS_KNOWN_DATA_TOOLS" not in os.environ
 
 
 def test_untrusted_env_cannot_declare_read_only_tools(
@@ -159,16 +166,21 @@ def test_untrusted_env_cannot_declare_read_only_tools(
     monkeypatch,
 ) -> None:
     """A project .env must not grant direct-execution steering (round-88)."""
+    # Same cleanup rule as the plain-hint test above: direct os.environ.pop,
+    # never a trailing monkeypatch.delenv (it restores the leak at teardown).
     monkeypatch.delenv("OUROBOROS_KNOWN_DATA_TOOLS_READONLY", raising=False)
     env_file = tmp_path / ".env"
     env_file.write_text("OUROBOROS_KNOWN_DATA_TOOLS_READONLY=migrate_query\n")
 
-    _load_env_file(env_file, trusted=False)
-    assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS_READONLY") is None
+    try:
+        _load_env_file(env_file, trusted=False)
+        assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS_READONLY") is None
 
-    _load_env_file(env_file, trusted=True)
-    assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS_READONLY") == "migrate_query"
-    monkeypatch.delenv("OUROBOROS_KNOWN_DATA_TOOLS_READONLY", raising=False)
+        _load_env_file(env_file, trusted=True)
+        assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS_READONLY") == "migrate_query"
+    finally:
+        os.environ.pop("OUROBOROS_KNOWN_DATA_TOOLS_READONLY", None)
+    assert "OUROBOROS_KNOWN_DATA_TOOLS_READONLY" not in os.environ
 
 
 def test_untrusted_env_cannot_set_bare_opencode_alias(

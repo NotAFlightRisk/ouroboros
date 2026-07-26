@@ -144,6 +144,10 @@ _ACCEPTED: list[tuple[str, dict[str, Any]]] = [
     ("filter-version", _answer(filters=["build=v2_1"])),
     ("filter-comparison", _answer(filters=["latency_ms>200"])),
     ("filter-short-hex", _answer(filters=["release=beta7"])),
+    # An identity WORD as a value names a kind, not an individual — only the
+    # word plus a numeric/hex run is a labeled identifier (round-89).
+    ("filter-kind-value", _answer(filters=["type=user"])),
+    ("filter-category-with-digits", _answer(filters=["cohort=tier_2"])),
     # Grouping is advertised on PROPOSALS only — the evidence schema itself
     # rejects a grouped executed request (round-46: one number cannot say
     # which group it came from), which this sweep's first draft rediscovered.
@@ -167,6 +171,13 @@ _DECLARED_REJECTIONS: list[tuple[str, dict[str, Any], str]] = [
     # in the accepted corpus above) is cross-token semantics the pattern
     # cannot express, so it stays declared residue.
     ("entity-modified-code", _answer(filters=["customer_code=zx123456"]), "keys an entity"),
+    # Round-89: a category KEY with an identity-LABELED value is one
+    # person's row — the label names what the digits index.
+    (
+        "labeled-identifier-value",
+        _answer(filters=["segment=user_1234567"]),
+        "labeled entity identifier",
+    ),
     ("opaque-7-digits", _answer(filters=["cohort=9999999"]), "opaque entity identifier"),
     ("opaque-bad-date", _answer(filters=["day=20260231"]), "opaque entity identifier"),
     (
@@ -246,6 +257,20 @@ def test_the_category_heads_are_advertised_in_the_policy() -> None:
     assert policy["filter_key_heads"] == sorted(_CATEGORY_HEADS | _MEASUREMENT_HEADS)
     assert "tier" in policy["category_dimension_heads"]
     assert "ms" in policy["filter_key_heads"]
+
+    # The cross-token semantics the head grammars cannot express are exposed
+    # as a machine-readable rule, from the SAME vocabularies enforcement
+    # applies (round-89: the customer_code rejection was declared only in
+    # tests, invisible to hosts).
+    from ouroboros.contracts.data_evidence import (
+        _IDENTITY_KEYS,
+        _IDENTITY_PRESERVING_HEADS,
+    )
+
+    rules = policy["identity_scope_rules"]
+    assert rules["identity_tokens"] == sorted(_IDENTITY_KEYS)
+    assert rules["identity_preserving_heads"] == sorted(_IDENTITY_PRESERVING_HEADS)
+    assert "code" in rules["identity_preserving_heads"]
 
 
 def test_the_metric_field_never_needs_the_declared_residue() -> None:

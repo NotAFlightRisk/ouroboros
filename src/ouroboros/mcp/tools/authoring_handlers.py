@@ -2565,6 +2565,11 @@ class InterviewHandler:
                     if last_question:
                         state.rounds[-1].question = last_question
                     state.rounds[-1].user_response = answer
+                    # Ingestion-time provenance stamp, same as the engine's
+                    # record_response (round-85): the field is the record and
+                    # the marker only its display projection, so a plugin-
+                    # filled round must not stay "human" by omission.
+                    state.rounds[-1].answer_provenance = classify_answer_provenance(answer)
                     state.record_adapter_answer(question_text, answer)
                 else:
                     # No rounds yet or all answered — append new round.
@@ -2591,6 +2596,7 @@ class InterviewHandler:
                             round_number=len(state.rounds) + 1,
                             question=question_text,
                             user_response=answer,
+                            answer_provenance=classify_answer_provenance(answer),
                         )
                     )
                     state.record_adapter_answer(question_text, answer)
@@ -3216,6 +3222,7 @@ class InterviewHandler:
                             round_number=len(state.rounds) + 1,
                             question=last_question or "[driver safe-default finalization]",
                             user_response=answer,
+                            answer_provenance=classify_answer_provenance(answer),
                         )
                     )
                     state.clear_stored_ambiguity()

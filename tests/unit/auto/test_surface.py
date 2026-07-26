@@ -2745,3 +2745,36 @@ def test_auto_handler_surfaces_orchestration_and_artifact_state_for_blocked_resu
     assert "Status: blocked" in text
     assert "Artifact state: partial_artifact_generated" in text
     assert "Status: complete" not in text
+
+
+def test_auto_save_seed_logs_unconfirmed_durability(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A false write_owner_only result is visible, like every other writer.
+
+    Round-89: the file was written but the directory flush was unconfirmed,
+    and Auto returned a successful path with no trace — crash-loss risk the
+    sibling artifact writers all report.
+    """
+    from unittest.mock import patch
+
+    from ouroboros.auto import adapters
+    from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+    seed = Seed(
+        goal="Demo goal",
+        ontology_schema=OntologySchema(name="demo", description="demo ontology"),
+        metadata=SeedMetadata(seed_id="durability-demo"),
+    )
+
+    with (
+        patch.object(adapters, "write_owner_only", return_value=False) as writer,
+        patch.object(adapters.log, "warning") as warned,
+    ):
+        path = adapters.save_seed(seed, seeds_dir=tmp_path / "seeds")
+
+    assert writer.called
+    assert path.endswith("durability-demo.yaml")
+    assert warned.called
+    assert warned.call_args.args[0] == "auto.seed_save_durability_uncertain"
