@@ -34,6 +34,13 @@ jobs:
           uv sync --dev
           uv pip check
 
+      - name: Validate release metadata
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${REF_NAME#v}"
+          python scripts/sync-plugin-version.py --version "$VERSION"
+
       - name: Build package
         run: |
           uv build
@@ -68,6 +75,7 @@ jobs:
 
   build-tui:
     name: Build TUI (${{ matrix.target }})
+    needs: release
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
