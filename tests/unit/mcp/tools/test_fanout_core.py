@@ -8560,3 +8560,104 @@ def test_round82_numeric_category_codes_complete_end_to_end(tmp_path: Any) -> No
     # stay rejected whatever the value.
     assert _identity_scope_problem("cohort=9999999", "filters[0]") is not None
     assert _identity_scope_problem("user_id=541511", "filters[0]") is not None
+
+
+# --------------------------------------------------------------------------- #
+# round-83 — legacy schemas fail closed; locks are bounded; retention is
+# platform-independent
+# --------------------------------------------------------------------------- #
+
+
+def test_round83_missing_legacy_schema_fails_closed(tmp_path: Any) -> None:
+    """A persisted contract with no usable schema cannot accept content.
+
+    Continuing without a violation completed the fan-out with arbitrary
+    unvalidated content persisted terminally. Round 17's rule for a broken
+    $ref applies a fortiori to a schema that is absent entirely.
+    """
+    registry = FanoutRegistry(tmp_path)
+    record = FanoutRecord(
+        fanout_id="legacy-83",
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="sess-83",
+        correlation_key="context.lane_id",
+        expected_keys=("ref_lane",),
+        required_keys=("ref_lane",),
+        synthesizer_input={
+            "lane_ids": ["ref_lane"],
+            "lane_answer_contracts": {"ref_lane": {"contract_id": "future_ref.v1"}},
+        },
+    )
+    assert bool(registry.save(record))
+
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-83",
+        correlation_key="context.lane_id",
+        results=[{"key": "ref_lane", "content": {"anything": "at all"}}],
+        fanout_id="legacy-83",
+    )
+
+    assert out["status"] == "partial"
+    assert out.get("contract_violations")
+    assert not registry.load("legacy-83").received_results
+
+
+def test_round83_unknown_ids_mint_no_durable_artifacts(tmp_path: Any) -> None:
+    """25 unknown ids: no lock files, no cached locks growing per id.
+
+    The lock table is a fixed 256-stripe array, so caller-supplied ids cannot
+    grow process memory, and a never-registered id takes no lock and creates
+    no sidecar.
+    """
+    from ouroboros.mcp.tools.subagent import _LOCAL_FANOUT_LOCK_STRIPES
+
+    registry = FanoutRegistry(tmp_path)
+    for index in range(25):
+        out = submit_fanout_results(
+            registry,
+            session_id="s",
+            correlation_key="context.persona",
+            results=[],
+            fanout_id=f"never-registered-{index}",
+        )
+        assert out["status"] == "unknown_fanout_id"
+
+    assert list(tmp_path.iterdir()) == [], "unknown ids minted durable artifacts"
+    assert len(_LOCAL_FANOUT_LOCK_STRIPES) == 256
+
+
+def test_round83_retention_applies_without_fcntl(tmp_path: Any) -> None:
+    """Stale records are swept on fcntl-less platforms too.
+
+    Returning early meant expired records lived forever there, contradicting
+    the seven-day retention contract.
+    """
+    import builtins
+    import os as os_module
+    import time
+    from unittest.mock import patch
+
+    registry = FanoutRegistry(tmp_path)
+    record = _persona_record("stale-83")
+    assert bool(registry.save(record))
+    stale_path = tmp_path / "stale-83.json"
+    old = time.time() - (8 * 24 * 3600)
+    os_module.utime(stale_path, (old, old))
+
+    real_import = builtins.__import__
+
+    def _no_fcntl(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "fcntl":
+            raise ImportError("no fcntl on this platform")
+        return real_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=_no_fcntl):
+        # Registration triggers the opportunistic sweep.
+        register_question_advisory_fanout(
+            registry,
+            session_id="sess-83-sweep",
+            payloads=_mixed_advisory_payloads(),
+        )
+
+    assert not stale_path.exists(), "stale record survived the fcntl-less sweep"

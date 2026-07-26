@@ -400,7 +400,7 @@ def _data_context_answer_contract() -> dict[str, Any]:
                         "items": {
                             "type": "string",
                             "maxLength": 32,
-                            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+                            "pattern": GROUPING_TOKEN_PATTERN,
                         },
                     },
                 },
@@ -1464,6 +1464,7 @@ _AGGREGATE_UNIT = re.compile(r"^[a-z%][a-z_/%]{0,23}$")
 #: calendar-valid partitions (month=202607) are admitted and the round-80
 #: calendar rule handles the rest.
 _HEX_ID_VALUE_EXCLUSION = r"(?!(?=[0-9a-f]{8,}(?:$|[_.:+-]))[0-9]*[a-f])"
+GROUPING_TOKEN_PATTERN = r"^[a-z][a-z0-9_]{0,31}$"
 FILTER_TOKEN_PATTERN = (
     r"^[a-z][a-z0-9_]{0,23}(=|!=|<|>|<=|>=)"
     + _HEX_ID_VALUE_EXCLUSION
@@ -1482,7 +1483,9 @@ _AGGREGATE_DIMENSION = re.compile(DIMENSION_TOKEN_PATTERN)
 _READ_REQUEST_FILTER = re.compile(FILTER_TOKEN_PATTERN)
 
 
-_READ_REQUEST_GROUPING = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+# One definition with the published schema (round-83, closing the class
+# rounds 78-81 aligned one field at a time).
+_READ_REQUEST_GROUPING = re.compile(GROUPING_TOKEN_PATTERN)
 #: The RETAINED form keeps a scope's key and drops its value, so its grammar
 #: is the bare key. Re-checking a carried-forward result against the
 #: submission grammar is the same category error as validating it against the

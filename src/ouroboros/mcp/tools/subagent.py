@@ -37,6 +37,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -3003,19 +3004,17 @@ class FanoutRecord:
 #: The thread lock is held around every yield path, so the documented
 #: process-local guarantee holds everywhere, and flock adds the
 #: cross-process half where the platform provides it.
-_LOCAL_FANOUT_LOCKS: dict[str, threading.Lock] = {}
-_LOCAL_FANOUT_LOCKS_GUARD = threading.Lock()
+#: STRIPED, not per-id (round-83): a dict keyed by caller-supplied ids grew
+#: one permanent Lock per probe — 25 unknown ids left 25 cached locks — and
+#: reclamation logic would be its own race. A fixed stripe array is bounded
+#: forever; a collision merely serializes two unrelated fan-outs for the
+#: duration of one submission, which is correctness-neutral.
+_LOCAL_FANOUT_LOCK_STRIPES: tuple[threading.Lock, ...] = tuple(threading.Lock() for _ in range(256))
 
 
 def _local_fanout_lock(fanout_id: str) -> threading.Lock:
-    with _LOCAL_FANOUT_LOCKS_GUARD:
-        lock = _LOCAL_FANOUT_LOCKS.get(fanout_id)
-        if lock is None:
-            # Bounded by the registry's own retention: ids are <=128 chars and
-            # the set of live fan-outs is small; entries for expired ids cost
-            # one Lock object until process exit.
-            lock = _LOCAL_FANOUT_LOCKS[fanout_id] = threading.Lock()
-        return lock
+    digest = hashlib.sha256(fanout_id.encode("utf-8", "surrogatepass")).digest()
+    return _LOCAL_FANOUT_LOCK_STRIPES[digest[0]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -3144,7 +3143,21 @@ class FanoutRegistry:
         try:
             import fcntl
         except ImportError:
-            # Cannot honor the lock protocol: leave the record in place.
+            # Without fcntl the CROSS-PROCESS half of the lock protocol is
+            # unavailable, but retention still applies (round-83): returning
+            # here meant stale records were NEVER deleted on such platforms
+            # and storage grew without bound, contradicting the seven-day
+            # contract. The process-local stripe lock covers in-process
+            # submissions, age is re-checked under it, and the OS itself
+            # refuses to unlink a file another process holds open on the
+            # platforms that lack fcntl — a refusal the suppression treats
+            # as "retry next sweep".
+            with _local_fanout_lock(fanout_id):
+                try:
+                    if path.stat().st_mtime < cutoff:
+                        path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             return
         lock_path = self._dir / f".{fanout_id}.lock"
         try:
@@ -3373,6 +3386,15 @@ class FanoutRegistry:
         lock it can flock itself, so a HELD lock is never deleted.
         """
         if not self.valid_fanout_id(fanout_id):
+            yield
+            return
+        if not self._path(fanout_id).exists():
+            # Nothing exists to protect (round-83): taking locks and creating
+            # sidecar lock files for a never-registered id let a probe mint
+            # durable artifacts from thin air — 25 unknown ids produced 25
+            # lock files with no records. A record appearing between this
+            # check and the load is indistinguishable from submitting a
+            # moment earlier and yields the same clean unknown_fanout_id.
             yield
             return
         # The process-local half is unconditional (round-82): it wraps every
@@ -4146,14 +4168,25 @@ def _lane_answer_contract_violations(
             else contract.get("response_model_schema")
         )
         if not isinstance(schema, Mapping):
-            if boundary_errors:
-                violations.append(
-                    {
-                        "lane_id": lane_id,
-                        "contract_id": contract_id,
-                        "errors": boundary_errors,
-                    }
-                )
+            # Fail CLOSED (round-83): a persisted contract whose schema is
+            # missing or not an object cannot validate anything, and
+            # continuing without a violation accepted arbitrary content into
+            # terminal state. Round 17 established the rule for a broken
+            # $ref; a schema that is absent entirely is more broken, not
+            # less. The lane stays incomplete until a conforming result —
+            # or a repaired registration — arrives.
+            violations.append(
+                {
+                    "lane_id": lane_id,
+                    "contract_id": contract_id,
+                    "errors": [
+                        *boundary_errors,
+                        "persisted answer contract carries no usable "
+                        "response_model_schema; the result cannot be "
+                        "validated and is not accepted",
+                    ],
+                }
+            )
             continue
         # Belt for records persisted before registration validated schemas
         # (round-12): an invalid registered schema must degrade to

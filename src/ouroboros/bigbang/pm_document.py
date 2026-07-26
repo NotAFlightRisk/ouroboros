@@ -213,7 +213,8 @@ def save_pm_document(
         pm_path = output_dir / _PM_FILENAME
 
     content = generate_pm_markdown(seed)
-    write_owner_only(pm_path, content)
+    if not write_owner_only(pm_path, content):
+        log.warning("pm.document_save_durability_uncertain", path=str(pm_path))
 
     log.info(
         "pm.document_saved",
@@ -364,7 +365,8 @@ class PMDocumentGenerator:
         output_dir.mkdir(parents=True, exist_ok=True)
         pm_path = output_dir / _PM_FILENAME
 
-        write_owner_only(pm_path, content)
+        if not write_owner_only(pm_path, content):
+            log.warning("pm.document_save_durability_uncertain", path=str(pm_path))
 
         log.info(
             "pm.document_saved",

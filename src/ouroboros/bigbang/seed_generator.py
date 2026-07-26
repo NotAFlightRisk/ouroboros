@@ -1072,7 +1072,13 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                 sort_keys=False,
             )
 
-            write_owner_only(file_path, content)
+            if not write_owner_only(file_path, content):
+                # Reported like every other artifact writer (round-83).
+                log.warning(
+                    "seed.save_durability_uncertain",
+                    seed_id=seed.metadata.seed_id,
+                    file_path=str(file_path),
+                )
 
             log.info(
                 "seed.saved",
@@ -1180,7 +1186,12 @@ def save_seed_sync(seed: Seed, file_path: Path) -> Result[Path, ValidationError]
             sort_keys=False,
         )
 
-        write_owner_only(file_path, content)
+        if not write_owner_only(file_path, content):
+            log.warning(
+                "seed.save_durability_uncertain",
+                seed_id=seed.metadata.seed_id,
+                file_path=str(file_path),
+            )
 
         log.info(
             "seed.saved.sync",
