@@ -448,3 +448,74 @@ def test_oversized_context_still_reports_the_summary_round_provenance() -> None:
     assert provenance == "data_fact"
     assert "412" in text
     assert state.initial_context_provenance == "human"
+
+
+# ---------------------------------------------------------------------------
+# The round provenance field is correct whoever built the round
+# ---------------------------------------------------------------------------
+#
+# ``record_response`` is the door and decides provenance from the UNDECORATED
+# answer. But the MCP handlers also build rounds directly, and each of those
+# sites had to remember to classify — the same "caller must remember" shape
+# that let a decorated answer be stamped human. The field now classifies
+# itself when the constructor did not decide, so forgetting is no longer
+# expressible; an explicit value still wins, which is what keeps the
+# decoration case and a user's own observation-quoting answer correct.
+
+
+def test_round_built_without_provenance_classifies_itself() -> None:
+    """A construction site that forgets still gets the right class."""
+    round_data = InterviewRound(
+        round_number=1,
+        question="How many enterprise accounts?",
+        user_response=f"{_OBSERVATION}",
+    )
+
+    assert round_data.answer_provenance == "human"
+
+    observed = InterviewRound(
+        round_number=1,
+        question="How many enterprise accounts?",
+        user_response="[from-data] 412 enterprise accounts are active.",
+    )
+
+    assert observed.answer_provenance == "data_fact"
+
+
+def test_explicit_provenance_wins_over_the_text() -> None:
+    """Decoration and user-authored citation both depend on the explicit value.
+
+    ``PM answer: [from-data] ...`` must stay ``data_fact`` (the decoration
+    must not launder it), and a human decision that QUOTES an observation
+    must stay ``human`` (the user authored the decision).
+    """
+    decorated = InterviewRound(
+        round_number=1,
+        question="Q",
+        user_response="PM answer: [from-data] 412 enterprise accounts are active.",
+        answer_provenance="data_fact",
+    )
+
+    assert decorated.answer_provenance == "data_fact"
+
+    cited = InterviewRound(
+        round_number=2,
+        question="Q",
+        user_response="412 of them, 37 asked for SSO, so this is P0. [from-data] source",
+        answer_provenance="human",
+    )
+
+    assert cited.answer_provenance == "human"
+
+
+def test_legacy_round_without_the_field_is_classified_on_load() -> None:
+    """A persisted round predating the typed field migrates on deserialization."""
+    legacy = InterviewRound.model_validate(
+        {
+            "round_number": 1,
+            "question": "Q",
+            "user_response": "[from-research] The spec was ratified in 2019.",
+        }
+    )
+
+    assert legacy.answer_provenance == "research_fact"

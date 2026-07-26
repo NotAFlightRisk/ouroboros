@@ -1056,3 +1056,21 @@ def test_round100_generated_only_interviews_are_not_generatable() -> None:
     auto_like = _state_with_answer("[from-auto] Use a conservative retry policy.")
     auto_like.initial_context = "Build a rate-limited ingestion API."
     assert not interview_has_no_promotable_requirement(auto_like)
+
+
+def test_round108_observation_context_never_reaches_persisted_evidence() -> None:
+    """Evidence is persisted and returned in Seed metadata, so it is gated too.
+
+    The observation was excluded from candidates and then serialized
+    verbatim one field over — a `[from-data] alice@example.com …` context
+    with a later human goal retained the email in RequirementDistillation.
+    """
+    state = _state_with_answer("Build the reporting lane for enterprise admins.")
+    state.initial_context = "[from-data] alice@example.com asked about 42 enterprise accounts."
+
+    distillation = build_requirement_distillation(state)
+    serialized = distillation.model_dump_json()
+    assert "alice@example.com" not in serialized
+    assert "42 enterprise accounts" not in serialized
+    # The user's own goal still survives.
+    assert "reporting lane" in serialized

@@ -4728,13 +4728,11 @@ def _durable_results(contracts: Mapping[str, Any], provided: Mapping[str, Any]) 
             stored[lane_id] = redact_prose_for_persistence(output)
             continue
         # Generic lanes DO retain their content — that is how synthesis
-        # works for code_context and its peers — but retention is not a
-        # licence to store a secret (round-104: credential-shaped text
-        # submitted through code_context survived verbatim in
-        # received_results and on disk). Credential-shaped tokens are
-        # replaced by their digest on the way to durable state; everything
-        # else, including code quotations, is untouched.
-        stored[lane_id] = _scrub_credentials_for_persistence(output)
+        # works for code_context and its peers. Scrubbing happens ONCE, at
+        # the persistence door (round-108): doing it here as well re-scrubbed
+        # existing markers on every partial save, growing the record on each
+        # write. One boundary, one pass.
+        stored[lane_id] = output
     return stored
 
 
@@ -4768,8 +4766,16 @@ def _scrub_credentials_for_persistence(value: Any, _depth: int = 0) -> Any:
             # calls any name ending in "key"/"token" credential-shaped, and
             # our own envelope keys (missing_optional_keys) are names, not
             # secrets. A name is not a secret; an assignment is.
+            #
+            # But a credential-NAMED key labels its VALUE (round-108):
+            # {"password": "huntertwo"} spelled the same assignment across a
+            # key/value pair, and scrubbing the two independently saw a
+            # harmless name beside a harmless word. The pair is read as the
+            # assignment it is.
             _redact_credential_tokens(str(key), identifier_pass=False): (
-                _scrub_credentials_for_persistence(item, _depth + 1)
+                redacted_segment(str(item))
+                if _credential_labelled_key(str(key)) and isinstance(item, str | int | float)
+                else _scrub_credentials_for_persistence(item, _depth + 1)
             )
             for key, item in value.items()
         }
@@ -4791,6 +4797,9 @@ def _redact_credential_tokens(text: str, *, identifier_pass: bool = True) -> str
     if not text:
         return text
     spans: list[list[int]] = []
+    # Already-digested spans are skipped, so a second pass over stored
+    # content is a no-op rather than a nesting machine (round-108).
+    protected = [[match.start(), match.end()] for match in _REDACTION_MARKER.finditer(text)]
     # A PEM block is a secret in a shape no token rule sees (round-107).
     spans.extend([match.start(), match.end()] for match in _PEM_BLOCK.finditer(text))
     for _label, pattern in data_evidence_boundary_patterns():
@@ -4802,6 +4811,12 @@ def _redact_credential_tokens(text: str, *, identifier_pass: bool = True) -> str
             for match in _CREDENTIAL_TOKEN_CANDIDATE.finditer(text)
             if _identifier_looks_secret(match.group(0))
         )
+    if protected:
+        spans = [
+            span
+            for span in spans
+            if not any(span[0] < end and start < span[1] for start, end in protected)
+        ]
     if not spans:
         return text
     spans.sort()
@@ -4830,6 +4845,52 @@ def _identifier_length_number(value: float) -> bool:
     if not float(value).is_integer():
         return False
     return len(str(abs(int(value)))) >= 12
+
+
+def _credential_labelled_key(key: str) -> bool:
+    """Whether a mapping key names a credential, labelling its value."""
+    decamelled = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", key)
+    ordered = [token for token in re.split(r"[^A-Za-z0-9]+", decamelled.lower()) if token]
+    tokens = set(ordered)
+    if tokens & _CREDENTIAL_LABEL_WORDS:
+        return True
+    # A qualified key IS a credential name (api_key, access_key,
+    # signing_key) while an unqualified one is a field name
+    # (correlation_key, missing_optional_keys) — the qualifier is what
+    # distinguishes them.
+    return bool(ordered) and ordered[-1] in {"key", "keys"} and bool(tokens & _KEY_QUALIFIERS)
+
+
+#: Qualifiers that turn a "…_key" field name into a credential name.
+_KEY_QUALIFIERS = frozenset(
+    {"api", "access", "secret", "private", "client", "encryption", "signing", "auth", "session"}
+)
+
+
+#: Key words that make their value a secret regardless of the value's shape.
+_CREDENTIAL_LABEL_WORDS = frozenset(
+    {
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "secrets",
+        "token",
+        "tokens",
+        "apikey",
+        "credential",
+        "credentials",
+        "authorization",
+        "auth",
+        "bearer",
+        "privatekey",
+        "passphrase",
+    }
+)
+
+
+#: The digest form this scrub emits — recognized so it is never re-scrubbed.
+_REDACTION_MARKER = re.compile(r"<redacted-key sha256:[0-9a-f]{12}>")
 
 
 #: A private-key block, whole.

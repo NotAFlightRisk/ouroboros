@@ -9609,3 +9609,62 @@ def test_round107_pem_blocks_and_numeric_identifiers_are_scrubbed() -> None:
     # Ordinary numbers are untouched.
     assert scrubbed["count"] == 42
     assert scrubbed["ratio"] == 0.42
+
+
+def test_round108_structured_credentials_and_idempotent_scrub(tmp_path: Any) -> None:
+    """A credential-NAMED key labels its value, and scrubbing is idempotent.
+
+    `{"password": "huntertwo", "api_key": "supersecret"}` spelled the
+    assignment across a key/value pair, and scrubbing the two independently
+    saw a harmless name beside a harmless word. Separately, `_durable_results`
+    and the save door both scrubbed, so markers grew on every partial save.
+    """
+    import json as json_module
+
+    from ouroboros.mcp.tools.subagent import _scrub_credentials_for_persistence
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-108",
+        lanes=[{"lane_id": "code_context", "capability": "inspect_code", "required": True}],
+    )
+    assert fanout_id is not None
+    submit_fanout_results(
+        registry,
+        session_id="sess-108",
+        correlation_key="context.lane_id",
+        results=[
+            {
+                "key": "code_context",
+                "content": {
+                    "lane_id": "code_context",
+                    "password": "huntertwo",
+                    "api_key": "supersecret",
+                    "apiKey": "camelsecret",
+                    "finding": "settings loaded",
+                },
+            }
+        ],
+        fanout_id=fanout_id,
+    )
+    record = registry.load(fanout_id)
+    assert record is not None
+    on_disk = json_module.dumps(
+        {"received": record.received_results, "terminal": record.terminal_response}
+    )
+    for secret in ("huntertwo", "supersecret", "camelsecret"):
+        assert secret not in on_disk, secret
+    assert "settings loaded" in on_disk
+
+    # Field NAMES that merely end in "key" are not credentials.
+    assert (
+        _scrub_credentials_for_persistence({"correlation_key": "context.lane_id"})[
+            "correlation_key"
+        ]
+        == "context.lane_id"
+    )
+
+    # Idempotent: re-scrubbing stored content is a no-op.
+    once = _scrub_credentials_for_persistence({"finding": "token = ghp_abcdefghijklmnop1234"})
+    assert _scrub_credentials_for_persistence(_scrub_credentials_for_persistence(once)) == once

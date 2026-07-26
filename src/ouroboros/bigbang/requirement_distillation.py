@@ -27,6 +27,7 @@ from ouroboros.core.requirement_candidate import (
     RequirementSection,
     effective_answer_provenance,
     evaluate_promotion,
+    extraction_safe_answer,
 )
 from ouroboros.core.seed import (
     BrownfieldContext,
@@ -205,11 +206,18 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
     goal_text, goal_provenance = prompt_safe_initial_context_with_provenance(state)
     if state.initial_context.strip():
         evidence_id = "initial-context"
+        # EVIDENCE is persisted and returned in Seed-generation metadata, so
+        # the provenance gate applies to its text too (round-108): the
+        # observation was correctly excluded from candidates and then
+        # serialized verbatim one field over. Withheld input contributes its
+        # note, not its content.
         evidence.append(
             RequirementEvidence(
                 evidence_id=evidence_id,
                 kind=RequirementEvidenceKind.USER_STATEMENT,
-                text=goal_text.strip() or state.initial_context.strip(),
+                text=extraction_safe_answer(
+                    goal_text.strip() or state.initial_context.strip(), goal_provenance
+                ),
             )
         )
         # The initial context takes the same provenance gate as every round
