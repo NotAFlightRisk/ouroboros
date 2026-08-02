@@ -1,0 +1,35 @@
+"""Contract tests for the topic-specific interview calibration skill."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+IDK_SKILL = Path("skills/idk/SKILL.md")
+INTERVIEW_SKILL = Path("skills/interview/SKILL.md")
+
+
+def test_idk_skill_defines_topic_specific_calibration_contract() -> None:
+    text = IDK_SKILL.read_text(encoding="utf-8")
+
+    assert "name: idk" in text
+    assert "Foundational" in text
+    assert "Working" in text
+    assert "Fluent" in text
+    assert "confidence" in text
+    assert "topic-specific interview calibration" in text
+    assert "Do not write a profile to disk" in text
+
+
+def test_idk_does_not_consume_a_pending_interview_question() -> None:
+    text = IDK_SKILL.read_text(encoding="utf-8")
+
+    assert "Do not treat the calibration text as the answer" in text
+    assert "Ask the rephrased question again" in text
+
+
+def test_interview_applies_idk_calibration_without_reducing_rigor() -> None:
+    text = INTERVIEW_SKILL.read_text(encoding="utf-8")
+
+    assert "most recent `Interview calibration` produced by `ooo idk`" in text
+    assert "preserve the original question's decision" in text
+    assert "do not forward that statement to MCP as the answer" in text
