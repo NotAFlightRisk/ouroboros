@@ -2,6 +2,9 @@
 name: idk
 description: "Calibrate interview explanations from the user's topic-specific understanding"
 aliases: [dont-know, calibrate]
+mcp_tool: ouroboros_interview
+mcp_args:
+  calibration_input: "$1"
 ---
 
 # /ouroboros:idk

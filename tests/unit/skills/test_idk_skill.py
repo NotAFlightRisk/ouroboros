@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ouroboros.router import Resolved, ResolveRequest, resolve_skill_dispatch
+
 IDK_SKILL = Path("skills/idk/SKILL.md")
 INTERVIEW_SKILL = Path("skills/interview/SKILL.md")
 
@@ -18,6 +20,21 @@ def test_idk_skill_defines_topic_specific_calibration_contract() -> None:
     assert "confidence" in text
     assert "topic-specific interview calibration" in text
     assert "Do not write a profile to disk" in text
+
+
+def test_idk_routes_through_the_interview_session_contract(tmp_path: Path) -> None:
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt="ooo idk I do not know idempotency; I built REST APIs",
+            cwd=tmp_path,
+            skills_dir=Path("skills"),
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.skill_name == "idk"
+    assert result.mcp_tool == "ouroboros_interview"
+    assert result.mcp_args == {"calibration_input": "I do not know idempotency; I built REST APIs"}
 
 
 def test_idk_does_not_consume_a_pending_interview_question() -> None:

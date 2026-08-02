@@ -21,9 +21,9 @@ load and follow their installed `SKILL.md` instead of inventing an MCP call.
 | `ooo cancel [execution_id]` | `ouroboros_cancel_execution` |
 | `ooo unstuck` / `ooo lateral` | `ouroboros_lateral_think` |
 
-`ooo idk ...` is session-native. Load the installed `idk` skill, produce the
-topic-specific interview calibration in the current conversation, and do not
-call MCP or persist a user profile.
+`ooo idk ...` routes to `ouroboros_interview` as a session-local calibration
+control turn. Preserve the pending question, do not treat the calibration text
+as its answer, and do not persist a user profile.
 
 If `ouroboros_start_auto` is unavailable, stop and report that the MCP dispatch surface is broken. Do not manually emulate `ooo auto` with ordinary shell, GitHub, or coding work.
 
