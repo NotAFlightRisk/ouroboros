@@ -355,7 +355,8 @@ Controls Phase 2 — the Double Diamond execution loop.
 
 ```yaml
 execution:
-  max_iterations_per_ac: 10   # Maximum execution iterations per acceptance criterion
+  max_iterations_per_ac: 10   # Tool-bearing agent turns per atomic attempt
+  ac_attempt_timeout_seconds: 900 # Total wall-clock cap per atomic attempt
   retrospective_interval: 3   # Iterations between automatic retrospectives
   default_model: null         # null/default/current = let the selected runtime choose
   project_guidance:            # Explicit project-local execution guidance allowlist
@@ -364,7 +365,8 @@ execution:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `max_iterations_per_ac` | `int >= 1` | `10` | Maximum number of execution iterations for a single acceptance criterion before the system escalates or declares failure. |
+| `max_iterations_per_ac` | `int >= 1` | `10` | Maximum tool-bearing agent turns targeted in one atomic attempt. The common stream owner cancels at the first observed over-budget turn and admits no later turn. Whole-Seed direct/resume calls multiply the limit by root AC count. |
+| `ac_attempt_timeout_seconds` | `int >= 1` | `900` | Hard wall-clock ceiling for one atomic provider attempt. Progress messages do not extend it. Whole-Seed direct/resume calls multiply the limit by root AC count. |
 | `retrospective_interval` | `int >= 1` | `3` | Number of iterations between automatic retrospective evaluations. |
 | `default_model` | `string \| null` | `null` | Optional Execute-stage model pin. `null`, an empty value, `"default"`, or `"current"` means Ouroboros does not pass a concrete `--model`; the selected runtime keeps its own current/default model. `OUROBOROS_EXECUTION_MODEL` has highest precedence, and a present empty env var explicitly clears the saved pin for that process. |
 | `project_guidance` | `list[string]` | `[]` | Guidance IDs loaded from `<project-root>/.ouroboros/guidance/<id>/GUIDANCE.md` and appended to execution system prompts. This option is config-only and has no environment-variable override. |
@@ -912,6 +914,7 @@ clarification:
 
 execution:
   max_iterations_per_ac: 10
+  ac_attempt_timeout_seconds: 900
   retrospective_interval: 3
 
 resilience:

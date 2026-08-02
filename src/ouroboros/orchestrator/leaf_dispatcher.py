@@ -27,6 +27,10 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
+from ouroboros.core.attempt_budget import (
+    AttemptBudgetExhaustion,
+    AttemptBudgetKind,
+)
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
@@ -68,6 +72,9 @@ class LeafDispatchState:
     final_message: str = ""
     success: bool = False
     stalled: bool = False
+    agentic_step_count: int = 0
+    attempt_started_at: float | None = None
+    attempt_budget_exhaustion: AttemptBudgetExhaustion | None = None
 
 
 @dataclass(slots=True)
@@ -383,6 +390,8 @@ class LeafDispatcher:
         label: str,
         indent: str,
         execution_counters: dict[str, int] | None,
+        max_iterations_per_ac: int,
+        ac_attempt_timeout_seconds: float,
     ) -> None:
         """Run the stall-scoped dispatch loop, mutating ``state`` in place."""
         executor = self._executor
@@ -399,9 +408,13 @@ class LeafDispatcher:
         # Stall detection: CancelScope with resettable deadline (RC6)
         last_heartbeat = time.monotonic()
         exec_start = time.monotonic()
+        if state.attempt_started_at is None:
+            state.attempt_started_at = anyio.current_time()
+        attempt_deadline = state.attempt_started_at + ac_attempt_timeout_seconds
 
         with (
             _BashFilesystemLeaseTracker(task_cwd=task_cwd) as identity_tracker,
+            anyio.CancelScope(deadline=attempt_deadline) as attempt_scope,
             anyio.CancelScope(
                 deadline=anyio.current_time() + STALL_TIMEOUT_SECONDS,
             ) as stall_scope,
@@ -490,6 +503,14 @@ class LeafDispatcher:
                     last_heartbeat = now
 
                 projected = project_runtime_message(message)
+                if projected.is_tool_call:
+                    state.agentic_step_count += 1
+                    if state.agentic_step_count > max_iterations_per_ac:
+                        state.attempt_budget_exhaustion = AttemptBudgetExhaustion(
+                            kind=AttemptBudgetKind.AGENTIC_STEPS,
+                            limit=float(max_iterations_per_ac),
+                            observed=float(state.agentic_step_count),
+                        )
                 await executor._event_emitter.observe_ac_activity(
                     runtime_identity=runtime_identity,
                     execution_id=execution_context_id,
@@ -498,6 +519,12 @@ class LeafDispatcher:
                     projected=projected,
                     is_final=message.is_final,
                 )
+
+                # Stop the runtime at the first observed over-budget tool turn.
+                # Some runtimes expose a request before its effect and others
+                # report it afterward; in both cases no *later* turn is admitted.
+                if state.attempt_budget_exhaustion is not None:
+                    break
 
                 persisted_session_id = executor._runtime_resume_session_id(state.runtime_handle)
                 if not lifecycle_emitted and persisted_session_id:
@@ -592,3 +619,13 @@ class LeafDispatcher:
 
         # Check if stall was detected (CancelScope ate the Cancelled)
         state.stalled = stall_scope.cancelled_caught
+        if attempt_scope.cancelled_caught:
+            elapsed = max(0.0, anyio.current_time() - state.attempt_started_at)
+            state.attempt_budget_exhaustion = AttemptBudgetExhaustion(
+                kind=AttemptBudgetKind.WALL_CLOCK,
+                limit=ac_attempt_timeout_seconds,
+                observed=elapsed,
+            )
+            # A fixed total deadline is a different recovery signal from an
+            # inactivity stall, even if both clocks happen to expire together.
+            state.stalled = False

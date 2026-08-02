@@ -49,6 +49,11 @@ from weakref import ref
 import anyio
 from rich.console import Console
 
+from ouroboros.core.attempt_budget import (
+    DEFAULT_AC_ATTEMPT_TIMEOUT_SECONDS,
+    DEFAULT_MAX_ITERATIONS_PER_AC,
+    validate_attempt_budget,
+)
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     InvestmentSpec,
@@ -100,6 +105,10 @@ from ouroboros.orchestrator.atomic_prompt_builder import (
     AtomicPromptBuilder,
     _build_success_contract_block,  # noqa: F401  (re-exported for tests/back-compat)
 )
+from ouroboros.orchestrator.attempt_budget_runtime import (
+    AtomicAttemptTerminalizer,
+    build_decomposition_trace_summary,
+)
 from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
     resolve_backend_limits,
@@ -140,7 +149,6 @@ from ouroboros.orchestrator.decomposition_policy import (
     legacy_unverified_split_decision,
     parse_decomposition_proposal,
     redact_and_truncate_text,
-    summarize_decomposition_trace,
     validate_decomposition_proposal,
 )
 from ouroboros.orchestrator.effort_routing import assess_investment, resolve_execute_effort
@@ -382,7 +390,6 @@ from ouroboros.orchestrator.synapse import (
     render_inform_signal_prompt,
 )
 from ouroboros.orchestrator.verifier import (
-    RetryAdmission,
     Verifier,
     VerifierContractError,
     VerifierVerdict,
@@ -2900,6 +2907,8 @@ class ParallelACExecutor:
         enable_decomposition: bool = True,
         decomposition_mode: Literal["bounce_only", "off"] = "bounce_only",
         max_concurrent: int = 3,
+        max_iterations_per_ac: int = DEFAULT_MAX_ITERATIONS_PER_AC,
+        ac_attempt_timeout_seconds: float = DEFAULT_AC_ATTEMPT_TIMEOUT_SECONDS,
         max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
         checkpoint_store: Any | None = None,
         inherited_runtime_handle: RuntimeHandle | None = None,
@@ -2936,6 +2945,8 @@ class ParallelACExecutor:
                 records remain readable, but no live constructor can authorize
                 a new pre-execution decomposition effect.
             max_concurrent: Maximum number of concurrent AC executions.
+            max_iterations_per_ac: Tool-bearing turn target per atomic attempt.
+            ac_attempt_timeout_seconds: Fixed wall-clock ceiling per atomic attempt.
             max_decomposition_depth: Maximum recursive decomposition depth.
             checkpoint_store: Optional CheckpointStore for state recovery (RC3).
             inherited_runtime_handle: Optional parent Claude runtime handle for
@@ -3001,6 +3012,11 @@ class ParallelACExecutor:
             self._max_decomposition_depth
         )
         self._max_concurrent = max_concurrent
+        attempt_budget = validate_attempt_budget(
+            max_iterations_per_ac=max_iterations_per_ac,
+            timeout_seconds=ac_attempt_timeout_seconds,
+        )
+        self._max_iterations_per_ac, self._ac_attempt_timeout_seconds = attempt_budget
         approval_mode = getattr(adapter, "permission_mode", None)
         self._inherited_runtime_handle = (
             replace(inherited_runtime_handle, approval_mode=approval_mode.strip())
@@ -3268,10 +3284,12 @@ class ParallelACExecutor:
         limits = get_attribute(self, "_resolved_backend_limits")
         coordinator_effort = getattr(coordinator, "_reasoning_effort", None)
         return {
-            "version": 1,
+            "version": 2,
             "decomposition_mode": get_attribute(self, "_decomposition_mode"),
             "max_decomposition_depth": get_attribute(self, "_max_decomposition_depth"),
             "max_concurrent": get_attribute(self, "_max_concurrent"),
+            "max_iterations_per_ac": get_attribute(self, "_max_iterations_per_ac"),
+            "ac_attempt_timeout_seconds": get_attribute(self, "_ac_attempt_timeout_seconds"),
             "execution_profile": (
                 get_attribute(self, "_execution_profile").model_dump(mode="json")
                 if get_attribute(self, "_execution_profile") is not None
@@ -6248,62 +6266,14 @@ class ParallelACExecutor:
         result: ACExecutionResult,
         ac_spec: AcceptanceCriterionSpec | None,
     ) -> DecompositionTraceSummary:
-        """Project one failed attempt into typed counts and enums only."""
-        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+        """Project one failed attempt through the bounded trace helper."""
 
-        verdict = result.atomic_verifier_verdict
-        attempted_tool_count = sum(
-            1
-            for message in result.messages
-            if isinstance(message.tool_name, str) and bool(message.tool_name.strip())
+        return build_decomposition_trace_summary(
+            result=result,
+            ac_spec=ac_spec,
+            task_cwd=self._task_cwd,
+            adapter_cwd=self._adapter.working_directory,
         )
-        evidence_field_count = (
-            len(result.typed_evidence.data)
-            if result.typed_evidence is not None and type(result.typed_evidence.data) is dict
-            else 0
-        )
-        verified_artifact_count = 0
-        remaining_artifact_count = 0
-        if ac_spec is not None and ac_spec.expected_artifacts:
-            cwd = Path(self._task_cwd or self._adapter.working_directory or os.getcwd())
-            for artifact in ac_spec.expected_artifacts[:8]:
-                target = Path(artifact)
-                if not target.is_absolute():
-                    target = cwd / target
-                if target.exists():
-                    verified_artifact_count += 1
-                else:
-                    remaining_artifact_count += 1
-
-        try:
-            failure_class = (
-                FailureClass(verdict.failure_class).value
-                if verdict is not None and verdict.failure_class is not None
-                else "UNKNOWN"
-            )
-        except ValueError:
-            failure_class = "UNKNOWN"
-        retry_admission = (
-            verdict.retry_admission.value
-            if verdict is not None and isinstance(verdict.retry_admission, RetryAdmission)
-            else "UNKNOWN"
-        )
-        lines = [
-            f"attempt_message_count={len(result.messages)}",
-            f"attempted_tool_count={attempted_tool_count}",
-            f"typed_evidence_present={result.typed_evidence is not None}",
-            f"evidence_field_count={evidence_field_count}",
-            f"verified_artifact_count={verified_artifact_count}",
-            f"remaining_artifact_count={remaining_artifact_count}",
-            f"failure_class={failure_class}",
-            f"retry_admission={retry_admission}",
-            f"verifier_reason_count={len(verdict.reasons) if verdict is not None else 0}",
-            f"failure_detail_present={bool(result.error or result.final_message)}",
-        ]
-        if ac_spec is not None:
-            lines.append(f"verify_command_present={bool(ac_spec.verify_command)}")
-            lines.append(f"output_assertion_present={bool(ac_spec.output_assertion)}")
-        return summarize_decomposition_trace("\n".join(lines))
 
     async def _dispatch_decomposition_prompt(
         self,
@@ -7243,6 +7213,8 @@ class ParallelACExecutor:
             console=self._console,
             enable_decomposition=False,
             max_concurrent=1,
+            max_iterations_per_ac=self._max_iterations_per_ac,
+            ac_attempt_timeout_seconds=self._ac_attempt_timeout_seconds,
             checkpoint_store=self._checkpoint_store,
             task_cwd=self._task_cwd,
             execution_profile=self._execution_profile,
@@ -8131,6 +8103,8 @@ Respond with either ATOMIC or the structured JSON object only.
                                 else None
                             ),
                             "fat_harness_mode": self._fat_harness_mode,
+                            "max_iterations_per_ac": self._max_iterations_per_ac,
+                            "ac_attempt_timeout_seconds": (self._ac_attempt_timeout_seconds),
                             # Investment metadata is authority-bearing: the effort
                             # router can lower or raise the dispatched tier from it.
                             # Keep the canonical Seed representation in the capsule
@@ -8724,27 +8698,22 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             sealed_dispatch_ids.add(dispatch_id_to_seal)
 
-        async def _terminalize_route_drift(dispatch_id_to_terminalize: str) -> ACExecutionResult:
-            """Close durable recovery state when live admission becomes stale."""
-
-            nonlocal clear_cached_runtime_handle
-            clear_cached_runtime_handle = True
-            await _seal_dispatch(
-                dispatch_id_to_terminalize,
-                reason="live route authority changed before provider entry",
-            )
-            await self._emit_ac_runtime_event(
-                event_type="execution.session.failed",
-                runtime_identity=runtime_identity,
-                ac_content=ac_content,
-                runtime_handle=dispatch_state.runtime_handle,
-                execution_id=execution_context_id,
-                session_id=dispatch_state.ac_session_id,
-                orchestrator_session_id=session_id,
-                success=False,
-                error="route admission blocked: live route state changed before provider entry",
-            )
-            return _route_drift_blocked_result()
+        attempt_terminalizer = AtomicAttemptTerminalizer(
+            executor=self,
+            dispatch_state=dispatch_state,
+            seal_dispatch=_seal_dispatch,
+            start_time=start_time,
+            runtime_identity=runtime_identity,
+            node_identity=node_identity,
+            execution_context_id=execution_context_id,
+            session_id=session_id,
+            ac_index=ac_index,
+            ac_content=ac_content,
+            retry_attempt=retry_attempt,
+            depth=depth,
+            route_candidate=observed_route_candidate,
+            route_drift_result=_route_drift_blocked_result,
+        )
 
         signal_target: SessionSignalTarget | None = None
         signal_target_registered = False
@@ -8772,7 +8741,8 @@ Respond with either ATOMIC or the structured JSON object only.
 
             provider_kwargs = _live_provider_kwargs()
             if provider_kwargs is None:
-                return await _terminalize_route_drift(active_dispatch_id)
+                clear_cached_runtime_handle = True
+                return await attempt_terminalizer.route_drift(active_dispatch_id)
             _invoke_execution_authority_guard(self)
             await self._authority_leaf_dispatcher_stream(
                 self._authority_leaf_dispatcher,
@@ -8795,11 +8765,17 @@ Respond with either ATOMIC or the structured JSON object only.
                 label=label,
                 indent=indent,
                 execution_counters=execution_counters,
+                max_iterations_per_ac=self._max_iterations_per_ac,
+                ac_attempt_timeout_seconds=self._ac_attempt_timeout_seconds,
             )
             runtime_handle = dispatch_state.runtime_handle
             ac_session_id = dispatch_state.ac_session_id
             final_message = dispatch_state.final_message
             success = dispatch_state.success
+
+            if dispatch_state.attempt_budget_exhaustion is not None:
+                clear_cached_runtime_handle = True
+                return await attempt_terminalizer.attempt_budget(active_dispatch_id)
 
             # Check if stall was detected (CancelScope ate the Cancelled)
             if dispatch_state.stalled:
@@ -9015,7 +8991,8 @@ Respond with either ATOMIC or the structured JSON object only.
                                     orchestrator_session_id=session_id,
                                 )
                             )
-                            return await _terminalize_route_drift(follow_up_dispatch_id)
+                            clear_cached_runtime_handle = True
+                            return await attempt_terminalizer.route_drift(follow_up_dispatch_id)
                         _invoke_execution_authority_guard(self)
                         await self._authority_leaf_dispatcher_stream(
                             self._authority_leaf_dispatcher,
@@ -9038,6 +9015,8 @@ Respond with either ATOMIC or the structured JSON object only.
                             label=label,
                             indent=indent,
                             execution_counters=execution_counters,
+                            max_iterations_per_ac=self._max_iterations_per_ac,
+                            ac_attempt_timeout_seconds=self._ac_attempt_timeout_seconds,
                         )
                     except Exception as exc:
                         await self._event_store.append(
@@ -9061,6 +9040,22 @@ Respond with either ATOMIC or the structured JSON object only.
                             dispatch_state.final_message = primary_final_message
                             continue
                         raise
+
+                    if dispatch_state.attempt_budget_exhaustion is not None:
+                        await self._event_store.append(
+                            create_session_signal_delivery_uncertain_event(
+                                queued_signal.signal,
+                                effective_mode=queued_signal.effective_mode,
+                                detail=(
+                                    "The runtime follow-up exhausted the atomic attempt budget "
+                                    "before an acknowledgement boundary."
+                                ),
+                                runtime_backend=signal_target.runtime_backend,
+                                orchestrator_session_id=session_id,
+                            )
+                        )
+                        clear_cached_runtime_handle = True
+                        return await attempt_terminalizer.attempt_budget(follow_up_dispatch_id)
 
                     signal_messages = messages[message_count_before_signal:]
                     acknowledgement_messages = [
@@ -10658,6 +10653,10 @@ Respond with either ATOMIC or the structured JSON object only.
         if not isinstance(result, ACExecutionResult):
             return False
         if result.success or result.is_blocked or result.is_invalid:
+            return False
+        # Repeating an AC that already consumed its hard step/time allowance
+        # defeats the bound and delays the trace-informed decomposition gate.
+        if result.attempt_budget_exhaustion is not None:
             return False
         # Stall retries are handled separately by the atomic leaf loop.
         return result.error != _STALL_SENTINEL

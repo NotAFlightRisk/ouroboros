@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.core.attempt_budget import AttemptBudgetKind
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     InvestmentSpec,
@@ -4366,6 +4367,131 @@ class _FinalMessageRuntime:
                 metadata=dict(resume_handle.metadata) if resume_handle is not None else {},
             ),
         )
+
+
+@pytest.mark.asyncio
+async def test_atomic_attempt_stops_before_over_budget_tool_effect() -> None:
+    """The common stream owner must cap tool-bearing turns for every runtime."""
+
+    runtime = _FinalMessageRuntime(
+        "must not reach terminal",
+        native_session_id="unused",
+        support_messages=tuple(
+            AgentMessage(
+                type="assistant",
+                content=f"Calling tool {index}",
+                tool_name="Read",
+                data={"tool_input": {"file_path": f"file-{index}.txt"}},
+            )
+            for index in range(3)
+        ),
+    )
+    event_store = AsyncMock()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=event_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        max_iterations_per_ac=2,
+    )
+    counters = {"messages_count": 0, "tool_calls_count": 0}
+
+    result = await executor._execute_atomic_ac(
+        ac_index=0,
+        ac_content="Inspect three files",
+        session_id="sess_budget_steps",
+        execution_id="exec_budget_steps",
+        tools=["Read"],
+        system_prompt="system",
+        seed_goal="Bound one attempt",
+        depth=0,
+        start_time=datetime.now(UTC),
+        execution_counters=counters,
+    )
+
+    assert result.success is False
+    assert result.attempt_budget_exhaustion is not None
+    assert result.attempt_budget_exhaustion.kind is AttemptBudgetKind.AGENTIC_STEPS
+    assert result.attempt_budget_exhaustion.limit == 2
+    assert result.attempt_budget_exhaustion.observed == 3
+    assert counters == {"messages_count": 3, "tool_calls_count": 2}
+    assert runtime.call_count == 1
+    assert executor._is_retryable_failure(result) is False
+    budget_events = [
+        call.args[0]
+        for call in event_store.append.await_args_list
+        if call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
+    ]
+    assert len(budget_events) == 1
+    assert budget_events[0].data["action"] == "bounce_or_fail"
+
+
+@pytest.mark.asyncio
+async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity() -> None:
+    """Progress messages may reset the idle watchdog but never the total deadline."""
+
+    class _ActiveForeverRuntime:
+        _runtime_handle_backend = "opencode"
+        _cwd = "/tmp/project"
+        _permission_mode = "acceptEdits"
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        @property
+        def runtime_backend(self) -> str:
+            return self._runtime_handle_backend
+
+        @property
+        def working_directory(self) -> str:
+            return self._cwd
+
+        @property
+        def permission_mode(self) -> str:
+            return self._permission_mode
+
+        async def execute_task(self, **_kwargs: Any):
+            try:
+                while True:
+                    yield AgentMessage(
+                        type="system",
+                        content="still working",
+                        data={"subtype": "progress"},
+                    )
+                    await asyncio.sleep(0.001)
+            finally:
+                self.closed = True
+
+    runtime = _ActiveForeverRuntime()
+    event_store = AsyncMock()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=event_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        max_iterations_per_ac=100,
+        ac_attempt_timeout_seconds=0.02,
+    )
+
+    result = await executor._execute_atomic_ac(
+        ac_index=0,
+        ac_content="Never-ending active task",
+        session_id="sess_budget_time",
+        execution_id="exec_budget_time",
+        tools=["Read"],
+        system_prompt="system",
+        seed_goal="Bound one attempt",
+        depth=0,
+        start_time=datetime.now(UTC),
+    )
+
+    assert result.success is False
+    assert result.attempt_budget_exhaustion is not None
+    assert result.attempt_budget_exhaustion.kind is AttemptBudgetKind.WALL_CLOCK
+    assert result.attempt_budget_exhaustion.limit == pytest.approx(0.02)
+    assert result.attempt_budget_exhaustion.observed >= 0.02
+    assert runtime.closed is True
+    assert executor._is_retryable_failure(result) is False
 
 
 def _deep_macos_workspace() -> str:

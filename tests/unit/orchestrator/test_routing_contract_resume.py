@@ -503,7 +503,9 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
     inputs = contract["execution_inputs"]
     semantics = contract["execution_semantics"]
     assert inputs["schema_version"] == 2
-    assert semantics["version"] == 3
+    assert semantics["version"] == 4
+    assert semantics["max_iterations_per_ac"] == 10
+    assert semantics["ac_attempt_timeout_seconds"] == 900
     assert semantics["usage_limit_pause_seconds"] == 18000
     assert semantics["runtime_effect_capabilities"]["version"] == 1
     assert "frozen-app 1.0.0" in inputs["context_pack_fragment"]
