@@ -8,6 +8,7 @@ from ouroboros.router import Resolved, ResolveRequest, resolve_skill_dispatch
 
 IDK_SKILL = Path("skills/idk/SKILL.md")
 INTERVIEW_SKILL = Path("skills/interview/SKILL.md")
+DEV_AGENTS = Path("AGENTS.md")
 
 
 def test_idk_skill_defines_topic_specific_calibration_contract() -> None:
@@ -50,3 +51,10 @@ def test_interview_applies_idk_calibration_without_reducing_rigor() -> None:
     assert "most recent `Interview calibration` produced by `ooo idk`" in text
     assert "preserve the original question's decision" in text
     assert "do not forward that statement to MCP as the answer" in text
+
+
+def test_dev_mode_agents_routes_and_summarizes_idk() -> None:
+    text = DEV_AGENTS.read_text(encoding="utf-8")
+
+    assert "`ooo idk ...` | Read `skills/idk/SKILL.md`" in text
+    assert "`ooo idk` | MCP: `ouroboros_interview` calibration control turn" in text
