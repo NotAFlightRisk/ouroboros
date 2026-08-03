@@ -18,12 +18,14 @@ partial message list must remain visible for teardown.
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import stat
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 
@@ -53,6 +55,12 @@ if TYPE_CHECKING:
         ExecutionNodeIdentity,
     )
     from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
+
+
+async def _close_runtime_stream(stream: AsyncGenerator[AgentMessage, None]) -> None:
+    """Finish provider cleanup even when the consuming attempt is cancelled."""
+    with anyio.CancelScope(shield=True):
+        await stream.aclose()
 
 
 @dataclass
@@ -412,20 +420,28 @@ class LeafDispatcher:
             state.attempt_started_at = anyio.current_time()
         attempt_deadline = state.attempt_started_at + ac_attempt_timeout_seconds
 
-        with (
-            _BashFilesystemLeaseTracker(task_cwd=task_cwd) as identity_tracker,
-            anyio.CancelScope(deadline=attempt_deadline) as attempt_scope,
-            anyio.CancelScope(
-                deadline=anyio.current_time() + STALL_TIMEOUT_SECONDS,
-            ) as stall_scope,
-        ):
-            async for message in executor._adapter.execute_task(
-                prompt=prompt,
-                tools=tools,
-                system_prompt=system_prompt,
-                resume_handle=state.runtime_handle,
-                **execute_effort_kwargs,
-            ):
+        async with AsyncExitStack() as stream_stack:
+            identity_tracker = stream_stack.enter_context(
+                _BashFilesystemLeaseTracker(task_cwd=task_cwd)
+            )
+            message_stream = cast(
+                AsyncGenerator[AgentMessage, None],
+                executor._adapter.execute_task(
+                    prompt=prompt,
+                    tools=tools,
+                    system_prompt=system_prompt,
+                    resume_handle=state.runtime_handle,
+                    **execute_effort_kwargs,
+                ),
+            )
+            stream_stack.push_async_callback(_close_runtime_stream, message_stream)
+            attempt_scope = stream_stack.enter_context(anyio.CancelScope(deadline=attempt_deadline))
+            stall_scope = stream_stack.enter_context(
+                anyio.CancelScope(
+                    deadline=anyio.current_time() + STALL_TIMEOUT_SECONDS,
+                )
+            )
+            async for message in message_stream:
                 # Reset stall deadline on every message (RC6 core)
                 stall_scope.deadline = anyio.current_time() + STALL_TIMEOUT_SECONDS
                 if message.resume_handle is not None:

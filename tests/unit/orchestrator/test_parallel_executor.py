@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
 import pytest
 
 from ouroboros.core.attempt_budget import AttemptBudgetKind
@@ -4373,19 +4374,41 @@ class _FinalMessageRuntime:
 async def test_atomic_attempt_stops_before_over_budget_tool_effect() -> None:
     """The common stream owner must cap tool-bearing turns for every runtime."""
 
-    runtime = _FinalMessageRuntime(
-        "must not reach terminal",
-        native_session_id="unused",
-        support_messages=tuple(
-            AgentMessage(
-                type="assistant",
-                content=f"Calling tool {index}",
-                tool_name="Read",
-                data={"tool_input": {"file_path": f"file-{index}.txt"}},
+    class _Process:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def aclose(self) -> None:
+            await asyncio.sleep(0)
+            self.closed = True
+
+    class _StepBudgetRuntime(_FinalMessageRuntime):
+        def __init__(self) -> None:
+            super().__init__(
+                "must not reach terminal",
+                native_session_id="unused",
+                support_messages=tuple(
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool {index}",
+                        tool_name="Read",
+                        data={"tool_input": {"file_path": f"file-{index}.txt"}},
+                    )
+                    for index in range(3)
+                ),
             )
-            for index in range(3)
-        ),
-    )
+            self.process = _Process()
+            self.finalized = False
+
+        async def execute_task(self, **kwargs: Any):
+            try:
+                async for message in super().execute_task(**kwargs):
+                    yield message
+            finally:
+                await self.process.aclose()
+                self.finalized = True
+
+    runtime = _StepBudgetRuntime()
     event_store = AsyncMock()
     executor = ParallelACExecutor(
         adapter=runtime,
@@ -4416,6 +4439,8 @@ async def test_atomic_attempt_stops_before_over_budget_tool_effect() -> None:
     assert result.attempt_budget_exhaustion.observed == 3
     assert counters == {"messages_count": 3, "tool_calls_count": 2}
     assert runtime.call_count == 1
+    assert runtime.finalized is True
+    assert runtime.process.closed is True
     assert executor._is_retryable_failure(result) is False
     budget_events = [
         call.args[0]
@@ -4424,6 +4449,89 @@ async def test_atomic_attempt_stops_before_over_budget_tool_effect() -> None:
     ]
     assert len(budget_events) == 1
     assert budget_events[0].data["action"] == "bounce_or_fail"
+
+
+@pytest.mark.asyncio
+async def test_atomic_attempt_external_cancellation_closes_runtime_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """External cancellation must wait for provider cleanup before propagating."""
+
+    class _Process:
+        def __init__(self) -> None:
+            self.close_started = False
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.close_started = True
+            await anyio.sleep(0)
+            self.closed = True
+
+    class _CancellationRuntime(_FinalMessageRuntime):
+        def __init__(self) -> None:
+            super().__init__("unused", native_session_id="unused")
+            self.message_yielded = False
+            self.process = _Process()
+            self.finalized = False
+
+        async def execute_task(self, **_kwargs: Any):
+            self.call_count += 1
+            try:
+                self.message_yielded = True
+                yield AgentMessage(
+                    type="system",
+                    content="provider is active",
+                    data={"subtype": "progress"},
+                )
+                await anyio.sleep_forever()
+            finally:
+                await self.process.aclose()
+                self.finalized = True
+
+    runtime = _CancellationRuntime()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+    activity_started = anyio.Event()
+
+    async def _block_activity(**_kwargs: Any) -> None:
+        activity_started.set()
+        await anyio.sleep_forever()
+
+    monkeypatch.setattr(executor._event_emitter, "observe_ac_activity", _block_activity)
+    cancellation_saw_closed_stream: bool | None = None
+
+    async def _run_attempt() -> None:
+        nonlocal cancellation_saw_closed_stream
+        try:
+            await executor._execute_atomic_ac(
+                ac_index=0,
+                ac_content="Remain active until cancelled",
+                session_id="sess_external_cancel",
+                execution_id="exec_external_cancel",
+                tools=["Read"],
+                system_prompt="system",
+                seed_goal="Cancel one attempt",
+                depth=0,
+                start_time=datetime.now(UTC),
+            )
+        except anyio.get_cancelled_exc_class():
+            cancellation_saw_closed_stream = runtime.process.closed
+            raise
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(_run_attempt)
+        await activity_started.wait()
+        task_group.cancel_scope.cancel()
+
+    assert runtime.message_yielded is True
+    assert runtime.process.close_started is True
+    assert runtime.process.closed is True
+    assert runtime.finalized is True
+    assert cancellation_saw_closed_stream is True
 
 
 @pytest.mark.asyncio
