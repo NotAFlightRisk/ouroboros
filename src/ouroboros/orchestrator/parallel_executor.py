@@ -108,6 +108,7 @@ from ouroboros.orchestrator.atomic_prompt_builder import (
 from ouroboros.orchestrator.attempt_budget_runtime import (
     AtomicAttemptTerminalizer,
     build_decomposition_trace_summary,
+    terminalize_bounded_route_exhaustion,
 )
 from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
@@ -6863,11 +6864,11 @@ class ParallelACExecutor:
                 expected_resume_runtime_scope_id=expected_resume_runtime_scope_id,
             )
             if atomic_result.error != _STALL_SENTINEL:
-                if atomic_result.outcome in {
+                if atomic_result.attempt_budget_exhaustion or atomic_result.outcome in {
                     ACExecutionOutcome.BLOCKED,
                     ACExecutionOutcome.INVALID,
                 }:
-                    # Admission/authority failures are terminal before recovery.
+                    # Admission/authority failures and exhausted budgets are terminal.
                     # Bounce classification and alternate-harness redispatch are
                     # provider effects too; neither may bypass a fail-closed route.
                     return _finalize_node_result(atomic_result)
@@ -9881,7 +9882,7 @@ Respond with either ATOMIC or the structured JSON object only.
         for an already-failed AC without a passing contract — is preserved
         (no double-fail for one root cause).
         """
-        if not self._run_verify_commands:
+        if result.attempt_budget_exhaustion or not self._run_verify_commands:
             return result
         if ac_index < 0 or ac_index >= len(seed.acceptance_criteria):
             return result
@@ -11253,7 +11254,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     session_id=session_id,
                     execution_counters=execution_counters,
                 )
-                value = round_results[round_position]
+                value = terminalize_bounded_route_exhaustion(round_results[round_position])
                 results[positions[ac_idx]] = value
                 if isinstance(value, _BatchInterruptedForRecoverablePause):
                     continue

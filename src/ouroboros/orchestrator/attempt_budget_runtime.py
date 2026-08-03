@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ouroboros.core.attempt_budget import AttemptBudgetExhaustion, AttemptBudgetKind
 from ouroboros.core.seed import AcceptanceCriterionSpec
@@ -21,7 +21,7 @@ from ouroboros.orchestrator.decomposition_policy import (
 )
 from ouroboros.orchestrator.events import create_ac_attempt_budget_exhausted_event
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
-from ouroboros.orchestrator.parallel_executor_models import ACExecutionResult
+from ouroboros.orchestrator.parallel_executor_models import ACExecutionOutcome, ACExecutionResult
 from ouroboros.orchestrator.runtime_message_projection import project_runtime_message
 from ouroboros.orchestrator.verifier import RetryAdmission
 
@@ -34,6 +34,13 @@ if TYPE_CHECKING:
     from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 
 log = get_logger(__name__)
+
+
+def terminalize_bounded_route_exhaustion[T](value: T) -> T:
+    """Turn an exhausted route result into a durable no-successor boundary."""
+    if isinstance(value, ACExecutionResult) and value.attempt_budget_exhaustion is not None:
+        return cast(T, replace(value, outcome=ACExecutionOutcome.BLOCKED))
+    return value
 
 
 class AttemptBudgetedMessageStream:
@@ -461,5 +468,6 @@ __all__ = [
     "build_decomposition_trace_summary",
     "direct_bounded_route_runtime_active",
     "should_emit_progress_event",
+    "terminalize_bounded_route_exhaustion",
     "terminate_runtime_handle",
 ]

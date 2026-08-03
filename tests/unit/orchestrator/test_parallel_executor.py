@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import anyio
 import pytest
 
-from ouroboros.core.attempt_budget import AttemptBudgetKind
+from ouroboros.core.attempt_budget import AttemptBudgetExhaustion, AttemptBudgetKind
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     InvestmentSpec,
@@ -4532,6 +4532,104 @@ async def test_atomic_attempt_external_cancellation_closes_runtime_stream(
     assert runtime.process.closed is True
     assert runtime.finalized is True
     assert cancellation_saw_closed_stream is True
+
+
+@pytest.mark.asyncio
+async def test_attempt_budget_exhaustion_skips_provider_recovery_paths() -> None:
+    """Bounce and alternate-harness recovery cannot renew an exhausted AC."""
+    exhaustion = AttemptBudgetExhaustion(
+        kind=AttemptBudgetKind.AGENTIC_STEPS,
+        limit=1.0,
+        observed=2.0,
+    )
+    exhausted = ACExecutionResult(
+        ac_index=0,
+        ac_content="Bound one attempt",
+        success=False,
+        error="Atomic attempt budget exhausted",
+        outcome=ACExecutionOutcome.FAILED,
+        attempt_budget_exhaustion=exhaustion,
+    )
+    executor = ProcessLocalTestExecutor(
+        adapter=_FinalMessageRuntime("unused", native_session_id="unused"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+    executor._execute_atomic_ac = AsyncMock(return_value=exhausted)
+    executor._maybe_recover_with_bounce_decomposition = AsyncMock(return_value=(None, None))
+    executor._maybe_redispatch_alt_harness = AsyncMock(return_value=None)
+
+    result = await executor._execute_single_ac(
+        ac_index=0,
+        ac_content="Bound one attempt",
+        session_id="sess_budget_terminal",
+        tools=["Read"],
+        tool_catalog=None,
+        system_prompt="system",
+        seed_goal="Bound one attempt",
+        execution_id="exec_budget_terminal",
+        same_runtime_budget_exhausted=True,
+    )
+
+    assert result.success is False
+    assert result.attempt_budget_exhaustion == exhaustion
+    executor._maybe_recover_with_bounce_decomposition.assert_not_awaited()
+    executor._maybe_redispatch_alt_harness.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_attempt_budget_exhaustion_cannot_be_recovered_by_verify_gate(
+    tmp_path: Path,
+) -> None:
+    """A passing partial artifact contract cannot erase hard exhaustion."""
+    (tmp_path / "done.txt").write_text("done\n", encoding="utf-8")
+    seed = Seed(
+        goal="Bound one attempt",
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(
+                description="Create done.txt",
+                expected_artifacts=("done.txt",),
+            ),
+        ),
+        ontology_schema=OntologySchema(name="BudgetedArtifact", description="d"),
+        metadata=SeedMetadata(ambiguity_score=0.0),
+    )
+    exhausted = ACExecutionResult(
+        ac_index=0,
+        ac_content="Create done.txt",
+        success=False,
+        error="Atomic attempt budget exhausted",
+        outcome=ACExecutionOutcome.FAILED,
+        attempt_budget_exhaustion=AttemptBudgetExhaustion(
+            kind=AttemptBudgetKind.AGENTIC_STEPS,
+            limit=1.0,
+            observed=2.0,
+        ),
+    )
+    executor = ParallelACExecutor(
+        adapter=_FinalMessageRuntime(
+            "unused",
+            native_session_id="unused",
+            cwd=str(tmp_path),
+        ),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        task_cwd=str(tmp_path),
+    )
+
+    gated = await executor._apply_verify_gate(
+        seed=seed,
+        ac_index=0,
+        result=exhausted,
+        session_id="sess_budget_verify",
+        execution_id="exec_budget_verify",
+    )
+
+    assert gated is exhausted
+    assert gated.success is False
+    assert gated.attempt_budget_exhaustion is not None
 
 
 @pytest.mark.asyncio

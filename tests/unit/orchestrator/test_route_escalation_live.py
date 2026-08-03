@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
+from ouroboros.core.attempt_budget import AttemptBudgetExhaustion, AttemptBudgetKind
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     OntologySchema,
@@ -546,6 +547,82 @@ async def test_live_loop_walks_each_route_once_then_succeeds() -> None:
     assert [event.data["route_id"] for event in judgments] == calls
     assert [event.data["route_attempt_index"] for event in judgments] == [0, 1, 2]
     assert all(event.data["route_episode_id"] == _episode_id(_seed()) for event in judgments)
+
+
+@pytest.mark.asyncio
+async def test_attempt_budget_exhaustion_never_dispatches_route_successor() -> None:
+    """A consumed AC allowance cannot be renewed by bounded Routing D."""
+    executor, _store, events = _executor(enable_decomposition=True)
+    calls: list[str] = []
+    exhaustion = AttemptBudgetExhaustion(
+        kind=AttemptBudgetKind.AGENTIC_STEPS,
+        limit=1.0,
+        observed=2.0,
+    )
+
+    async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
+        expected = kwargs.get("route_overrides", {}).get(0)
+        route_id = expected.route_id if expected is not None else "compat:claude:frugal"
+        calls.append(route_id)
+        if len(calls) > 1:
+            return [
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content="ship it",
+                    success=True,
+                    route_candidate=_candidate(executor, route_id),
+                )
+            ]
+        return [
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ship it",
+                success=False,
+                error="Atomic attempt budget exhausted",
+                messages=(AgentMessage(type="tool", content="attempted", tool_name="Read"),),
+                outcome=ACExecutionOutcome.FAILED,
+                atomic_verifier_verdict=VerifierVerdict(
+                    passed=False,
+                    reasons=("unfinished scope",),
+                    failure_class=FailureClass.SCOPE_CREEP.value,
+                    retry_admission=RetryAdmission.REDISPATCH,
+                ),
+                route_candidate=_candidate(executor, route_id),
+                attempt_budget_exhaustion=exhaustion,
+            )
+        ]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+    executor._request_bounce_classification = AsyncMock(return_value=(BounceCause.UNKNOWN, False))
+
+    results = await executor._run_batch_with_bounded_route_escalation(
+        seed=_seed(),
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    assert calls == ["compat:claude:frugal"]
+    result = results[0]
+    assert isinstance(result, ACExecutionResult)
+    assert result.success is False
+    assert result.outcome is ACExecutionOutcome.BLOCKED
+    assert result.attempt_budget_exhaustion == exhaustion
+    executor._request_bounce_classification.assert_not_awaited()
+    route_events = [event for event in events if event.type == "execution.ac.route_observed"]
+    assert len(route_events) == 1
+    terminal = route_events[0]
+    assert terminal.data["observation"]["verifier_outcome"] == VerifierOutcome.BLOCKED.value
+    assert terminal.data["observation"]["failure_class"] == FailureClass.BLOCKED.value
+    assert terminal.data["decision"]["action"] == "blocked"
+    assert terminal.data["decision"]["reason"] == EscalationReason.HUMAN_HANDOFF_REQUIRED.value
+    assert terminal.data["human_handoff_required"] is True
 
 
 @pytest.mark.asyncio
