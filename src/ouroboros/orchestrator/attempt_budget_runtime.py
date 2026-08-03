@@ -200,7 +200,17 @@ class DirectAttemptBudget:
                 "call_site": context,
             }
         )
-        await event_store.append(event)
+        try:
+            await event_store.append(event)
+        except Exception as exc:
+            log.warning(
+                "orchestrator.runner.attempt_budget_event_persist_failed",
+                execution_id=execution_id,
+                session_id=session_id,
+                context=context,
+                event_type=event.type,
+                error=str(exc),
+            )
         log.warning(
             "orchestrator.runner.attempt_budget_exhausted",
             execution_id=execution_id,

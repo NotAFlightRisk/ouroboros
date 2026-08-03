@@ -1117,6 +1117,66 @@ class TestOrchestratorRunner:
         assert budget_event.data["root_ac_count"] == 3
 
     @pytest.mark.asyncio
+    async def test_execute_seed_direct_preserves_budget_result_when_event_write_fails(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Observe-only budget telemetry cannot mask an enforced direct boundary."""
+
+        runner._max_iterations_per_ac = 1
+        runner._ac_attempt_timeout_seconds = 10
+        produced = 0
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            nonlocal produced
+            del args, kwargs
+            for index in range(20):
+                produced += 1
+                yield AgentMessage(
+                    type="tool",
+                    content=f"tool {index}",
+                    tool_name="Read",
+                )
+
+        async def append_event(event: Any) -> None:
+            if event.type == "execution.ac.attempt_budget_exhausted":
+                raise RuntimeError("budget telemetry unavailable")
+
+        async def create_session(*args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        mock_adapter.execute_task = mock_execute
+        mock_event_store.append.side_effect = append_event
+
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(
+                runner._session_repo,
+                "mark_failed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_ok and result.value.success is False
+        assert produced == 4
+        assert "agentic_steps limit=3" in result.value.final_message
+        assert "budget telemetry unavailable" not in result.value.final_message
+        assert any(
+            getattr(call.args[0], "type", None) == "execution.ac.attempt_budget_exhausted"
+            for call in mock_event_store.append.await_args_list
+        )
+
+    @pytest.mark.asyncio
     async def test_execute_seed_direct_stops_at_scaled_wall_clock_budget(
         self,
         runner: OrchestratorRunner,
@@ -6769,6 +6829,78 @@ class TestOrchestratorRunner:
         assert budget_event.data["limit"] == 3
         runner._retire_process_local_authority(
             session_id="sess_resume_budget",
+            execution_id=paused_tracker.execution_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_session_preserves_budget_result_when_event_write_fails(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Resume exhaustion remains terminal when its audit event cannot persist."""
+
+        runner._max_iterations_per_ac = 1
+        runner._ac_attempt_timeout_seconds = 10
+        paused_tracker = SessionTracker.create(
+            "exec_resume_budget_event_failure",
+            sample_seed.metadata.seed_id,
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id="sess_resume_budget_event_failure",
+        )
+        provider_calls = 0
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            nonlocal provider_calls
+            del args, kwargs
+            provider_calls += 1
+            for index in range(20):
+                yield AgentMessage(
+                    type="tool",
+                    content=f"tool {index}",
+                    tool_name="Read",
+                )
+
+        async def append_event(event: Any) -> None:
+            if event.type == "execution.ac.attempt_budget_exhausted":
+                raise RuntimeError("budget telemetry unavailable")
+
+        mock_adapter.execute_task = mock_execute
+        mock_event_store.append.side_effect = append_event
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_failed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.resume_session(
+                "sess_resume_budget_event_failure",
+                sample_seed,
+            )
+
+        assert result.is_ok and result.value.success is False
+        assert provider_calls == 1
+        assert "agentic_steps limit=3" in result.value.final_message
+        assert "budget telemetry unavailable" not in result.value.final_message
+        assert any(
+            getattr(call.args[0], "type", None) == "execution.ac.attempt_budget_exhausted"
+            for call in mock_event_store.append.await_args_list
+        )
+        runner._retire_process_local_authority(
+            session_id="sess_resume_budget_event_failure",
             execution_id=paused_tracker.execution_id,
         )
 
