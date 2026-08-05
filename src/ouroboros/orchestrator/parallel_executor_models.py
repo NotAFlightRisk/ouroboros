@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ouroboros.core.attempt_budget import AttemptBudgetExhaustion
+from ouroboros.core.attempt_budget import AttemptBudgetExhaustion, AttemptBudgetProgress
 from ouroboros.orchestrator.decomposition_policy import DecompositionDecisionRecord
 
 if TYPE_CHECKING:
@@ -73,6 +73,8 @@ class ACExecutionResult:
         attempt_budget_exhaustion: Measured hard boundary that stopped this
             provider attempt, when it exhausted its finite step or wall-clock
             budget.
+        attempt_budget_progress: Finite-resource state captured when the exact
+            provider attempt paused and remains resumable.
     """
 
     ac_index: int
@@ -97,6 +99,7 @@ class ACExecutionResult:
     verify_gate_outcome: Any | None = None
     decomposition_decision: DecompositionDecisionRecord | None = None
     attempt_budget_exhaustion: AttemptBudgetExhaustion | None = None
+    attempt_budget_progress: AttemptBudgetProgress | None = None
     # Provisional dispatch metadata only.  The selected candidate authorizes no
     # future effect and says nothing about Final Gate acceptance; the outer
     # bounded-escalation owner uses it to durably observe the attempt.

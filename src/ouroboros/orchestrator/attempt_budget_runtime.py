@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from ouroboros.core.attempt_budget import AttemptBudgetExhaustion, AttemptBudgetKind
+from ouroboros.core.attempt_budget import (
+    AttemptBudgetExhaustion,
+    AttemptBudgetKind,
+    AttemptBudgetProgress,
+)
 from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeHandle
@@ -52,12 +56,22 @@ class AttemptBudgetedMessageStream:
         *,
         max_agentic_steps: int,
         timeout_seconds: float,
+        progress: AttemptBudgetProgress | None = None,
     ) -> None:
+        if progress is not None:
+            progress = AttemptBudgetProgress.from_contract_data(
+                progress.to_contract_data(),
+                max_agentic_steps=max_agentic_steps,
+                timeout_seconds=timeout_seconds,
+            )
         self._source = source
         self._max_agentic_steps = max_agentic_steps
         self._timeout_seconds = timeout_seconds
         self._started_at: float | None = None
-        self._agentic_steps = 0
+        self._agentic_steps = progress.agentic_steps_consumed if progress is not None else 0
+        self._elapsed_before_start = (
+            progress.elapsed_timeout_seconds() if progress is not None else 0.0
+        )
         self.exhaustion: AttemptBudgetExhaustion | None = None
 
     def __aiter__(self) -> AttemptBudgetedMessageStream:
@@ -68,8 +82,21 @@ class AttemptBudgetedMessageStream:
         """Return monotonic time consumed since the first provider read."""
 
         if self._started_at is None:
-            return 0.0
-        return max(0.0, asyncio.get_running_loop().time() - self._started_at)
+            return self._elapsed_before_start
+        return self._elapsed_before_start + max(
+            0.0,
+            asyncio.get_running_loop().time() - self._started_at,
+        )
+
+    def progress(self) -> AttemptBudgetProgress:
+        """Return conservative durable progress for a recoverable pause."""
+
+        return AttemptBudgetProgress.capture(
+            agentic_steps_consumed=self._agentic_steps,
+            elapsed_timeout_seconds=self.elapsed_seconds,
+            max_agentic_steps=self._max_agentic_steps,
+            timeout_seconds=self._timeout_seconds,
+        )
 
     async def __anext__(self) -> AgentMessage:
         if self.exhaustion is not None:
@@ -78,7 +105,7 @@ class AttemptBudgetedMessageStream:
         loop = asyncio.get_running_loop()
         if self._started_at is None:
             self._started_at = loop.time()
-        elapsed = max(0.0, loop.time() - self._started_at)
+        elapsed = self.elapsed_seconds
         remaining = self._timeout_seconds - elapsed
         if remaining <= 0:
             self.exhaustion = AttemptBudgetExhaustion(
@@ -95,7 +122,7 @@ class AttemptBudgetedMessageStream:
         except TimeoutError:
             if not deadline.expired():
                 raise
-            elapsed = max(0.0, loop.time() - self._started_at)
+            elapsed = self.elapsed_seconds
             self.exhaustion = AttemptBudgetExhaustion(
                 kind=AttemptBudgetKind.WALL_CLOCK,
                 limit=self._timeout_seconds,
@@ -122,6 +149,12 @@ class DirectAttemptBudget:
     timeout_seconds: float
     root_ac_count: int
     attempts_started: int = 0
+    resume_progress: AttemptBudgetProgress | None = None
+    _last_stream: AttemptBudgetedMessageStream | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     @classmethod
     def from_execution_semantics(
@@ -129,6 +162,7 @@ class DirectAttemptBudget:
         execution_semantics: Mapping[str, Any],
         *,
         root_ac_count: int,
+        resume_progress: AttemptBudgetProgress | None = None,
     ) -> DirectAttemptBudget:
         """Scale the validated per-AC contract by the whole-Seed root count."""
 
@@ -141,6 +175,7 @@ class DirectAttemptBudget:
                 float(execution_semantics["ac_attempt_timeout_seconds"]) * bounded_root_count
             ),
             root_ac_count=bounded_root_count,
+            resume_progress=resume_progress,
         )
 
     def decorate_prompt(self, prompt: str) -> str:
@@ -157,11 +192,22 @@ class DirectAttemptBudget:
         """Start and count one bounded provider stream."""
 
         self.attempts_started += 1
-        return AttemptBudgetedMessageStream(
+        stream = AttemptBudgetedMessageStream(
             source,
             max_agentic_steps=self.max_agentic_steps,
             timeout_seconds=self.timeout_seconds,
+            progress=self.resume_progress,
         )
+        self.resume_progress = None
+        self._last_stream = stream
+        return stream
+
+    def progress(self) -> AttemptBudgetProgress:
+        """Return the current stream's durable pause state."""
+
+        if self._last_stream is None:
+            raise RuntimeError("direct attempt budget has no started stream")
+        return self._last_stream.progress()
 
     async def terminalize(
         self,

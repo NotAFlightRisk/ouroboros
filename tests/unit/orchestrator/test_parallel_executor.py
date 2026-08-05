@@ -18,7 +18,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import anyio
 import pytest
 
-from ouroboros.core.attempt_budget import AttemptBudgetExhaustion, AttemptBudgetKind
+from ouroboros.core.attempt_budget import (
+    AttemptBudgetExhaustion,
+    AttemptBudgetKind,
+)
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     InvestmentSpec,

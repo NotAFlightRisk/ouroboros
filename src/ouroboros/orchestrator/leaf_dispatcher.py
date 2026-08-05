@@ -32,6 +32,7 @@ import anyio
 from ouroboros.core.attempt_budget import (
     AttemptBudgetExhaustion,
     AttemptBudgetKind,
+    AttemptBudgetProgress,
 )
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.evidence.claims import (
@@ -81,8 +82,27 @@ class LeafDispatchState:
     success: bool = False
     stalled: bool = False
     agentic_step_count: int = 0
+    attempt_elapsed_seconds: float = 0.0
     attempt_started_at: float | None = None
     attempt_budget_exhaustion: AttemptBudgetExhaustion | None = None
+
+    def attempt_budget_progress(
+        self,
+        *,
+        max_agentic_steps: int,
+        timeout_seconds: float,
+    ) -> AttemptBudgetProgress:
+        """Capture cumulative finite-resource state at a recoverable pause."""
+
+        elapsed = self.attempt_elapsed_seconds
+        if self.attempt_started_at is not None:
+            elapsed += max(0.0, anyio.current_time() - self.attempt_started_at)
+        return AttemptBudgetProgress.capture(
+            agentic_steps_consumed=self.agentic_step_count,
+            elapsed_timeout_seconds=elapsed,
+            max_agentic_steps=max_agentic_steps,
+            timeout_seconds=timeout_seconds,
+        )
 
 
 @dataclass(slots=True)
@@ -418,7 +438,9 @@ class LeafDispatcher:
         exec_start = time.monotonic()
         if state.attempt_started_at is None:
             state.attempt_started_at = anyio.current_time()
-        attempt_deadline = state.attempt_started_at + ac_attempt_timeout_seconds
+        attempt_deadline = (
+            state.attempt_started_at + ac_attempt_timeout_seconds - state.attempt_elapsed_seconds
+        )
 
         async with AsyncExitStack() as stream_stack:
             identity_tracker = stream_stack.enter_context(
@@ -636,7 +658,10 @@ class LeafDispatcher:
         # Check if stall was detected (CancelScope ate the Cancelled)
         state.stalled = stall_scope.cancelled_caught
         if attempt_scope.cancelled_caught:
-            elapsed = max(0.0, anyio.current_time() - state.attempt_started_at)
+            elapsed = state.attempt_elapsed_seconds + max(
+                0.0,
+                anyio.current_time() - state.attempt_started_at,
+            )
             state.attempt_budget_exhaustion = AttemptBudgetExhaustion(
                 kind=AttemptBudgetKind.WALL_CLOCK,
                 limit=ac_attempt_timeout_seconds,

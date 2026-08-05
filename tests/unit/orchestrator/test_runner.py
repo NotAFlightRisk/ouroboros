@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.core.attempt_budget import AttemptBudgetProgress
 from ouroboros.core.errors import ConfigError, PersistenceError
 from ouroboros.core.project_identity import resolve_project_identity
 from ouroboros.core.seed import (
@@ -94,6 +95,7 @@ _LONG_WINDOW_429_ENCODINGS = tuple(
     for value in (429, "429")
 )
 _EXPECTED_CANONICAL_PROJECT_CWD = str(Path("/tmp/project").resolve())
+_DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY = "direct_attempt_budget_progress"
 
 
 def _task_workspace() -> TaskWorkspace:
@@ -208,6 +210,22 @@ def _allow_mocked_precreated_durable_state(runner: OrchestratorRunner) -> None:
     runner._reconstruct_precreated_durable_tracker = AsyncMock(side_effect=reconstruct)
 
 
+def _direct_attempt_budget_progress(
+    runner: OrchestratorRunner,
+    *,
+    root_ac_count: int,
+    agentic_steps_consumed: int = 0,
+    elapsed_timeout_seconds: float = 0,
+) -> AttemptBudgetProgress:
+    bounded_root_count = max(1, root_ac_count)
+    return AttemptBudgetProgress.capture(
+        agentic_steps_consumed=agentic_steps_consumed,
+        elapsed_timeout_seconds=elapsed_timeout_seconds,
+        max_agentic_steps=runner._max_iterations_per_ac * bounded_root_count,
+        timeout_seconds=runner._ac_attempt_timeout_seconds * bounded_root_count,
+    )
+
+
 def _attach_live_process_local_contract(
     runner: OrchestratorRunner,
     tracker: SessionTracker,
@@ -235,7 +253,16 @@ def _attach_live_process_local_contract(
         execution_contract=contract,
     )
     _allow_mocked_precreated_durable_state(runner)
-    return tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
+    attempt_budget_progress = _direct_attempt_budget_progress(
+        runner,
+        root_ac_count=len(seed.acceptance_criteria),
+    )
+    return tracker.with_progress(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: contract,
+            _DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY: (attempt_budget_progress.to_contract_data()),
+        }
+    )
 
 
 def _enable_direct_bounded_routes(
@@ -2298,7 +2325,7 @@ class TestOrchestratorRunner:
             aggregate_type="execution",
             aggregate_id="execution-route-resume",
             data={
-                "schema_version": 1,
+                "schema_version": 2,
                 "execution_id": "execution-route-resume",
                 "session_id": "session-route-resume",
                 "root_ac_index": None,
@@ -2309,6 +2336,9 @@ class TestOrchestratorRunner:
                 "attempt_index": 0,
                 "prior_route_ids": [],
                 "route": paused_candidate.to_contract_data(),
+                "attempt_budget_progress": paused_tracker.progress[
+                    _DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY
+                ],
                 "recoverable_pause": True,
                 "final_acceptance_declared": False,
             },
@@ -2621,7 +2651,7 @@ class TestOrchestratorRunner:
             aggregate_type="execution",
             aggregate_id=paused_tracker.execution_id,
             data={
-                "schema_version": 1,
+                "schema_version": 2,
                 "execution_id": paused_tracker.execution_id,
                 "session_id": paused_tracker.session_id,
                 "root_ac_index": None,
@@ -2633,6 +2663,9 @@ class TestOrchestratorRunner:
                 "attempt_index": 0,
                 "prior_route_ids": [],
                 "route": paused_candidate.to_contract_data(),
+                "attempt_budget_progress": paused_tracker.progress[
+                    _DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY
+                ],
                 "recoverable_pause": True,
                 "final_acceptance_declared": False,
             },
@@ -2756,7 +2789,7 @@ class TestOrchestratorRunner:
             aggregate_type="execution",
             aggregate_id=paused_tracker.execution_id,
             data={
-                "schema_version": 1,
+                "schema_version": 2,
                 "execution_id": paused_tracker.execution_id,
                 "session_id": paused_tracker.session_id,
                 "root_ac_index": None,
@@ -2765,6 +2798,9 @@ class TestOrchestratorRunner:
                 "attempt_index": 0,
                 "prior_route_ids": [],
                 "route": paused_candidate.to_contract_data(),
+                "attempt_budget_progress": paused_tracker.progress[
+                    _DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY
+                ],
                 "recoverable_pause": True,
                 "final_acceptance_declared": False,
             },
@@ -2931,13 +2967,17 @@ class TestOrchestratorRunner:
         initial = admit_compat_escalation_route(projection, effort=None)
         assert initial.selected is not None
         episode_id = "route:" + hashlib.sha256(f"{execution_id}\0direct".encode()).hexdigest()
+        attempt_budget_progress = _direct_attempt_budget_progress(
+            runner,
+            root_ac_count=1,
+        ).to_contract_data()
         pauses = [
             BaseEvent(
                 type="execution.ac.route_paused",
                 aggregate_type="execution",
                 aggregate_id=execution_id,
                 data={
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "execution_id": execution_id,
                     "session_id": session_id,
                     "root_ac_index": None,
@@ -2946,6 +2986,7 @@ class TestOrchestratorRunner:
                     "attempt_index": 0,
                     "prior_route_ids": [],
                     "route": initial.selected.to_contract_data(),
+                    "attempt_budget_progress": attempt_budget_progress,
                     "recoverable_pause": True,
                     "final_acceptance_declared": False,
                 },
@@ -3042,7 +3083,7 @@ class TestOrchestratorRunner:
             aggregate_type="execution",
             aggregate_id=execution_id,
             data={
-                "schema_version": 1,
+                "schema_version": 2,
                 "execution_id": execution_id,
                 "session_id": session_id,
                 "root_ac_index": None,
@@ -3051,6 +3092,10 @@ class TestOrchestratorRunner:
                 "attempt_index": 1,
                 "prior_route_ids": [current.route_id],
                 "route": drifted_pause.to_contract_data(),
+                "attempt_budget_progress": _direct_attempt_budget_progress(
+                    runner,
+                    root_ac_count=1,
+                ).to_contract_data(),
                 "recoverable_pause": True,
                 "final_acceptance_declared": False,
             },
@@ -6775,8 +6820,18 @@ class TestOrchestratorRunner:
             sample_seed,
             session_id="sess_resume_budget",
         )
+        paused_tracker = paused_tracker.with_progress(
+            {
+                _DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY: _direct_attempt_budget_progress(
+                    runner,
+                    root_ac_count=len(sample_seed.acceptance_criteria),
+                    agentic_steps_consumed=2,
+                ).to_contract_data()
+            }
+        )
         terminate_calls = 0
         provider_calls = 0
+        produced_tool_turns = 0
 
         async def terminate(_handle: RuntimeHandle) -> bool:
             nonlocal terminate_calls
@@ -6790,9 +6845,11 @@ class TestOrchestratorRunner:
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             nonlocal provider_calls
+            nonlocal produced_tool_turns
             del args, kwargs
             provider_calls += 1
             for index in range(20):
+                produced_tool_turns += 1
                 yield AgentMessage(
                     type="tool",
                     content=f"tool {index}",
@@ -6818,6 +6875,7 @@ class TestOrchestratorRunner:
 
         assert result.is_ok and result.value.success is False
         assert provider_calls == 1
+        assert produced_tool_turns == 2
         assert terminate_calls == 1
         assert "agentic_steps limit=3" in result.value.final_message
         budget_event = next(
@@ -6831,6 +6889,142 @@ class TestOrchestratorRunner:
             session_id="sess_resume_budget",
             execution_id=paused_tracker.execution_id,
         )
+
+    @pytest.mark.asyncio
+    async def test_resume_session_uses_only_remaining_direct_wall_clock_budget(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """A quota pause cannot reset the deadline of the same direct attempt."""
+
+        runner._max_iterations_per_ac = 100
+        runner._ac_attempt_timeout_seconds = 1
+        paused_tracker = SessionTracker.create(
+            "exec_resume_time_budget",
+            sample_seed.metadata.seed_id,
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id="sess_resume_time_budget",
+        ).with_progress(
+            {
+                _DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY: _direct_attempt_budget_progress(
+                    runner,
+                    root_ac_count=len(sample_seed.acceptance_criteria),
+                    elapsed_timeout_seconds=2.98,
+                ).to_contract_data()
+            }
+        )
+        terminate_calls = 0
+
+        async def terminate(_handle: RuntimeHandle) -> bool:
+            nonlocal terminate_calls
+            terminate_calls += 1
+            return True
+
+        live_handle = RuntimeHandle(
+            backend="opencode",
+            native_session_id="resume-time-budget",
+        ).bind_controls(terminate_callback=terminate)
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args, kwargs
+            yield AgentMessage(
+                type="assistant",
+                content="still working",
+                resume_handle=live_handle,
+            )
+            await asyncio.sleep(1)
+            yield AgentMessage(type="result", content="too late")
+
+        mock_adapter.execute_task = mock_execute
+        started = asyncio.get_running_loop().time()
+        try:
+            with (
+                patch.object(
+                    runner._session_repo,
+                    "reconstruct_session",
+                    AsyncMock(return_value=Result.ok(paused_tracker)),
+                ),
+                patch.object(
+                    runner._session_repo,
+                    "mark_failed",
+                    AsyncMock(return_value=Result.ok(None)),
+                ),
+            ):
+                result = await runner.resume_session(
+                    "sess_resume_time_budget",
+                    sample_seed,
+                )
+        finally:
+            runner._retire_process_local_authority(
+                session_id="sess_resume_time_budget",
+                execution_id=paused_tracker.execution_id,
+            )
+
+        elapsed = asyncio.get_running_loop().time() - started
+        assert result.is_ok and result.value.success is False
+        assert elapsed < 0.5
+        assert terminate_calls == 1
+        budget_event = next(
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.attempt_budget_exhausted"
+        )
+        assert budget_event.data["budget_kind"] == "wall_clock"
+        assert budget_event.data["limit"] == pytest.approx(3.0)
+        assert budget_event.data["observed"] >= 3.0
+
+    @pytest.mark.asyncio
+    async def test_resume_session_rejects_missing_direct_budget_progress_before_provider(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        paused_tracker = SessionTracker.create(
+            "exec_resume_missing_budget",
+            sample_seed.metadata.seed_id,
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id="sess_resume_missing_budget",
+        ).with_progress({_DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY: None})
+        provider_called = False
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            nonlocal provider_called
+            del args, kwargs
+            provider_called = True
+            yield AgentMessage(type="result", content="must not run")
+
+        mock_adapter.execute_task = mock_execute
+        try:
+            with patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ):
+                result = await runner.resume_session(
+                    "sess_resume_missing_budget",
+                    sample_seed,
+                )
+        finally:
+            runner._retire_process_local_authority(
+                session_id="sess_resume_missing_budget",
+                execution_id=paused_tracker.execution_id,
+            )
+
+        assert result.is_err
+        assert "valid direct attempt budget progress" in str(result.error)
+        assert provider_called is False
 
     @pytest.mark.asyncio
     async def test_resume_session_preserves_budget_result_when_event_write_fails(
@@ -6986,6 +7180,10 @@ class TestOrchestratorRunner:
                     "execution_id": execution_id,
                     "seed_id": sample_seed.metadata.seed_id,
                 },
+                _DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY: _direct_attempt_budget_progress(
+                    runner,
+                    root_ac_count=len(sample_seed.acceptance_criteria),
+                ).to_contract_data(),
             }
         )
 
