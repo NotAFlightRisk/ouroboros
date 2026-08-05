@@ -265,6 +265,19 @@ def _attach_live_process_local_contract(
     )
 
 
+def _attach_exact_resume_handle(
+    tracker: SessionTracker,
+    adapter: MagicMock,
+    native_session_id: str,
+) -> tuple[SessionTracker, RuntimeHandle]:
+    """Give a resume fixture the exact provider identity required by PAUSED."""
+    handle = RuntimeHandle(
+        backend=adapter.runtime_backend,
+        native_session_id=native_session_id,
+    )
+    return tracker.with_progress({"runtime": handle.to_session_state_dict()}), handle
+
+
 def _enable_direct_bounded_routes(
     runner: OrchestratorRunner,
     adapter: MagicMock,
@@ -2381,6 +2394,7 @@ class TestOrchestratorRunner:
     @pytest.mark.parametrize(
         ("scenario", "expected_calls"),
         [
+            ("legacy_initial_handleless_pause", 1),
             ("initial_handleless_pause", 1),
             ("successor_handleless_pause", 2),
             ("pause_handle_persistence_failure", 1),
@@ -2410,7 +2424,8 @@ class TestOrchestratorRunner:
             enable_decomposition=False,
         )
         runner._run_verify_commands = False
-        _enable_direct_bounded_routes(runner, mock_adapter)
+        if scenario != "legacy_initial_handleless_pause":
+            _enable_direct_bounded_routes(runner, mock_adapter)
         mock_adapter.llm_backend = "test-llm"
         mock_adapter._model = "test-model"
         provider_calls: list[dict[str, Any]] = []
@@ -4718,6 +4733,10 @@ class TestOrchestratorRunner:
             sample_seed,
             session_id=tracker.session_id,
         )
+        pause_handle = RuntimeHandle(
+            backend=mock_adapter.runtime_backend,
+            native_session_id="pause-persistence-pending",
+        )
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             del args, kwargs
@@ -4725,6 +4744,7 @@ class TestOrchestratorRunner:
                 type="result",
                 content="Usage limit reached. Please try again in 5 hours.",
                 data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=pause_handle,
             )
 
         mock_adapter.execute_task = mock_execute
@@ -5302,9 +5322,12 @@ class TestOrchestratorRunner:
             return True
 
         runtime_handle = RuntimeHandle(
-            backend="codex_cli",
+            backend=mock_adapter.runtime_backend,
             native_session_id="thread-123",
         ).bind_controls(terminate_callback=terminate)
+        running_tracker = running_tracker.with_progress(
+            {"runtime": runtime_handle.to_session_state_dict()}
+        )
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             del args, kwargs
@@ -5380,6 +5403,11 @@ class TestOrchestratorRunner:
             sample_seed,
             session_id="sess_resume_pause_pending",
         )
+        tracker, _resume_handle = _attach_exact_resume_handle(
+            tracker,
+            mock_adapter,
+            "resume-pause-persistence-pending",
+        )
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             del args, kwargs
@@ -5447,6 +5475,11 @@ class TestOrchestratorRunner:
             tracker,
             sample_seed,
             session_id=tracker.session_id,
+        )
+        tracker, _resume_handle = _attach_exact_resume_handle(
+            tracker,
+            mock_adapter,
+            "resume-projection-pending",
         )
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
@@ -5521,6 +5554,11 @@ class TestOrchestratorRunner:
             tracker,
             sample_seed,
             session_id="sess_resume_pause_cancel",
+        )
+        tracker, _resume_handle = _attach_exact_resume_handle(
+            tracker,
+            mock_adapter,
+            "resume-late-cancellation",
         )
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
@@ -6767,7 +6805,13 @@ class TestOrchestratorRunner:
             sample_seed,
             session_id="sess_resume_paused",
         )
-        runtime_handle = RuntimeHandle(backend="codex_cli", native_session_id="thread-123")
+        runtime_handle = RuntimeHandle(
+            backend=mock_adapter.runtime_backend,
+            native_session_id="thread-123",
+        )
+        paused_tracker = paused_tracker.with_progress(
+            {"runtime": runtime_handle.to_session_state_dict()}
+        )
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             del args, kwargs
@@ -6797,6 +6841,45 @@ class TestOrchestratorRunner:
         assert result.is_ok
         assert result.value.success is True
         mark_completed.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_legacy_direct_resume_without_exact_handle_never_redispatches(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """A legacy PAUSED snapshot without provider identity must fail closed."""
+
+        paused_tracker = SessionTracker.create(
+            "exec_handleless_resume",
+            sample_seed.metadata.seed_id,
+            session_id="sess_handleless_resume",
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id=paused_tracker.session_id,
+        )
+        provider_calls = 0
+
+        async def mock_execute(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentMessage]:
+            nonlocal provider_calls
+            provider_calls += 1
+            yield AgentMessage(type="result", content="must not run")
+
+        mock_adapter.execute_task = mock_execute
+        with patch.object(
+            runner._session_repo,
+            "reconstruct_session",
+            AsyncMock(return_value=Result.ok(paused_tracker)),
+        ):
+            result = await runner.resume_session(paused_tracker.session_id, sample_seed)
+
+        assert result.is_err
+        assert "without its exact resumable provider handle" in result.error.message
+        assert provider_calls == 0
 
     @pytest.mark.asyncio
     async def test_resume_session_stops_at_direct_agentic_budget_without_retry(
@@ -6842,6 +6925,9 @@ class TestOrchestratorRunner:
             backend="opencode",
             native_session_id="resume-budget",
         ).bind_controls(terminate_callback=terminate)
+        paused_tracker = paused_tracker.with_progress(
+            {"runtime": live_handle.to_session_state_dict()}
+        )
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             nonlocal provider_calls
@@ -6931,6 +7017,9 @@ class TestOrchestratorRunner:
             backend="opencode",
             native_session_id="resume-time-budget",
         ).bind_controls(terminate_callback=terminate)
+        paused_tracker = paused_tracker.with_progress(
+            {"runtime": live_handle.to_session_state_dict()}
+        )
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             del args, kwargs
@@ -7047,6 +7136,11 @@ class TestOrchestratorRunner:
             paused_tracker,
             sample_seed,
             session_id="sess_resume_budget_event_failure",
+        )
+        paused_tracker, _resume_handle = _attach_exact_resume_handle(
+            paused_tracker,
+            mock_adapter,
+            "resume-budget-event-failure",
         )
         provider_calls = 0
 
@@ -7184,6 +7278,10 @@ class TestOrchestratorRunner:
                     runner,
                     root_ac_count=len(sample_seed.acceptance_criteria),
                 ).to_contract_data(),
+                "runtime": RuntimeHandle(
+                    backend=mock_adapter.runtime_backend,
+                    native_session_id="resume-managed-linked",
+                ).to_session_state_dict(),
             }
         )
 
@@ -7231,6 +7329,11 @@ class TestOrchestratorRunner:
             paused_tracker,
             research_seed,
             session_id="sess_resume_research",
+        )
+        paused_tracker, _resume_handle = _attach_exact_resume_handle(
+            paused_tracker,
+            mock_adapter,
+            "resume-research",
         )
         captured: dict[str, Any] = {}
 
@@ -7295,6 +7398,11 @@ class TestOrchestratorRunner:
             paused_tracker,
             sample_seed,
             session_id="sess_resume_context",
+        )
+        paused_tracker, _resume_handle = _attach_exact_resume_handle(
+            paused_tracker,
+            mock_adapter,
+            "resume-context",
         )
         manifest.write_text(
             '[project]\nname = "resume-app"\nversion = "9.9.9"\n',

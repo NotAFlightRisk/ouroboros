@@ -13,7 +13,12 @@ from ouroboros.config import get_default_config
 from ouroboros.core.attempt_budget import AttemptBudgetProgress
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.types import Result
-from ouroboros.orchestrator.adapter import FULL_CAPABILITIES, AgentMessage, ParamSupport
+from ouroboros.orchestrator.adapter import (
+    FULL_CAPABILITIES,
+    AgentMessage,
+    ParamSupport,
+    RuntimeHandle,
+)
 from ouroboros.orchestrator.direct_pause_runtime import (
     DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY,
 )
@@ -523,6 +528,10 @@ async def test_same_process_resume_delivers_persisted_guidance_to_adapter_system
                 max_agentic_steps=resumed._max_iterations_per_ac,
                 timeout_seconds=resumed._ac_attempt_timeout_seconds,
             ).to_contract_data(),
+            "runtime": RuntimeHandle(
+                backend=resumed._adapter.runtime_backend,
+                native_session_id="guidance-resume",
+            ).to_session_state_dict(),
         }
     )
     resumed._register_process_local_authority(

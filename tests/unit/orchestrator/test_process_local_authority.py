@@ -35,7 +35,7 @@ from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 from ouroboros.mcp.tools.job_handlers import CancelExecutionHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator import heartbeat
-from ouroboros.orchestrator.adapter import FULL_CAPABILITIES, AgentMessage
+from ouroboros.orchestrator.adapter import FULL_CAPABILITIES, AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.direct_pause_runtime import (
     DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY,
 )
@@ -124,6 +124,10 @@ class _RecoverablePauseRuntime(_CountingRuntime):
             type="result",
             content="Usage limit reached. Please try again in 5 hours.",
             data={"subtype": "error", "error_type": "CodexCliError"},
+            resume_handle=RuntimeHandle(
+                backend=self.runtime_backend,
+                native_session_id="recoverable-pause-runtime",
+            ),
         )
 
 
@@ -1299,6 +1303,10 @@ async def test_resume_pause_reconciles_preexisting_terminal_winner(tmp_path) -> 
         tracker.session_id,
         {
             "messages_processed": tracker.messages_processed,
+            "runtime": RuntimeHandle(
+                backend=runner._adapter.runtime_backend,
+                native_session_id="resume-terminal-winner",
+            ).to_session_state_dict(),
             DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY: AttemptBudgetProgress.capture(
                 agentic_steps_consumed=0,
                 elapsed_timeout_seconds=0,

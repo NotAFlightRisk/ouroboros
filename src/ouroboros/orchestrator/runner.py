@@ -9604,7 +9604,7 @@ class OrchestratorRunner:
                         runtime_handle=active_runtime_handle,
                         messages_processed=messages_processed,
                         attempt_budget_progress=direct_pause_budget_progress,
-                        require_exact_handle=direct_bounded_routing,
+                        require_exact_handle=True,
                     )
                 ):
                     # A quota signal without provider continuity cannot authorize
@@ -9745,6 +9745,7 @@ class OrchestratorRunner:
                 if (
                     cancelled_result is None
                     and not success
+                    and not direct_terminal_blocked
                     and recoverable_failure_pause is None
                     and runtime_handle is not None
                     and not direct_bounded_routing
@@ -11380,12 +11381,10 @@ Note: This is a resumed session. Please continue from where execution was interr
                             "human_handoff_required": True,
                         },
                     )
-                if resume_route_state is not None and not has_exact_resumable_runtime_handle(
-                    runtime_handle
-                ):
+                if not has_exact_resumable_runtime_handle(runtime_handle):
                     raise OrchestratorError(
                         message=(
-                            "Refusing to replay a paused direct route without its exact "
+                            "Refusing to replay a paused direct attempt without its exact "
                             "resumable provider handle"
                         ),
                         details={
@@ -11570,7 +11569,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                         runtime_handle=live_runtime_handle,
                         messages_processed=messages_processed,
                         attempt_budget_progress=resume_pause_budget_progress,
-                        require_exact_handle=resume_route_state is not None,
+                        require_exact_handle=True,
                     )
                 ):
                     recoverable_resume_failure = None
