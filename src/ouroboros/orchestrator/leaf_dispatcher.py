@@ -64,6 +64,22 @@ async def _close_runtime_stream(stream: AsyncGenerator[AgentMessage, None]) -> N
         await stream.aclose()
 
 
+def restored_attempt_budget_exhaustion(
+    progress: AttemptBudgetProgress | None,
+    *,
+    timeout_seconds: float,
+) -> AttemptBudgetExhaustion | None:
+    """Project an already-depleted durable clock before provider entry."""
+
+    if progress is None or progress.remaining_timeout_microseconds != 0:
+        return None
+    return AttemptBudgetExhaustion(
+        kind=AttemptBudgetKind.WALL_CLOCK,
+        limit=timeout_seconds,
+        observed=timeout_seconds,
+    )
+
+
 @dataclass
 class LeafDispatchState:
     """Mutable streaming state shared between the executor and the dispatcher.
@@ -423,6 +439,14 @@ class LeafDispatcher:
     ) -> None:
         """Run the stall-scoped dispatch loop, mutating ``state`` in place."""
         executor = self._executor
+
+        # A durable resume snapshot can validly contain zero remaining
+        # microseconds. Terminalize that already-exhausted attempt without
+        # constructing or iterating a provider stream: an expired CancelScope
+        # created after ``execute_task`` is too late to protect the effect
+        # boundary for async-generator runtimes.
+        if state.attempt_budget_exhaustion is not None:
+            return
 
         lifecycle_event_type = (
             "execution.session.resumed"

@@ -21,6 +21,7 @@ import pytest
 from ouroboros.core.attempt_budget import (
     AttemptBudgetExhaustion,
     AttemptBudgetKind,
+    AttemptBudgetProgress,
 )
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
@@ -63,11 +64,14 @@ from ouroboros.orchestrator.execution_runtime_scope import (
     build_level_coordinator_runtime_scope,
 )
 from ouroboros.orchestrator.leaf_dispatcher import (
+    LeafDispatcher,
+    LeafDispatchState,
     _attach_bash_filesystem_effects,
     _BashFilesystemLeaseTracker,
     _close_pending_targets,
     _correlated_tool_result_name,
     _pending_bash_filesystem_targets,
+    restored_attempt_budget_exhaustion,
 )
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
@@ -4701,6 +4705,71 @@ async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity() -> None
     assert result.attempt_budget_exhaustion.observed >= 0.02
     assert runtime.closed is True
     assert executor._is_retryable_failure(result) is False
+
+
+@pytest.mark.asyncio
+async def test_resumed_atomic_attempt_with_zero_time_never_enters_provider() -> None:
+    """A zero-allowance durable snapshot must terminalize before adapter entry."""
+
+    runtime = _FinalMessageRuntime(
+        "must not enter provider",
+        native_session_id="must-not-dispatch",
+    )
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+    exhausted_progress = AttemptBudgetProgress(
+        max_agentic_steps=10,
+        timeout_microseconds=900_000_000,
+        agentic_steps_consumed=2,
+        remaining_timeout_microseconds=0,
+    )
+    exhaustion = restored_attempt_budget_exhaustion(
+        exhausted_progress,
+        timeout_seconds=900.0,
+    )
+    assert exhaustion is not None
+    state = LeafDispatchState(
+        messages=[],
+        runtime_handle=None,
+        agentic_step_count=exhausted_progress.agentic_steps_consumed,
+        attempt_elapsed_seconds=exhausted_progress.elapsed_timeout_seconds(),
+        attempt_budget_exhaustion=exhaustion,
+    )
+
+    with patch.object(runtime, "execute_task", wraps=runtime.execute_task) as execute_task:
+        await LeafDispatcher(executor).stream(
+            state=state,
+            prompt="resume",
+            tools=["Read"],
+            system_prompt="system",
+            execute_effort_kwargs={},
+            runtime_identity=MagicMock(),
+            execution_context_id="exec_zero_remaining",
+            session_id="sess_zero_remaining",
+            ac_index=0,
+            ac_content="Resume an expired provider attempt",
+            is_sub_ac=False,
+            parent_ac_index=None,
+            sub_ac_index=None,
+            node_identity=None,
+            retry_attempt=0,
+            semantic_ac_key="ac_zero_remaining",
+            label="AC 1",
+            indent="",
+            execution_counters=None,
+            max_iterations_per_ac=10,
+            ac_attempt_timeout_seconds=900.0,
+        )
+
+    execute_task.assert_not_called()
+
+    assert runtime.call_count == 0
+    assert state.messages == []
+    assert state.attempt_budget_exhaustion == exhaustion
 
 
 def _deep_macos_workspace() -> str:

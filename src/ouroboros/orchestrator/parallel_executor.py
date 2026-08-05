@@ -330,6 +330,7 @@ from ouroboros.orchestrator.frugality_evidence import (
 from ouroboros.orchestrator.leaf_dispatcher import (
     LeafDispatcher,
     LeafDispatchState,
+    restored_attempt_budget_exhaustion,
 )
 from ouroboros.orchestrator.level_context import (
     ACContextSummary,
@@ -8598,6 +8599,10 @@ Respond with either ATOMIC or the structured JSON object only.
                 attempt_budget_progress.elapsed_timeout_seconds()
                 if attempt_budget_progress is not None
                 else 0.0
+            ),
+            attempt_budget_exhaustion=restored_attempt_budget_exhaustion(
+                attempt_budget_progress,
+                timeout_seconds=self._ac_attempt_timeout_seconds,
             ),
         )
         active_dispatch_id = dispatch_id
