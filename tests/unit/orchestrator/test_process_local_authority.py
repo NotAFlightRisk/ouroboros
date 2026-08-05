@@ -18,6 +18,7 @@ import pytest
 import yaml
 
 from ouroboros.cli.commands.cancel import _cancel_session
+from ouroboros.core.attempt_budget import AttemptBudgetProgress
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.project_identity import ProjectIdentity
 from ouroboros.core.seed import (
@@ -35,6 +36,9 @@ from ouroboros.mcp.tools.job_handlers import CancelExecutionHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator import heartbeat
 from ouroboros.orchestrator.adapter import FULL_CAPABILITIES, AgentMessage
+from ouroboros.orchestrator.direct_pause_runtime import (
+    DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY,
+)
 from ouroboros.orchestrator.events import create_session_completed_event
 from ouroboros.orchestrator.execution_authority import (
     _PROCESS_LOCAL_AUTHORITY_REGISTRY,
@@ -1291,6 +1295,19 @@ async def test_resume_pause_reconciles_preexisting_terminal_winner(tmp_path) -> 
     assert prepared.is_ok
     tracker = prepared.value
     contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    persisted_budget = await runner._session_repo.track_progress(
+        tracker.session_id,
+        {
+            "messages_processed": tracker.messages_processed,
+            DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY: AttemptBudgetProgress.capture(
+                agentic_steps_consumed=0,
+                elapsed_timeout_seconds=0,
+                max_agentic_steps=runner._max_iterations_per_ac,
+                timeout_seconds=runner._ac_attempt_timeout_seconds,
+            ).to_contract_data(),
+        },
+    )
+    assert persisted_budget.is_ok
     initial_pause = await runner._session_repo.mark_paused(
         tracker.session_id,
         reason="initial resumable pause",

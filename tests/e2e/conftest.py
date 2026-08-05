@@ -524,6 +524,10 @@ async def persisted_session(
     temp_dir: Path,
 ) -> dict[str, Any]:
     """Create a paused session that retains its creating-process capability."""
+    from ouroboros.core.attempt_budget import AttemptBudgetProgress
+    from ouroboros.orchestrator.direct_pause_runtime import (
+        DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY,
+    )
     from ouroboros.orchestrator.runner import OrchestratorRunner
     from ouroboros.orchestrator.session import SessionRepository
 
@@ -551,7 +555,24 @@ async def persisted_session(
 
     # Track some progress
     await repo.track_progress(mock_session_id, {"step": 1, "message": "Started"})
-    await repo.track_progress(mock_session_id, {"step": 2, "message": "In progress"})
+    await repo.track_progress(
+        mock_session_id,
+        {
+            "step": 2,
+            "message": "In progress",
+            DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY: AttemptBudgetProgress.capture(
+                agentic_steps_consumed=0,
+                elapsed_timeout_seconds=0,
+                max_agentic_steps=(
+                    runner._max_iterations_per_ac * max(1, len(sample_seed.acceptance_criteria))
+                ),
+                timeout_seconds=(
+                    runner._ac_attempt_timeout_seconds
+                    * max(1, len(sample_seed.acceptance_criteria))
+                ),
+            ).to_contract_data(),
+        },
+    )
     pause_result = await repo.mark_paused(mock_session_id, reason="Test interruption")
     if pause_result.is_err:
         raise RuntimeError(f"Failed to pause test session: {pause_result.error}")
