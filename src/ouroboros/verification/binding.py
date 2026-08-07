@@ -27,7 +27,9 @@ def _is_identifier_continue(character: str) -> bool:
     Python's Unicode identifier table directly and keeps literal boundaries
     conservative for every such continuation.
     """
-    return bool(character) and (character == "$" or ("A" + character).isidentifier())
+    return bool(character) and (
+        character in {"$", "\u200c", "\u200d"} or ("A" + character).isidentifier()
+    )
 
 
 def literal_spans(text: str, literal: str) -> tuple[tuple[int, int], ...]:

@@ -1723,24 +1723,27 @@ class TestSpecVerifier:
         [
             "CameraProvider\u0301",
             "CameraProvider\u200c",
+            "CameraProvider\u200d",
             "CameraProvider·",
             "Fake\u0301CameraProvider",
             "Fake\u200cCameraProvider",
+            "Fake\u200dCameraProvider",
             "Fake·CameraProvider",
         ],
         ids=[
             "combining-suffix",
             "zwnj-suffix",
+            "zwj-suffix",
             "middle-dot-suffix",
             "combining-prefix",
             "zwnj-prefix",
+            "zwj-prefix",
             "middle-dot-prefix",
         ],
     )
     def test_unicode_identifier_continuation_cannot_extend_structural_target(
         self, identifier: str
     ) -> None:
-        assert identifier.isidentifier()
         project = self._create_project({"main.py": f"class {identifier}:\n    pass\n"})
         assertion = SpecAssertion(
             ac_index=0,
