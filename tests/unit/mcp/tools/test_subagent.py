@@ -1018,6 +1018,20 @@ acceptance_criteria:
         assert payload.context["auto_evolve"] is False
         assert payload.context["seed_handoff_id"] == "seed_handoff_opaque"
 
+    def test_auto_evolve_false_uses_terminal_plugin_handoff_without_polling(self) -> None:
+        payload = build_execute_subagent(
+            seed_content="goal: evaluate once",
+            session_id="sess-passive-eval",
+            auto_evaluate=True,
+            auto_evolve=False,
+            seed_handoff_id="seed_handoff_opaque",
+        )
+
+        assert "status `delegated_to_plugin` with no job_id" in payload.prompt
+        assert "do not poll job tools" in payload.prompt
+        assert "Task pane" in payload.prompt
+        assert "poll the returned job" not in payload.prompt
+
 
 # ---------------------------------------------------------------------------
 # Tool-specific builders: PM Interview

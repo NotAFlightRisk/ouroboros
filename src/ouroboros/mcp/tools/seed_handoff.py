@@ -67,6 +67,19 @@ def plugin_evaluation_instruction(
         if seed_handoff_id
         else "the worker-safe seed_content"
     )
+    if not auto_evolve:
+        return (
+            "After every terminal evaluable execution result, including unsuccessful AC "
+            "execution, run formal 3-stage evaluation without host involvement: call "
+            "ouroboros_start_evaluate with the session_id, execution "
+            f"artifact, {seed_argument}, working directory, and auto_evolve: false. "
+            "This opt-out uses plugin delegation: when the call returns "
+            "status `delegated_to_plugin` with no job_id, do not poll job tools. Treat "
+            "the handoff as terminal and rely on the bridge-rendered evaluation child "
+            "in the Task pane to deliver the final APPROVED/not-approved verdict. If "
+            "evaluation fails, keep run success intact and report "
+            "`ooo evaluate <session_id>` as the manual retry."
+        )
     return (
         "After every terminal evaluable execution result, including unsuccessful AC "
         "execution, run formal 3-stage evaluation without host involvement: call "

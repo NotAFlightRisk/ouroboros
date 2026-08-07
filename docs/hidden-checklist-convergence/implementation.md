@@ -49,9 +49,10 @@ generation budget are snapshotted when evaluation is enqueued. The budget is
 clamped to 1..10 and bound to the lineage through a durable policy claim before
 the Ralph successor starts. The successor receipt records both `job_id` and the
 authoritative budget, so later configuration changes cannot rewrite replay
-behavior or metadata. Auto pipeline run
-dispatches explicitly set `auto_evolve: false` because Auto owns a separate
-Ralph lineage.
+behavior or metadata. Auto pipeline run dispatches explicitly set both
+`auto_evaluate: false` and `auto_evolve: false`: Auto already owns its Ralph
+handoff and final formal evaluation, so the run boundary must not create a
+second evaluation owner or a competing Ralph lineage.
 
 The detached run request likewise carries resolved `auto_evaluate` and
 `auto_evolve` booleans. A restarted execute owner therefore cannot change

@@ -288,22 +288,39 @@ class TestPluginModeDispatch:
 
     @pytest.mark.asyncio
     async def test_restored_handoff_stays_hidden_in_delegated_evaluation(self, event_store) -> None:
+        from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
         from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
 
         registry = SeedHandoffRegistry()
-        session_id = "orch_hidden_eval"
-        handoff_id = registry.register(
-            session_id=session_id,
-            seed_content=(
-                "goal: Judge the artifact\n"
-                "acceptance_criteria:\n"
-                "  - description: Produce output.json\n"
-                "    artifacts: [output.json]\n"
-                "    verify_command: python secret_check.py --token TOP_SECRET\n"
-                "    output_assertion:\n"
-                "      contains: HIDDEN_SENTINEL\n"
-            ),
+        seed_content = (
+            "goal: Judge the artifact\n"
+            "acceptance_criteria:\n"
+            "  - description: Produce output.json\n"
+            "    artifacts: [output.json]\n"
+            "    verify_command: python secret_check.py --token TOP_SECRET\n"
+            "    output_assertion:\n"
+            "      contains: HIDDEN_SENTINEL\n"
         )
+        execute_handler = ExecuteSeedHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            seed_handoff_registry=registry,
+        )
+        execution = await execute_handler.handle(
+            {
+                "seed_content": seed_content,
+                "auto_evaluate": True,
+                "auto_evolve": False,
+            }
+        )
+        assert execution.is_ok
+        execution_payload = execution.value.meta["_subagent"]
+        session_id = execution.value.meta["session_id"]
+        handoff_id = execution_payload["context"]["seed_handoff_id"]
+        assert "status `delegated_to_plugin` with no job_id" in execution_payload["prompt"]
+        assert "do not poll job tools" in execution_payload["prompt"]
+        assert "poll the returned job" not in execution_payload["prompt"]
+
         handler = StartEvaluateHandler(
             evaluate_handler=MagicMock(),
             event_store=event_store,
@@ -322,6 +339,8 @@ class TestPluginModeDispatch:
         )
 
         assert result.is_ok
+        assert result.value.meta["status"] == "delegated_to_plugin"
+        assert result.value.meta["job_id"] is None
         payload = result.value.meta["_subagent"]
         visible = payload["prompt"] + str(payload["context"])
         assert "Produce output.json" in visible

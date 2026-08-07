@@ -25,7 +25,7 @@ class _FakeSeed:
 
 
 @pytest.mark.asyncio
-async def test_auto_run_starter_disables_nested_auto_evolve(tmp_path) -> None:
+async def test_auto_run_starter_keeps_one_authoritative_evaluation_path(tmp_path) -> None:
     handler = AsyncMock()
     handler.handle = AsyncMock(
         return_value=Result.ok(MCPToolResult(meta={"job_id": "job_run", "session_id": "orch_run"}))
@@ -35,6 +35,7 @@ async def test_auto_run_starter_disables_nested_auto_evolve(tmp_path) -> None:
     await starter(_FakeSeed())  # type: ignore[arg-type]
 
     arguments = handler.handle.await_args.args[0]
+    assert arguments["auto_evaluate"] is False
     assert arguments["auto_evolve"] is False
 
 
@@ -96,6 +97,8 @@ async def test_synchronous_run_starter_skips_execute_seed_qa(tmp_path) -> None:
 
     arguments = handler.handle.await_args.args[0]
     assert arguments["skip_qa"] is True
+    assert arguments["auto_evaluate"] is False
+    assert arguments["auto_evolve"] is False
     assert result["status"] == "completed"
     assert result["success"] is True
 
