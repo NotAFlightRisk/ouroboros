@@ -590,6 +590,105 @@ Parallel Execution Verification Report
         assert "criterion-bound" in summary.ac_results[0].evidence
         assert summary.run_verdict == "FAIL"
 
+    @pytest.mark.parametrize(
+        ("content", "approved"),
+        [("--verbose\n", True), ("not--verbose\n", False), ("x--verbose-extra\n", False)],
+        ids=["exact-flag", "identifier-prefix", "extended-flag"],
+    )
+    def test_flag_substrings_cannot_publish_a_formal_pass(
+        self, tmp_path: Any, content: str, approved: bool
+    ) -> None:
+        ac_text = "CLI accepts --verbose flag"
+        (tmp_path / "help.txt").write_text(content)
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r".+",
+            expected_value="--verbose",
+            file_hint="*.txt",
+            evidence_targets=("--verbose",),
+            input_binding_required=True,
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.final_approved is approved
+        assert summary.ac_results[0].passed is approved
+        assert summary.run_verdict == ("PASS" if approved else "FAIL")
+
+    @pytest.mark.parametrize(
+        ("relative_path", "approved"),
+        [
+            ("pkg/CameraProvider.py", True),
+            ("x/pkg/CameraProvider.py", False),
+            ("pkg/CameraProvider.py.bak", False),
+            ("Pkg/CameraProvider.py", False),
+        ],
+        ids=["exact-path", "prefixed-path", "suffixed-path", "case-variant"],
+    )
+    def test_qualified_path_substrings_cannot_publish_a_formal_pass(
+        self, tmp_path: Any, relative_path: str, approved: bool
+    ) -> None:
+        ac_text = "MUST create file pkg/CameraProvider.py"
+        candidate = tmp_path / relative_path
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_text("# provider\n")
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r".+CameraProvider\.py",
+            expected_value="pkg/CameraProvider.py",
+            file_hint="**/*",
+            evidence_targets=("pkg/CameraProvider.py",),
+            input_binding_required=True,
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.final_approved is approved
+        assert summary.ac_results[0].passed is approved
+        assert summary.run_verdict == ("PASS" if approved else "FAIL")
+
     def test_bound_zero_width_evidence_keeps_auditable_formal_provenance(
         self, tmp_path: Any
     ) -> None:
