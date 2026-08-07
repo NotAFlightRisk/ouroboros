@@ -34,6 +34,7 @@ from ouroboros.core.seed import (
 from ouroboros.events.base import BaseEvent
 from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
 from ouroboros.mcp.types import MCPToolDefinition
+from ouroboros.orchestrator import retry_hints
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
     AgentMessage,
@@ -4516,7 +4517,7 @@ async def test_atomic_attempt_stops_before_over_budget_tool_effect() -> None:
     assert runtime.call_count == 1
     assert runtime.finalized is True
     assert runtime.process.closed is True
-    assert executor._is_retryable_failure(result) is False
+    assert retry_hints.is_retryable_failure(result) is False
     budget_events = [
         call.args[0]
         for call in event_store.append.await_args_list
@@ -4772,7 +4773,7 @@ async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity() -> None
     assert result.attempt_budget_exhaustion.limit == pytest.approx(0.02)
     assert result.attempt_budget_exhaustion.observed >= 0.02
     assert runtime.closed is True
-    assert executor._is_retryable_failure(result) is False
+    assert retry_hints.is_retryable_failure(result) is False
 
 
 @pytest.mark.asyncio
@@ -14124,6 +14125,61 @@ class TestParallelACExecutor:
             "abandon",
         ]
         assert all(event.data["max_attempts"] == MAX_STALL_RETRIES + 1 for event in stall_events)
+
+    @pytest.mark.asyncio
+    async def test_attempt_budget_exhaustion_never_enters_batch_retry_loop(self) -> None:
+        """A hard attempt allowance cannot be renewed by the V3 retry loop."""
+        seed = _make_seed("AC 0 flow")
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            ac_retry_attempts=2,
+            cross_harness_redispatch=False,
+        )
+        exhaustion = AttemptBudgetExhaustion(
+            kind=AttemptBudgetKind.AGENTIC_STEPS,
+            limit=1.0,
+            observed=2.0,
+        )
+        batch_calls = 0
+
+        async def exhausted_batch(**kwargs: Any) -> list[ACExecutionResult]:
+            nonlocal batch_calls
+            batch_calls += 1
+            return [
+                ACExecutionResult(
+                    ac_index=idx,
+                    ac_content=seed.acceptance_criteria[idx],
+                    success=False,
+                    error="Atomic attempt budget exhausted",
+                    outcome=ACExecutionOutcome.FAILED,
+                    attempt_budget_exhaustion=exhaustion,
+                )
+                for idx in kwargs["batch_indices"]
+            ]
+
+        executor._execute_ac_batch = exhausted_batch  # type: ignore[method-assign]
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=seed,
+            batch_executable=[0],
+            session_id="sess_budget_no_retry",
+            execution_id="exec_budget_no_retry",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        assert batch_calls == 1
+        result = results[0]
+        assert isinstance(result, ACExecutionResult)
+        assert result.attempt_budget_exhaustion == exhaustion
+        assert retry_hints.is_retryable_failure(result) is False
 
     @pytest.mark.asyncio
     async def test_alt_harness_defers_until_same_runtime_retry_budget_spent(self) -> None:
