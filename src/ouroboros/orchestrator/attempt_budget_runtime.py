@@ -14,6 +14,7 @@ from ouroboros.core.attempt_budget import (
     AttemptBudgetExhaustion,
     AttemptBudgetKind,
     AttemptBudgetProgress,
+    conservative_timeout_deadline,
     scale_attempt_budget,
 )
 from ouroboros.core.seed import AcceptanceCriterionSpec
@@ -65,14 +66,22 @@ class AttemptBudgetedMessageStream:
                 max_agentic_steps=max_agentic_steps,
                 timeout_seconds=timeout_seconds,
             )
+        else:
+            progress = AttemptBudgetProgress.capture(
+                agentic_steps_consumed=0,
+                elapsed_timeout_seconds=0,
+                max_agentic_steps=max_agentic_steps,
+                timeout_seconds=timeout_seconds,
+            )
         self._source = source
         self._max_agentic_steps = max_agentic_steps
         self._timeout_seconds = timeout_seconds
         self._started_at: float | None = None
-        self._agentic_steps = progress.agentic_steps_consumed if progress is not None else 0
-        self._elapsed_before_start = (
-            progress.elapsed_timeout_seconds() if progress is not None else 0.0
-        )
+        self._progress_at_start = progress
+        self._agentic_steps = progress.agentic_steps_consumed
+        # This float is telemetry only. Deadlines and durable progress always
+        # consume the exact integer remainder in ``_progress_at_start``.
+        self._elapsed_before_start = progress.elapsed_timeout_seconds()
         self.exhaustion: AttemptBudgetExhaustion | None = None
 
     def __aiter__(self) -> AttemptBudgetedMessageStream:
@@ -82,21 +91,25 @@ class AttemptBudgetedMessageStream:
     def elapsed_seconds(self) -> float:
         """Return monotonic time consumed since the first provider read."""
 
+        return self._elapsed_before_start + self._elapsed_since_start
+
+    @property
+    def _elapsed_since_start(self) -> float:
         if self._started_at is None:
-            return self._elapsed_before_start
-        return self._elapsed_before_start + max(
-            0.0,
-            asyncio.get_running_loop().time() - self._started_at,
-        )
+            return 0.0
+        return max(0.0, asyncio.get_running_loop().time() - self._started_at)
 
     def progress(self) -> AttemptBudgetProgress:
         """Return conservative durable progress for a recoverable pause."""
 
-        return AttemptBudgetProgress.capture(
-            agentic_steps_consumed=self._agentic_steps,
-            elapsed_timeout_seconds=self.elapsed_seconds,
+        elapsed_progress = self._progress_at_start.consume_elapsed_seconds(
+            self._elapsed_since_start
+        )
+        return AttemptBudgetProgress(
             max_agentic_steps=self._max_agentic_steps,
-            timeout_seconds=self._timeout_seconds,
+            timeout_microseconds=elapsed_progress.timeout_microseconds,
+            agentic_steps_consumed=self._agentic_steps,
+            remaining_timeout_microseconds=elapsed_progress.remaining_timeout_microseconds,
         )
 
     async def __anext__(self) -> AgentMessage:
@@ -106,8 +119,14 @@ class AttemptBudgetedMessageStream:
         loop = asyncio.get_running_loop()
         if self._started_at is None:
             self._started_at = loop.time()
-        elapsed = self.elapsed_seconds
-        remaining = self._timeout_seconds - elapsed
+        fixed_deadline = conservative_timeout_deadline(
+            started_at=self._started_at,
+            remaining_seconds=self._progress_at_start.remaining_timeout_seconds,
+        )
+        elapsed_since_start = self._elapsed_since_start
+        elapsed = self._elapsed_before_start + elapsed_since_start
+        remaining_progress = self._progress_at_start.consume_elapsed_seconds(elapsed_since_start)
+        remaining = remaining_progress.remaining_timeout_seconds
         if remaining <= 0:
             self.exhaustion = AttemptBudgetExhaustion(
                 kind=AttemptBudgetKind.WALL_CLOCK,
@@ -116,7 +135,7 @@ class AttemptBudgetedMessageStream:
             )
             raise StopAsyncIteration
 
-        deadline = asyncio.timeout(remaining)
+        deadline = asyncio.timeout_at(fixed_deadline)
         try:
             async with deadline:
                 message = await anext(self._source)

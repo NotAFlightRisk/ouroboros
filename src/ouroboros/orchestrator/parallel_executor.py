@@ -8648,11 +8648,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 if attempt_budget_progress is not None
                 else 0
             ),
-            attempt_elapsed_seconds=(
-                attempt_budget_progress.elapsed_timeout_seconds()
-                if attempt_budget_progress is not None
-                else 0.0
-            ),
+            attempt_budget_snapshot=attempt_budget_progress,
             attempt_budget_exhaustion=restored_attempt_budget_exhaustion(
                 attempt_budget_progress,
                 timeout_seconds=self._ac_attempt_timeout_seconds,

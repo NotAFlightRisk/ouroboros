@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 import json
+import math
 import os
 from pathlib import Path
 import shlex
@@ -20,6 +21,7 @@ import anyio
 import pytest
 
 from ouroboros.core.attempt_budget import (
+    MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
     AttemptBudgetExhaustion,
     AttemptBudgetKind,
     AttemptBudgetProgress,
@@ -74,6 +76,7 @@ from ouroboros.orchestrator.execution_authority import (
 )
 from ouroboros.orchestrator.execution_runtime_scope import (
     ExecutionNodeIdentity,
+    build_ac_runtime_identity,
     build_level_coordinator_runtime_scope,
 )
 from ouroboros.orchestrator.leaf_dispatcher import (
@@ -4805,7 +4808,7 @@ async def test_resumed_atomic_attempt_with_zero_time_never_enters_provider() -> 
         messages=[],
         runtime_handle=None,
         agentic_step_count=exhausted_progress.agentic_steps_consumed,
-        attempt_elapsed_seconds=exhausted_progress.elapsed_timeout_seconds(),
+        attempt_budget_snapshot=exhausted_progress,
         attempt_budget_exhaustion=exhaustion,
     )
 
@@ -4816,7 +4819,10 @@ async def test_resumed_atomic_attempt_with_zero_time_never_enters_provider() -> 
             tools=["Read"],
             system_prompt="system",
             execute_effort_kwargs={},
-            runtime_identity=MagicMock(),
+            runtime_identity=build_ac_runtime_identity(
+                0,
+                execution_context_id="exec_zero_remaining",
+            ),
             execution_context_id="exec_zero_remaining",
             session_id="sess_zero_remaining",
             ac_index=0,
@@ -4839,6 +4845,102 @@ async def test_resumed_atomic_attempt_with_zero_time_never_enters_provider() -> 
     assert runtime.call_count == 0
     assert state.messages == []
     assert state.attempt_budget_exhaustion == exhaustion
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remaining_microseconds", (1, 999_999))
+async def test_parallel_attempt_resume_preserves_exact_near_max_remaining_time(
+    remaining_microseconds: int,
+) -> None:
+    """Parallel provider entry uses only the exact persisted remainder."""
+
+    total_microseconds = MAX_AC_ATTEMPT_TIMEOUT_SECONDS * 1_000_000
+    progress = AttemptBudgetProgress(
+        max_agentic_steps=10,
+        timeout_microseconds=total_microseconds,
+        agentic_steps_consumed=2,
+        remaining_timeout_microseconds=remaining_microseconds,
+    )
+    state = LeafDispatchState(
+        messages=[],
+        runtime_handle=None,
+        agentic_step_count=progress.agentic_steps_consumed,
+        attempt_budget_snapshot=progress,
+    )
+
+    class _CancelScope:
+        def __init__(self, *, deadline: float = math.inf, shield: bool = False) -> None:
+            del shield
+            self.deadline = deadline
+            self.cancelled_caught = False
+            deadlines.append(deadline)
+
+        def __enter__(self) -> _CancelScope:
+            return self
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    runtime = _FinalMessageRuntime(
+        "entered provider",
+        native_session_id=f"near-max-{remaining_microseconds}",
+    )
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        max_iterations_per_ac=10,
+        ac_attempt_timeout_seconds=MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
+    )
+    deadlines: list[float] = []
+
+    with (
+        patch(
+            "ouroboros.orchestrator.leaf_dispatcher.anyio.current_time",
+            return_value=100.0,
+        ),
+        patch(
+            "ouroboros.orchestrator.leaf_dispatcher.anyio.CancelScope",
+            _CancelScope,
+        ),
+    ):
+        await LeafDispatcher(executor).stream(
+            state=state,
+            prompt="resume",
+            tools=["Read"],
+            system_prompt="system",
+            execute_effort_kwargs={},
+            runtime_identity=build_ac_runtime_identity(
+                0,
+                execution_context_id="exec_near_max_remaining",
+            ),
+            execution_context_id="exec_near_max_remaining",
+            session_id="sess_near_max_remaining",
+            ac_index=0,
+            ac_content="Resume with exact remaining authority",
+            is_sub_ac=False,
+            parent_ac_index=None,
+            sub_ac_index=None,
+            node_identity=None,
+            retry_attempt=0,
+            semantic_ac_key="ac_near_max_remaining",
+            label="AC 1",
+            indent="",
+            execution_counters=None,
+            max_iterations_per_ac=10,
+            ac_attempt_timeout_seconds=MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
+        )
+        captured = state.attempt_budget_progress(
+            max_agentic_steps=10,
+            timeout_seconds=MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
+        )
+
+    assert runtime.call_count == 1
+    assert state.final_message == "entered provider"
+    assert captured.remaining_timeout_microseconds == remaining_microseconds
+    assert len(deadlines) >= 2
+    assert 0 < deadlines[0] - 100.0 <= progress.remaining_timeout_seconds
 
 
 def _deep_macos_workspace() -> str:

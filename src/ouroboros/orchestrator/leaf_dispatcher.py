@@ -33,6 +33,7 @@ from ouroboros.core.attempt_budget import (
     AttemptBudgetExhaustion,
     AttemptBudgetKind,
     AttemptBudgetProgress,
+    conservative_timeout_deadline,
 )
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.evidence.claims import (
@@ -98,9 +99,32 @@ class LeafDispatchState:
     success: bool = False
     stalled: bool = False
     agentic_step_count: int = 0
-    attempt_elapsed_seconds: float = 0.0
+    attempt_budget_snapshot: AttemptBudgetProgress | None = None
     attempt_started_at: float | None = None
     attempt_budget_exhaustion: AttemptBudgetExhaustion | None = None
+
+    def prepare_attempt_budget(
+        self,
+        *,
+        max_agentic_steps: int,
+        timeout_seconds: float,
+    ) -> AttemptBudgetProgress:
+        """Resolve exact remaining authority before entering a provider."""
+
+        if self.attempt_budget_snapshot is None:
+            self.attempt_budget_snapshot = AttemptBudgetProgress.capture(
+                agentic_steps_consumed=self.agentic_step_count,
+                elapsed_timeout_seconds=0,
+                max_agentic_steps=max_agentic_steps,
+                timeout_seconds=timeout_seconds,
+            )
+        else:
+            self.attempt_budget_snapshot = AttemptBudgetProgress.from_contract_data(
+                self.attempt_budget_snapshot.to_contract_data(),
+                max_agentic_steps=max_agentic_steps,
+                timeout_seconds=timeout_seconds,
+            )
+        return self.attempt_budget_snapshot
 
     def attempt_budget_progress(
         self,
@@ -110,14 +134,21 @@ class LeafDispatchState:
     ) -> AttemptBudgetProgress:
         """Capture cumulative finite-resource state at a recoverable pause."""
 
-        elapsed = self.attempt_elapsed_seconds
-        if self.attempt_started_at is not None:
-            elapsed += max(0.0, anyio.current_time() - self.attempt_started_at)
-        return AttemptBudgetProgress.capture(
-            agentic_steps_consumed=self.agentic_step_count,
-            elapsed_timeout_seconds=elapsed,
+        snapshot = self.prepare_attempt_budget(
             max_agentic_steps=max_agentic_steps,
             timeout_seconds=timeout_seconds,
+        )
+        live_elapsed = (
+            0.0
+            if self.attempt_started_at is None
+            else max(0.0, anyio.current_time() - self.attempt_started_at)
+        )
+        elapsed_progress = snapshot.consume_elapsed_seconds(live_elapsed)
+        return AttemptBudgetProgress(
+            max_agentic_steps=max_agentic_steps,
+            timeout_microseconds=elapsed_progress.timeout_microseconds,
+            agentic_steps_consumed=self.agentic_step_count,
+            remaining_timeout_microseconds=elapsed_progress.remaining_timeout_microseconds,
         )
 
 
@@ -448,6 +479,17 @@ class LeafDispatcher:
         if state.attempt_budget_exhaustion is not None:
             return
 
+        attempt_budget_snapshot = state.prepare_attempt_budget(
+            max_agentic_steps=max_iterations_per_ac,
+            timeout_seconds=ac_attempt_timeout_seconds,
+        )
+        if attempt_budget_snapshot.remaining_timeout_microseconds == 0:
+            state.attempt_budget_exhaustion = restored_attempt_budget_exhaustion(
+                attempt_budget_snapshot,
+                timeout_seconds=ac_attempt_timeout_seconds,
+            )
+            return
+
         lifecycle_event_type = (
             "execution.session.resumed"
             if executor._is_resumable_runtime_handle(state.runtime_handle)
@@ -462,8 +504,9 @@ class LeafDispatcher:
         exec_start = time.monotonic()
         if state.attempt_started_at is None:
             state.attempt_started_at = anyio.current_time()
-        attempt_deadline = (
-            state.attempt_started_at + ac_attempt_timeout_seconds - state.attempt_elapsed_seconds
+        attempt_deadline = conservative_timeout_deadline(
+            started_at=state.attempt_started_at,
+            remaining_seconds=attempt_budget_snapshot.remaining_timeout_seconds,
         )
 
         async with AsyncExitStack() as stream_stack:
@@ -682,14 +725,23 @@ class LeafDispatcher:
         # Check if stall was detected (CancelScope ate the Cancelled)
         state.stalled = stall_scope.cancelled_caught
         if attempt_scope.cancelled_caught:
-            elapsed = state.attempt_elapsed_seconds + max(
-                0.0,
-                anyio.current_time() - state.attempt_started_at,
+            exhausted_progress = state.attempt_budget_progress(
+                max_agentic_steps=max_iterations_per_ac,
+                timeout_seconds=ac_attempt_timeout_seconds,
+            )
+            state.attempt_budget_snapshot = AttemptBudgetProgress(
+                max_agentic_steps=exhausted_progress.max_agentic_steps,
+                timeout_microseconds=exhausted_progress.timeout_microseconds,
+                agentic_steps_consumed=exhausted_progress.agentic_steps_consumed,
+                remaining_timeout_microseconds=0,
             )
             state.attempt_budget_exhaustion = AttemptBudgetExhaustion(
                 kind=AttemptBudgetKind.WALL_CLOCK,
                 limit=ac_attempt_timeout_seconds,
-                observed=elapsed,
+                observed=max(
+                    ac_attempt_timeout_seconds,
+                    state.attempt_budget_snapshot.elapsed_timeout_seconds(),
+                ),
             )
             # A fixed total deadline is a different recovery signal from an
             # inactivity stall, even if both clocks happen to expire together.

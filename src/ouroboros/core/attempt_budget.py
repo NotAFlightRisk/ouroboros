@@ -68,6 +68,22 @@ def _microseconds_to_seconds(timeout_microseconds: int) -> float:
     return timeout_seconds
 
 
+def conservative_timeout_deadline(*, started_at: float, remaining_seconds: float) -> float:
+    """Build a float scheduler deadline without rounding authority upward."""
+
+    if (
+        not math.isfinite(started_at)
+        or started_at < 0
+        or not math.isfinite(remaining_seconds)
+        or remaining_seconds < 0
+    ):
+        raise ValueError("attempt deadline inputs must be finite and non-negative")
+    deadline = started_at + remaining_seconds
+    if deadline - started_at > remaining_seconds:
+        deadline = math.nextafter(deadline, started_at)
+    return deadline
+
+
 class AttemptBudgetKind(StrEnum):
     """The finite resource that ended an atomic attempt."""
 
@@ -126,10 +142,56 @@ class AttemptBudgetProgress:
         return _microseconds_to_seconds(self.remaining_timeout_microseconds)
 
     def elapsed_timeout_seconds(self) -> float:
-        """Recover a conservative cumulative elapsed value from remaining time."""
+        """Project cumulative elapsed time for audit output, never authority."""
 
         return _microseconds_to_seconds(
             self.timeout_microseconds - self.remaining_timeout_microseconds
+        )
+
+    def consume_elapsed_seconds(
+        self,
+        elapsed_timeout_seconds: int | float,
+    ) -> AttemptBudgetProgress:
+        """Subtract one live segment from exact remaining authority.
+
+        A resumed attempt must never reconstruct its allowance by subtracting
+        two large floats.  Near the durable upper bound, one float ULP is larger
+        than a microsecond and that subtraction can mint time.  Convert only the
+        small live segment, round its consumption up, and subtract it from the
+        persisted integer remainder instead.
+        """
+
+        if (
+            isinstance(elapsed_timeout_seconds, bool)
+            or not isinstance(elapsed_timeout_seconds, (int, float))
+            or elapsed_timeout_seconds < 0
+        ):
+            raise ValueError("elapsed attempt time must be finite and non-negative")
+        if isinstance(elapsed_timeout_seconds, float) and not math.isfinite(
+            elapsed_timeout_seconds
+        ):
+            raise ValueError("elapsed attempt time must be finite and non-negative")
+
+        remaining_seconds = self.remaining_timeout_seconds
+        if elapsed_timeout_seconds >= remaining_seconds:
+            consumed_microseconds = self.remaining_timeout_microseconds
+        elif isinstance(elapsed_timeout_seconds, int):
+            consumed_microseconds = min(
+                self.remaining_timeout_microseconds,
+                elapsed_timeout_seconds * _MICROSECONDS_PER_SECOND,
+            )
+        else:
+            consumed_microseconds = min(
+                self.remaining_timeout_microseconds,
+                math.ceil(elapsed_timeout_seconds * _MICROSECONDS_PER_SECOND),
+            )
+        return AttemptBudgetProgress(
+            max_agentic_steps=self.max_agentic_steps,
+            timeout_microseconds=self.timeout_microseconds,
+            agentic_steps_consumed=self.agentic_steps_consumed,
+            remaining_timeout_microseconds=(
+                self.remaining_timeout_microseconds - consumed_microseconds
+            ),
         )
 
     def to_contract_data(self) -> dict[str, int]:
@@ -161,30 +223,14 @@ class AttemptBudgetProgress:
             or not 0 <= agentic_steps_consumed <= max_agentic_steps
         ):
             raise ValueError("consumed agentic steps exceed the configured attempt budget")
-        if (
-            isinstance(elapsed_timeout_seconds, bool)
-            or not isinstance(elapsed_timeout_seconds, (int, float))
-            or not math.isfinite(float(elapsed_timeout_seconds))
-            or elapsed_timeout_seconds < 0
-        ):
-            raise ValueError("elapsed attempt time must be finite and non-negative")
         timeout_microseconds = _timeout_to_microseconds(timeout_seconds)
-        if elapsed_timeout_seconds >= timeout_seconds:
-            remaining_timeout_microseconds = 0
-        else:
-            elapsed_timeout_microseconds = math.ceil(
-                float(elapsed_timeout_seconds) * _MICROSECONDS_PER_SECOND
-            )
-            remaining_timeout_microseconds = max(
-                0,
-                timeout_microseconds - elapsed_timeout_microseconds,
-            )
-        return cls(
+        initial = cls(
             max_agentic_steps=max_agentic_steps,
             timeout_microseconds=timeout_microseconds,
             agentic_steps_consumed=agentic_steps_consumed,
-            remaining_timeout_microseconds=remaining_timeout_microseconds,
+            remaining_timeout_microseconds=timeout_microseconds,
         )
+        return initial.consume_elapsed_seconds(elapsed_timeout_seconds)
 
     @classmethod
     def from_contract_data(
@@ -292,6 +338,7 @@ __all__ = [
     "DEFAULT_MAX_ITERATIONS_PER_AC",
     "MAX_AC_ATTEMPT_TIMEOUT_SECONDS",
     "MAX_ATTEMPT_TIMEOUT_MICROSECONDS",
+    "conservative_timeout_deadline",
     "scale_attempt_budget",
     "validate_attempt_budget",
 ]

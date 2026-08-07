@@ -12,6 +12,7 @@ from ouroboros.core.attempt_budget import (
     AttemptBudgetExhaustion,
     AttemptBudgetKind,
     AttemptBudgetProgress,
+    conservative_timeout_deadline,
     scale_attempt_budget,
     validate_attempt_budget,
 )
@@ -51,6 +52,30 @@ def test_scale_attempt_budget_rejects_root_count_overflow() -> None:
             max_iterations_per_ac=1,
             timeout_seconds=MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
             multiplier=2,
+        )
+
+
+def test_conservative_timeout_deadline_never_rounds_remaining_time_up() -> None:
+    deadline = conservative_timeout_deadline(
+        started_at=100.0,
+        remaining_seconds=0.999999,
+    )
+
+    assert 0 < deadline - 100.0 <= 0.999999
+
+
+@pytest.mark.parametrize(
+    ("started_at", "remaining_seconds"),
+    ((-1.0, 1.0), (1.0, -1.0), (math.inf, 1.0), (1.0, math.inf)),
+)
+def test_conservative_timeout_deadline_rejects_invalid_inputs(
+    started_at: float,
+    remaining_seconds: float,
+) -> None:
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        conservative_timeout_deadline(
+            started_at=started_at,
+            remaining_seconds=remaining_seconds,
         )
 
 

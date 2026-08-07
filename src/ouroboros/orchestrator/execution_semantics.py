@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from typing import NamedTuple
 
 from ouroboros.config import MAX_USAGE_LIMIT_PAUSE_SECONDS
+from ouroboros.core.attempt_budget import MAX_AC_ATTEMPT_TIMEOUT_SECONDS
 from ouroboros.orchestrator.adaptive_concurrency import adaptive_concurrency_policy
 from ouroboros.orchestrator.execution_authority import (
     valid_runtime_effect_capabilities_contract,
@@ -122,7 +123,7 @@ def valid_execution_semantics_contract(value: object) -> bool:
         type(max_iterations) is int
         and max_iterations >= 1
         and type(attempt_timeout) is int
-        and attempt_timeout >= 1
+        and 1 <= attempt_timeout <= MAX_AC_ATTEMPT_TIMEOUT_SECONDS
         and type(timeout) is int
         and timeout >= 1
         and type(retries) is int

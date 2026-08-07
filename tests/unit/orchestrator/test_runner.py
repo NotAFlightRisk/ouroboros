@@ -14,7 +14,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ouroboros.core.attempt_budget import AttemptBudgetProgress
+from ouroboros.core.attempt_budget import (
+    MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
+    AttemptBudgetProgress,
+)
 from ouroboros.core.errors import ConfigError, PersistenceError
 from ouroboros.core.project_identity import resolve_project_identity
 from ouroboros.core.seed import (
@@ -40,6 +43,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.attempt_budget_runtime import (
+    AttemptBudgetedMessageStream,
     DirectAttemptBudget,
     direct_bounded_route_runtime_active,
 )
@@ -239,6 +243,78 @@ def test_direct_attempt_budget_rejects_scaled_timeout_overflow() -> None:
             },
             root_ac_count=2,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remaining_microseconds", (1, 999_999))
+async def test_direct_attempt_resume_preserves_exact_near_max_remaining_time(
+    remaining_microseconds: int,
+) -> None:
+    """Direct provider entry uses only the exact persisted remainder."""
+
+    total_microseconds = MAX_AC_ATTEMPT_TIMEOUT_SECONDS * 1_000_000
+    progress = AttemptBudgetProgress(
+        max_agentic_steps=10,
+        timeout_microseconds=total_microseconds,
+        agentic_steps_consumed=2,
+        remaining_timeout_microseconds=remaining_microseconds,
+    )
+
+    async def one_message() -> AsyncIterator[AgentMessage]:
+        yield AgentMessage(type="assistant", content="entered provider")
+
+    class _Clock:
+        times = iter((100.0, 100.0, 100.25, 100.25))
+
+        @classmethod
+        def time(cls) -> float:
+            return next(cls.times)
+
+    class _Timeout:
+        def __init__(self, deadline: float) -> None:
+            self.deadline = deadline
+
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *_args: object) -> bool:
+            return False
+
+        @staticmethod
+        def expired() -> bool:
+            return False
+
+    deadlines: list[float] = []
+    source = one_message()
+    try:
+        stream = AttemptBudgetedMessageStream(
+            source,
+            max_agentic_steps=10,
+            timeout_seconds=MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
+            progress=progress,
+        )
+
+        with (
+            patch(
+                "ouroboros.orchestrator.attempt_budget_runtime.asyncio.get_running_loop",
+                return_value=_Clock(),
+            ),
+            patch(
+                "ouroboros.orchestrator.attempt_budget_runtime.asyncio.timeout_at",
+                side_effect=lambda deadline: deadlines.append(deadline) or _Timeout(deadline),
+            ),
+        ):
+            message = await anext(stream)
+            captured = stream.progress()
+
+        assert message.content == "entered provider"
+        assert captured.remaining_timeout_microseconds <= remaining_microseconds
+        assert len(deadlines) == 1
+        # The timeout remains anchored to the first provider read. A later
+        # clock sample must not rebase the deadline and mint that gap.
+        assert 0 < deadlines[0] - 100.0 <= progress.remaining_timeout_seconds
+    finally:
+        await source.aclose()
 
 
 def _attach_live_process_local_contract(
@@ -776,6 +852,37 @@ class TestOrchestratorRunner:
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
         _allow_mocked_precreated_durable_state(runner)
         return runner
+
+    @pytest.mark.parametrize(
+        "attempt_timeout",
+        (MAX_AC_ATTEMPT_TIMEOUT_SECONDS + 1, 2**53 + 3, 10**400),
+    )
+    def test_resume_rejects_unrepresentable_durable_attempt_timeout(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+        attempt_timeout: int,
+    ) -> None:
+        """A fingerprint cannot authorize a timeout outside the durable boundary."""
+
+        contract = copy.deepcopy(
+            runner._build_execution_contract(
+                project_identity=runner._project_identity(),
+                seed=sample_seed,
+            )
+        )
+        semantics = contract["execution_semantics"]
+        proof = contract["frugality_proof"]
+        semantics["ac_attempt_timeout_seconds"] = attempt_timeout
+        proof["execution_semantics_fingerprint"] = runner._execution_semantics_fingerprint(
+            semantics
+        )
+
+        with pytest.raises(OrchestratorError, match="invalid execution contract"):
+            runner._restore_execution_contract_snapshot(
+                {EXECUTION_CONTRACT_PROGRESS_KEY: contract},
+                seed=sample_seed,
+            )
 
     def test_param_degradation_notice_surfaces_for_serial_runner(
         self,
