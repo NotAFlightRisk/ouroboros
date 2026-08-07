@@ -1,5 +1,10 @@
 """Opaque Seed handoff and worker-safe rendering regressions."""
 
+import json
+
+import pytest
+import yaml
+
 from ouroboros.mcp.tools.evaluation_job import (
     resolve_auto_evolve_policy,
     restore_seed_handoff,
@@ -25,6 +30,51 @@ def test_worker_safe_seed_fails_closed_for_malformed_yaml() -> None:
 
     assert "SECRET_VALUE" not in rendered
     assert "Seed omitted: invalid YAML" in rendered
+
+
+@pytest.mark.parametrize(
+    "repeat_value",
+    [
+        pytest.param(lambda value: value, id="raw"),
+        pytest.param(repr, id="quoted"),
+        pytest.param(lambda value: json.dumps(value)[1:-1], id="escaped"),
+    ],
+)
+def test_worker_safe_seed_redacts_hidden_values_repeated_elsewhere(repeat_value) -> None:
+    command = 'python hidden_grader.py --expect "PRIVATE_SENTINEL"'
+    assertion = "PRIVATE_SENTINEL"
+    raw = yaml.safe_dump(
+        {
+            "goal": "Build safely",
+            "constraints": [
+                f"Do not reveal {repeat_value(command)}",
+                f"Do not reveal {repeat_value(assertion)}",
+            ],
+            "acceptance_criteria": [
+                {
+                    "description": "Produce output.json",
+                    "expected_artifacts": ["output.json"],
+                    "verify_command": command,
+                    "output_assertion": assertion,
+                }
+            ],
+            "ontology_schema": {
+                "name": "HiddenContractArtifact",
+                "description": "Artifact with parent-owned verification",
+            },
+            "metadata": {"ambiguity_score": 0.0},
+        },
+        sort_keys=False,
+    )
+
+    rendered = render_worker_safe_seed(raw)
+
+    assert "hidden_grader.py" not in rendered
+    assert "PRIVATE_SENTINEL" not in rendered
+    assert "verify_command" not in rendered
+    assert "output_assertion" not in rendered
+    assert "Produce output.json" in rendered
+    assert "output.json" in rendered
 
 
 def test_restore_consumes_process_local_handoff_handle() -> None:

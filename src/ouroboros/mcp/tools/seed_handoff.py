@@ -10,20 +10,52 @@ from uuid import uuid4
 
 import yaml
 
+from ouroboros.orchestrator.contract_redaction import redact_hidden_contract_values
+
 _HIDDEN_WORKER_KEYS = frozenset({"verify_command", "output_assertion"})
 
 
-def _worker_safe_value(value: Any) -> Any:
+def _hidden_scalar_values(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,) if value else ()
+    if isinstance(value, Mapping):
+        return tuple(hidden for item in value.values() for hidden in _hidden_scalar_values(item))
+    if isinstance(value, (list, tuple)):
+        return tuple(hidden for item in value for hidden in _hidden_scalar_values(item))
+    return ()
+
+
+def _worker_safe_value(value: Any, hidden_values: list[str]) -> Any:
+    if isinstance(value, Mapping):
+        projected: dict[str, Any] = {}
+        for key, item in value.items():
+            rendered_key = str(key)
+            if rendered_key in _HIDDEN_WORKER_KEYS:
+                hidden_values.extend(_hidden_scalar_values(item))
+                continue
+            projected[rendered_key] = _worker_safe_value(item, hidden_values)
+        return projected
+    if isinstance(value, list):
+        return [_worker_safe_value(item, hidden_values) for item in value]
+    if isinstance(value, tuple):
+        return [_worker_safe_value(item, hidden_values) for item in value]
+    return value
+
+
+def _redact_worker_value(value: Any, hidden_values: tuple[str, ...]) -> Any:
+    if isinstance(value, str):
+        return redact_hidden_contract_values(value, hidden_values)
     if isinstance(value, Mapping):
         return {
-            str(key): _worker_safe_value(item)
+            redact_hidden_contract_values(str(key), hidden_values): _redact_worker_value(
+                item, hidden_values
+            )
             for key, item in value.items()
-            if str(key) not in _HIDDEN_WORKER_KEYS
         }
     if isinstance(value, list):
-        return [_worker_safe_value(item) for item in value]
+        return [_redact_worker_value(item, hidden_values) for item in value]
     if isinstance(value, tuple):
-        return [_worker_safe_value(item) for item in value]
+        return [_redact_worker_value(item, hidden_values) for item in value]
     return value
 
 
@@ -39,7 +71,9 @@ def render_worker_safe_seed(seed_content: str) -> str:
         return "# Seed omitted: invalid YAML; ask the parent to retry with a valid Seed.\n"
     if not isinstance(parsed, Mapping):
         return "# Seed omitted: expected a YAML mapping.\n"
-    projected = _worker_safe_value(parsed)
+    hidden_values: list[str] = []
+    projected = _worker_safe_value(parsed, hidden_values)
+    projected = _redact_worker_value(projected, tuple(hidden_values))
     if projected == parsed:
         return seed_content
     return yaml.safe_dump(

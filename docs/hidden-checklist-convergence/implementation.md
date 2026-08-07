@@ -82,5 +82,7 @@ whether it creates evaluation or Ralph successors by reading newer config.
   evaluation request, and gives a detached evaluation owner no process-local
   handle to resolve. If evaluation itself is delegated, the parent derives its
   checklist from the raw Seed but passes only the same worker-safe projection.
-  Raw verifier material remains absent from plugin-worker prompts and
-  worker-queryable events.
+  That projection removes verifier keys and redacts every raw, quoted, or
+  escaped occurrence of their values elsewhere in the Seed using the same
+  longest-first contract redactor as retry hints. Raw verifier material remains
+  absent from plugin-worker prompts and worker-queryable events.

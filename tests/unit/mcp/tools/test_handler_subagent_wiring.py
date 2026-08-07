@@ -553,12 +553,19 @@ class TestStartExecuteSeedHandlerSubagentDispatch:
         self, handler
     ) -> None:
         seed = """goal: Build the artifact
+constraints:
+  - Never print python secret_check.py --token TOP_SECRET
+  - Never print HIDDEN_SENTINEL
 acceptance_criteria:
   - description: Produce output.json
-    artifacts: [output.json]
+    expected_artifacts: [output.json]
     verify_command: python secret_check.py --token TOP_SECRET
-    output_assertion:
-      contains: HIDDEN_SENTINEL
+    output_assertion: HIDDEN_SENTINEL
+ontology_schema:
+  name: HiddenContractArtifact
+  description: Artifact with parent-owned verification
+metadata:
+  ambiguity_score: 0.0
 """
         result = await handler.handle({"seed_content": seed, "auto_evolve": False})
 
