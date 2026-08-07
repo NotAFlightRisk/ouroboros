@@ -2615,13 +2615,12 @@ class StartExecuteSeedHandler:
             execution_id = f"exec_{uuid4().hex[:12]}"
             new_session_id = f"orch_{uuid4().hex[:12]}"
 
-        auto_evaluate_enabled = resolve_auto_evaluate(
-            get_auto_evaluate_enabled(),
-            arguments.get("auto_evaluate"),
-        )
-        auto_evolve_enabled = resolve_auto_evaluate(
-            get_auto_evolve_enabled(),
-            arguments.get("auto_evolve"),
+        from ouroboros.mcp.tools.run_evaluate_chain import snapshot_run_successor_policy
+
+        arguments, auto_evaluate_enabled, auto_evolve_enabled = snapshot_run_successor_policy(
+            arguments,
+            configured_auto_evaluate=get_auto_evaluate_enabled(),
+            configured_auto_evolve=get_auto_evolve_enabled(),
         )
 
         # The shared pipeline owns the ``should_cancel()`` pre-work guard.

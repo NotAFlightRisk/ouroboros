@@ -16,6 +16,25 @@ from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 log = structlog.get_logger(__name__)
 
 
+def snapshot_run_successor_policy(
+    arguments: dict[str, Any],
+    *,
+    configured_auto_evaluate: bool,
+    configured_auto_evolve: bool,
+) -> tuple[dict[str, Any], bool, bool]:
+    """Freeze run successor policy before detached execute re-entry."""
+
+    snapshotted = dict(arguments)
+    auto_evaluate = arguments.get("auto_evaluate")
+    if not isinstance(auto_evaluate, bool):
+        auto_evaluate = configured_auto_evaluate
+    auto_evolve = arguments.get("auto_evolve")
+    if not isinstance(auto_evolve, bool):
+        auto_evolve = configured_auto_evolve
+    snapshotted.update(auto_evaluate=auto_evaluate, auto_evolve=auto_evolve)
+    return snapshotted, auto_evaluate, auto_evolve
+
+
 def is_evaluable_run_result(result: MCPToolResult) -> bool:
     """Return whether a terminal run produced evidence formal evaluation can judge."""
 

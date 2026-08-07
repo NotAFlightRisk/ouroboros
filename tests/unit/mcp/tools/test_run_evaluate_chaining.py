@@ -25,6 +25,7 @@ from ouroboros.mcp.tools.execution_handlers import (
     _run_only_verification_meta,
     _run_only_verification_text,
 )
+from ouroboros.mcp.tools.run_evaluate_chain import snapshot_run_successor_policy
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.persistence.event_store import EventStore
 
@@ -58,6 +59,31 @@ async def _wait_terminal(job_manager: JobManager, job_id: str) -> JobSnapshot:
     diagnostics = _diagnose_stuck_job(job_manager, job_id)
     diagnostics += "\n" + await _dump_all_job_streams(job_manager)
     raise AssertionError(f"job {job_id} did not reach a terminal state\n{diagnostics}")
+
+
+@pytest.mark.parametrize(
+    ("first_config", "second_config"),
+    [((False, False), (True, True)), ((True, True), (False, False))],
+)
+def test_detached_run_successor_policy_survives_config_flip(
+    first_config: tuple[bool, bool],
+    second_config: tuple[bool, bool],
+) -> None:
+    initial, initial_evaluate, initial_evolve = snapshot_run_successor_policy(
+        {},
+        configured_auto_evaluate=first_config[0],
+        configured_auto_evolve=first_config[1],
+    )
+    replayed, replay_evaluate, replay_evolve = snapshot_run_successor_policy(
+        initial,
+        configured_auto_evaluate=second_config[0],
+        configured_auto_evolve=second_config[1],
+    )
+
+    assert (initial_evaluate, initial_evolve) == first_config
+    assert (replay_evaluate, replay_evolve) == first_config
+    assert replayed["auto_evaluate"] is first_config[0]
+    assert replayed["auto_evolve"] is first_config[1]
 
 
 async def _dump_all_job_streams(job_manager: JobManager) -> str:

@@ -53,6 +53,10 @@ behavior or metadata. Auto pipeline run
 dispatches explicitly set `auto_evolve: false` because Auto owns a separate
 Ralph lineage.
 
+The detached run request likewise carries resolved `auto_evaluate` and
+`auto_evolve` booleans. A restarted execute owner therefore cannot change
+whether it creates evaluation or Ralph successors by reading newer config.
+
 ## Testing
 
 - Original feature regression suite: 1,261 passed.
