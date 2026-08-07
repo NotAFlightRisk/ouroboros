@@ -19,7 +19,12 @@ import re
 from re import _parser as regex_parser
 from typing import NamedTuple
 
-from ouroboros.verification.binding import acceptance_targets, literal_is_bound, literal_spans
+from ouroboros.verification.binding import (
+    acceptance_targets,
+    identifier_component_spans,
+    literal_is_bound,
+    literal_spans,
+)
 from ouroboros.verification.models import (
     ACVerificationReport,
     SpecAssertion,
@@ -901,6 +906,8 @@ class SpecVerifier:
                 if binding_text is None and "/" in target:
                     target_in_subject = target.rsplit("/", 1)[-1]
                 spans = literal_spans(bound_subject, target_in_subject)
+                if not spans and assertion.tier == VerificationTier.T1_CONSTANT:
+                    spans = identifier_component_spans(bound_subject, target_in_subject)
                 if not spans:
                     continue
                 if binding_text is not None or match.start() == match.end():
