@@ -1641,6 +1641,7 @@ class TestSpecVerifier:
             "class Fake_CameraProvider:\n    pass\n",
             "class CameraProvider$Fake:\n    pass\n",
             "class Fake$CameraProvider:\n    pass\n",
+            "class cameraprovider:\n    pass\n",
             "가짜카메라값 = object()\n",
         ],
         ids=[
@@ -1648,6 +1649,7 @@ class TestSpecVerifier:
             "identifier-prefix",
             "dollar-suffix",
             "dollar-prefix",
+            "case-variant",
             "unicode-embedding",
         ],
     )
@@ -1693,8 +1695,8 @@ class TestSpecVerifier:
 
     @pytest.mark.parametrize(
         "content",
-        ["NOT_MAX_RETRIES = 5\n", "MAX_RETRIES_EXTRA = 5\n"],
-        ids=["identifier-prefix", "identifier-suffix"],
+        ["NOT_MAX_RETRIES = 5\n", "MAX_RETRIES_EXTRA = 5\n", "max_retries = 5\n"],
+        ids=["identifier-prefix", "identifier-suffix", "case-variant"],
     )
     def test_t1_exact_identifier_cannot_bind_inside_an_unrelated_identifier(
         self, content: str
@@ -1704,7 +1706,7 @@ class TestSpecVerifier:
             ac_index=0,
             ac_text="MUST set MAX_RETRIES to 5",
             tier=VerificationTier.T1_CONSTANT,
-            pattern=r"(?:NOT_)?MAX_RETRIES(?:_EXTRA)?\s*=\s*",
+            pattern=r"(?i)(?:NOT_)?MAX_RETRIES(?:_EXTRA)?\s*=\s*",
             expected_value="5",
             file_hint="*.py",
             evidence_targets=("MAX_RETRIES",),
@@ -1763,8 +1765,15 @@ class TestSpecVerifier:
             ("not--verbose\n", False),
             ("x--verbose-extra\n", False),
             ("---verbose\n", False),
+            ("--VERBOSE\n", False),
         ],
-        ids=["exact-flag", "identifier-prefix", "extended-flag", "hyphen-prefix"],
+        ids=[
+            "exact-flag",
+            "identifier-prefix",
+            "extended-flag",
+            "hyphen-prefix",
+            "case-variant",
+        ],
     )
     def test_flag_target_requires_a_complete_cli_token(self, content: str, verified: bool) -> None:
         project = self._create_project({"help.txt": content})
@@ -1865,6 +1874,30 @@ class TestSpecVerifier:
         assert bool(summary.verified_count) is verified
         result = summary.reports[0].results[0]
         assert result.evidence_target == ("pkg/CameraProvider.py" if verified else "")
+
+    @pytest.mark.parametrize(
+        ("filename", "verified"),
+        [("CameraProvider.py", True), ("cameraprovider.py", False)],
+        ids=["exact-case", "case-variant"],
+    )
+    def test_unqualified_filename_target_preserves_exact_case(
+        self, filename: str, verified: bool
+    ) -> None:
+        project = self._create_project({filename: "# provider\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST create file CameraProvider.py",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"(?i)CameraProvider\.py",
+            expected_value="CameraProvider.py",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider.py",),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert bool(summary.verified_count) is verified
 
 
 # -- Extractor Tests --
@@ -2025,7 +2058,7 @@ class TestAssertionExtractor:
         assert summary.verified_count == 0
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("expected_value", ["", "interface", "Python"])
+    @pytest.mark.parametrize("expected_value", ["", "interface", "Python", "cameraprovider"])
     async def test_t2_model_cannot_choose_or_omit_the_structural_target(
         self, expected_value: str
     ) -> None:
