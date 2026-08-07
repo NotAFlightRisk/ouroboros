@@ -65,8 +65,9 @@ def plugin_evaluation_instruction(
         else "the worker-safe seed_content"
     )
     return (
-        "After successful execution, run formal 3-stage evaluation without host "
-        "involvement: call ouroboros_start_evaluate with the session_id, execution "
+        "After every terminal evaluable execution result, including unsuccessful AC "
+        "execution, run formal 3-stage evaluation without host involvement: call "
+        "ouroboros_start_evaluate with the session_id, execution "
         f"artifact, {seed_argument}, working directory, and auto_evolve: "
         f"{str(auto_evolve).lower()}; poll the returned job with "
         "ouroboros_job_wait/status. If its terminal result contains "

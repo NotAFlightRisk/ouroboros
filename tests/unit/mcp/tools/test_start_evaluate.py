@@ -65,8 +65,56 @@ class TestDefinition:
         inner = EvaluateHandler()
         assert {p.name for p in h.definition.parameters} == {
             *(p.name for p in inner.definition.parameters),
+            "auto_evolve",
             "seed_handoff_id",
         }
+        assert "auto_evolve" not in {p.name for p in inner.definition.parameters}
+
+    @pytest.mark.asyncio
+    async def test_consumed_handoff_is_safe_for_detached_worker_reentry(
+        self, tmp_path: Path, fake_inner_handler
+    ) -> None:
+        """The durable request carries the restored Seed, never a process-local handle."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'handoff.db'}")
+        await store.initialize()
+        manager = JobManager(store, durable_jobs=True)
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_detached_handoff",
+            seed_content="goal: parent only\nprivate_marker: HIDDEN_PARENT_SEED\n",
+        )
+        snapshot = MagicMock(job_id="job_detached", cursor=0)
+        snapshot.status.value = "queued"
+
+        with patch(
+            "ouroboros.mcp.tools.background.launch_detached_job",
+            new=AsyncMock(return_value=snapshot),
+        ) as launch:
+            handler = StartEvaluateHandler(
+                evaluate_handler=fake_inner_handler,
+                event_store=store,
+                job_manager=manager,
+                seed_handoff_registry=registry,
+            )
+            result = await handler.handle(
+                {
+                    "session_id": "orch_detached_handoff",
+                    "artifact": "partial artifact",
+                    "seed_handoff_id": handoff_id,
+                    "auto_evolve": True,
+                }
+            )
+
+        try:
+            assert result.is_ok
+            request = launch.await_args.kwargs["request"]
+            assert "seed_handoff_id" not in request.arguments
+            assert request.arguments["seed_content"].startswith("goal: parent only")
+            assert request.arguments["_auto_evolve_max_generations"] >= 1
+        finally:
+            await store.close()
 
 
 class TestRequiredArguments:

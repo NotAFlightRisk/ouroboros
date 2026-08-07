@@ -33,5 +33,7 @@ the preceding verdict remains authoritative if successor chaining fails.
   next planned generation is 2.
 - Concurrent or replayed evaluation completions publish Gen1 and enqueue at most
   one Ralph successor; active and terminal successors are reattached by lineage.
+- The resolved Ralph generation budget is snapshotted at evaluation enqueue and
+  remains authoritative across configuration changes and successor replay.
 - Approved/unjudged/opted-out evaluations do not enqueue Ralph.
 - Static checks and the bounded target test suites pass.

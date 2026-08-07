@@ -483,16 +483,6 @@ class EvaluateHandler:
                     default=False,
                 ),
                 MCPToolParameter(
-                    name="auto_evolve",
-                    type=ToolInputType.BOOLEAN,
-                    description=(
-                        "Override execution.auto_evolve for this call. When true, "
-                        "an explicitly rejected formal evaluation starts a bounded "
-                        "Ralph continuation loop."
-                    ),
-                    required=False,
-                ),
-                MCPToolParameter(
                     name="working_dir",
                     type=ToolInputType.STRING,
                     description=(
@@ -2132,6 +2122,16 @@ class StartEvaluateHandler:
             parameters=(
                 *EvaluateHandler().definition.parameters,
                 MCPToolParameter(
+                    name="auto_evolve",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "Override execution.auto_evolve for this background call. "
+                        "When true, an explicitly rejected formal evaluation starts "
+                        "a bounded Ralph continuation loop."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
                     name="seed_handoff_id",
                     type=ToolInputType.STRING,
                     description="Opaque parent-owned Seed handle for plugin evaluation",
@@ -2170,12 +2170,14 @@ class StartEvaluateHandler:
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_evaluate"))
 
-        from ouroboros.mcp.tools.execution_handlers import resolve_auto_evaluate
+        from ouroboros.mcp.tools.evaluation_job import resolve_auto_evolve_policy
 
-        auto_evolve_enabled = resolve_auto_evaluate(
-            get_auto_evolve_enabled(),
-            arguments.get("auto_evolve"),
-        )
+        try:
+            arguments, auto_evolve_enabled = resolve_auto_evolve_policy(
+                arguments, configured_enabled=get_auto_evolve_enabled()
+            )
+        except ValueError as exc:
+            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_evaluate"))
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         # Plugin mode is terminal only when no convergence successor is needed:

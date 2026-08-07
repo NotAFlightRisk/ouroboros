@@ -546,6 +546,7 @@ acceptance_criteria:
         assert payload["context"]["auto_evolve"] is False
         assert payload["context"]["seed_handoff_id"].startswith("seed_handoff_")
         assert "auto_evolve: false" in payload["prompt"]
+        assert "including unsuccessful AC execution" in payload["prompt"]
 
     async def test_plugin_mode_auto_evaluate_false_keeps_legacy_manual_path(self, handler) -> None:
         result = await handler.handle({"seed_content": "goal: test", "auto_evaluate": False})

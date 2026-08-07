@@ -20,7 +20,7 @@ from ouroboros.evolution.loop_support import planned_evolve_generation
 from ouroboros.evolution.reflect import ReflectOutput
 from ouroboros.evolution.wonder import WonderOutput
 from ouroboros.mcp.job_manager import JobManager, JobStatus
-from ouroboros.mcp.tools import evaluate_ralph_chain, evaluation_handlers
+from ouroboros.mcp.tools import evaluate_ralph_chain, evaluation_handlers, evaluation_job
 from ouroboros.mcp.tools.evaluate_ralph_chain import (
     ac_results_from_checklist,
     evaluation_summary_from_eval_meta,
@@ -165,6 +165,47 @@ async def test_rejected_evaluation_seeds_gen1_and_enqueues_ralph(
     assert summary["ac_results"][0]["rendered_verdict"] == "PASS"
     assert summary["ac_results"][1]["rendered_verdict"] == "FAIL"
     assert await planned_evolve_generation(event_store, lineage_id, execute=True) == 2
+
+
+async def test_evaluation_enqueue_snapshots_budget_before_rejection(
+    event_store: EventStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class FakeStartRalphHandler:
+        async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, Any]:
+            calls.append(arguments)
+            return Result.ok(MCPToolResult(meta={"job_id": "job_snapshotted_budget"}))
+
+    monkeypatch.setattr(evaluation_handlers, "get_auto_evolve_enabled", lambda: True)
+    monkeypatch.setattr(
+        evaluation_job,
+        "get_auto_evolve_max_generations",
+        lambda: 2,
+    )
+    # If the chain reads live configuration after evaluation, this later value
+    # would leak into the Ralph request and result metadata.
+    monkeypatch.setattr(evaluate_ralph_chain, "get_auto_evolve_max_generations", lambda: 9)
+    manager = JobManager(event_store)
+    handler = StartEvaluateHandler(
+        evaluate_handler=_StaticEvaluateHandler(_rejected_result()),  # type: ignore[arg-type]
+        event_store=event_store,
+        job_manager=manager,
+        start_ralph_handler=FakeStartRalphHandler(),  # type: ignore[arg-type]
+    )
+
+    started = await handler.handle(
+        {
+            "session_id": "orch-budget-snapshot",
+            "artifact": "partial artifact",
+            "seed_content": _seed_yaml(),
+        }
+    )
+    terminal = await _wait_terminal(manager, started.value.meta["job_id"])
+
+    assert calls[0]["max_generations"] == 2
+    assert terminal.result_meta["chained_ralph_max_generations"] == 2
 
 
 async def test_real_rejection_to_ralph_completes_generation_two(
@@ -673,7 +714,11 @@ async def test_concurrent_ralph_enqueue_has_one_durable_winner(tmp_path: Path) -
         for store in stores:
             await store.close()
 
-    assert job_ids == ["job_single_winner", "job_single_winner"]
+    assert [receipt.job_id for receipt in job_ids] == [
+        "job_single_winner",
+        "job_single_winner",
+    ]
+    assert [receipt.max_generations for receipt in job_ids] == [3, 3]
     assert starter.calls == 1
 
 
@@ -698,7 +743,7 @@ async def test_terminal_ralph_job_closes_successor_crash_gap(
         async def handle(self, _: dict[str, Any]) -> Result[MCPToolResult, Any]:
             raise AssertionError("terminal Ralph successor must be reattached")
 
-    job_id = await evaluate_ralph_chain._claim_or_start_chained_ralph(
+    receipt = await evaluate_ralph_chain._claim_or_start_chained_ralph(
         lineage_id="lineage-terminal-successor",
         arguments={},
         max_generations=3,
@@ -707,8 +752,52 @@ async def test_terminal_ralph_job_closes_successor_crash_gap(
         start_ralph_handler=NeverStartRalph(),
     )
 
-    assert job_id == "job_already_terminal"
+    assert receipt.job_id == "job_already_terminal"
+    assert receipt.max_generations == 3
     assert calls == [True]
+
+
+async def test_ralph_budget_receipt_survives_later_config_change(tmp_path: Path) -> None:
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'ralph-budget.db'}")
+    await store.initialize()
+
+    class EmptyJobManager:
+        async def find_active_job_by_lineage(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    class OneRalphStarter:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, Any]:
+            self.calls.append(arguments)
+            return Result.ok(MCPToolResult(meta={"job_id": "job_budget_owner"}))
+
+    starter = OneRalphStarter()
+    try:
+        first = await evaluate_ralph_chain._claim_or_start_chained_ralph(
+            lineage_id="lineage-budget-owner",
+            arguments={},
+            max_generations=2,
+            event_store=store,
+            job_manager=EmptyJobManager(),
+            start_ralph_handler=starter,
+        )
+        replay = await evaluate_ralph_chain._claim_or_start_chained_ralph(
+            lineage_id="lineage-budget-owner",
+            arguments={},
+            max_generations=7,
+            event_store=store,
+            job_manager=EmptyJobManager(),
+            start_ralph_handler=starter,
+        )
+    finally:
+        await store.close()
+
+    assert first == replay
+    assert replay.max_generations == 2
+    assert starter.calls[0]["max_generations"] == 2
+    assert len(starter.calls) == 1
 
 
 async def _async_value(value: Any) -> Any:

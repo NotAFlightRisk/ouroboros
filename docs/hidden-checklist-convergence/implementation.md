@@ -45,8 +45,12 @@ execution:
 ```
 
 `auto_evolve` is also a per-call override. The automatic generation budget is
-clamped to 1..10. Auto pipeline run dispatches explicitly set
-`auto_evolve: false` because Auto owns a separate Ralph lineage.
+clamped to 1..10, snapshotted when evaluation is enqueued, and bound to the
+lineage through a durable policy claim before the Ralph successor starts. The
+successor receipt records both `job_id` and the authoritative budget, so later
+configuration changes cannot rewrite replay metadata. Auto pipeline run
+dispatches explicitly set `auto_evolve: false` because Auto owns a separate
+Ralph lineage.
 
 ## Testing
 
@@ -67,7 +71,8 @@ clamped to 1..10. Auto pipeline run dispatches explicitly set
   hints are deterministic.
 - Single-AC evaluations without checklist metadata use Ralph's existing
   full-graph focus fallback.
-- Plugin Seed handoffs are intentionally process-local. If the parent server
-  restarts before the child redeems a handoff, evaluation rejects the unknown
-  handle and the child reports the manual retry; raw verifier material is never
-  persisted into worker-queryable events.
+- Plugin Seed handoffs are intentionally process-local until redemption. The
+  parent consumes the opaque handle, restores the raw Seed into its private
+  evaluation request, and gives a detached evaluation owner no process-local
+  handle to resolve. Raw verifier material remains absent from plugin-worker
+  prompts and worker-queryable events.

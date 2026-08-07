@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 import hashlib
 import json
 from typing import Any
@@ -21,6 +22,14 @@ from ouroboros.evolution.loop_support import (
 )
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.persistence.event_store import EventStore
+
+
+@dataclass(frozen=True, slots=True)
+class RalphSuccessorReceipt:
+    """Durable identity and immutable policy for one Ralph successor."""
+
+    job_id: str
+    max_generations: int
 
 
 def _checklist_by_text(checklist: object) -> dict[str, list[Mapping[str, Any]]]:
@@ -227,11 +236,49 @@ async def _find_chained_ralph_job(job_manager: Any, lineage_id: str) -> str | No
     return job_id if isinstance(job_id, str) and job_id else None
 
 
-def _decode_ralph_job_receipt(payload: Mapping[str, Any]) -> str:
+def _decode_generation_budget(payload: Mapping[str, Any]) -> int:
+    max_generations = payload.get("max_generations")
+    if (
+        not isinstance(max_generations, int)
+        or isinstance(max_generations, bool)
+        or not 1 <= max_generations <= 10
+    ):
+        raise RuntimeError("Durable Ralph policy receipt has an invalid generation budget")
+    return max_generations
+
+
+async def _bind_ralph_generation_budget(
+    event_store: EventStore,
+    *,
+    lineage_id: str,
+    proposed_max_generations: int,
+) -> int:
+    """Persist the first accepted budget before any Ralph side effect occurs."""
+
+    async def _select_proposed_budget() -> int:
+        return proposed_max_generations
+
+    request_key = hashlib.sha256(f"ralph-policy\0{lineage_id}".encode()).hexdigest()
+    return await run_durable_lineage_single_flight(
+        event_store,
+        lineage_id,
+        request_key,
+        _select_proposed_budget,
+        generation_number=1,
+        encode=lambda value: {"max_generations": value},
+        decode=_decode_generation_budget,
+        scope="evaluation-ralph-policy",
+    )
+
+
+def _decode_ralph_job_receipt(payload: Mapping[str, Any]) -> RalphSuccessorReceipt:
     job_id = payload.get("job_id")
     if not isinstance(job_id, str) or not job_id:
         raise RuntimeError("Durable Ralph successor receipt has no job_id")
-    return job_id
+    return RalphSuccessorReceipt(
+        job_id=job_id,
+        max_generations=_decode_generation_budget(payload),
+    )
 
 
 async def _claim_or_start_chained_ralph(
@@ -242,17 +289,23 @@ async def _claim_or_start_chained_ralph(
     event_store: EventStore,
     job_manager: Any,
     start_ralph_handler: Any | None,
-) -> str:
+) -> RalphSuccessorReceipt:
     """Reconnect or durably elect the sole Ralph successor for a lineage."""
+
+    bound_max_generations = await _bind_ralph_generation_budget(
+        event_store,
+        lineage_id=lineage_id,
+        proposed_max_generations=max_generations,
+    )
 
     existing_job_id = await _find_chained_ralph_job(job_manager, lineage_id)
     if existing_job_id is not None:
-        return existing_job_id
+        return RalphSuccessorReceipt(existing_job_id, bound_max_generations)
 
-    async def _start_once() -> str:
+    async def _start_once() -> RalphSuccessorReceipt:
         recovered_job_id = await _find_chained_ralph_job(job_manager, lineage_id)
         if recovered_job_id is not None:
-            return recovered_job_id
+            return RalphSuccessorReceipt(recovered_job_id, bound_max_generations)
         if start_ralph_handler is None:
             raise RuntimeError(
                 "Automatic Ralph chaining is not configured: "
@@ -265,7 +318,7 @@ async def _claim_or_start_chained_ralph(
                 "parallel": True,
                 "skip_qa": False,
                 "project_dir": arguments.get("working_dir"),
-                "max_generations": max_generations,
+                "max_generations": bound_max_generations,
             }
         )
         if started.is_err:
@@ -273,7 +326,7 @@ async def _claim_or_start_chained_ralph(
         job_id = started.value.meta.get("job_id")
         if not isinstance(job_id, str) or not job_id:
             raise RuntimeError("StartRalphHandler did not return a pollable Ralph job_id")
-        return job_id
+        return RalphSuccessorReceipt(job_id, bound_max_generations)
 
     request_key = hashlib.sha256(f"ralph-successor\0{lineage_id}".encode()).hexdigest()
     return await run_durable_lineage_single_flight(
@@ -282,7 +335,10 @@ async def _claim_or_start_chained_ralph(
         request_key,
         _start_once,
         generation_number=1,
-        encode=lambda job_id: {"job_id": job_id},
+        encode=lambda receipt: {
+            "job_id": receipt.job_id,
+            "max_generations": receipt.max_generations,
+        },
         decode=_decode_ralph_job_receipt,
         scope="evaluation-ralph",
     )
@@ -317,7 +373,14 @@ async def enqueue_chained_ralph(
         )
 
     lineage_id = mint_chain_lineage_id(seed.metadata.seed_id, session_id)
-    max_generations = get_auto_evolve_max_generations()
+    raw_max_generations = arguments.get("_auto_evolve_max_generations")
+    max_generations = (
+        raw_max_generations
+        if isinstance(raw_max_generations, int)
+        and not isinstance(raw_max_generations, bool)
+        and 1 <= raw_max_generations <= 10
+        else get_auto_evolve_max_generations()
+    )
     try:
         await seed_gen1_lineage(
             event_store,
@@ -325,7 +388,7 @@ async def enqueue_chained_ralph(
             seed=seed,
             summary=evaluation_summary_from_eval_meta(seed, evaluation_result.meta),
         )
-        ralph_job_id = await _claim_or_start_chained_ralph(
+        ralph_receipt = await _claim_or_start_chained_ralph(
             lineage_id=lineage_id,
             arguments=arguments,
             max_generations=max_generations,
@@ -348,13 +411,13 @@ async def enqueue_chained_ralph(
         evaluation_result,
         (
             "\nAutomatic Ralph: queued bounded convergence loop\n"
-            f"Ralph Job ID: {ralph_job_id}\nLineage ID: {lineage_id}\n"
+            f"Ralph Job ID: {ralph_receipt.job_id}\nLineage ID: {lineage_id}\n"
         ),
         meta={
             **evaluation_result.meta,
-            "chained_ralph_job_id": ralph_job_id,
+            "chained_ralph_job_id": ralph_receipt.job_id,
             "chained_ralph_lineage_id": lineage_id,
-            "chained_ralph_max_generations": max_generations,
+            "chained_ralph_max_generations": ralph_receipt.max_generations,
         },
     )
 

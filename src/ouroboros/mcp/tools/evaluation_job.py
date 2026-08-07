@@ -11,6 +11,7 @@ from pydantic import ValidationError as PydanticValidationError
 import structlog
 import yaml
 
+from ouroboros.config import get_auto_evolve_max_generations
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.seed import Seed, ac_text
 from ouroboros.mcp.tools.evaluate_ralph_chain import enqueue_chained_ralph
@@ -40,7 +41,45 @@ def restore_seed_handoff(
     if seed_content is None:
         raise ValueError("seed_handoff_id is unknown or does not belong to this session")
     restored["seed_content"] = seed_content
+    # The opaque handle is a one-process plugin boundary, not durable worker
+    # input.  Consume it before StartEvaluate serializes detached arguments so
+    # a fresh worker can use the restored parent-owned Seed without consulting
+    # an empty process-local registry.
+    restored.pop("seed_handoff_id", None)
     return restored
+
+
+def snapshot_auto_evolve_policy(
+    arguments: Mapping[str, Any],
+    *,
+    enabled: bool,
+) -> dict[str, Any]:
+    """Freeze effect-bearing evaluation policy before durable job handoff."""
+
+    snapshotted = dict(arguments)
+    if not enabled:
+        return snapshotted
+    raw_budget = snapshotted.get("_auto_evolve_max_generations")
+    if raw_budget is None:
+        snapshotted["_auto_evolve_max_generations"] = get_auto_evolve_max_generations()
+    elif (
+        not isinstance(raw_budget, int) or isinstance(raw_budget, bool) or not 1 <= raw_budget <= 10
+    ):
+        raise ValueError("invalid internal auto-evolve generation budget")
+    return snapshotted
+
+
+def resolve_auto_evolve_policy(
+    arguments: Mapping[str, Any],
+    *,
+    configured_enabled: bool,
+) -> tuple[dict[str, Any], bool]:
+    """Resolve the public override and snapshot its effect-bearing budget."""
+
+    from ouroboros.mcp.tools.execution_handlers import resolve_auto_evaluate
+
+    enabled = resolve_auto_evaluate(configured_enabled, arguments.get("auto_evolve"))
+    return snapshot_auto_evolve_policy(arguments, enabled=enabled), enabled
 
 
 def _acceptance_criteria(arguments: Mapping[str, Any]) -> tuple[tuple[str, ...], Seed | None]:

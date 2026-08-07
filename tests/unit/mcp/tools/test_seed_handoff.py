@@ -1,5 +1,6 @@
 """Opaque Seed handoff and worker-safe rendering regressions."""
 
+from ouroboros.mcp.tools.evaluation_job import restore_seed_handoff
 from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry, render_worker_safe_seed
 
 
@@ -21,3 +22,18 @@ def test_worker_safe_seed_fails_closed_for_malformed_yaml() -> None:
 
     assert "SECRET_VALUE" not in rendered
     assert "Seed omitted: invalid YAML" in rendered
+
+
+def test_restore_consumes_process_local_handoff_handle() -> None:
+    registry = SeedHandoffRegistry()
+    handoff_id = registry.register(session_id="orch-restore", seed_content="goal: private")
+    original = {"session_id": "orch-restore", "seed_handoff_id": handoff_id}
+
+    restored = restore_seed_handoff(
+        original,
+        session_id="orch-restore",
+        registry=registry,
+    )
+
+    assert restored == {"session_id": "orch-restore", "seed_content": "goal: private"}
+    assert original["seed_handoff_id"] == handoff_id
