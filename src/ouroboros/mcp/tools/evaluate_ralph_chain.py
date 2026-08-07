@@ -110,9 +110,17 @@ def evaluation_summary_from_eval_meta(seed: Seed, meta: Mapping[str, Any]) -> Ev
             failure_reason = "; ".join(rendered)
     if not approved and failure_reason is None:
         failure_reason = "formal evaluation rejected the run"
+    raw_highest_stage = meta.get("highest_stage")
+    highest_stage = (
+        raw_highest_stage
+        if isinstance(raw_highest_stage, int)
+        and not isinstance(raw_highest_stage, bool)
+        and 1 <= raw_highest_stage <= 3
+        else 1
+    )
     return EvaluationSummary(
         final_approved=approved,
-        highest_stage_passed=3 if approved else 2,
+        highest_stage_passed=highest_stage,
         score=score,
         failure_reason=failure_reason,
         ac_results=ac_results_from_checklist(seed, meta.get("checklist")),
@@ -122,10 +130,14 @@ def evaluation_summary_from_eval_meta(seed: Seed, meta: Mapping[str, Any]) -> Ev
 
 
 def mint_chain_lineage_id(seed_id: str, session_id: str) -> str:
-    """Mint one deterministic lineage per Seed and originating run session."""
+    """Mint one storage-safe deterministic lineage per Seed/run tuple."""
 
     identity = f"{seed_id}\0{session_id}".encode()
-    return f"ralph-{seed_id}-{hashlib.sha256(identity).hexdigest()[:16]}"
+    # events.aggregate_id is VARCHAR(36) on length-enforcing production
+    # databases. Keep the human-readable prefix and use 120 digest bits so the
+    # complete tuple identity remains collision-resistant without embedding an
+    # unbounded raw Seed ID.
+    return f"ralph-{hashlib.sha256(identity).hexdigest()[:30]}"
 
 
 async def seed_gen1_lineage(

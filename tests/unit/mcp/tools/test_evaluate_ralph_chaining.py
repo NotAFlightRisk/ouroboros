@@ -32,6 +32,7 @@ from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import StartRalphHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.schema import events_table
 
 
 @pytest.fixture
@@ -61,6 +62,7 @@ def _rejected_result() -> MCPToolResult:
         meta={
             "session_id": "orch-chain-1234",
             "final_approved": False,
+            "highest_stage": 2,
             "multi_ac": True,
             "pass_rate": 0.5,
             "run_feedback": ["failing AC: output is missing"],
@@ -737,8 +739,17 @@ def test_single_ac_without_checklist_degrades_to_empty_ac_results() -> None:
     )
     assert ac_results_from_checklist(seed, None) == ()
     lineage_id = mint_chain_lineage_id("single", "orch-123456")
-    assert lineage_id.startswith("ralph-single-")
-    assert len(lineage_id.rsplit("-", 1)[-1]) == 16
+    assert lineage_id.startswith("ralph-")
+    assert len(lineage_id) == 36
+
+
+def test_lineage_identity_fits_production_aggregate_id_width() -> None:
+    lineage_id = mint_chain_lineage_id("seed_2be2907edc07", "orch_abc111111111")
+    aggregate_id_width = events_table.c.aggregate_id.type.length
+
+    assert aggregate_id_width == 36
+    assert len(lineage_id) <= aggregate_id_width
+    assert lineage_id == mint_chain_lineage_id("seed_2be2907edc07", "orch_abc111111111")
 
 
 def test_lineage_identity_uses_the_complete_session_id() -> None:
@@ -747,3 +758,22 @@ def test_lineage_identity_uses_the_complete_session_id() -> None:
 
     assert first != second
     assert first == mint_chain_lineage_id("same-seed", "orch_abc111111111")
+
+
+@pytest.mark.parametrize("highest_stage", [1, 3])
+def test_gen1_summary_preserves_formal_evaluation_stage(highest_stage: int) -> None:
+    seed = _seed()
+    meta = {**_rejected_result().meta, "highest_stage": highest_stage}
+
+    summary = evaluation_summary_from_eval_meta(seed, meta)
+
+    assert summary.highest_stage_passed == highest_stage
+
+
+def test_gen1_summary_missing_stage_falls_back_conservatively() -> None:
+    seed = _seed()
+    meta = {key: value for key, value in _rejected_result().meta.items() if key != "highest_stage"}
+
+    summary = evaluation_summary_from_eval_meta(seed, meta)
+
+    assert summary.highest_stage_passed == 1

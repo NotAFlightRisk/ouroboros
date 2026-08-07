@@ -1005,6 +1005,11 @@ class EvaluateHandler:
         eval_results = tuple(entry.value for entry in gathered)  # type: ignore[union-attr]
         checklist = aggregate_results(acceptance_criteria, eval_results)
         feedback = build_run_feedback(checklist)
+        # The checklist is one aggregate evaluation, so its trustworthy stage
+        # is the highest stage completed by every AC pipeline, not an invented
+        # constant or the best stage reached by only one AC. EvaluationSummary
+        # uses this value as a quality axis in frugality comparisons.
+        highest_stage = min(max(1, result.highest_stage_completed) for result in eval_results)
 
         code_changes: bool | None = None
         if any(r.stage1_result and not r.stage1_result.passed for r in eval_results):
@@ -1018,6 +1023,7 @@ class EvaluateHandler:
         meta = {
             "session_id": session_id,
             "final_approved": checklist.all_passed,
+            "highest_stage": highest_stage,
             "multi_ac": True,
             "ac_count": checklist.total,
             "passed_count": checklist.passed_count,

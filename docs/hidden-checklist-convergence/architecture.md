@@ -33,7 +33,7 @@ start_execute_seed
 | No answer-key configuration knob | Hidden grading is a correctness boundary, not a tuning option. |
 | Manifest is read-only coaching input | Retry quality improves without allowing evidence to affect the deliver verdict. |
 | Ralph owns convergence | Avoids duplicating loop termination, focus, and budget logic. |
-| Deterministic lineage ID | Evaluation retries reconnect to the same Seed/run lineage. |
+| Deterministic lineage ID | A 120-bit digest of the complete Seed/run tuple fits the event store's 36-character aggregate-ID contract. |
 | Durable lineage claims | Cross-process retries elect one Gen1 writer and one Ralph successor owner. |
 | Atomic Gen1 publication | The creation and generation-completed events commit together; legacy creation-only state is repaired under the same claim. |
 | Terminal successor recovery | Retries reconnect to both active and terminal Ralph jobs, closing the enqueue/result crash gap. |
