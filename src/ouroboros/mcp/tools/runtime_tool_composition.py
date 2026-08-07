@@ -36,11 +36,7 @@ def configured_runtime_tools(
     # the worker re-enters this local registry for parent-owned evaluation.
     # Other runtimes retain their lightweight builtin registry and their
     # existing dispatcher/server ownership model.
-    if (
-        runtime_backend != "opencode"
-        or opencode_mode != "plugin"
-        or _COMPOSING_RUNTIME_TOOLS.get()
-    ):
+    if runtime_backend != "opencode" or opencode_mode != "plugin" or _COMPOSING_RUNTIME_TOOLS.get():
         return None
 
     from ouroboros.mcp.server.adapter import create_ouroboros_server

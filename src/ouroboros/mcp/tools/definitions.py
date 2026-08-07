@@ -479,10 +479,7 @@ def get_ouroboros_tools(
     if (
         runtime_backend == "opencode"
         and opencode_mode == "plugin"
-        and (
-            resolved_manager is None
-            or (context is not None and context.mcp_bridge is not None)
-        )
+        and (resolved_manager is None or (context is not None and context.mcp_bridge is not None))
     ):
         from ouroboros.mcp.tools.runtime_tool_composition import configured_runtime_tools
 
