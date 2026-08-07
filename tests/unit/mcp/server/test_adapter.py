@@ -592,6 +592,64 @@ Parallel Execution Verification Report
             "criterion target 'CameraProvider' from file content" in summary.ac_results[0].evidence
         )
 
+    def test_stale_verifier_report_cannot_publish_a_formal_pass(self) -> None:
+        """Report text must exactly match both task and Seed criterion provenance."""
+        report_text = "MUST define a CameraProvider interface"
+        trusted_text = "MUST define a PaymentProvider interface"
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=report_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="CameraProvider",
+            expected_value="CameraProvider",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text=report_text,
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            verified=True,
+                            detail="Found structure 'CameraProvider'",
+                        ),
+                    ),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=trusted_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+        seed = SimpleNamespace(acceptance_criteria=(trusted_text,))
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.approval_status == "rejected"
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].ac_content == trusted_text
+        assert "provenance mismatch" in summary.ac_results[0].evidence
+        assert "mechanical task" in summary.ac_results[0].evidence
+        assert "seed" in summary.ac_results[0].evidence
+        assert summary.run_verdict == "FAIL"
+
     def test_spec_verification_promotes_checked_reports_to_formal_ac_results(self) -> None:
         """Verifier-checked reports become formal AC verdicts without synthetic drift."""
         mechanical = EvaluationSummary(
