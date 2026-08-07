@@ -31,7 +31,7 @@ def _is_identifier_continue(character: str) -> bool:
 
 
 def literal_spans(text: str, literal: str) -> tuple[tuple[int, int], ...]:
-    """Return case-insensitive whole-literal spans with Unicode XID boundaries."""
+    """Return exact-case whole-literal spans with Unicode XID boundaries."""
     literal = literal.strip()
     if not literal:
         return ()
@@ -44,7 +44,7 @@ def literal_spans(text: str, literal: str) -> tuple[tuple[int, int], ...]:
         if literal.isdecimal()
         else frozenset()
     )
-    for match in re.finditer(re.escape(literal), text, re.IGNORECASE):
+    for match in re.finditer(re.escape(literal), text):
         if match.start() > 0:
             previous = text[match.start() - 1]
             if (
