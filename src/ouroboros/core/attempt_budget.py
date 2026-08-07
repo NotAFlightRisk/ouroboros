@@ -19,6 +19,11 @@ DEFAULT_MAX_ITERATIONS_PER_AC = 10
 DEFAULT_AC_ATTEMPT_TIMEOUT_SECONDS = 900.0
 ATTEMPT_BUDGET_PROGRESS_SCHEMA_VERSION = 1
 _MICROSECONDS_PER_SECOND = 1_000_000
+# Keep durable timeout values exactly representable by IEEE-754 consumers as
+# well as Python's integer-based contract.  This also bounds conversions used
+# by asyncio's float-based monotonic deadlines.
+MAX_ATTEMPT_TIMEOUT_MICROSECONDS = (1 << 53) - 1
+MAX_AC_ATTEMPT_TIMEOUT_SECONDS = MAX_ATTEMPT_TIMEOUT_MICROSECONDS // _MICROSECONDS_PER_SECOND
 _ATTEMPT_BUDGET_PROGRESS_KEYS = (
     "schema_version",
     "max_agentic_steps",
@@ -27,6 +32,40 @@ _ATTEMPT_BUDGET_PROGRESS_KEYS = (
     "remaining_timeout_microseconds",
 )
 _MISSING_PROGRESS_FIELD = object()
+
+
+def _timeout_to_microseconds(timeout_seconds: float) -> int:
+    """Return a bounded durable ceiling without rounding the allowance up."""
+
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+        raise ValueError("ac_attempt_timeout_seconds must be finite and > 0")
+    if isinstance(timeout_seconds, float):
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("ac_attempt_timeout_seconds must be finite and > 0")
+        maximum_timeout_seconds = MAX_ATTEMPT_TIMEOUT_MICROSECONDS / _MICROSECONDS_PER_SECOND
+        if timeout_seconds > maximum_timeout_seconds:
+            raise ValueError(
+                "ac_attempt_timeout_seconds exceeds the exact durable microsecond ceiling"
+            )
+        timeout_microseconds = math.floor(timeout_seconds * _MICROSECONDS_PER_SECOND)
+    else:
+        if timeout_seconds <= 0:
+            raise ValueError("ac_attempt_timeout_seconds must be finite and > 0")
+        timeout_microseconds = timeout_seconds * _MICROSECONDS_PER_SECOND
+    if timeout_microseconds < 1:
+        raise ValueError("attempt timeout must be at least one microsecond")
+    if timeout_microseconds > MAX_ATTEMPT_TIMEOUT_MICROSECONDS:
+        raise ValueError("ac_attempt_timeout_seconds exceeds the exact durable microsecond ceiling")
+    return timeout_microseconds
+
+
+def _microseconds_to_seconds(timeout_microseconds: int) -> float:
+    """Convert a durable ceiling without allowing float rounding to widen it."""
+
+    timeout_seconds = timeout_microseconds / _MICROSECONDS_PER_SECOND
+    while math.floor(timeout_seconds * _MICROSECONDS_PER_SECOND) > timeout_microseconds:
+        timeout_seconds = math.nextafter(timeout_seconds, 0.0)
+    return timeout_seconds
 
 
 class AttemptBudgetKind(StrEnum):
@@ -66,8 +105,11 @@ class AttemptBudgetProgress:
     def __post_init__(self) -> None:
         if type(self.max_agentic_steps) is not int or self.max_agentic_steps < 1:
             raise ValueError("maximum agentic steps must be an integer >= 1")
-        if type(self.timeout_microseconds) is not int or self.timeout_microseconds < 1:
-            raise ValueError("attempt timeout must be an integer >= 1 microsecond")
+        if (
+            type(self.timeout_microseconds) is not int
+            or not 1 <= self.timeout_microseconds <= MAX_ATTEMPT_TIMEOUT_MICROSECONDS
+        ):
+            raise ValueError("attempt timeout exceeds the exact durable microsecond boundary")
         if (
             type(self.agentic_steps_consumed) is not int
             or not 0 <= self.agentic_steps_consumed <= self.max_agentic_steps
@@ -81,15 +123,13 @@ class AttemptBudgetProgress:
 
     @property
     def remaining_timeout_seconds(self) -> float:
-        return self.remaining_timeout_microseconds / _MICROSECONDS_PER_SECOND
+        return _microseconds_to_seconds(self.remaining_timeout_microseconds)
 
     def elapsed_timeout_seconds(self) -> float:
         """Recover a conservative cumulative elapsed value from remaining time."""
 
-        return max(
-            0.0,
-            (self.timeout_microseconds - self.remaining_timeout_microseconds)
-            / _MICROSECONDS_PER_SECOND,
+        return _microseconds_to_seconds(
+            self.timeout_microseconds - self.remaining_timeout_microseconds
         )
 
     def to_contract_data(self) -> dict[str, int]:
@@ -128,15 +168,22 @@ class AttemptBudgetProgress:
             or elapsed_timeout_seconds < 0
         ):
             raise ValueError("elapsed attempt time must be finite and non-negative")
-        remaining = max(0.0, timeout_seconds - float(elapsed_timeout_seconds))
-        timeout_microseconds = math.floor(timeout_seconds * _MICROSECONDS_PER_SECOND)
-        if timeout_microseconds < 1:
-            raise ValueError("attempt timeout must be at least one microsecond")
+        timeout_microseconds = _timeout_to_microseconds(timeout_seconds)
+        if elapsed_timeout_seconds >= timeout_seconds:
+            remaining_timeout_microseconds = 0
+        else:
+            elapsed_timeout_microseconds = math.ceil(
+                float(elapsed_timeout_seconds) * _MICROSECONDS_PER_SECOND
+            )
+            remaining_timeout_microseconds = max(
+                0,
+                timeout_microseconds - elapsed_timeout_microseconds,
+            )
         return cls(
             max_agentic_steps=max_agentic_steps,
             timeout_microseconds=timeout_microseconds,
             agentic_steps_consumed=agentic_steps_consumed,
-            remaining_timeout_microseconds=math.floor(remaining * _MICROSECONDS_PER_SECOND),
+            remaining_timeout_microseconds=remaining_timeout_microseconds,
         )
 
     @classmethod
@@ -176,7 +223,7 @@ class AttemptBudgetProgress:
             or type(persisted_max_steps) is not int
             or persisted_max_steps < 1
             or type(persisted_timeout) is not int
-            or persisted_timeout < 1
+            or not 1 <= persisted_timeout <= MAX_ATTEMPT_TIMEOUT_MICROSECONDS
             or type(steps) is not int
             or not 0 <= steps <= persisted_max_steps
             or type(remaining) is not int
@@ -190,7 +237,7 @@ class AttemptBudgetProgress:
                 max_iterations_per_ac=persisted_max_steps,
                 timeout_seconds=timeout_seconds,
             )
-            if math.floor(validated_timeout * _MICROSECONDS_PER_SECOND) != persisted_timeout:
+            if _timeout_to_microseconds(validated_timeout) != persisted_timeout:
                 raise ValueError("attempt budget progress has a different timeout ceiling")
         return cls(
             max_agentic_steps=persisted_max_steps,
@@ -209,14 +256,31 @@ def validate_attempt_budget(
 
     if type(max_iterations_per_ac) is not int or max_iterations_per_ac < 1:
         raise ValueError("max_iterations_per_ac must be an integer >= 1")
-    if (
-        isinstance(timeout_seconds, bool)
-        or not isinstance(timeout_seconds, (int, float))
-        or not math.isfinite(float(timeout_seconds))
-        or timeout_seconds <= 0
-    ):
-        raise ValueError("ac_attempt_timeout_seconds must be finite and > 0")
-    return max_iterations_per_ac, float(timeout_seconds)
+    timeout_microseconds = _timeout_to_microseconds(timeout_seconds)
+    return max_iterations_per_ac, _microseconds_to_seconds(timeout_microseconds)
+
+
+def scale_attempt_budget(
+    *,
+    max_iterations_per_ac: int,
+    timeout_seconds: float,
+    multiplier: int,
+) -> tuple[int, float]:
+    """Scale a per-AC budget using exact integer ceilings, failing closed."""
+
+    if type(multiplier) is not int or multiplier < 1:
+        raise ValueError("attempt budget multiplier must be an integer >= 1")
+    max_iterations_per_ac, _validated_timeout = validate_attempt_budget(
+        max_iterations_per_ac=max_iterations_per_ac,
+        timeout_seconds=timeout_seconds,
+    )
+    timeout_microseconds = _timeout_to_microseconds(timeout_seconds) * multiplier
+    if timeout_microseconds > MAX_ATTEMPT_TIMEOUT_MICROSECONDS:
+        raise ValueError("scaled attempt timeout exceeds the exact durable microsecond ceiling")
+    return (
+        max_iterations_per_ac * multiplier,
+        _microseconds_to_seconds(timeout_microseconds),
+    )
 
 
 __all__ = [
@@ -226,5 +290,8 @@ __all__ = [
     "AttemptBudgetProgress",
     "DEFAULT_AC_ATTEMPT_TIMEOUT_SECONDS",
     "DEFAULT_MAX_ITERATIONS_PER_AC",
+    "MAX_AC_ATTEMPT_TIMEOUT_SECONDS",
+    "MAX_ATTEMPT_TIMEOUT_MICROSECONDS",
+    "scale_attempt_budget",
     "validate_attempt_budget",
 ]

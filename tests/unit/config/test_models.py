@@ -352,6 +352,11 @@ class TestExecutionConfig:
         with pytest.raises(ValidationError):
             ExecutionConfig(**{field: value})
 
+    @pytest.mark.parametrize("value", (2**53 + 3, 10**400))
+    def test_execution_attempt_timeout_rejects_unrepresentable_integer(self, value: int) -> None:
+        with pytest.raises(ValidationError):
+            ExecutionConfig(ac_attempt_timeout_seconds=value)
+
     @pytest.mark.parametrize(("raw", "expected"), [(0, 1), (11, 10), (4, 4)])
     def test_auto_evolve_generation_budget_is_clamped(self, raw: int, expected: int) -> None:
         assert (

@@ -698,7 +698,7 @@ def create_ac_attempt_budget_exhausted_event(
             "limit": limit,
             "observed": observed,
             "elapsed_seconds": elapsed_seconds,
-            "action": "bounce_or_fail",
+            "action": "fail_no_successor",
             "timestamp": datetime.now(UTC).isoformat(),
         },
     )

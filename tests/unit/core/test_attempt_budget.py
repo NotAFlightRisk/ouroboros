@@ -8,9 +8,11 @@ import math
 import pytest
 
 from ouroboros.core.attempt_budget import (
+    MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
     AttemptBudgetExhaustion,
     AttemptBudgetKind,
     AttemptBudgetProgress,
+    scale_attempt_budget,
     validate_attempt_budget,
 )
 
@@ -20,6 +22,36 @@ def test_validate_attempt_budget_preserves_exact_values() -> None:
         max_iterations_per_ac=7,
         timeout_seconds=12.5,
     ) == (7, 12.5)
+
+
+@pytest.mark.parametrize("timeout", (2**53 + 3, 10**400))
+def test_validate_attempt_budget_rejects_oversized_integer_timeout(timeout: int) -> None:
+    with pytest.raises(ValueError, match="exact durable microsecond ceiling"):
+        validate_attempt_budget(max_iterations_per_ac=1, timeout_seconds=timeout)
+
+
+def test_validate_attempt_budget_truncates_fractional_microseconds() -> None:
+    assert validate_attempt_budget(
+        max_iterations_per_ac=1,
+        timeout_seconds=12.3456789,
+    ) == (1, 12.345678)
+
+
+def test_scale_attempt_budget_preserves_exact_safe_integer_boundary() -> None:
+    assert scale_attempt_budget(
+        max_iterations_per_ac=7,
+        timeout_seconds=4_503_599_627,
+        multiplier=2,
+    ) == (14, 9_007_199_254.0)
+
+
+def test_scale_attempt_budget_rejects_root_count_overflow() -> None:
+    with pytest.raises(ValueError, match="scaled attempt timeout"):
+        scale_attempt_budget(
+            max_iterations_per_ac=1,
+            timeout_seconds=MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
+            multiplier=2,
+        )
 
 
 @pytest.mark.parametrize(
@@ -82,6 +114,20 @@ def test_attempt_budget_progress_reads_only_bounded_exact_fields() -> None:
 def test_attempt_budget_progress_rejects_oversized_mapping_without_iteration() -> None:
     with pytest.raises(ValueError, match="invalid schema"):
         AttemptBudgetProgress.from_contract_data(_NoIterationProgressMapping({}, reported_length=6))
+
+
+def test_attempt_budget_progress_rejects_unrepresentable_persisted_timeout() -> None:
+    persisted = AttemptBudgetProgress(
+        max_agentic_steps=1,
+        timeout_microseconds=1,
+        agentic_steps_consumed=0,
+        remaining_timeout_microseconds=1,
+    ).to_contract_data()
+    persisted["timeout_microseconds"] = 2**53
+    persisted["remaining_timeout_microseconds"] = 2**53
+
+    with pytest.raises(ValueError, match="configured boundary"):
+        AttemptBudgetProgress.from_contract_data(persisted)
 
 
 def test_attempt_budget_progress_never_rounds_submicrosecond_timeout_up() -> None:

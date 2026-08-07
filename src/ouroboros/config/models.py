@@ -38,6 +38,7 @@ from ouroboros.config._model_defaults import (
 from ouroboros.core.attempt_budget import (
     DEFAULT_AC_ATTEMPT_TIMEOUT_SECONDS,
     DEFAULT_MAX_ITERATIONS_PER_AC,
+    MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
 )
 from ouroboros.orchestrator_stage import VALID_STAGE_KEYS
 
@@ -270,6 +271,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     ac_attempt_timeout_seconds: int = Field(
         default=int(DEFAULT_AC_ATTEMPT_TIMEOUT_SECONDS),
         ge=1,
+        le=MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
     )
     retrospective_interval: int = Field(default=3, ge=1)
     tui_autolaunch: bool = False

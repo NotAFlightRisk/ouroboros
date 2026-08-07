@@ -230,6 +230,17 @@ def _direct_attempt_budget_progress(
     )
 
 
+def test_direct_attempt_budget_rejects_scaled_timeout_overflow() -> None:
+    with pytest.raises(ValueError, match="scaled attempt timeout"):
+        DirectAttemptBudget.from_execution_semantics(
+            {
+                "max_iterations_per_ac": 1,
+                "ac_attempt_timeout_seconds": 9_007_199_254,
+            },
+            root_ac_count=2,
+        )
+
+
 def _attach_live_process_local_contract(
     runner: OrchestratorRunner,
     tracker: SessionTracker,

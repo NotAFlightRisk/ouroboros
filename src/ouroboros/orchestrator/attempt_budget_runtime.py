@@ -14,6 +14,7 @@ from ouroboros.core.attempt_budget import (
     AttemptBudgetExhaustion,
     AttemptBudgetKind,
     AttemptBudgetProgress,
+    scale_attempt_budget,
 )
 from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.observability.logging import get_logger
@@ -167,13 +168,14 @@ class DirectAttemptBudget:
         """Scale the validated per-AC contract by the whole-Seed root count."""
 
         bounded_root_count = max(1, root_ac_count)
+        max_agentic_steps, timeout_seconds = scale_attempt_budget(
+            max_iterations_per_ac=execution_semantics["max_iterations_per_ac"],
+            timeout_seconds=execution_semantics["ac_attempt_timeout_seconds"],
+            multiplier=bounded_root_count,
+        )
         return cls(
-            max_agentic_steps=(
-                int(execution_semantics["max_iterations_per_ac"]) * bounded_root_count
-            ),
-            timeout_seconds=(
-                float(execution_semantics["ac_attempt_timeout_seconds"]) * bounded_root_count
-            ),
+            max_agentic_steps=max_agentic_steps,
+            timeout_seconds=timeout_seconds,
             root_ac_count=bounded_root_count,
             resume_progress=resume_progress,
         )

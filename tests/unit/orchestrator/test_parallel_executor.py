@@ -4524,7 +4524,7 @@ async def test_atomic_attempt_stops_before_over_budget_tool_effect() -> None:
         if call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
     ]
     assert len(budget_events) == 1
-    assert budget_events[0].data["action"] == "bounce_or_fail"
+    assert budget_events[0].data["action"] == "fail_no_successor"
 
 
 @pytest.mark.asyncio
