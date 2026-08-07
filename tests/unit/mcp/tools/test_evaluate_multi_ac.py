@@ -404,6 +404,14 @@ class TestMultiACRoutingBoundary:
         assert meta["run_feedback"] == []
         assert len(meta["checklist"]) == 2
         assert all(item["passed"] for item in meta["checklist"])
+        assert set(meta["checklist"][0]) == {
+            "ac_text",
+            "passed",
+            "reasoning",
+            "evidence",
+            "questions_used",
+            "failure_reason",
+        }
         assert "ALL PASSED" in result.value.text_content
 
     async def test_seed_acceptance_criteria_used_when_explicit_ac_absent(self) -> None:

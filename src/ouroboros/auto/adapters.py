@@ -264,6 +264,9 @@ class HandlerRunStarter:
             "cwd": self.cwd,
             "use_worktree": self.use_worktree,
             "efficiency_mode": self.efficiency_mode,
+            # Auto owns its own RALPH_HANDOFF lineage. Prevent the nested run
+            # evaluation from starting a competing run-session lineage.
+            "auto_evolve": False,
         }
         if self.frugality_assurance_explicit:
             arguments["frugality_assurance"] = self.frugality_assurance

@@ -10,6 +10,7 @@ import pytest
 from ouroboros.auto.adapters import (
     HandlerError,
     HandlerInterviewBackend,
+    HandlerRunStarter,
     HandlerSeedGenerator,
     HandlerSynchronousRunStarter,
 )
@@ -21,6 +22,22 @@ from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 class _FakeSeed:
     def to_dict(self) -> dict[str, object]:
         return {"goal": "Create hello_auto.py", "acceptance_criteria": ()}
+
+
+@pytest.mark.asyncio
+async def test_auto_run_starter_disables_nested_auto_evolve(tmp_path) -> None:
+    handler = AsyncMock()
+    handler.handle = AsyncMock(
+        return_value=Result.ok(
+            MCPToolResult(meta={"job_id": "job_run", "session_id": "orch_run"})
+        )
+    )
+    starter = HandlerRunStarter(handler, cwd=str(tmp_path))
+
+    await starter(_FakeSeed())  # type: ignore[arg-type]
+
+    arguments = handler.handle.await_args.args[0]
+    assert arguments["auto_evolve"] is False
 
 
 @pytest.mark.asyncio

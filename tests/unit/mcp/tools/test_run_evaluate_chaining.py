@@ -187,6 +187,38 @@ class _SuccessfulExecuteHandler:
         )
 
 
+class _FailedExecuteHandler(_SuccessfulExecuteHandler):
+    async def handle(
+        self,
+        arguments: dict[str, Any],
+        *,
+        execution_id: str | None = None,
+        session_id_override: str | None = None,
+        synchronous: bool = False,
+    ) -> Result[MCPToolResult, Any]:
+        result = await super().handle(
+            arguments,
+            execution_id=execution_id,
+            session_id_override=session_id_override,
+            synchronous=synchronous,
+        )
+        assert result.is_ok
+        meta = {**result.value.meta, "success": False, "status": "failed"}
+        self.returned_meta = dict(meta)
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text="execution failed: AC 2 did not produce output.json",
+                    ),
+                ),
+                is_error=False,
+                meta=meta,
+            )
+        )
+
+
 async def test_successful_run_enqueues_chained_evaluate_job(
     event_store,
     tmp_path,
@@ -219,6 +251,10 @@ async def test_successful_run_enqueues_chained_evaluate_job(
         execute_handler=_SuccessfulExecuteHandler(text="execution artifact"),  # type: ignore[arg-type]
         event_store=event_store,
         job_manager=job_manager,
+        start_evaluate_handler=StartEvaluateHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+        ),
     )
 
     seed_content = (
@@ -267,6 +303,66 @@ async def test_successful_run_enqueues_chained_evaluate_job(
     assert "execution artifact" in evaluate_calls[0]["arguments"]["artifact"]
 
 
+async def test_failed_run_with_artifact_enqueues_chained_evaluate_job(
+    event_store,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(execution_handlers, "get_auto_evaluate_enabled", lambda: True)
+    evaluate_calls: list[dict[str, Any]] = []
+    constructor_kwargs: list[dict[str, Any]] = []
+
+    class FakeStartEvaluateHandler:
+        def __init__(self, **kwargs: Any) -> None:
+            constructor_kwargs.append(kwargs)
+
+        async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, Any]:
+            evaluate_calls.append(arguments)
+            return Result.ok(
+                MCPToolResult(
+                    meta={"job_id": "job_eval_failed_run", "session_id": arguments["session_id"]}
+                )
+            )
+
+    monkeypatch.setattr(
+        evaluation_handlers,
+        "StartEvaluateHandler",
+        FakeStartEvaluateHandler,
+    )
+    job_manager = JobManager(event_store)
+    handler = StartExecuteSeedHandler(
+        execute_handler=_FailedExecuteHandler(),  # type: ignore[arg-type]
+        event_store=event_store,
+        job_manager=job_manager,
+        start_evaluate_handler=FakeStartEvaluateHandler(deadline_seconds=1800.0),  # type: ignore[arg-type]
+    )
+    seed_content = (
+        "goal: Preserve failed output\n"
+        "acceptance_criteria:\n"
+        "  - output.json exists\n"
+        "  - output.json is valid\n"
+        "ontology_schema:\n"
+        "  name: Output\n"
+        "  description: Output domain\n"
+        "metadata:\n"
+        "  ambiguity_score: 0.1\n"
+    )
+
+    started = await handler.handle({"seed_content": seed_content, "cwd": str(tmp_path)})
+    assert started.is_ok
+    snapshot = await _wait_terminal(job_manager, started.value.meta["job_id"])
+
+    assert snapshot.status == JobStatus.COMPLETED
+    assert snapshot.result_meta["success"] is False
+    assert snapshot.result_meta["chained_evaluate_job_id"] == "job_eval_failed_run"
+    assert constructor_kwargs[0]["deadline_seconds"] == 1800.0
+    assert evaluate_calls[0]["acceptance_criteria"] == [
+        "output.json exists",
+        "output.json is valid",
+    ]
+    assert "execution failed: AC 2 did not produce output.json" in evaluate_calls[0]["artifact"]
+
+
 async def test_run_job_stranded_without_terminal_event_still_terminalizes(
     event_store,
     tmp_path,
@@ -303,6 +399,10 @@ async def test_run_job_stranded_without_terminal_event_still_terminalizes(
         execute_handler=_SuccessfulExecuteHandler(text="execution artifact"),  # type: ignore[arg-type]
         event_store=event_store,
         job_manager=job_manager,
+        start_evaluate_handler=StartEvaluateHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+        ),
     )
 
     _terminal_types = {
@@ -394,6 +494,10 @@ async def test_chained_evaluate_uses_execution_worktree_when_present(
         ),  # type: ignore[arg-type]
         event_store=event_store,
         job_manager=job_manager,
+        start_evaluate_handler=StartEvaluateHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+        ),
     )
 
     started = await handler.handle({"seed_content": "goal: chain\n", "cwd": str(original_cwd)})
@@ -514,6 +618,7 @@ async def test_evaluate_enqueue_failure_keeps_run_completed(
         execute_handler=_SuccessfulExecuteHandler(),  # type: ignore[arg-type]
         event_store=event_store,
         job_manager=job_manager,
+        start_evaluate_handler=FailingStartEvaluateHandler(),  # type: ignore[arg-type]
     )
 
     started = await handler.handle({"seed_content": "goal: failure\n", "cwd": str(tmp_path)})
@@ -561,3 +666,30 @@ async def test_start_evaluate_timeout_writes_terminal_event(
     terminal = [event for event in events if event.type == "mcp.job.failed"]
     assert terminal
     assert terminal[-1].data["result_meta"]["evaluation_status"] == "timed_out"
+
+
+async def test_start_evaluate_zero_deadline_waits_without_timeout(event_store) -> None:
+    class ImmediateEvaluateHandler:
+        async def handle(self, _: dict[str, Any]) -> Result[MCPToolResult, Any]:
+            await asyncio.sleep(0)
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="approved"),),
+                    meta={"session_id": "orch_no_deadline", "final_approved": True},
+                )
+            )
+
+    job_manager = JobManager(event_store)
+    handler = StartEvaluateHandler(
+        evaluate_handler=ImmediateEvaluateHandler(),  # type: ignore[arg-type]
+        event_store=event_store,
+        job_manager=job_manager,
+        deadline_seconds=0,
+    )
+
+    started = await handler.handle({"session_id": "orch_no_deadline", "artifact": "code"})
+    assert started.is_ok
+    snapshot = await _wait_terminal(job_manager, started.value.meta["job_id"])
+
+    assert snapshot.status == JobStatus.COMPLETED
+    assert snapshot.result_meta["final_approved"] is True

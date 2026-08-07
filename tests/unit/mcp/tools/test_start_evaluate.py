@@ -10,6 +10,7 @@ background task, let callers poll ``job_status`` / ``job_wait`` / ``job_result``
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -17,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros.core.types import Result
+from ouroboros.mcp.job_manager import JobManager
 from ouroboros.mcp.tools.evaluation_handlers import (
     EvaluateHandler,
     StartEvaluateHandler,
@@ -151,7 +153,11 @@ class TestPluginModeDispatch:
     """OpenCode plugin mode: terminal subagent delegation, no job enqueue."""
 
     @pytest.fixture
-    def handler(self, event_store):
+    def handler(self, event_store, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.evaluation_handlers.get_auto_evolve_enabled",
+            lambda: False,
+        )
         return StartEvaluateHandler(
             evaluate_handler=MagicMock(),
             event_store=event_store,
@@ -306,6 +312,43 @@ class TestPluginModeDispatch:
         assert result.is_ok
         payload_context = result.value.meta["_subagent"]["context"]
         assert payload_context["working_dir"] == str(default_project.resolve())
+
+    @pytest.mark.asyncio
+    async def test_auto_evolve_keeps_verdict_parent_owned_and_pollable(
+        self,
+        event_store,
+        fake_inner_handler,
+    ) -> None:
+        manager = JobManager(event_store)
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=event_store,
+            job_manager=manager,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await handler.handle(
+            {
+                "session_id": "orch_converge",
+                "artifact": "code",
+                "auto_evolve": True,
+            }
+        )
+
+        assert result.is_ok
+        assert isinstance(result.value.meta["job_id"], str)
+        assert "_subagent" not in result.value.meta
+        for _ in range(200):
+            snapshot = await manager.get_snapshot(result.value.meta["job_id"])
+            if snapshot.is_terminal:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("parent-owned evaluation did not finish")
+        forwarded = fake_inner_handler.handle.await_args.args[0]
+        assert forwarded["_force_in_process"] is True
+        assert snapshot.result_meta["final_approved"] is True
 
 
 class TestFactoryWiring:

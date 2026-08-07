@@ -970,6 +970,7 @@ class TestBuildExecuteSubagent:
         assert "Run QA evaluation" in p.prompt
         assert "formal 3-stage evaluation" in p.prompt
         assert "ouroboros_start_evaluate" in p.prompt
+        assert "chained_ralph_job_id" in p.prompt
 
     def test_skip_qa_changes_the_verify_line(self) -> None:
         p = build_execute_subagent(

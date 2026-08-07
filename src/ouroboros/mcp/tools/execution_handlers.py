@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 import inspect
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from pydantic import ValidationError as PydanticValidationError
@@ -20,6 +20,7 @@ import yaml
 
 from ouroboros.config.loader import (
     get_auto_evaluate_enabled,
+    get_auto_evolve_enabled,
     get_max_parallel_workers,
     resolve_execution_model,
 )
@@ -96,6 +97,9 @@ from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
+
+if TYPE_CHECKING:
+    from ouroboros.mcp.tools.evaluation_handlers import StartEvaluateHandler
 
 
 _PROCESS_LOCAL_BACKGROUND_OWNED_BLOCKS = frozenset(
@@ -577,13 +581,6 @@ def resolve_auto_evaluate(config_flag: bool, per_call_override: bool | None) -> 
     if isinstance(per_call_override, bool):
         return per_call_override
     return config_flag
-
-
-def _run_succeeded(result: MCPToolResult) -> bool:
-    """Return True when a synchronous execute_seed result reached successful completion."""
-    if result.is_error:
-        return False
-    return result.meta.get("success") is True
 
 
 def _result_session_id(result: MCPToolResult, fallback: str | None) -> str | None:
@@ -1202,8 +1199,18 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     type=ToolInputType.BOOLEAN,
                     description=(
                         "Override execution.auto_evaluate for this call. When true, "
-                        "a successful background execute_seed run enqueues formal "
+                        "a completed background execute_seed run enqueues formal "
                         "3-stage evaluation as a separate bounded background job."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="auto_evolve",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "Override execution.auto_evolve for the chained evaluation. "
+                        "When true, an explicitly rejected evaluation starts a bounded "
+                        "Ralph continuation loop."
                     ),
                     required=False,
                 ),
@@ -2330,6 +2337,7 @@ class StartExecuteSeedHandler:
     job_manager: JobManager | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    start_evaluate_handler: "StartEvaluateHandler | None" = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
@@ -2394,9 +2402,8 @@ class StartExecuteSeedHandler:
         session_id: str | None,
         seed_content: str,
         working_dir: Path,
+        auto_evolve: bool,
     ) -> MCPToolResult:
-        from ouroboros.mcp.tools.evaluation_handlers import StartEvaluateHandler
-
         artifact = run_result.text_content or "Execution completed successfully."
         evaluation_arguments: dict[str, Any] = {
             "session_id": session_id,
@@ -2404,6 +2411,7 @@ class StartExecuteSeedHandler:
             "artifact_type": "code",
             "seed_content": seed_content,
             "working_dir": str(working_dir),
+            "auto_evolve": auto_evolve,
         }
         try:
             seed_dict = yaml.safe_load(seed_content)
@@ -2434,14 +2442,12 @@ class StartExecuteSeedHandler:
                 error=str(exc),
             )
         try:
-            start_evaluate = StartEvaluateHandler(
-                event_store=self._event_store,
-                job_manager=self._job_manager,
-                llm_backend=self._execute_handler.llm_backend,
-                agent_runtime_backend=self.agent_runtime_backend,
-                opencode_mode=self.opencode_mode,
-            )
-            evaluate_result = await start_evaluate.handle(evaluation_arguments)
+            if self.start_evaluate_handler is None:
+                raise RuntimeError(
+                    "Automatic evaluation chaining is not configured: "
+                    "StartEvaluateHandler dependency is missing"
+                )
+            evaluate_result = await self.start_evaluate_handler.handle(evaluation_arguments)
         except Exception as exc:  # noqa: BLE001 - evaluation must never flip run success.
             error = str(exc)
             return _append_result_text(
@@ -2755,6 +2761,10 @@ class StartExecuteSeedHandler:
             get_auto_evaluate_enabled(),
             arguments.get("auto_evaluate"),
         )
+        auto_evolve_enabled = resolve_auto_evaluate(
+            get_auto_evolve_enabled(),
+            arguments.get("auto_evolve"),
+        )
 
         # The shared pipeline owns the ``should_cancel()`` pre-work guard.
         async def _runner(_handle) -> MCPToolResult:
@@ -2771,7 +2781,9 @@ class StartExecuteSeedHandler:
                 run_result,
                 session_id or new_session_id,
             )
-            if auto_evaluate_enabled and run_session_id and _run_succeeded(run_result):
+            # A completed execution with a session can be evaluated even when
+            # its ACs failed. Handler-level errors still have no usable artifact.
+            if auto_evaluate_enabled and run_session_id and not run_result.is_error:
                 return await self._enqueue_chained_evaluation(
                     run_result,
                     session_id=run_session_id,
@@ -2780,6 +2792,7 @@ class StartExecuteSeedHandler:
                         run_result,
                         resolved_cwd,
                     ),
+                    auto_evolve=auto_evolve_enabled,
                 )
             return run_result
 
@@ -2853,7 +2866,10 @@ class StartExecuteSeedHandler:
                 cursor=snapshot.cursor,
                 session_id=snapshot.links.session_id,
                 execution_id=snapshot.links.execution_id,
-                follow_result_job_keys=("chained_evaluate_job_id",),
+                follow_result_job_keys=(
+                    "chained_evaluate_job_id",
+                    "chained_ralph_job_id",
+                ),
             ),
             **_run_only_verification_meta(snapshot.links.session_id),
         }

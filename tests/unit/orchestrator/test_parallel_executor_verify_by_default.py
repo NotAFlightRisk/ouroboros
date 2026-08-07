@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 import os
 import time
 from typing import Any
@@ -17,6 +18,7 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
 )
+from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
 from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
 from ouroboros.orchestrator.decomposition_policy import (
     DecompositionChild,
@@ -1196,6 +1198,66 @@ def test_retry_prompt_redacts_secret_like_failure_values() -> None:
     assert prompt.count("[REDACTED]") == 3
 
 
+def test_retry_prompt_uses_trace_facts_without_hidden_contract_values() -> None:
+    executor = _make_executor()
+    assertion = "PRIVATE_SENTINEL"
+    command = "python hidden_grader.py"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command=command,
+        expected_artifacts=("dist/result.json",),
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason="output_assertion not satisfied by verify_command output",
+        output_tail=f"actual result; expected context echoed {assertion}",
+        missing_artifacts=("dist/result.json",),
+    )
+    manifest = EvidenceManifest(
+        ac_id="ac_0",
+        entries=(
+            EvidenceEntry(
+                kind=EvidenceKind.COMMAND_EXECUTED,
+                ok=False,
+                started_at=datetime.now(UTC),
+                ended_at=datetime.now(UTC),
+                payload={"tool_name": "Bash", "args_preview": "uv run pytest tests/unit"},
+                source_event_ids=("event-1",),
+            ),
+            EvidenceEntry(
+                kind=EvidenceKind.FILE_MODIFIED,
+                ok=True,
+                started_at=datetime.now(UTC),
+                ended_at=datetime.now(UTC),
+                payload={"tool_name": "Write", "args_preview": "dist/result.json"},
+                source_event_ids=("event-2",),
+            ),
+        ),
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        error=f"Verify gate failed: assertion {assertion}; command {command}",
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = executor._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        manifest=manifest,
+        spec=spec,
+    )
+
+    assert "dist/result.json" in prompt
+    assert "uv run pytest tests/unit" in prompt
+    assert "File operation observed (succeeded)" in prompt
+    assert assertion not in prompt
+    assert command not in prompt
+
+
 # ---------------------------------------------------------------------------
 # V4 trust leaks — sibling flip gate
 # ---------------------------------------------------------------------------
@@ -1923,7 +1985,7 @@ class TestSuccessContractBlock:
         spec = AcceptanceCriterionSpec(description="just a description")
         assert _build_success_contract_block(spec) == ""
 
-    def test_full_contract_renders_all_three_lines(self) -> None:
+    def test_full_contract_hides_harness_answer_key(self) -> None:
         spec = AcceptanceCriterionSpec(
             description="build succeeds",
             verify_command="make build",
@@ -1933,21 +1995,17 @@ class TestSuccessContractBlock:
         block = _build_success_contract_block(spec)
         assert block.startswith("SUCCESS CONTRACT for this AC:")
         assert (
-            "- Run locally before completion: make build. "
-            "The verify gate re-runs it and records authoritative evidence." in block
-        )
-        assert (
             "- Expected artifacts: dist/app, dist/app.map — ensure they exist in the workspace"
             in block
         )
-        assert "- Expected output: BUILD OK" in block
+        assert "independently verifies this contract" in block
+        assert "make build" not in block
+        assert "BUILD OK" not in block
 
     def test_partial_contract_only_renders_present_fields(self) -> None:
         spec = AcceptanceCriterionSpec(description="verify only", verify_command="pytest -q")
         block = _build_success_contract_block(spec)
-        assert (
-            "- Run locally before completion: pytest -q. "
-            "The verify gate re-runs it and records authoritative evidence." in block
-        )
+        assert "independently verifies this contract" in block
+        assert "pytest -q" not in block
         assert "Expected artifacts" not in block
         assert "Expected output" not in block

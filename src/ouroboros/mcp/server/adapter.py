@@ -2282,14 +2282,6 @@ def create_ouroboros_server(
         if mcp_bridge is not None and hasattr(mcp_bridge, "tool_prefix")
         else ""
     )
-    start_execute_seed = StartExecuteSeedHandler(
-        execute_handler=execute_seed,
-        event_store=event_store,
-        job_manager=job_manager,
-        agent_runtime_backend=execute_runtime_backend,
-        opencode_mode=opencode_mode,
-    )
-
     def build_ralph_handler(
         runtime_backend: str | None,
         ralph_opencode_mode: str | None,
@@ -2309,6 +2301,29 @@ def create_ouroboros_server(
         job_manager=job_manager,
         agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
+    )
+    evaluate_handler = EvaluateHandler(
+        event_store=event_store,
+        llm_backend=evaluate_llm_backend,
+        agent_runtime_backend=evaluate_runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+    start_evaluate_handler = StartEvaluateHandler(
+        evaluate_handler=evaluate_handler,
+        event_store=event_store,
+        job_manager=job_manager,
+        llm_backend=evaluate_llm_backend,
+        agent_runtime_backend=evaluate_runtime_backend,
+        opencode_mode=opencode_mode,
+        start_ralph_handler=start_ralph_handler,
+    )
+    start_execute_seed = StartExecuteSeedHandler(
+        execute_handler=execute_seed,
+        event_store=event_store,
+        job_manager=job_manager,
+        agent_runtime_backend=execute_runtime_backend,
+        opencode_mode=opencode_mode,
+        start_evaluate_handler=start_evaluate_handler,
     )
     # ONE registry, shared by every producer and by the re-entry tool. A fan-out
     # registered by the interview handler is redeemed through
@@ -2438,19 +2453,8 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
         ),
         BrownfieldHandler(_store=brownfield_store),
-        EvaluateHandler(
-            event_store=event_store,
-            llm_backend=evaluate_llm_backend,
-            agent_runtime_backend=evaluate_runtime_backend,
-            opencode_mode=opencode_mode,
-        ),
-        StartEvaluateHandler(
-            event_store=event_store,
-            job_manager=job_manager,
-            llm_backend=evaluate_llm_backend,
-            agent_runtime_backend=evaluate_runtime_backend,
-            opencode_mode=opencode_mode,
-        ),
+        evaluate_handler,
+        start_evaluate_handler,
         LateralThinkHandler(
             agent_runtime_backend=reflect_runtime_backend,
             opencode_mode=opencode_mode,
