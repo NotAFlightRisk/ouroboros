@@ -453,6 +453,7 @@ def get_ouroboros_tools(
     opencode_mode: str | None = None,
     include_auto: bool = True,
     context: AgentRuntimeContext | None = None,
+    runtime_adapter: object | None = None,
 ) -> OuroborosToolHandlers:
     """Create the default set of Ouroboros MCP tool handlers.
 
@@ -468,18 +469,18 @@ def get_ouroboros_tools(
     kwargs (see :func:`_resolve_bridge_fields`). This is the migration
     path captured by #474; legacy kwargs continue to work unchanged.
 
-    Passive OpenCode plugin callers receive the same configured object graph
+    Runtime-owned builtin interceptors receive the same configured object graph
     as the MCP server composition root. The lightweight constructor path
-    remains for capability discovery and other runtimes' existing dispatcher
-    ownership model.
+    remains for capability discovery, where ``runtime_adapter`` is absent.
     """
     resolved_manager, resolved_prefix = _resolve_bridge_fields(
         context, mcp_manager, mcp_tool_prefix
     )
-    if (
-        runtime_backend == "opencode"
-        and opencode_mode == "plugin"
-        and (resolved_manager is None or (context is not None and context.mcp_bridge is not None))
+    needs_configured_runtime_graph = (
+        runtime_adapter is not None and runtime_backend in {"codex", "hermes"}
+    ) or (runtime_backend == "opencode" and opencode_mode == "plugin")
+    if needs_configured_runtime_graph and (
+        resolved_manager is None or (context is not None and context.mcp_bridge is not None)
     ):
         from ouroboros.mcp.tools.runtime_tool_composition import configured_runtime_tools
 
@@ -489,6 +490,7 @@ def get_ouroboros_tools(
             opencode_mode=opencode_mode,
             include_auto=include_auto,
             mcp_bridge=(context.mcp_bridge if context is not None else None),
+            runtime_adapter=runtime_adapter,
         )
         if configured_tools is not None:
             return configured_tools

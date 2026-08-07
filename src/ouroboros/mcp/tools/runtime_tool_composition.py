@@ -16,6 +16,21 @@ _COMPOSING_RUNTIME_TOOLS: ContextVar[bool] = ContextVar(
 )
 
 
+def lightweight_runtime_tool_map(
+    *, runtime_backend: str | None, llm_backend: str | None
+) -> dict[str, Any]:
+    """Build the side-effect-free handler map used for authority discovery."""
+    from ouroboros.mcp.tools.definitions import get_ouroboros_tools
+
+    return {
+        handler.definition.name: handler
+        for handler in get_ouroboros_tools(
+            runtime_backend=runtime_backend,
+            llm_backend=llm_backend,
+        )
+    }
+
+
 def configured_runtime_tools(
     *,
     runtime_backend: str | None,
@@ -23,6 +38,7 @@ def configured_runtime_tools(
     opencode_mode: str | None,
     include_auto: bool,
     mcp_bridge: Any | None,
+    runtime_adapter: Any | None = None,
 ) -> tuple[Any, ...] | None:
     """Return the production handler graph, or ``None`` for lightweight fallback.
 
@@ -32,11 +48,14 @@ def configured_runtime_tools(
     finishes the real graph.
     """
 
-    # The hidden-Seed handoff is specific to passive OpenCode plugin dispatch:
-    # the worker re-enters this local registry for parent-owned evaluation.
-    # Other runtimes retain their lightweight builtin registry and their
-    # existing dispatcher/server ownership model.
-    if runtime_backend != "opencode" or opencode_mode != "plugin" or _COMPOSING_RUNTIME_TOOLS.get():
+    # These runtimes execute handlers from their builtin registry rather than
+    # using it only for capability discovery. They therefore need the complete
+    # parent-owned run -> evaluate -> Ralph -> evolve graph. OpenCode also uses
+    # the graph as the process-local vault behind its opaque hidden-Seed handoff.
+    executing_builtin_runtime = (
+        runtime_adapter is not None and runtime_backend in {"codex", "hermes"}
+    ) or (runtime_backend == "opencode" and opencode_mode == "plugin")
+    if not executing_builtin_runtime or _COMPOSING_RUNTIME_TOOLS.get():
         return None
 
     from ouroboros.mcp.server.adapter import create_ouroboros_server
@@ -50,6 +69,7 @@ def configured_runtime_tools(
                 llm_backend=llm_backend,
                 opencode_mode=opencode_mode,
                 mcp_bridge=mcp_bridge,
+                runtime_adapter=runtime_adapter,
                 # Embedded interceptors own their event loop. Preserve this
                 # factory's historical in-process JobManager behavior.
                 durable_jobs=False,

@@ -1559,6 +1559,7 @@ def create_ouroboros_server(
     llm_backend: str | None = None,
     opencode_mode: str | None = None,
     mcp_bridge: Any | None = None,
+    runtime_adapter: Any | None = None,
     durable_jobs: bool = True,
     forced_inline_job_id: str | None = None,
 ) -> MCPServerAdapter:
@@ -1593,6 +1594,9 @@ def create_ouroboros_server(
             ``orchestrator.opencode_mode`` in the config file. Controls
             whether ``_subagent`` envelopes are emitted (plugin) or handlers
             run in-process (subprocess / non-opencode runtimes).
+        runtime_adapter: Optional already-resolved execution runtime. Embedded
+            builtin interceptors pass their owner here so this composition
+            root does not recursively create the same runtime.
         durable_jobs: When true, Start* background work is owned by detached
             worker processes so it survives MCP/client turn shutdown.
         forced_inline_job_id: Internal one-shot recursion boundary used by a
@@ -1749,12 +1753,17 @@ def create_ouroboros_server(
     # Materialize the default runtime once at server creation so backend wiring
     # is validated up front and composition-root tests can assert the selected
     # runtime backend without waiting for a tool invocation.
-    default_execute_runtime = create_agent_runtime(
-        backend=execute_runtime_backend,
-        model=None,
-        cwd=effective_cwd,
-        llm_backend=evaluate_llm_backend,
-    )
+    default_execute_runtime = runtime_adapter
+    if (
+        default_execute_runtime is None
+        or default_execute_runtime.runtime_backend != execute_runtime_backend
+    ):
+        default_execute_runtime = create_agent_runtime(
+            backend=execute_runtime_backend,
+            model=None,
+            cwd=effective_cwd,
+            llm_backend=evaluate_llm_backend,
+        )
 
     # Create shared LLM adapter for interview/seed paths.
     # Evaluation constructs its own adapter with higher max_turns — see

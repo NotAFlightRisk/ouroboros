@@ -383,9 +383,39 @@ async def test_server_composition_reuses_configured_chain_handlers(
     assert start_evaluate.start_ralph_handler._evolve_handler.evolutionary_loop is not None
 
 
-def test_runtime_factory_reuses_configured_parent_owned_convergence_graph() -> None:
-    """Runtime interceptors must not receive the old unconfigured mini graph."""
+def _builtin_runtime_tools(
+    runtime_backend: str,
+    opencode_mode: str | None = None,
+) -> tuple[Any, ...]:
+    if runtime_backend == "codex":
+        from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+
+        runtime = CodexCliRuntime(cli_path="codex")
+        return tuple(runtime._get_builtin_mcp_handlers().values())
+    if runtime_backend == "hermes":
+        from ouroboros.orchestrator.hermes_runtime import HermesCliRuntime
+
+        runtime = HermesCliRuntime(cli_path="hermes")
+        return tuple(runtime._get_builtin_mcp_handlers().values())
+
     from ouroboros.mcp.tools.definitions import get_ouroboros_tools
+
+    return get_ouroboros_tools(
+        runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+        include_auto=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("runtime_backend", "opencode_mode"),
+    [("opencode", "plugin"), ("codex", None), ("hermes", None)],
+)
+def test_runtime_factory_reuses_configured_parent_owned_convergence_graph(
+    runtime_backend: str,
+    opencode_mode: str | None,
+) -> None:
+    """Runtime interceptors must not receive the old unconfigured mini graph."""
     from ouroboros.mcp.tools.evaluation_handlers import StartEvaluateHandler
     from ouroboros.mcp.tools.execution_handlers import (
         ExecuteSeedHandler,
@@ -393,11 +423,7 @@ def test_runtime_factory_reuses_configured_parent_owned_convergence_graph() -> N
     )
     from ouroboros.mcp.tools.ralph_handlers import StartRalphHandler
 
-    tools = get_ouroboros_tools(
-        runtime_backend="opencode",
-        opencode_mode="plugin",
-        include_auto=False,
-    )
+    tools = _builtin_runtime_tools(runtime_backend, opencode_mode)
     start_evaluate = next(tool for tool in tools if isinstance(tool, StartEvaluateHandler))
     start_execute = next(tool for tool in tools if isinstance(tool, StartExecuteSeedHandler))
     execute = next(tool for tool in tools if isinstance(tool, ExecuteSeedHandler))
@@ -405,8 +431,9 @@ def test_runtime_factory_reuses_configured_parent_owned_convergence_graph() -> N
     parent_start_ralph = start_evaluate.start_ralph_handler
 
     assert parent_start_ralph is not None
-    assert parent_start_ralph is not public_start_ralph
-    assert public_start_ralph.opencode_mode == "plugin"
+    if runtime_backend == "opencode":
+        assert parent_start_ralph is not public_start_ralph
+        assert public_start_ralph.opencode_mode == "plugin"
     assert parent_start_ralph.opencode_mode is None
     assert parent_start_ralph._evolve_handler.opencode_mode is None
     assert parent_start_ralph._evolve_handler.evolutionary_loop is not None
@@ -415,6 +442,48 @@ def test_runtime_factory_reuses_configured_parent_owned_convergence_graph() -> N
     assert start_execute._event_store is start_evaluate._event_store
     assert execute.seed_handoff_registry is start_execute.seed_handoff_registry
     assert execute.seed_handoff_registry is start_evaluate.seed_handoff_registry
+
+
+@pytest.mark.parametrize("runtime_backend", ["codex", "hermes"])
+async def test_builtin_runtime_rejection_starts_pollable_ralph_job(
+    runtime_backend: str,
+    tmp_path: Path,
+) -> None:
+    """Executing builtin factories must honor the advertised auto-evolve contract."""
+    tools = _builtin_runtime_tools(runtime_backend)
+    start_evaluate = next(tool for tool in tools if isinstance(tool, StartEvaluateHandler))
+    parent_start_ralph = start_evaluate.start_ralph_handler
+    assert parent_start_ralph is not None
+    await start_evaluate._event_store.initialize()
+
+    async def converged_generation(_: dict[str, Any]) -> Result[MCPToolResult, Any]:
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="converged"),),
+                meta={
+                    "lineage_id": "factory-runtime-lineage",
+                    "action": "converged",
+                    "generation": 2,
+                    "qa": {"verdict": "pass"},
+                },
+            )
+        )
+
+    parent_start_ralph._evolve_handler.handle = converged_generation
+    chained = await start_evaluate._enqueue_chained_ralph(
+        _rejected_result(),
+        session_id=f"orch-{runtime_backend}-factory",
+        arguments={"seed_content": _seed_yaml(), "working_dir": str(tmp_path)},
+    )
+
+    ralph_job_id = chained.meta.get("chained_ralph_job_id")
+    assert isinstance(ralph_job_id, str), (
+        chained.meta.get("chained_ralph_error"),
+        chained.meta.get("chained_ralph_skipped"),
+    )
+    terminal = await _wait_terminal(start_evaluate._job_manager, ralph_job_id)
+    assert terminal.status == JobStatus.COMPLETED
+    assert terminal.result_meta["stop_reason"] == "qa passed"
 
 
 @pytest.mark.parametrize("meta", [{"final_approved": True}, {}])
