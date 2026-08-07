@@ -277,8 +277,8 @@ class AssertionExtractor:
                     prefer_expected=tier is VerificationTier.T2_STRUCTURAL,
                 )
                 if tier is VerificationTier.T2_STRUCTURAL:
-                    expected = text_fields["expected_value"].strip().casefold()
-                    targets = tuple(target for target in targets if target.casefold() == expected)
+                    expected = text_fields["expected_value"].strip()
+                    targets = tuple(target for target in targets if target == expected)
                 if (
                     tier
                     in (

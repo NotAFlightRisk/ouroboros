@@ -592,8 +592,13 @@ Parallel Execution Verification Report
 
     @pytest.mark.parametrize(
         ("content", "approved"),
-        [("--verbose\n", True), ("not--verbose\n", False), ("x--verbose-extra\n", False)],
-        ids=["exact-flag", "identifier-prefix", "extended-flag"],
+        [
+            ("--verbose\n", True),
+            ("not--verbose\n", False),
+            ("x--verbose-extra\n", False),
+            ("--VERBOSE\n", False),
+        ],
+        ids=["exact-flag", "identifier-prefix", "extended-flag", "case-variant"],
     )
     def test_flag_substrings_cannot_publish_a_formal_pass(
         self, tmp_path: Any, content: str, approved: bool
@@ -608,6 +613,137 @@ Parallel Execution Verification Report
             expected_value="--verbose",
             file_hint="*.txt",
             evidence_targets=("--verbose",),
+            input_binding_required=True,
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.final_approved is approved
+        assert summary.ac_results[0].passed is approved
+        assert summary.run_verdict == ("PASS" if approved else "FAIL")
+
+    @pytest.mark.parametrize(
+        (
+            "tier",
+            "ac_text",
+            "filename",
+            "content",
+            "pattern",
+            "expected",
+            "target",
+            "approved",
+        ),
+        [
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider interface",
+                "main.py",
+                "class CameraProvider:\n    pass\n",
+                r"(?i)class\s+cameraprovider",
+                "CameraProvider",
+                "CameraProvider",
+                True,
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider interface",
+                "main.py",
+                "class cameraprovider:\n    pass\n",
+                r"(?i)class\s+cameraprovider",
+                "CameraProvider",
+                "CameraProvider",
+                False,
+            ),
+            (
+                VerificationTier.T1_CONSTANT,
+                "MUST set MAX_RETRIES to 5",
+                "main.py",
+                "MAX_RETRIES = 5\n",
+                r"(?i)max_retries\s*=\s*",
+                "5",
+                "MAX_RETRIES",
+                True,
+            ),
+            (
+                VerificationTier.T1_CONSTANT,
+                "MUST set MAX_RETRIES to 5",
+                "main.py",
+                "max_retries = 5\n",
+                r"(?i)max_retries\s*=\s*",
+                "5",
+                "MAX_RETRIES",
+                False,
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST create file CameraProvider.py",
+                "CameraProvider.py",
+                "# provider\n",
+                r"(?i)CameraProvider\.py",
+                "CameraProvider.py",
+                "CameraProvider.py",
+                True,
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST create file CameraProvider.py",
+                "cameraprovider.py",
+                "# provider\n",
+                r"(?i)CameraProvider\.py",
+                "CameraProvider.py",
+                "CameraProvider.py",
+                False,
+            ),
+        ],
+        ids=[
+            "symbol-exact",
+            "symbol-case",
+            "constant-exact",
+            "constant-case",
+            "filename-exact",
+            "filename-case",
+        ],
+    )
+    def test_code_evidence_identity_is_case_sensitive_at_formal_boundary(
+        self,
+        tmp_path: Any,
+        tier: VerificationTier,
+        ac_text: str,
+        filename: str,
+        content: str,
+        pattern: str,
+        expected: str,
+        target: str,
+        approved: bool,
+    ) -> None:
+        (tmp_path / filename).write_text(content)
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=pattern,
+            expected_value=expected,
+            file_hint="*.py",
+            evidence_targets=(target,),
             input_binding_required=True,
         )
         verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
