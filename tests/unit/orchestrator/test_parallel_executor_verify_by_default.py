@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+import json
 import os
 import time
 from typing import Any
@@ -1256,6 +1257,49 @@ def test_retry_prompt_uses_trace_facts_without_hidden_contract_values() -> None:
     assert "File operation observed (succeeded)" in prompt
     assert assertion not in prompt
     assert command not in prompt
+
+
+@pytest.mark.parametrize(
+    "render_hidden",
+    [
+        pytest.param(lambda value: value, id="raw"),
+        pytest.param(repr, id="quoted"),
+        pytest.param(lambda value: json.dumps(value)[1:-1], id="escaped"),
+    ],
+)
+def test_retry_prompt_redacts_overlapping_hidden_command_before_assertion(
+    render_hidden,
+) -> None:
+    executor = _make_executor()
+    assertion = "PRIVATE_SENTINEL"
+    command = 'python hidden_grader.py --expect "PRIVATE_SENTINEL"'
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command=command,
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason="output_assertion not satisfied by verify_command output",
+        output_tail=f"grader invocation: {render_hidden(command)}",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = executor._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "hidden_grader.py" not in prompt
+    assert "--expect" not in prompt
+    assert assertion not in prompt
 
 
 # ---------------------------------------------------------------------------

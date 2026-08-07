@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
+import shlex
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.core.seed import AcceptanceCriterionSpec
@@ -18,17 +20,38 @@ _MAX_HINT_CHARS = 4_000
 _MAX_TRACE_FACTS = 12
 
 
+def _hidden_contract_variants(spec: AcceptanceCriterionSpec) -> tuple[str, ...]:
+    """Return longest-first raw, quoted, and escaped hidden values."""
+
+    variants: set[str] = set()
+    for hidden in (spec.verify_command, spec.output_assertion):
+        if not hidden:
+            continue
+        json_quoted = json.dumps(hidden, ensure_ascii=False)
+        variants.update(
+            {
+                hidden,
+                repr(hidden),
+                shlex.quote(hidden),
+                json_quoted,
+                json_quoted[1:-1],
+            }
+        )
+    # A command commonly contains its output assertion. Redacting the shorter
+    # assertion first would mutate the command and prevent the full hidden
+    # value from matching, so all encodings share one longest-first order.
+    return tuple(
+        sorted((value for value in variants if value), key=lambda value: (-len(value), value))
+    )
+
+
 def _sanitize_fragment(text: str, spec: AcceptanceCriterionSpec | None) -> str:
     """Redact secrets and hidden contract values without discarding clean facts."""
 
     sanitized = text
     if spec is not None:
-        hidden_values = (spec.output_assertion, spec.verify_command)
-        for hidden in hidden_values:
-            if not hidden:
-                continue
+        for hidden in _hidden_contract_variants(spec):
             sanitized = sanitized.replace(hidden, "[REDACTED CONTRACT VALUE]")
-            sanitized = sanitized.replace(repr(hidden), "[REDACTED CONTRACT VALUE]")
     return redact_and_truncate_text(sanitized, max_chars=_MAX_HINT_CHARS)
 
 
