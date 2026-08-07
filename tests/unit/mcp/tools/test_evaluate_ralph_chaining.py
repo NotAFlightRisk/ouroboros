@@ -501,6 +501,214 @@ async def test_gen1_seed_is_idempotent_and_active_job_is_reused(
     ]
 
 
+async def test_gen1_batch_failure_leaves_no_partial_lineage_and_retry_repairs(
+    event_store: EventStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = _seed()
+    summary = evaluation_summary_from_eval_meta(seed, _rejected_result().meta)
+    lineage_id = mint_chain_lineage_id(seed.metadata.seed_id, "orch-atomic-gen1")
+    original_append_batch = event_store.append_batch
+    attempts = 0
+
+    async def _fail_first_batch(events):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("simulated atomic batch failure")
+        await original_append_batch(events)
+
+    monkeypatch.setattr(event_store, "append_batch", _fail_first_batch)
+
+    with pytest.raises(RuntimeError, match="simulated atomic batch failure"):
+        await evaluate_ralph_chain.seed_gen1_lineage(
+            event_store,
+            lineage_id=lineage_id,
+            seed=seed,
+            summary=summary,
+        )
+    assert await event_store.replay_lineage(lineage_id) == []
+
+    assert await evaluate_ralph_chain.seed_gen1_lineage(
+        event_store,
+        lineage_id=lineage_id,
+        seed=seed,
+        summary=summary,
+    )
+    assert [event.type for event in await event_store.replay_lineage(lineage_id)] == [
+        "lineage.created",
+        "lineage.generation.completed",
+    ]
+
+
+async def test_concurrent_gen1_projection_publishes_one_complete_pair(
+    event_store: EventStore,
+) -> None:
+    seed = _seed()
+    summary = evaluation_summary_from_eval_meta(seed, _rejected_result().meta)
+    lineage_id = mint_chain_lineage_id(seed.metadata.seed_id, "orch-concurrent-gen1")
+
+    await asyncio.gather(
+        *(
+            evaluate_ralph_chain.seed_gen1_lineage(
+                event_store,
+                lineage_id=lineage_id,
+                seed=seed,
+                summary=summary,
+            )
+            for _ in range(4)
+        )
+    )
+
+    assert [event.type for event in await event_store.replay_lineage(lineage_id)] == [
+        "lineage.created",
+        "lineage.generation.completed",
+    ]
+
+
+async def test_concurrent_gen1_with_different_evidence_replays_first_winner(
+    event_store: EventStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = _seed()
+    summary = evaluation_summary_from_eval_meta(seed, _rejected_result().meta)
+    alternate = summary.model_copy(update={"failure_reason": "alternate evaluator wording"})
+    lineage_id = mint_chain_lineage_id(seed.metadata.seed_id, "orch-competing-gen1")
+    original_append_batch = event_store.append_batch
+
+    async def _slow_append_batch(events):
+        await asyncio.sleep(0.05)
+        await original_append_batch(events)
+
+    monkeypatch.setattr(event_store, "append_batch", _slow_append_batch)
+
+    results = await asyncio.gather(
+        evaluate_ralph_chain.seed_gen1_lineage(
+            event_store,
+            lineage_id=lineage_id,
+            seed=seed,
+            summary=summary,
+        ),
+        evaluate_ralph_chain.seed_gen1_lineage(
+            event_store,
+            lineage_id=lineage_id,
+            seed=seed,
+            summary=alternate,
+        ),
+    )
+
+    assert sorted(results) == [False, True]
+    assert [event.type for event in await event_store.replay_lineage(lineage_id)] == [
+        "lineage.created",
+        "lineage.generation.completed",
+    ]
+
+
+async def test_legacy_creation_only_lineage_is_completed_under_claim(
+    event_store: EventStore,
+) -> None:
+    seed = _seed()
+    summary = evaluation_summary_from_eval_meta(seed, _rejected_result().meta)
+    lineage_id = mint_chain_lineage_id(seed.metadata.seed_id, "orch-partial-gen1")
+    await event_store.append(evaluate_ralph_chain.lineage_created(lineage_id, seed.goal))
+
+    assert await evaluate_ralph_chain.seed_gen1_lineage(
+        event_store,
+        lineage_id=lineage_id,
+        seed=seed,
+        summary=summary,
+    )
+    assert [event.type for event in await event_store.replay_lineage(lineage_id)] == [
+        "lineage.created",
+        "lineage.generation.completed",
+    ]
+
+
+async def test_concurrent_ralph_enqueue_has_one_durable_winner(tmp_path: Path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'ralph-successor.db'}"
+    stores = [EventStore(database_url), EventStore(database_url)]
+    for store in stores:
+        await store.initialize()
+
+    class EmptyJobManager:
+        async def find_active_job_by_lineage(
+            self,
+            lineage_id: str,
+            *,
+            job_type: str | None = None,
+            include_terminal: bool = False,
+        ) -> None:
+            assert lineage_id == "lineage-concurrent-successor"
+            assert job_type == "ralph"
+            assert include_terminal is True
+            return None
+
+    class SlowRalphStarter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def handle(self, _: dict[str, Any]) -> Result[MCPToolResult, Any]:
+            self.calls += 1
+            await asyncio.sleep(0.05)
+            return Result.ok(MCPToolResult(meta={"job_id": "job_single_winner"}))
+
+    starter = SlowRalphStarter()
+    try:
+        job_ids = await asyncio.gather(
+            *(
+                evaluate_ralph_chain._claim_or_start_chained_ralph(
+                    lineage_id="lineage-concurrent-successor",
+                    arguments={},
+                    max_generations=3,
+                    event_store=store,
+                    job_manager=EmptyJobManager(),
+                    start_ralph_handler=starter,
+                )
+                for store in stores
+            )
+        )
+    finally:
+        for store in stores:
+            await store.close()
+
+    assert job_ids == ["job_single_winner", "job_single_winner"]
+    assert starter.calls == 1
+
+
+async def test_terminal_ralph_job_closes_successor_crash_gap(
+    event_store: EventStore,
+) -> None:
+    calls: list[bool] = []
+
+    class TerminalJobManager:
+        async def find_active_job_by_lineage(
+            self,
+            _lineage_id: str,
+            *,
+            job_type: str | None = None,
+            include_terminal: bool = False,
+        ) -> SimpleNamespace:
+            assert job_type == "ralph"
+            calls.append(include_terminal)
+            return SimpleNamespace(job_id="job_already_terminal")
+
+    class NeverStartRalph:
+        async def handle(self, _: dict[str, Any]) -> Result[MCPToolResult, Any]:
+            raise AssertionError("terminal Ralph successor must be reattached")
+
+    job_id = await evaluate_ralph_chain._claim_or_start_chained_ralph(
+        lineage_id="lineage-terminal-successor",
+        arguments={},
+        max_generations=3,
+        event_store=event_store,
+        job_manager=TerminalJobManager(),
+        start_ralph_handler=NeverStartRalph(),
+    )
+
+    assert job_id == "job_already_terminal"
+    assert calls == [True]
+
+
 async def _async_value(value: Any) -> Any:
     return value
 

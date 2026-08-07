@@ -5,7 +5,10 @@
 
 ## Original Request
 
-Implement the design in `/Users/jaegyu.lee/.claude/plans/piped-squishing-ember.md`.
+Turn one-shot `ooo run` execution into a bounded convergence chain while keeping
+harness-owned grading inputs hidden from implementation workers. Failed but
+evaluable runs proceed through formal evaluation and focused Ralph evolution;
+the preceding verdict remains authoritative if successor chaining fails.
 
 ## Clarified Specification
 
@@ -28,5 +31,7 @@ Implement the design in `/Users/jaegyu.lee/.claude/plans/piped-squishing-ember.m
 - Run → evaluate → Ralph job IDs are transitively observable.
 - Gen1 replay has `lineage.created` plus `lineage.generation.completed`, and the
   next planned generation is 2.
+- Concurrent or replayed evaluation completions publish Gen1 and enqueue at most
+  one Ralph successor; active and terminal successors are reattached by lineage.
 - Approved/unjudged/opted-out evaluations do not enqueue Ralph.
 - Static checks and the bounded target test suites pass.

@@ -15,6 +15,10 @@ from ouroboros.core.errors import ValidationError
 from ouroboros.core.lineage import ACResult, EvaluationSummary
 from ouroboros.core.seed import Seed, ac_text
 from ouroboros.events.lineage import lineage_created, lineage_generation_completed
+from ouroboros.evolution.loop_support import (
+    LineageWinnerAdvanced,
+    run_durable_lineage_single_flight,
+)
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.persistence.event_store import EventStore
 
@@ -133,20 +137,143 @@ async def seed_gen1_lineage(
 ) -> bool:
     """Project a completed generation 1 once; return whether events were appended."""
 
-    if await event_store.replay_lineage(lineage_id):
-        return False
-    await event_store.append(lineage_created(lineage_id, seed.goal))
-    await event_store.append(
-        lineage_generation_completed(
-            lineage_id,
-            generation_number=1,
-            seed_id=seed.metadata.seed_id,
-            ontology_snapshot=seed.ontology_schema.model_dump(mode="json"),
-            evaluation_summary=summary.model_dump(mode="json"),
-            seed_json=json.dumps(seed.to_dict(), ensure_ascii=False),
+    async def _already_completed() -> bool:
+        events = await event_store.replay_lineage(lineage_id)
+        return any(
+            event.type == "lineage.generation.completed"
+            and event.data.get("generation_number") == 1
+            for event in events
         )
+
+    if await _already_completed():
+        return False
+
+    seed_json = json.dumps(seed.to_dict(), ensure_ascii=False)
+    summary_json = summary.model_dump(mode="json")
+    request_key = hashlib.sha256(
+        json.dumps(
+            {"seed": seed.to_dict(), "evaluation_summary": summary_json},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+    async def _append_gen1() -> bool:
+        events = await event_store.replay_lineage(lineage_id)
+        if any(
+            event.type == "lineage.generation.completed"
+            and event.data.get("generation_number") == 1
+            for event in events
+        ):
+            return False
+        created = any(event.type == "lineage.created" for event in events)
+        batch = [] if created else [lineage_created(lineage_id, seed.goal)]
+        batch.append(
+            lineage_generation_completed(
+                lineage_id,
+                generation_number=1,
+                seed_id=seed.metadata.seed_id,
+                ontology_snapshot=seed.ontology_schema.model_dump(mode="json"),
+                evaluation_summary=summary_json,
+                seed_json=seed_json,
+            )
+        )
+        await event_store.append_batch(batch)
+        return True
+
+    try:
+        return await run_durable_lineage_single_flight(
+            event_store,
+            lineage_id,
+            request_key,
+            _append_gen1,
+            generation_number=1,
+            encode=lambda appended: {"appended": appended},
+            decode=lambda payload: payload.get("appended") is True,
+            scope="evaluation-gen1",
+        )
+    except LineageWinnerAdvanced:
+        # Concurrent formal evaluations can render different evidence text for
+        # the same run. The first complete Gen1 is authoritative; recompute from
+        # that durable state instead of turning the losing evaluation into a
+        # chaining error.
+        if await _already_completed():
+            return False
+        raise
+
+
+async def _find_chained_ralph_job(job_manager: Any, lineage_id: str) -> str | None:
+    existing = await job_manager.find_active_job_by_lineage(
+        lineage_id,
+        job_type="ralph",
+        include_terminal=True,
     )
-    return True
+    if existing is None:
+        return None
+    job_id = existing.job_id
+    return job_id if isinstance(job_id, str) and job_id else None
+
+
+def _decode_ralph_job_receipt(payload: Mapping[str, Any]) -> str:
+    job_id = payload.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        raise RuntimeError("Durable Ralph successor receipt has no job_id")
+    return job_id
+
+
+async def _claim_or_start_chained_ralph(
+    *,
+    lineage_id: str,
+    arguments: Mapping[str, Any],
+    max_generations: int,
+    event_store: EventStore,
+    job_manager: Any,
+    start_ralph_handler: Any | None,
+) -> str:
+    """Reconnect or durably elect the sole Ralph successor for a lineage."""
+
+    existing_job_id = await _find_chained_ralph_job(job_manager, lineage_id)
+    if existing_job_id is not None:
+        return existing_job_id
+
+    async def _start_once() -> str:
+        recovered_job_id = await _find_chained_ralph_job(job_manager, lineage_id)
+        if recovered_job_id is not None:
+            return recovered_job_id
+        if start_ralph_handler is None:
+            raise RuntimeError(
+                "Automatic Ralph chaining is not configured: "
+                "StartRalphHandler dependency is missing"
+            )
+        started = await start_ralph_handler.handle(
+            {
+                "lineage_id": lineage_id,
+                "execute": True,
+                "parallel": True,
+                "skip_qa": False,
+                "project_dir": arguments.get("working_dir"),
+                "max_generations": max_generations,
+            }
+        )
+        if started.is_err:
+            raise RuntimeError(started.error.message)
+        job_id = started.value.meta.get("job_id")
+        if not isinstance(job_id, str) or not job_id:
+            raise RuntimeError("StartRalphHandler did not return a pollable Ralph job_id")
+        return job_id
+
+    request_key = hashlib.sha256(f"ralph-successor\0{lineage_id}".encode()).hexdigest()
+    return await run_durable_lineage_single_flight(
+        event_store,
+        lineage_id,
+        request_key,
+        _start_once,
+        generation_number=1,
+        encode=lambda job_id: {"job_id": job_id},
+        decode=_decode_ralph_job_receipt,
+        scope="evaluation-ralph",
+    )
 
 
 async def enqueue_chained_ralph(
@@ -186,30 +313,14 @@ async def enqueue_chained_ralph(
             seed=seed,
             summary=evaluation_summary_from_eval_meta(seed, evaluation_result.meta),
         )
-        active = await job_manager.find_active_job_by_lineage(lineage_id, job_type="ralph")
-        if active is not None:
-            ralph_job_id = active.job_id
-        else:
-            if start_ralph_handler is None:
-                raise RuntimeError(
-                    "Automatic Ralph chaining is not configured: "
-                    "StartRalphHandler dependency is missing"
-                )
-            started = await start_ralph_handler.handle(
-                {
-                    "lineage_id": lineage_id,
-                    "execute": True,
-                    "parallel": True,
-                    "skip_qa": False,
-                    "project_dir": arguments.get("working_dir"),
-                    "max_generations": max_generations,
-                }
-            )
-            if started.is_err:
-                raise RuntimeError(started.error.message)
-            ralph_job_id = started.value.meta.get("job_id")
-            if not isinstance(ralph_job_id, str) or not ralph_job_id:
-                raise RuntimeError("StartRalphHandler did not return a pollable Ralph job_id")
+        ralph_job_id = await _claim_or_start_chained_ralph(
+            lineage_id=lineage_id,
+            arguments=arguments,
+            max_generations=max_generations,
+            event_store=event_store,
+            job_manager=job_manager,
+            start_ralph_handler=start_ralph_handler,
+        )
     except Exception as exc:  # noqa: BLE001 - chaining must never flip rejection.
         return append_result_text(
             evaluation_result,

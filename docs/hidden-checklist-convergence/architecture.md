@@ -34,5 +34,8 @@ start_execute_seed
 | Manifest is read-only coaching input | Retry quality improves without allowing evidence to affect the deliver verdict. |
 | Ralph owns convergence | Avoids duplicating loop termination, focus, and budget logic. |
 | Deterministic lineage ID | Evaluation retries reconnect to the same Seed/run lineage. |
+| Durable lineage claims | Cross-process retries elect one Gen1 writer and one Ralph successor owner. |
+| Atomic Gen1 publication | The creation and generation-completed events commit together; legacy creation-only state is repaired under the same claim. |
+| Terminal successor recovery | Retries reconnect to both active and terminal Ralph jobs, closing the enqueue/result crash gap. |
 | Single-AC checklist absence yields no fabricated AC result | Existing full-graph focus fallback remains honest and safe. |
 | Raw Seed handoff is process-local | Persisting hidden verifier material in worker-queryable events would defeat the boundary. A server restart invalidates the opaque handle and evaluation fails closed instead of exposing the Seed. |
