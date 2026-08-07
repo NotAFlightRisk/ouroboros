@@ -20,6 +20,7 @@ _NON_TARGET_WORDS = frozenset(
         "constant",
         "contain",
         "contains",
+        "create",
         "define",
         "defines",
         "directory",
@@ -40,6 +41,7 @@ _NON_TARGET_WORDS = frozenset(
         "must",
         "of",
         "or",
+        "project",
         "remain",
         "required",
         "requires",
@@ -57,6 +59,9 @@ _NON_TARGET_WORDS = frozenset(
 )
 
 _TARGET_TOKEN = re.compile(r"[\w][\w./:-]*", re.UNICODE)
+_STRUCTURAL_WORDS = frozenset(
+    {"class", "constant", "directory", "file", "flag", "function", "interface", "struct", "trait"}
+)
 
 
 def literal_spans(text: str, literal: str) -> tuple[tuple[int, int], ...]:
@@ -64,8 +69,8 @@ def literal_spans(text: str, literal: str) -> tuple[tuple[int, int], ...]:
     literal = literal.strip()
     if not literal:
         return ()
-    left = r"(?<![A-Za-z0-9])" if literal[0].isalnum() or literal[0] == "_" else ""
-    right = r"(?![A-Za-z0-9])" if literal[-1].isalnum() or literal[-1] == "_" else ""
+    left = r"(?<!\w)" if literal[0].isalnum() or literal[0] == "_" else ""
+    right = r"(?!\w)" if literal[-1].isalnum() or literal[-1] == "_" else ""
     expression = re.compile(left + re.escape(literal) + right, re.IGNORECASE)
     return tuple((match.start(), match.end()) for match in expression.finditer(text))
 
@@ -73,6 +78,23 @@ def literal_spans(text: str, literal: str) -> tuple[tuple[int, int], ...]:
 def literal_is_bound(text: str, literal: str) -> bool:
     """Whether ``literal`` is present as a complete value in trusted text."""
     return bool(literal_spans(text, literal))
+
+
+def identifier_component_spans(text: str, literal: str) -> tuple[tuple[int, int], ...]:
+    """Return spans where a literal is one component of a snake-case identifier.
+
+    This compatibility is T1-only: prose commonly says ``Warmup frames`` while
+    source spells the key ``WARMUP_FRAMES``. Structural names do not receive
+    this relaxation, so ``CameraProvider`` cannot bind ``CameraProvider_fake``.
+    """
+    literal = literal.strip()
+    if not literal:
+        return ()
+    expression = re.compile(
+        r"(?<![^\W_])" + re.escape(literal) + r"(?![^\W_])",
+        re.IGNORECASE,
+    )
+    return tuple((match.start(), match.end()) for match in expression.finditer(text))
 
 
 def acceptance_targets(
@@ -92,13 +114,13 @@ def acceptance_targets(
     expected = expected_value.strip()
     if expected and not literal_is_bound(ac_text, expected):
         return ()
-    if prefer_expected and expected:
-        return (expected,)
-
-    expected_parts = {part.casefold() for part in _TARGET_TOKEN.findall(expected)}
-    targets: list[str] = []
+    expected_parts = (
+        set() if prefer_expected else {part.casefold() for part in _TARGET_TOKEN.findall(expected)}
+    )
+    candidates: list[tuple[str, int, int]] = []
     seen: set[str] = set()
-    for token in _TARGET_TOKEN.findall(ac_text):
+    for match in _TARGET_TOKEN.finditer(ac_text):
+        token = match.group(0)
         folded = token.casefold()
         if (
             folded in seen
@@ -109,5 +131,36 @@ def acceptance_targets(
         ):
             continue
         seen.add(folded)
-        targets.append(token)
-    return tuple(targets)
+        candidates.append((token, match.start(), match.end()))
+
+    if prefer_expected:
+        selected: list[str] = []
+        for word in _TARGET_TOKEN.finditer(ac_text):
+            if word.group(0).casefold() not in _STRUCTURAL_WORDS:
+                continue
+            ranked = sorted(
+                candidates,
+                key=lambda candidate: min(
+                    abs(candidate[2] - word.start()),
+                    abs(candidate[1] - word.end()),
+                ),
+            )
+            if ranked and ranked[0][0].casefold() not in {target.casefold() for target in selected}:
+                selected.append(ranked[0][0])
+        if selected:
+            return tuple(selected)
+        if len(candidates) == 1:
+            return (candidates[0][0],)
+        return ()
+
+    if expected:
+        value_spans = literal_spans(ac_text, expected)
+        if not value_spans:
+            return ()
+        value_start, value_end = value_spans[0]
+        before = [candidate for candidate in candidates if candidate[2] <= value_start]
+        if before:
+            return (before[-1][0],)
+        after = [candidate for candidate in candidates if candidate[1] >= value_end]
+        return (after[0][0],) if after else ()
+    return tuple(token for token, _start, _end in candidates)

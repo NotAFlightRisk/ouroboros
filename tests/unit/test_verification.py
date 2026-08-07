@@ -1634,6 +1634,56 @@ class TestSpecVerifier:
         assert result.evidence_target == "CameraProvider"
         assert result.file_path.endswith("main.py")
 
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "class CameraProvider_fake:\n    pass\n",
+            "class Fake_CameraProvider:\n    pass\n",
+            "가짜카메라값 = object()\n",
+        ],
+        ids=["identifier-suffix", "identifier-prefix", "unicode-embedding"],
+    )
+    def test_structural_target_must_be_a_complete_unicode_identifier(self, content: str) -> None:
+        """A target embedded in an identifier is unrelated evidence."""
+        target = "카메라" if "카메라" in content else "CameraProvider"
+        project = self._create_project({"main.py": content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=f"MUST define a {target} interface",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=re.escape(target),
+            expected_value=target,
+            file_hint="*.py",
+            evidence_targets=(target,),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        result = summary.reports[0].results[0]
+        assert result.verified is False
+        assert result.evidence_target == ""
+        assert "criterion-bound" in result.detail
+
+    def test_t1_prose_target_can_bind_a_snake_case_identifier_component(self) -> None:
+        """T1 keeps the established prose-to-SNAKE_CASE compatibility."""
+        project = self._create_project({"config.py": "WARMUP_FRAMES = 10\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Warmup frames should be 10",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"WARMUP_FRAMES\s*=\s*",
+            expected_value="10",
+            file_hint="*.py",
+            evidence_targets=("frames",),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.verified_count == 1
+        assert summary.reports[0].results[0].evidence_target == "frames"
+
 
 # -- Extractor Tests --
 
@@ -1643,7 +1693,7 @@ _GOOD_EXTRACTION = json.dumps(
             "ac_index": 0,
             "tier": "t2_structural",
             "pattern": "class Foo",
-            "expected_value": "",
+            "expected_value": "Foo",
             "file_hint": "*.py",
             "description": "",
         }
@@ -1793,6 +1843,95 @@ class TestAssertionExtractor:
         assert summary.verified_count == 0
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("expected_value", ["", "interface", "Python"])
+    async def test_t2_model_cannot_choose_or_omit_the_structural_target(
+        self, expected_value: str
+    ) -> None:
+        """T2 evidence must name the deterministic structural target from the AC."""
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t2_structural",
+                    "pattern": rf"{re.escape(expected_value)}" if expected_value else r".+",
+                    "expected_value": expected_value,
+                    "file_hint": "*.py",
+                    "description": "redirect structural evidence",
+                }
+            ]
+        )
+
+        result = await extractor.extract(
+            f"seed_t2_redirect_{expected_value}",
+            ("MUST define a CameraProvider interface in a Python project",),
+        )
+
+        assert result.is_ok
+        assert result.value == ()
+
+    @pytest.mark.asyncio
+    async def test_t1_target_is_bound_to_the_expected_value_clause(self) -> None:
+        """A nearby unrelated term cannot replace the constant being specified."""
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": r"Python\s*=\s*",
+                    "expected_value": "5",
+                    "file_hint": "*.py",
+                    "description": "redirect to a language name",
+                }
+            ]
+        )
+        result = await extractor.extract(
+            "seed_t1_clause_binding",
+            ("MUST set MAX_RETRIES to 5 in Python config",),
+        )
+
+        assert result.is_ok and len(result.value) == 1
+        assert result.value[0].evidence_targets == ("MAX_RETRIES",)
+
+        project = TestSpecVerifier()._create_project({"config.py": "Python = 5\n"})
+        summary = SpecVerifier(project_dir=project).verify_all(result.value)
+        assert summary.verified_count == 0
+        assert "criterion-bound" in summary.reports[0].results[0].detail
+
+    @pytest.mark.asyncio
+    async def test_multiple_constants_bind_to_their_nearest_symbols(self) -> None:
+        """Each extracted scalar maps to its own declaration in a compound AC."""
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": r"WARMUP\s*=\s*",
+                    "expected_value": "10",
+                    "file_hint": "*.py",
+                    "description": "warmup",
+                },
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": r"FPS\s*=\s*",
+                    "expected_value": "30",
+                    "file_hint": "*.py",
+                    "description": "fps",
+                },
+            ]
+        )
+
+        result = await extractor.extract(
+            "seed_compound_constants", ("MUST set WARMUP=10 and FPS=30",)
+        )
+
+        assert result.is_ok
+        assert [item.evidence_targets for item in result.value] == [("WARMUP",), ("FPS",)]
+        project = TestSpecVerifier()._create_project({"config.py": "WARMUP = 10\nFPS = 30\n"})
+        summary = SpecVerifier(project_dir=project).verify_all(result.value)
+        assert summary.verified_count == 2
+
+    @pytest.mark.asyncio
     async def test_wrapped_invalid_regex_assertion_rejected_before_verifier(self) -> None:
         """Invalid T1/T2 regexes are unusable and must not become assertions."""
         payload = json.dumps(
@@ -1887,15 +2026,15 @@ class TestAssertionExtractor:
         assert "No files matched hint" in summary.reports[0].results[0].detail
 
     @pytest.mark.asyncio
-    async def test_caches_by_seed_id(self) -> None:
-        """Second call with same seed_id returns cached results."""
+    async def test_caches_by_seed_id_and_criterion_content(self) -> None:
+        """An unchanged seed input reuses the same extracted result."""
         extractor = self._make_extractor(
             [
                 {
                     "ac_index": 0,
                     "tier": "t2_structural",
                     "pattern": "class Foo",
-                    "expected_value": "",
+                    "expected_value": "Foo",
                     "file_hint": "*.py",
                     "description": "",
                 }
@@ -1907,6 +2046,47 @@ class TestAssertionExtractor:
         assert r1.value is r2.value
         # LLM called only once
         extractor.llm_adapter.complete.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_changed_criteria_with_same_seed_id_do_not_reuse_stale_assertions(
+        self,
+    ) -> None:
+        """Criterion content participates in the cache identity."""
+        first = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t2_structural",
+                    "pattern": "class Foo",
+                    "expected_value": "Foo",
+                    "file_hint": "*.py",
+                    "description": "",
+                }
+            ]
+        )
+        second = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t2_structural",
+                    "pattern": "class Bar",
+                    "expected_value": "Bar",
+                    "file_hint": "*.py",
+                    "description": "",
+                }
+            ]
+        )
+        extractor = self._make_extractor_sequence(first, second)
+
+        foo = await extractor.extract("same_seed", ("Has class Foo",))
+        bar = await extractor.extract("same_seed", ("Has class Bar",))
+
+        assert foo.is_ok and bar.is_ok
+        assert foo.value[0].ac_text == "Has class Foo"
+        assert foo.value[0].evidence_targets == ("Foo",)
+        assert bar.value[0].ac_text == "Has class Bar"
+        assert bar.value[0].evidence_targets == ("Bar",)
+        assert extractor.llm_adapter.complete.await_count == 2
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2007,7 +2187,7 @@ class TestAssertionExtractor:
                         "ac_index": 0,
                         "tier": "t2_structural",
                         "pattern": "class Foo",
-                        "expected_value": "",
+                        "expected_value": "Foo",
                         "file_hint": "*.py",
                         "description": "",
                     },
