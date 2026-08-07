@@ -4,75 +4,52 @@ from __future__ import annotations
 
 import re
 
-# Words that describe the verification shape rather than the thing being
-# verified. They cannot bind evidence to a criterion: finding an unrelated
-# ``class Foo`` does not prove a request for ``CameraProvider`` merely because
-# both the request and the match can be described as a class.
-_NON_TARGET_WORDS = frozenset(
-    {
-        "a",
-        "accept",
-        "accepts",
-        "an",
-        "and",
-        "be",
-        "class",
-        "constant",
-        "contain",
-        "contains",
-        "create",
-        "define",
-        "defines",
-        "directory",
-        "exist",
-        "exists",
-        "file",
-        "flag",
-        "for",
-        "function",
-        "has",
-        "have",
-        "in",
-        "interface",
-        "is",
-        "it",
-        "match",
-        "maximum",
-        "must",
-        "of",
-        "or",
-        "project",
-        "remain",
-        "required",
-        "requires",
-        "set",
-        "should",
-        "struct",
-        "test",
-        "the",
-        "to",
-        "trait",
-        "value",
-        "whether",
-        "with",
-    }
+_TARGET_TOKEN = re.compile(r"--[\w][\w-]*|[\w][\w./:-]*", re.UNICODE)
+_QUOTED_TOKEN = re.compile(
+    r"(?P<quote>[`'\"])(?P<token>--[\w][\w-]*|[\w][\w./:-]*)(?P=quote)",
+    re.UNICODE,
 )
-
-_TARGET_TOKEN = re.compile(r"[\w][\w./:-]*", re.UNICODE)
 _STRUCTURAL_WORDS = frozenset(
     {"class", "constant", "directory", "file", "flag", "function", "interface", "struct", "trait"}
 )
+_CONSTANT_BINDING_SUFFIX = re.compile(
+    r"(?:=|:|\bto\b|\bof\b|\bis\b|\bshould\s+be\b|\bmust\s+be\b)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_identifier_continue(character: str) -> bool:
+    r"""Return whether a character can continue a Unicode identifier.
+
+    Python's regex ``\w`` omits valid XID continuations such as combining
+    marks, ZWNJ, and the middle dot. Prefixing a known identifier starter asks
+    Python's Unicode identifier table directly and keeps literal boundaries
+    conservative for every such continuation.
+    """
+    return bool(character) and (character == "$" or ("A" + character).isidentifier())
 
 
 def literal_spans(text: str, literal: str) -> tuple[tuple[int, int], ...]:
-    """Return case-insensitive whole-literal spans without prefix matches."""
+    """Return case-insensitive whole-literal spans with Unicode XID boundaries."""
     literal = literal.strip()
     if not literal:
         return ()
-    left = r"(?<!\w)" if literal[0].isalnum() or literal[0] == "_" else ""
-    right = r"(?!\w)" if literal[-1].isalnum() or literal[-1] == "_" else ""
-    expression = re.compile(left + re.escape(literal) + right, re.IGNORECASE)
-    return tuple((match.start(), match.end()) for match in expression.finditer(text))
+    spans: list[tuple[int, int]] = []
+    for match in re.finditer(re.escape(literal), text, re.IGNORECASE):
+        if (
+            (literal[0].isalnum() or literal[0] == "_")
+            and match.start() > 0
+            and _is_identifier_continue(text[match.start() - 1])
+        ):
+            continue
+        if (
+            (literal[-1].isalnum() or literal[-1] == "_")
+            and match.end() < len(text)
+            and _is_identifier_continue(text[match.end()])
+        ):
+            continue
+        spans.append((match.start(), match.end()))
+    return tuple(spans)
 
 
 def literal_is_bound(text: str, literal: str) -> bool:
@@ -80,21 +57,93 @@ def literal_is_bound(text: str, literal: str) -> bool:
     return bool(literal_spans(text, literal))
 
 
-def identifier_component_spans(text: str, literal: str) -> tuple[tuple[int, int], ...]:
-    """Return spans where a literal is one component of a snake-case identifier.
+def _looks_code_like(token: str) -> bool:
+    """Recognize conservative code literals without interpreting prose nouns."""
+    if token.startswith("--"):
+        return True
+    if any(separator in token for separator in ("_", "/", ".", ":", "-")):
+        return True
+    if token.isascii() and token.isupper() and token.isalpha() and len(token) <= 3:
+        return True
+    return bool(re.search(r"[a-z][A-Z]", token))
 
-    This compatibility is T1-only: prose commonly says ``Warmup frames`` while
-    source spells the key ``WARMUP_FRAMES``. Structural names do not receive
-    this relaxation, so ``CameraProvider`` cannot bind ``CameraProvider_fake``.
-    """
-    literal = literal.strip()
-    if not literal:
-        return ()
-    expression = re.compile(
-        r"(?<![^\W_])" + re.escape(literal) + r"(?![^\W_])",
-        re.IGNORECASE,
+
+def _looks_constant_literal(token: str) -> bool:
+    """Recognize exact constant keys without admitting arbitrary prose."""
+    return _looks_code_like(token) or (token.isascii() and token.isupper() and token.isalpha())
+
+
+def _token_candidates(ac_text: str) -> tuple[tuple[str, int, int, bool], ...]:
+    """Return unquoted and explicitly quoted literals with source spans."""
+    quoted = tuple(
+        (match.group("token"), match.start(), match.end(), True)
+        for match in _QUOTED_TOKEN.finditer(ac_text)
     )
-    return tuple((match.start(), match.end()) for match in expression.finditer(text))
+    quoted_inner_spans = tuple(
+        (match.start("token"), match.end("token")) for match in _QUOTED_TOKEN.finditer(ac_text)
+    )
+    plain = tuple(
+        (match.group(0), match.start(), match.end(), False)
+        for match in _TARGET_TOKEN.finditer(ac_text)
+        if not any(
+            start <= match.start() and match.end() <= end for start, end in quoted_inner_spans
+        )
+    )
+    return tuple(sorted((*quoted, *plain), key=lambda candidate: candidate[1]))
+
+
+def _structural_targets(ac_text: str) -> tuple[str, ...]:
+    """Derive structural names under conservative, input-only grammar."""
+    candidates = _token_candidates(ac_text)
+    words = [candidate for candidate in candidates if not candidate[3]]
+    selected: list[str] = []
+
+    for word, word_start, word_end, _quoted in words:
+        folded = word.casefold()
+        if folded not in _STRUCTURAL_WORDS:
+            continue
+        previous = next((item for item in reversed(words) if item[2] <= word_start), None)
+        if previous is not None and not ac_text[previous[2] : word_start].strip():
+            token = previous[0]
+            if _looks_code_like(token):
+                selected.append(token)
+                continue
+        following = next((item for item in words if item[1] >= word_end), None)
+        if following is not None and not ac_text[word_end : following[1]].strip():
+            token = following[0]
+            if _looks_code_like(token) or (
+                token.isascii() and token[:1].isupper() and token[1:].islower()
+            ):
+                selected.append(token)
+
+    if selected:
+        return tuple(dict.fromkeys(selected))
+
+    explicit = [token for token, _start, _end, quoted in candidates if quoted]
+    code_literals = [
+        token for token, _start, _end, quoted in candidates if quoted or _looks_code_like(token)
+    ]
+    unique = tuple(dict.fromkeys(explicit or code_literals))
+    return unique if len(unique) == 1 else ()
+
+
+def _constant_target(ac_text: str, expected: str) -> tuple[str, ...]:
+    """Bind a scalar only to an explicit code literal in its own clause."""
+    value_spans = literal_spans(ac_text, expected)
+    if not value_spans:
+        return ()
+    candidates = [
+        candidate
+        for candidate in _token_candidates(ac_text)
+        if candidate[3] or _looks_constant_literal(candidate[0])
+    ]
+    for value_start, _value_end in value_spans:
+        for token, _start, end, _quoted in reversed(candidates):
+            if end > value_start:
+                continue
+            if _CONSTANT_BINDING_SUFFIX.fullmatch(ac_text[end:value_start].strip()):
+                return (token,)
+    return ()
 
 
 def acceptance_targets(
@@ -103,64 +152,18 @@ def acceptance_targets(
     *,
     prefer_expected: bool = False,
 ) -> tuple[str, ...]:
-    """Return criterion-derived literals that may bind verification evidence.
+    """Return exact code literals derived only from caller-authored criterion text.
 
-    ``ac_text`` is supplied by the caller, not by the extraction model. An
-    expected value is usable only when that caller-authored text contains it.
-    Structural assertions prefer that exact expected name. Constant assertions
-    instead bind the matched declaration/key and verify the expected scalar in
-    a separate comparison.
+    Structural targets are selected independently of model ``expected_value``;
+    the extractor subsequently requires the model value to equal one of them.
+    Constant targets require an explicit code-shaped literal bound to the
+    expected scalar's clause. Ambiguous prose has no target and fails closed.
     """
     expected = expected_value.strip()
     if expected and not literal_is_bound(ac_text, expected):
         return ()
-    expected_parts = (
-        set() if prefer_expected else {part.casefold() for part in _TARGET_TOKEN.findall(expected)}
-    )
-    candidates: list[tuple[str, int, int]] = []
-    seen: set[str] = set()
-    for match in _TARGET_TOKEN.finditer(ac_text):
-        token = match.group(0)
-        folded = token.casefold()
-        if (
-            folded in seen
-            or folded in _NON_TARGET_WORDS
-            or folded in expected_parts
-            or token.isdecimal()
-            or len(token) < 2
-        ):
-            continue
-        seen.add(folded)
-        candidates.append((token, match.start(), match.end()))
-
     if prefer_expected:
-        selected: list[str] = []
-        for word in _TARGET_TOKEN.finditer(ac_text):
-            if word.group(0).casefold() not in _STRUCTURAL_WORDS:
-                continue
-            ranked = sorted(
-                candidates,
-                key=lambda candidate: min(
-                    abs(candidate[2] - word.start()),
-                    abs(candidate[1] - word.end()),
-                ),
-            )
-            if ranked and ranked[0][0].casefold() not in {target.casefold() for target in selected}:
-                selected.append(ranked[0][0])
-        if selected:
-            return tuple(selected)
-        if len(candidates) == 1:
-            return (candidates[0][0],)
-        return ()
-
+        return _structural_targets(ac_text)
     if expected:
-        value_spans = literal_spans(ac_text, expected)
-        if not value_spans:
-            return ()
-        value_start, value_end = value_spans[0]
-        before = [candidate for candidate in candidates if candidate[2] <= value_start]
-        if before:
-            return (before[-1][0],)
-        after = [candidate for candidate in candidates if candidate[1] >= value_end]
-        return (after[0][0],) if after else ()
-    return tuple(token for token, _start, _end in candidates)
+        return _constant_target(ac_text, expected)
+    return ()

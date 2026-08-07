@@ -21,7 +21,6 @@ from typing import NamedTuple
 
 from ouroboros.verification.binding import (
     acceptance_targets,
-    identifier_component_spans,
     literal_is_bound,
     literal_spans,
 )
@@ -902,12 +901,7 @@ class SpecVerifier:
         bound_subject = searched_text if binding_text is None else binding_text
         for match in pattern.finditer(searched_text):
             for target in targets:
-                target_in_subject = target
-                if binding_text is None and "/" in target:
-                    target_in_subject = target.rsplit("/", 1)[-1]
-                spans = literal_spans(bound_subject, target_in_subject)
-                if not spans and assertion.tier == VerificationTier.T1_CONSTANT:
-                    spans = identifier_component_spans(bound_subject, target_in_subject)
+                spans = literal_spans(bound_subject, target)
                 if not spans:
                     continue
                 if binding_text is not None or match.start() == match.end():
@@ -1062,9 +1056,15 @@ class SpecVerifier:
         if name_pattern:
             for file_path in files:
                 basename = os.path.basename(file_path)
+                relative_file = self._relative_file(file_path)
+                filename_subject = (
+                    relative_file
+                    if any("/" in target for target in self._evidence_targets(assertion))
+                    else basename
+                )
                 bound = self._find_bound_match(
                     name_pattern,
-                    basename,
+                    filename_subject,
                     assertion,
                 )
                 if bound:
