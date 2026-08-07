@@ -16,6 +16,13 @@ from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 log = structlog.get_logger(__name__)
 
 
+def is_evaluable_run_result(result: MCPToolResult) -> bool:
+    """Return whether a terminal run produced evidence formal evaluation can judge."""
+
+    status = result.meta.get("status")
+    return status in {"completed", "failed"} and bool(result.text_content.strip())
+
+
 def _append_text(result: MCPToolResult, text: str, meta: dict[str, Any]) -> MCPToolResult:
     return MCPToolResult(
         content=(*result.content, MCPContentItem(type=ContentType.TEXT, text=text)),

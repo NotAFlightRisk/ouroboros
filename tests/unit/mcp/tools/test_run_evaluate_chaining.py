@@ -213,7 +213,7 @@ class _FailedExecuteHandler(_SuccessfulExecuteHandler):
                         text="execution failed: AC 2 did not produce output.json",
                     ),
                 ),
-                is_error=False,
+                is_error=True,
                 meta=meta,
             )
         )
@@ -352,7 +352,9 @@ async def test_failed_run_with_artifact_enqueues_chained_evaluate_job(
     assert started.is_ok
     snapshot = await _wait_terminal(job_manager, started.value.meta["job_id"])
 
-    assert snapshot.status == JobStatus.COMPLETED
+    # The run remains a failed run even though its evidence is evaluable and
+    # the formal evaluator was successfully enqueued.
+    assert snapshot.status == JobStatus.FAILED
     assert snapshot.result_meta["success"] is False
     assert snapshot.result_meta["chained_evaluate_job_id"] == "job_eval_failed_run"
     assert constructor_kwargs[0]["deadline_seconds"] == 1800.0

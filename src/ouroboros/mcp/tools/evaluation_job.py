@@ -57,6 +57,7 @@ def snapshot_auto_evolve_policy(
     """Freeze effect-bearing evaluation policy before durable job handoff."""
 
     snapshotted = dict(arguments)
+    snapshotted["auto_evolve"] = enabled
     if not enabled:
         return snapshotted
     raw_budget = snapshotted.get("_auto_evolve_max_generations")

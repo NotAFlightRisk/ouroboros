@@ -44,11 +44,12 @@ execution:
   auto_evolve_max_generations: 3
 ```
 
-`auto_evolve` is also a per-call override. The automatic generation budget is
-clamped to 1..10, snapshotted when evaluation is enqueued, and bound to the
-lineage through a durable policy claim before the Ralph successor starts. The
-successor receipt records both `job_id` and the authoritative budget, so later
-configuration changes cannot rewrite replay metadata. Auto pipeline run
+`auto_evolve` is also a per-call override. Its resolved boolean and the automatic
+generation budget are snapshotted when evaluation is enqueued. The budget is
+clamped to 1..10 and bound to the lineage through a durable policy claim before
+the Ralph successor starts. The successor receipt records both `job_id` and the
+authoritative budget, so later configuration changes cannot rewrite replay
+behavior or metadata. Auto pipeline run
 dispatches explicitly set `auto_evolve: false` because Auto owns a separate
 Ralph lineage.
 

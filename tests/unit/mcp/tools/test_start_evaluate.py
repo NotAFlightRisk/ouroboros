@@ -112,6 +112,7 @@ class TestDefinition:
             request = launch.await_args.kwargs["request"]
             assert "seed_handoff_id" not in request.arguments
             assert request.arguments["seed_content"].startswith("goal: parent only")
+            assert request.arguments["auto_evolve"] is True
             assert request.arguments["_auto_evolve_max_generations"] >= 1
         finally:
             await store.close()

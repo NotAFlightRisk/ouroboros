@@ -2639,12 +2639,12 @@ class StartExecuteSeedHandler:
                 run_result,
                 session_id or new_session_id,
             )
-            # A completed execution with a session can be evaluated even when
-            # its ACs failed. Handler-level errors still have no usable artifact.
-            if auto_evaluate_enabled and run_session_id and not run_result.is_error:
-                from ouroboros.mcp.tools.run_evaluate_chain import enqueue_chained_evaluation
+            # Failed AC execution is evaluable; pauses and cancellation are not.
+            from ouroboros.mcp.tools import run_evaluate_chain
 
-                return await enqueue_chained_evaluation(
+            evaluable = run_evaluate_chain.is_evaluable_run_result(run_result)
+            if auto_evaluate_enabled and run_session_id and evaluable:
+                return await run_evaluate_chain.enqueue_chained_evaluation(
                     run_result,
                     session_id=run_session_id,
                     seed_content=seed_content,

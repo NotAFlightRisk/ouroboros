@@ -35,5 +35,7 @@ the preceding verdict remains authoritative if successor chaining fails.
   one Ralph successor; active and terminal successors are reattached by lineage.
 - The resolved Ralph generation budget is snapshotted at evaluation enqueue and
   remains authoritative across configuration changes and successor replay.
+- The resolved automatic-evolution enable/disable decision is part of the
+  detached evaluation request and cannot flip when configuration changes.
 - Approved/unjudged/opted-out evaluations do not enqueue Ralph.
 - Static checks and the bounded target test suites pass.
