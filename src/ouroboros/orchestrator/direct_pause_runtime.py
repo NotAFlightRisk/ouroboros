@@ -10,6 +10,7 @@ from typing import Any
 from ouroboros.core.attempt_budget import AttemptBudgetProgress
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.parallel_executor_models import CoordinatorQuotaPause
 from ouroboros.orchestrator.route_policy import RouteCandidate
 from ouroboros.orchestrator.session import SessionRepository
 
@@ -50,6 +51,7 @@ class RecoverableFailurePause:
     resume_hint: str
     pause_seconds: int | None = None
     resume_after: datetime | None = None
+    coordinator_owner: CoordinatorQuotaPause | None = None
 
 
 @dataclass(frozen=True, slots=True)
