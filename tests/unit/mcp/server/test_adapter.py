@@ -548,6 +548,48 @@ Parallel Execution Verification Report
         assert summary.score == 0.0
         assert summary.run_verdict == "FAIL"
 
+    def test_t1_identifier_component_cannot_publish_a_formal_pass(self, tmp_path: Any) -> None:
+        """An exact criterion key cannot bind inside an unrelated snake identifier."""
+        ac_text = "MUST set MAX_RETRIES to 5"
+        (tmp_path / "config.py").write_text("NOT_MAX_RETRIES = 5\n")
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"NOT_MAX_RETRIES\s*=\s*",
+            expected_value="5",
+            file_hint="*.py",
+            evidence_targets=("MAX_RETRIES",),
+            input_binding_required=True,
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert verification.reports[0].verified_pass is False
+        assert summary.final_approved is False
+        assert summary.ac_results[0].passed is False
+        assert "criterion-bound" in summary.ac_results[0].evidence
+        assert summary.run_verdict == "FAIL"
+
     def test_bound_zero_width_evidence_keeps_auditable_formal_provenance(
         self, tmp_path: Any
     ) -> None:
