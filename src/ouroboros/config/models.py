@@ -228,8 +228,8 @@ class ExecutionConfig(BaseModel, frozen=True):
         max_iterations_per_ac: Maximum iterations per acceptance criteria
         retrospective_interval: Iterations between retrospectives
         tui_autolaunch: Whether `ooo run` should open the TUI without prompting
-        auto_evaluate: When true, a successful `execute_seed` run automatically
-            enqueues formal evaluation as a background job.
+        auto_evaluate: When true, an evaluable terminal `execute_seed` run
+            automatically enqueues formal evaluation as a background job.
         auto_evolve: When true, a rejected formal evaluation automatically
             continues through a bounded Ralph evolution loop.
         auto_evolve_max_generations: Maximum Ralph generations for that chain.

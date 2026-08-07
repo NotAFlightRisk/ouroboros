@@ -313,15 +313,19 @@ class TestEvaluateHandlerSubagentDispatch:
         result = await handler.handle(
             {
                 "session_id": "sess-hidden",
-                "artifact": "partial artifact",
+                "artifact": "partial artifact HIDDEN_SENTINEL",
                 "seed_content": (
                     "goal: Judge the artifact\n"
                     "acceptance_criteria:\n"
-                    "  - description: Produce output.json\n"
-                    "    artifacts: [output.json]\n"
+                    "  - description: Produce output.json without HIDDEN_SENTINEL\n"
+                    "    expected_artifacts: [output.json]\n"
                     "    verify_command: python secret_check.py --token TOP_SECRET\n"
-                    "    output_assertion:\n"
-                    "      contains: HIDDEN_SENTINEL\n"
+                    "    output_assertion: HIDDEN_SENTINEL\n"
+                    "ontology_schema:\n"
+                    "  name: HiddenContractArtifact\n"
+                    "  description: Artifact with parent-owned verification\n"
+                    "metadata:\n"
+                    "  ambiguity_score: 0.0\n"
                 ),
             }
         )

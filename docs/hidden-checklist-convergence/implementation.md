@@ -83,6 +83,11 @@ whether it creates evaluation or Ralph successors by reading newer config.
   handle to resolve. If evaluation itself is delegated, the parent derives its
   checklist from the raw Seed but passes only the same worker-safe projection.
   That projection removes verifier keys and redacts every raw, quoted, or
-  escaped occurrence of their values elsewhere in the Seed using the same
-  longest-first contract redactor as retry hints. Raw verifier material remains
-  absent from plugin-worker prompts and worker-queryable events.
+  escaped occurrence of their values across the final worker prompt, context,
+  artifacts, and separately rendered checklist text using the same longest-first
+  contract redactor as retry hints. Raw verifier material remains absent from
+  plugin-worker prompts and worker-queryable events.
+
+- Run-to-evaluation arguments retain the source execution completion status.
+  A failed-but-evaluable run can be formally judged and evolved without being
+  rewritten as a successfully completed Generation 1 during durable replay.

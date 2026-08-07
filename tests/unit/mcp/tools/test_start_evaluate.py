@@ -298,7 +298,7 @@ class TestPluginModeDispatch:
             "  - Never print python secret_check.py --token TOP_SECRET\n"
             "  - Never print HIDDEN_SENTINEL\n"
             "acceptance_criteria:\n"
-            "  - description: Produce output.json\n"
+            "  - description: Produce output.json without HIDDEN_SENTINEL\n"
             "    expected_artifacts: [output.json]\n"
             "    verify_command: python secret_check.py --token TOP_SECRET\n"
             "    output_assertion: HIDDEN_SENTINEL\n"
@@ -339,7 +339,7 @@ class TestPluginModeDispatch:
         result = await handler.handle(
             {
                 "session_id": session_id,
-                "artifact": "partial artifact",
+                "artifact": "partial artifact HIDDEN_SENTINEL",
                 "seed_handoff_id": handoff_id,
                 "auto_evolve": False,
             }

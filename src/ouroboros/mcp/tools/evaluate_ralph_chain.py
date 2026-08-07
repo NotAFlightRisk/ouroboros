@@ -105,7 +105,12 @@ def ac_results_from_checklist(seed: Seed, checklist: object) -> tuple[ACResult, 
     return tuple(results)
 
 
-def evaluation_summary_from_eval_meta(seed: Seed, meta: Mapping[str, Any]) -> EvaluationSummary:
+def evaluation_summary_from_eval_meta(
+    seed: Seed,
+    meta: Mapping[str, Any],
+    *,
+    execution_completion_status: object = "completed",
+) -> EvaluationSummary:
     """Build the generation-1 evaluation snapshot consumed by focused evolve."""
 
     approved = meta.get("final_approved") is True
@@ -127,13 +132,19 @@ def evaluation_summary_from_eval_meta(seed: Seed, meta: Mapping[str, Any]) -> Ev
         and 1 <= raw_highest_stage <= 3
         else 1
     )
+    source_status = (
+        execution_completion_status
+        if isinstance(execution_completion_status, str)
+        and execution_completion_status in {"completed", "failed"}
+        else "completed"
+    )
     return EvaluationSummary(
         final_approved=approved,
         highest_stage_passed=highest_stage,
         score=score,
         failure_reason=failure_reason,
         ac_results=ac_results_from_checklist(seed, meta.get("checklist")),
-        execution_completion_status="completed",
+        execution_completion_status=source_status,
         approval_status="approved" if approved else "rejected",
     )
 
@@ -386,7 +397,11 @@ async def enqueue_chained_ralph(
             event_store,
             lineage_id=lineage_id,
             seed=seed,
-            summary=evaluation_summary_from_eval_meta(seed, evaluation_result.meta),
+            summary=evaluation_summary_from_eval_meta(
+                seed,
+                evaluation_result.meta,
+                execution_completion_status=arguments.get("_source_execution_status"),
+            ),
         )
         ralph_receipt = await _claim_or_start_chained_ralph(
             lineage_id=lineage_id,

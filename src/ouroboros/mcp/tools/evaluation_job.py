@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ from ouroboros.config import get_auto_evolve_max_generations
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.seed import Seed, ac_text
 from ouroboros.mcp.tools.evaluate_ralph_chain import enqueue_chained_ralph
-from ouroboros.mcp.tools.seed_handoff import render_worker_safe_seed
+from ouroboros.mcp.tools.seed_handoff import project_worker_safe_seed
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     build_evaluate_subagent,
@@ -26,10 +27,28 @@ from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 log = structlog.get_logger(__name__)
 
 
-def worker_safe_evaluation_seed(seed_content: object) -> str | None:
-    """Project parent-owned Seed state for an evaluation worker."""
+@dataclass(frozen=True, slots=True)
+class WorkerSafeEvaluationInputs:
+    seed_content: str | None
+    acceptance_criterion: str | None
+    artifact: str
 
-    return render_worker_safe_seed(seed_content) if isinstance(seed_content, str) else None
+
+def worker_safe_evaluation_inputs(
+    seed_content: object,
+    acceptance_criterion: str | None,
+    artifact: str,
+) -> WorkerSafeEvaluationInputs:
+    """Project every parent-owned evaluation field crossing a worker boundary."""
+
+    if not isinstance(seed_content, str):
+        return WorkerSafeEvaluationInputs(None, acceptance_criterion, artifact)
+    projection = project_worker_safe_seed(seed_content)
+    return WorkerSafeEvaluationInputs(
+        projection.seed_content,
+        projection.redact(acceptance_criterion),
+        projection.redact(artifact) or "[REDACTED ARTIFACT]",
+    )
 
 
 def restore_seed_handoff(
@@ -138,13 +157,16 @@ async def dispatch_plugin_evaluation(
         if criteria
         else None
     )
+    worker_inputs = worker_safe_evaluation_inputs(
+        arguments.get("seed_content"), rendered_ac, artifact
+    )
     working_dir = await resolve_working_dir(arguments.get("working_dir"), seed)
     payload = build_evaluate_subagent(
         session_id=session_id,
-        artifact=artifact,
+        artifact=worker_inputs.artifact,
         artifact_type=arguments.get("artifact_type", "code"),
-        seed_content=worker_safe_evaluation_seed(arguments.get("seed_content")),
-        acceptance_criterion=rendered_ac,
+        seed_content=worker_inputs.seed_content,
+        acceptance_criterion=worker_inputs.acceptance_criterion,
         working_dir=str(working_dir),
         trigger_consensus=arguments.get("trigger_consensus", False),
     )

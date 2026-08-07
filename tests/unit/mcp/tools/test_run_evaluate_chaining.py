@@ -388,7 +388,80 @@ async def test_failed_run_with_artifact_enqueues_chained_evaluate_job(
         "output.json exists",
         "output.json is valid",
     ]
+    assert evaluate_calls[0]["_source_execution_status"] == "failed"
     assert "execution failed: AC 2 did not produce output.json" in evaluate_calls[0]["artifact"]
+
+
+async def test_failed_run_rejection_persists_failed_gen1_status(
+    event_store,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(execution_handlers, "get_auto_evaluate_enabled", lambda: True)
+    monkeypatch.setattr(evaluation_handlers, "get_auto_evolve_enabled", lambda: True)
+
+    class RejectedEvaluateHandler:
+        async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, Any]:
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="REJECTED"),),
+                    meta={
+                        "session_id": arguments["session_id"],
+                        "final_approved": False,
+                        "highest_stage": 2,
+                        "pass_rate": 0.0,
+                        "run_feedback": ["failed execution remains incomplete"],
+                        "checklist": [
+                            {
+                                "ac_text": "output.json exists",
+                                "passed": False,
+                                "failure_reason": "not found",
+                            }
+                        ],
+                    },
+                )
+            )
+
+    class FakeStartRalphHandler:
+        async def handle(self, _arguments: dict[str, Any]) -> Result[MCPToolResult, Any]:
+            return Result.ok(MCPToolResult(meta={"job_id": "job_failed_run_ralph"}))
+
+    manager = JobManager(event_store)
+    start_evaluate = StartEvaluateHandler(
+        evaluate_handler=RejectedEvaluateHandler(),  # type: ignore[arg-type]
+        event_store=event_store,
+        job_manager=manager,
+        start_ralph_handler=FakeStartRalphHandler(),  # type: ignore[arg-type]
+    )
+    handler = StartExecuteSeedHandler(
+        execute_handler=_FailedExecuteHandler(),  # type: ignore[arg-type]
+        event_store=event_store,
+        job_manager=manager,
+        start_evaluate_handler=start_evaluate,
+    )
+    seed_content = (
+        "goal: Preserve failed output\n"
+        "acceptance_criteria:\n"
+        "  - output.json exists\n"
+        "ontology_schema:\n"
+        "  name: Output\n"
+        "  description: Output domain\n"
+        "metadata:\n"
+        "  seed_id: seed-failed-gen1\n"
+        "  ambiguity_score: 0.1\n"
+    )
+
+    started = await handler.handle({"seed_content": seed_content, "cwd": str(tmp_path)})
+    run_snapshot = await _wait_terminal(manager, started.value.meta["job_id"])
+    evaluate_snapshot = await _wait_terminal(
+        manager, run_snapshot.result_meta["chained_evaluate_job_id"]
+    )
+
+    assert run_snapshot.status == JobStatus.FAILED
+    lineage_id = evaluate_snapshot.result_meta["chained_ralph_lineage_id"]
+    events = await event_store.replay_lineage(lineage_id)
+    gen1 = next(event for event in events if event.type == "lineage.generation.completed")
+    assert gen1.data["evaluation_summary"]["execution_completion_status"] == "failed"
 
 
 async def test_run_job_stranded_without_terminal_event_still_terminalizes(
@@ -660,7 +733,7 @@ async def test_evaluate_enqueue_failure_keeps_run_completed(
     assert snapshot.result_meta["evaluation_error"] == "enqueue boom"
     assert snapshot.result_meta["next_step"].startswith("ooo evaluate orch_")
     assert "chained_evaluate_job_id" not in snapshot.result_meta
-    assert "run result remains successful" in (snapshot.result_text or "")
+    assert "run verdict remains unchanged" in (snapshot.result_text or "")
 
 
 async def test_start_evaluate_timeout_writes_terminal_event(

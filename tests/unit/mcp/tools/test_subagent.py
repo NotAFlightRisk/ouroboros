@@ -1032,6 +1032,38 @@ acceptance_criteria:
         assert "Task pane" in payload.prompt
         assert "poll the returned job" not in payload.prompt
 
+    def test_hidden_command_is_redacted_from_detected_project_commands(self, tmp_path) -> None:
+        command = "uv run pytest --token TOP_SECRET"
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "fixture"\nversion = "0.0.1"\ndependencies = ["pytest"]\n',
+            encoding="utf-8",
+        )
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "mechanical.toml").write_text(f'test = "{command}"\n', encoding="utf-8")
+        seed = (
+            "goal: Build safely\n"
+            "acceptance_criteria:\n"
+            "  - description: Produce output.json\n"
+            f"    verify_command: {command}\n"
+            "ontology_schema:\n"
+            "  name: Artifact\n"
+            "  description: Safe artifact\n"
+            "metadata:\n"
+            "  ambiguity_score: 0.0\n"
+        )
+
+        payload = build_execute_subagent(
+            seed_content=seed,
+            session_id="sess-project-command",
+            cwd=str(tmp_path),
+        )
+
+        visible = payload.prompt + str(payload.context)
+        assert "Project verify commands" in visible
+        assert "--token" not in visible
+        assert "TOP_SECRET" not in visible
+
 
 # ---------------------------------------------------------------------------
 # Tool-specific builders: PM Interview

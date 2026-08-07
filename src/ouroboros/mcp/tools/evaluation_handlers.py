@@ -593,7 +593,6 @@ class EvaluateHandler:
 
         working_dir = await _resolve_evaluate_working_dir(arguments.get("working_dir"), seed)
 
-        # --- Subagent dispatch: gate on runtime + opencode_mode ---
         if len(acceptance_criteria) > 1:
             ac_for_payload: str | None = "\n".join(
                 f"{i + 1}. {ac}" for i, ac in enumerate(acceptance_criteria)
@@ -602,14 +601,15 @@ class EvaluateHandler:
             ac_for_payload = acceptance_criteria[0]
         else:
             ac_for_payload = None
-        from ouroboros.mcp.tools.evaluation_job import worker_safe_evaluation_seed
+        from ouroboros.mcp.tools.evaluation_job import worker_safe_evaluation_inputs
 
+        worker_inputs = worker_safe_evaluation_inputs(seed_content, ac_for_payload, artifact)
         payload = build_evaluate_subagent(
             session_id=session_id,
-            artifact=artifact,
+            artifact=worker_inputs.artifact,
             artifact_type=artifact_type,
-            seed_content=worker_safe_evaluation_seed(seed_content),
-            acceptance_criterion=ac_for_payload,
+            seed_content=worker_inputs.seed_content,
+            acceptance_criterion=worker_inputs.acceptance_criterion,
             working_dir=str(working_dir),
             trigger_consensus=trigger_consensus,
         )

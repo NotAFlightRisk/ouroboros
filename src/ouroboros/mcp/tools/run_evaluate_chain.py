@@ -70,7 +70,7 @@ def _failure(result: MCPToolResult, session_id: str | None, error: str) -> MCPTo
     )
     return _append_text(
         result,
-        "\nFormal Evaluation: enqueue failed; run result remains successful.\n"
+        "\nFormal Evaluation: enqueue failed; run verdict remains unchanged.\n"
         f"Evaluation Error: {error[:1000]}\nNext: {_retry_step(session_id)}\n",
         meta,
     )
@@ -91,6 +91,7 @@ def _evaluation_arguments(
         "seed_content": seed_content,
         "working_dir": str(working_dir),
         "auto_evolve": auto_evolve,
+        "_source_execution_status": result.meta.get("status"),
     }
     try:
         parsed = yaml.safe_load(seed_content)

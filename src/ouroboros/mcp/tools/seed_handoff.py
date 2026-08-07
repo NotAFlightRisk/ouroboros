@@ -15,6 +15,27 @@ from ouroboros.orchestrator.contract_redaction import redact_hidden_contract_val
 _HIDDEN_WORKER_KEYS = frozenset({"verify_command", "output_assertion"})
 
 
+@dataclass(frozen=True, slots=True)
+class WorkerSafeSeedProjection:
+    """One Seed projection and the values hidden from every sibling field."""
+
+    seed_content: str
+    hidden_values: tuple[str, ...] = ()
+    valid_mapping: bool = True
+
+    def redact(self, text: str | None) -> str | None:
+        if not self.valid_mapping:
+            return None
+        return (
+            redact_hidden_contract_values(text, self.hidden_values)
+            if isinstance(text, str)
+            else None
+        )
+
+    def redact_value(self, value: Any) -> Any:
+        return _redact_worker_value(value, self.hidden_values)
+
+
 def _hidden_scalar_values(value: Any) -> tuple[str, ...]:
     if isinstance(value, str):
         return (value,) if value else ()
@@ -59,8 +80,8 @@ def _redact_worker_value(value: Any, hidden_values: tuple[str, ...]) -> Any:
     return value
 
 
-def render_worker_safe_seed(seed_content: str) -> str:
-    """Render a Seed without harness-owned verifier commands/assertions.
+def project_worker_safe_seed(seed_content: str) -> WorkerSafeSeedProjection:
+    """Project a Seed and retain its hidden values for sibling-field redaction.
 
     Malformed input fails closed: the raw text is never forwarded to a worker.
     """
@@ -68,19 +89,34 @@ def render_worker_safe_seed(seed_content: str) -> str:
     try:
         parsed = yaml.safe_load(seed_content)
     except yaml.YAMLError:
-        return "# Seed omitted: invalid YAML; ask the parent to retry with a valid Seed.\n"
+        return WorkerSafeSeedProjection(
+            "# Seed omitted: invalid YAML; ask the parent to retry with a valid Seed.\n",
+            valid_mapping=False,
+        )
     if not isinstance(parsed, Mapping):
-        return "# Seed omitted: expected a YAML mapping.\n"
+        return WorkerSafeSeedProjection(
+            "# Seed omitted: expected a YAML mapping.\n", valid_mapping=False
+        )
     hidden_values: list[str] = []
     projected = _worker_safe_value(parsed, hidden_values)
-    projected = _redact_worker_value(projected, tuple(hidden_values))
+    hidden = tuple(hidden_values)
+    projected = _redact_worker_value(projected, hidden)
     if projected == parsed:
-        return seed_content
-    return yaml.safe_dump(
-        projected,
-        sort_keys=False,
-        allow_unicode=True,
+        return WorkerSafeSeedProjection(seed_content, hidden)
+    return WorkerSafeSeedProjection(
+        yaml.safe_dump(
+            projected,
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        hidden,
     )
+
+
+def render_worker_safe_seed(seed_content: str) -> str:
+    """Render a Seed without harness-owned verifier keys or values."""
+
+    return project_worker_safe_seed(seed_content).seed_content
 
 
 def plugin_evaluation_instruction(

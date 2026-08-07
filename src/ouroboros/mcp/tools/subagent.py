@@ -1744,7 +1744,7 @@ def build_execute_subagent(
         qa_verify = "Run QA evaluation after execution completes and confirm it passes."
     from ouroboros.mcp.tools.seed_handoff import (
         plugin_evaluation_instruction,
-        render_worker_safe_seed,
+        project_worker_safe_seed,
     )
 
     formal_evaluation_verify = plugin_evaluation_instruction(
@@ -1752,7 +1752,8 @@ def build_execute_subagent(
         auto_evolve=auto_evolve,
         seed_handoff_id=seed_handoff_id,
     )
-    worker_seed_content = render_worker_safe_seed(seed_content)
+    seed_projection = project_worker_safe_seed(seed_content)
+    worker_seed_content = seed_projection.seed_content
 
     verify_lines: list[str] = [
         "Every acceptance criterion in the seed is satisfied.",
@@ -1760,10 +1761,7 @@ def build_execute_subagent(
         formal_evaluation_verify,
     ]
     if cwd:
-        # Deterministic project verify commands (parsed from
-        # .ouroboros/mechanical.toml) so the worker runs the project's real
-        # test/lint checks instead of guessing. Best-effort — omitted when
-        # the project has no detected commands.
+        # Best-effort project commands; omitted when none are detected.
         from pathlib import Path
 
         from ouroboros.orchestrator.context_pack import detected_verify_commands
@@ -1813,6 +1811,8 @@ def build_execute_subagent(
         "frugality_assurance_explicit": frugality_assurance_explicit,
         "max_parallel_workers": max_parallel_workers,
     }
+    prompt = seed_projection.redact(prompt) or "[REDACTED EXECUTION PROMPT]"
+    context = seed_projection.redact_value(context)
 
     return build_subagent_payload(
         tool_name="ouroboros_execute_seed",
