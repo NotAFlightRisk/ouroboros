@@ -138,18 +138,20 @@ a known-non-atomic unit to run as atomic must **record that compromise** as an e
 
 ### 3. Discipline on the existing attempt-then-bounce loop
 
-- **Bounded attempts** at seed granularity: the common stream owner cancels at
+- **Bounded atomic provider attempts**: the common stream owner cancels at
   the first observed turn beyond `execution.max_iterations_per_ac` tool-bearing
   agent turns (default 10), admits no later turn, and enforces
   `execution.ac_attempt_timeout_seconds` total wall-clock seconds (default 900),
   independent of activity. Because runtimes differ on whether a tool request is
   reported before or after its effect, this does not claim universal pre-effect
-  blocking of the boundary turn. Exhaustion bypasses same-AC retry in favor of
-  bounce classification or terminal failure. Legacy whole-Seed direct/resume
-  calls scale both limits by root AC count and terminally fail without a recovery
-  or route successor when exhausted.
-- **Bounce-cause classification** when evaluation rejects: *too-big* vs. *bad-spec*
-  vs. *environment* — only *too-big* should drive a decomposition.
+  blocking of the boundary turn. Exhaustion is terminal: it bypasses same-AC
+  retry, verification recovery, bounce classification, alternate runtimes, and
+  route successors. Legacy whole-Seed direct/resume calls scale both limits by
+  root AC count and fail closed if the scaled timeout exceeds the exact durable
+  microsecond boundary.
+- **Bounce-cause classification** when an atomic execution or verifier result
+  fails: *too-big* vs. *bad-spec* vs. *environment* — only *too-big* should drive
+  a decomposition.
 - **Bounce-trace as decomposition input**: split from *what was actually attempted
   and what remains*, not from the AC text. This beats splitting from a text-surface
   guess.

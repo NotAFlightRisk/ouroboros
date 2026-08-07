@@ -127,9 +127,11 @@ tool-bearing agent turn was observed and no later turn was admitted;
 `budget_kind=wall_clock` means
 the fixed attempt deadline expired even though progress may still have been
 streaming. The event records the configured `limit`, measured `observed` value,
-and `action=bounce_or_fail`; it is evidence for trace-informed recovery, never
-an acceptance verdict. Direct calls use `ac_index=null`, `scope=direct_seed`,
-and record `root_ac_count` plus `call_site`.
+and `action=fail_no_successor`. Exhaustion is terminal for that bounded
+execution scope: it cannot authorize retry, verification recovery, bounce
+decomposition, an alternate runtime, or a route successor. The event is audit
+evidence, never an acceptance verdict. Direct calls use `ac_index=null`,
+`scope=direct_seed`, and record `root_ac_count` plus `call_site`.
 
 ### mcp.job.cancelled
 
