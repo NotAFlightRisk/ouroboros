@@ -602,11 +602,13 @@ class EvaluateHandler:
             ac_for_payload = acceptance_criteria[0]
         else:
             ac_for_payload = None
+        from ouroboros.mcp.tools.evaluation_job import worker_safe_evaluation_seed
+
         payload = build_evaluate_subagent(
             session_id=session_id,
             artifact=artifact,
             artifact_type=artifact_type,
-            seed_content=seed_content,
+            seed_content=worker_safe_evaluation_seed(seed_content),
             acceptance_criterion=ac_for_payload,
             working_dir=str(working_dir),
             trigger_consensus=trigger_consensus,

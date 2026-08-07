@@ -287,6 +287,51 @@ class TestPluginModeDispatch:
         assert "Tasks can be listed" in forwarded
 
     @pytest.mark.asyncio
+    async def test_restored_handoff_stays_hidden_in_delegated_evaluation(self, event_store) -> None:
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        registry = SeedHandoffRegistry()
+        session_id = "orch_hidden_eval"
+        handoff_id = registry.register(
+            session_id=session_id,
+            seed_content=(
+                "goal: Judge the artifact\n"
+                "acceptance_criteria:\n"
+                "  - description: Produce output.json\n"
+                "    artifacts: [output.json]\n"
+                "    verify_command: python secret_check.py --token TOP_SECRET\n"
+                "    output_assertion:\n"
+                "      contains: HIDDEN_SENTINEL\n"
+            ),
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=MagicMock(),
+            event_store=event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            seed_handoff_registry=registry,
+        )
+
+        result = await handler.handle(
+            {
+                "session_id": session_id,
+                "artifact": "partial artifact",
+                "seed_handoff_id": handoff_id,
+                "auto_evolve": False,
+            }
+        )
+
+        assert result.is_ok
+        payload = result.value.meta["_subagent"]
+        visible = payload["prompt"] + str(payload["context"])
+        assert "Produce output.json" in visible
+        assert "output.json" in visible
+        assert "TOP_SECRET" not in visible
+        assert "HIDDEN_SENTINEL" not in visible
+        assert "verify_command" not in visible
+        assert "output_assertion" not in visible
+
+    @pytest.mark.asyncio
     async def test_evaluate_handler_seed_acceptance_criteria_preserved_in_plugin_payload(
         self, event_store
     ) -> None:

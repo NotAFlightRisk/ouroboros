@@ -39,8 +39,11 @@ def render_worker_safe_seed(seed_content: str) -> str:
         return "# Seed omitted: invalid YAML; ask the parent to retry with a valid Seed.\n"
     if not isinstance(parsed, Mapping):
         return "# Seed omitted: expected a YAML mapping.\n"
+    projected = _worker_safe_value(parsed)
+    if projected == parsed:
+        return seed_content
     return yaml.safe_dump(
-        _worker_safe_value(parsed),
+        projected,
         sort_keys=False,
         allow_unicode=True,
     )

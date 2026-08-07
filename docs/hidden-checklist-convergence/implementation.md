@@ -79,5 +79,7 @@ whether it creates evaluation or Ralph successors by reading newer config.
 - Plugin Seed handoffs are intentionally process-local until redemption. The
   parent consumes the opaque handle, restores the raw Seed into its private
   evaluation request, and gives a detached evaluation owner no process-local
-  handle to resolve. Raw verifier material remains absent from plugin-worker
-  prompts and worker-queryable events.
+  handle to resolve. If evaluation itself is delegated, the parent derives its
+  checklist from the raw Seed but passes only the same worker-safe projection.
+  Raw verifier material remains absent from plugin-worker prompts and
+  worker-queryable events.

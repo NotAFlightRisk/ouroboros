@@ -309,6 +309,33 @@ class TestEvaluateHandlerSubagentDispatch:
         assert ctx["seed_content"] == "goal: test"
         assert ctx["trigger_consensus"] is True
 
+    async def test_plugin_payload_hides_harness_contract(self, handler) -> None:
+        result = await handler.handle(
+            {
+                "session_id": "sess-hidden",
+                "artifact": "partial artifact",
+                "seed_content": (
+                    "goal: Judge the artifact\n"
+                    "acceptance_criteria:\n"
+                    "  - description: Produce output.json\n"
+                    "    artifacts: [output.json]\n"
+                    "    verify_command: python secret_check.py --token TOP_SECRET\n"
+                    "    output_assertion:\n"
+                    "      contains: HIDDEN_SENTINEL\n"
+                ),
+            }
+        )
+
+        assert result.is_ok
+        payload = result.value.meta["_subagent"]
+        visible = payload["prompt"] + str(payload["context"])
+        assert "Produce output.json" in visible
+        assert "output.json" in visible
+        assert "TOP_SECRET" not in visible
+        assert "HIDDEN_SENTINEL" not in visible
+        assert "verify_command" not in visible
+        assert "output_assertion" not in visible
+
 
 # ---------------------------------------------------------------------------
 # ExecuteSeedHandler

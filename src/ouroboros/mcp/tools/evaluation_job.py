@@ -15,6 +15,7 @@ from ouroboros.config import get_auto_evolve_max_generations
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.seed import Seed, ac_text
 from ouroboros.mcp.tools.evaluate_ralph_chain import enqueue_chained_ralph
+from ouroboros.mcp.tools.seed_handoff import render_worker_safe_seed
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     build_evaluate_subagent,
@@ -23,6 +24,12 @@ from ouroboros.mcp.tools.subagent import (
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 
 log = structlog.get_logger(__name__)
+
+
+def worker_safe_evaluation_seed(seed_content: object) -> str | None:
+    """Project parent-owned Seed state for an evaluation worker."""
+
+    return render_worker_safe_seed(seed_content) if isinstance(seed_content, str) else None
 
 
 def restore_seed_handoff(
@@ -136,7 +143,7 @@ async def dispatch_plugin_evaluation(
         session_id=session_id,
         artifact=artifact,
         artifact_type=arguments.get("artifact_type", "code"),
-        seed_content=arguments.get("seed_content"),
+        seed_content=worker_safe_evaluation_seed(arguments.get("seed_content")),
         acceptance_criterion=rendered_ac,
         working_dir=str(working_dir),
         trigger_consensus=arguments.get("trigger_consensus", False),
