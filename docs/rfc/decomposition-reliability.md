@@ -102,10 +102,13 @@ regex patches.
 
 ### Error bias: attempt-then-bounce is already how the live system works
 
-The live system runs ACs at seed granularity and lets **evaluation bounce**
-failures — 115 ACs executed with *zero* pre-execution atomicity judgments. So the
-work is not *choosing* the error bias (it is empirically attempt-then-bounce); it is
-adding **discipline** to the loop that already exists.
+The live system runs ACs without a pre-execution atomicity judgment and lets
+failed atomic execution or verifier results enter **bounce classification** —
+115 ACs executed with *zero* pre-execution atomicity judgments. So the work is
+not *choosing* the error bias (it is empirically attempt-then-bounce); it is
+adding **discipline** to the loop that already exists. Hard attempt-budget
+exhaustion is the exception: it terminates without bounce classification or a
+successor.
 
 ### Lineage
 
@@ -195,8 +198,10 @@ re-grounding is that lesson applied.
    repaired (one retry), or escalated — never silently accepted.
 3. Every forced-atomic compromise appears in the event stream; the live executor's
    split/verdict fields carry **real** inputs (no hardcoded stand-ins).
-4. Evaluation bounces are classified (too-big / bad-spec / environment) and only
-   *too-big* drives a decomposition, seeded from the bounce trace.
+4. Failed atomic execution or verifier results are classified (too-big /
+   bad-spec / environment), and only *too-big* drives a decomposition seeded
+   from the bounce trace. Attempt-budget exhaustion bypasses this classifier and
+   terminates without a successor.
 5. With no LLM available, the fallback records `UNKNOWN` and leaves the failed
    unit untrusted for escalation or human handoff. It never invents children or
    emits a confident keyword verdict; verified fan-out has no heuristic fallback.
