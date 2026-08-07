@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import hashlib
 import json
 from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
+import yaml
+
+from ouroboros.config import get_auto_evolve_max_generations
+from ouroboros.core.errors import ValidationError
 from ouroboros.core.lineage import ACResult, EvaluationSummary
 from ouroboros.core.seed import Seed, ac_text
 from ouroboros.events.lineage import lineage_created, lineage_generation_completed
@@ -114,7 +120,8 @@ def evaluation_summary_from_eval_meta(seed: Seed, meta: Mapping[str, Any]) -> Ev
 def mint_chain_lineage_id(seed_id: str, session_id: str) -> str:
     """Mint one deterministic lineage per Seed and originating run session."""
 
-    return f"ralph-{seed_id}-{session_id[:8]}"
+    identity = f"{seed_id}\0{session_id}".encode()
+    return f"ralph-{seed_id}-{hashlib.sha256(identity).hexdigest()[:16]}"
 
 
 async def seed_gen1_lineage(
@@ -140,6 +147,93 @@ async def seed_gen1_lineage(
         )
     )
     return True
+
+
+async def enqueue_chained_ralph(
+    evaluation_result: MCPToolResult,
+    *,
+    session_id: str,
+    arguments: Mapping[str, Any],
+    event_store: EventStore,
+    job_manager: Any,
+    start_ralph_handler: Any | None,
+) -> MCPToolResult:
+    """Project a rejection and start the configured pollable Ralph successor."""
+
+    seed_content = arguments.get("seed_content")
+    try:
+        seed_data = yaml.safe_load(seed_content) if isinstance(seed_content, str) else None
+        if not isinstance(seed_data, dict):
+            raise ValueError("seed_content is unavailable or not a mapping")
+        seed = Seed.from_dict(seed_data)
+    except (ValueError, yaml.YAMLError, ValidationError, PydanticValidationError) as exc:
+        return append_result_text(
+            evaluation_result,
+            "\nAutomatic Ralph: skipped because the original Seed could not be loaded.\n",
+            meta={
+                **evaluation_result.meta,
+                "chained_ralph_skipped": "seed_unavailable",
+                "chained_ralph_skip_detail": str(exc)[:1000],
+            },
+        )
+
+    lineage_id = mint_chain_lineage_id(seed.metadata.seed_id, session_id)
+    max_generations = get_auto_evolve_max_generations()
+    try:
+        await seed_gen1_lineage(
+            event_store,
+            lineage_id=lineage_id,
+            seed=seed,
+            summary=evaluation_summary_from_eval_meta(seed, evaluation_result.meta),
+        )
+        active = await job_manager.find_active_job_by_lineage(lineage_id, job_type="ralph")
+        if active is not None:
+            ralph_job_id = active.job_id
+        else:
+            if start_ralph_handler is None:
+                raise RuntimeError(
+                    "Automatic Ralph chaining is not configured: "
+                    "StartRalphHandler dependency is missing"
+                )
+            started = await start_ralph_handler.handle(
+                {
+                    "lineage_id": lineage_id,
+                    "execute": True,
+                    "parallel": True,
+                    "skip_qa": False,
+                    "project_dir": arguments.get("working_dir"),
+                    "max_generations": max_generations,
+                }
+            )
+            if started.is_err:
+                raise RuntimeError(started.error.message)
+            ralph_job_id = started.value.meta.get("job_id")
+            if not isinstance(ralph_job_id, str) or not ralph_job_id:
+                raise RuntimeError("StartRalphHandler did not return a pollable Ralph job_id")
+    except Exception as exc:  # noqa: BLE001 - chaining must never flip rejection.
+        return append_result_text(
+            evaluation_result,
+            "\nAutomatic Ralph: enqueue failed; the evaluation verdict is unchanged.\n",
+            meta={
+                **evaluation_result.meta,
+                "chained_ralph_error": str(exc)[:1000],
+                "chained_ralph_lineage_id": lineage_id,
+            },
+        )
+
+    return append_result_text(
+        evaluation_result,
+        (
+            "\nAutomatic Ralph: queued bounded convergence loop\n"
+            f"Ralph Job ID: {ralph_job_id}\nLineage ID: {lineage_id}\n"
+        ),
+        meta={
+            **evaluation_result.meta,
+            "chained_ralph_job_id": ralph_job_id,
+            "chained_ralph_lineage_id": lineage_id,
+            "chained_ralph_max_generations": max_generations,
+        },
+    )
 
 
 def append_result_text(

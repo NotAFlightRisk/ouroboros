@@ -28,9 +28,7 @@ class _FakeSeed:
 async def test_auto_run_starter_disables_nested_auto_evolve(tmp_path) -> None:
     handler = AsyncMock()
     handler.handle = AsyncMock(
-        return_value=Result.ok(
-            MCPToolResult(meta={"job_id": "job_run", "session_id": "orch_run"})
-        )
+        return_value=Result.ok(MCPToolResult(meta={"job_id": "job_run", "session_id": "orch_run"}))
     )
     starter = HandlerRunStarter(handler, cwd=str(tmp_path))
 

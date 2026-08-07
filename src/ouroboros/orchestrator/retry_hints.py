@@ -96,9 +96,7 @@ def build_assertion_safe_retry_hint(
         if outcome.output_tail:
             output_tail = _sanitize_fragment(outcome.output_tail, spec)
             if output_tail:
-                sections.append(
-                    "### Harness verification output (tail)\n" + output_tail
-                )
+                sections.append("### Harness verification output (tail)\n" + output_tail)
 
     facts = _manifest_facts(manifest, spec)
     if facts:

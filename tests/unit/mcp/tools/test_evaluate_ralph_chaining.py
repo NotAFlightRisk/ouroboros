@@ -20,7 +20,7 @@ from ouroboros.evolution.loop_support import planned_evolve_generation
 from ouroboros.evolution.reflect import ReflectOutput
 from ouroboros.evolution.wonder import WonderOutput
 from ouroboros.mcp.job_manager import JobManager, JobStatus
-from ouroboros.mcp.tools import evaluation_handlers
+from ouroboros.mcp.tools import evaluate_ralph_chain, evaluation_handlers
 from ouroboros.mcp.tools.evaluate_ralph_chain import (
     ac_results_from_checklist,
     evaluation_summary_from_eval_meta,
@@ -119,7 +119,7 @@ async def test_rejected_evaluation_seeds_gen1_and_enqueues_ralph(
             return Result.ok(MCPToolResult(meta={"job_id": "job_ralph_chain"}))
 
     monkeypatch.setattr(evaluation_handlers, "get_auto_evolve_enabled", lambda: True)
-    monkeypatch.setattr(evaluation_handlers, "get_auto_evolve_max_generations", lambda: 3)
+    monkeypatch.setattr(evaluate_ralph_chain, "get_auto_evolve_max_generations", lambda: 3)
     manager = JobManager(event_store)
     handler = StartEvaluateHandler(
         evaluate_handler=_StaticEvaluateHandler(_rejected_result()),  # type: ignore[arg-type]
@@ -142,7 +142,7 @@ async def test_rejected_evaluation_seeds_gen1_and_enqueues_ralph(
     assert snapshot.result_meta["final_approved"] is False
     assert snapshot.result_meta["chained_ralph_job_id"] == "job_ralph_chain"
     lineage_id = snapshot.result_meta["chained_ralph_lineage_id"]
-    assert lineage_id == "ralph-seed-chain-orch-cha"
+    assert lineage_id == mint_chain_lineage_id("seed-chain", "orch-chain-1234")
     assert snapshot.result_meta["chained_ralph_max_generations"] == 3
     assert calls == [
         {
@@ -288,7 +288,7 @@ async def test_real_rejection_to_ralph_completes_generation_two(
         )
 
     monkeypatch.setattr(QAHandler, "handle", passing_qa)
-    monkeypatch.setattr(evaluation_handlers, "get_auto_evolve_max_generations", lambda: 2)
+    monkeypatch.setattr(evaluate_ralph_chain, "get_auto_evolve_max_generations", lambda: 2)
 
     chained = await handler._enqueue_chained_ralph(
         _rejected_result(),
@@ -324,19 +324,54 @@ async def test_server_composition_reuses_configured_chain_handlers(
         server = create_ouroboros_server(
             event_store=event_store,
             state_dir=tmp_path / "state",
-            runtime_backend="codex",
+            runtime_backend="opencode",
             llm_backend="claude_code",
+            opencode_mode="plugin",
         )
 
     start_execute = server._tool_handlers["ouroboros_start_execute_seed"]
     start_evaluate = server._tool_handlers["ouroboros_start_evaluate"]
     start_ralph = server._tool_handlers["ouroboros_start_ralph"]
-    evolve_step = server._tool_handlers["ouroboros_evolve_step"]
-
     assert start_execute.start_evaluate_handler is start_evaluate
-    assert start_evaluate.start_ralph_handler is start_ralph
-    assert start_ralph._evolve_handler is evolve_step
-    assert evolve_step.evolutionary_loop is not None
+    assert start_evaluate.start_ralph_handler is not start_ralph
+    assert start_ralph.opencode_mode == "plugin"
+    assert start_evaluate.start_ralph_handler.opencode_mode is None
+    assert start_evaluate.start_ralph_handler._evolve_handler.opencode_mode is None
+    assert start_evaluate.start_ralph_handler._evolve_handler.evolutionary_loop is not None
+
+
+def test_runtime_factory_reuses_configured_parent_owned_convergence_graph() -> None:
+    """Runtime interceptors must not receive the old unconfigured mini graph."""
+    from ouroboros.mcp.tools.definitions import get_ouroboros_tools
+    from ouroboros.mcp.tools.evaluation_handlers import StartEvaluateHandler
+    from ouroboros.mcp.tools.execution_handlers import (
+        ExecuteSeedHandler,
+        StartExecuteSeedHandler,
+    )
+    from ouroboros.mcp.tools.ralph_handlers import StartRalphHandler
+
+    tools = get_ouroboros_tools(
+        runtime_backend="opencode",
+        opencode_mode="plugin",
+        include_auto=False,
+    )
+    start_evaluate = next(tool for tool in tools if isinstance(tool, StartEvaluateHandler))
+    start_execute = next(tool for tool in tools if isinstance(tool, StartExecuteSeedHandler))
+    execute = next(tool for tool in tools if isinstance(tool, ExecuteSeedHandler))
+    public_start_ralph = next(tool for tool in tools if isinstance(tool, StartRalphHandler))
+    parent_start_ralph = start_evaluate.start_ralph_handler
+
+    assert parent_start_ralph is not None
+    assert parent_start_ralph is not public_start_ralph
+    assert public_start_ralph.opencode_mode == "plugin"
+    assert parent_start_ralph.opencode_mode is None
+    assert parent_start_ralph._evolve_handler.opencode_mode is None
+    assert parent_start_ralph._evolve_handler.evolutionary_loop is not None
+    assert start_evaluate._event_store is parent_start_ralph._event_store
+    assert start_evaluate._job_manager is parent_start_ralph._job_manager
+    assert start_execute._event_store is start_evaluate._event_store
+    assert execute.seed_handoff_registry is start_execute.seed_handoff_registry
+    assert execute.seed_handoff_registry is start_evaluate.seed_handoff_registry
 
 
 @pytest.mark.parametrize("meta", [{"final_approved": True}, {}])
@@ -389,7 +424,8 @@ async def test_auto_evolve_opt_out_matrix(
     started = await handler.handle(arguments)
     snapshot = await _wait_terminal(manager, started.value.meta["job_id"])
     assert "chained_ralph_job_id" not in snapshot.result_meta
-    assert await event_store.replay_lineage("ralph-seed-chain-orch-opt") == []
+    lineage_id = mint_chain_lineage_id("seed-chain", "orch-optout")
+    assert await event_store.replay_lineage(lineage_id) == []
 
 
 async def test_seed_unavailable_skips_chain_fail_open(event_store: EventStore) -> None:
@@ -431,7 +467,8 @@ async def test_enqueue_error_keeps_rejection_and_gen1_snapshot(
 
     assert result.meta["final_approved"] is False
     assert result.meta["chained_ralph_error"] == "ralph enqueue exploded"
-    assert len(await event_store.replay_lineage("ralph-seed-chain-orch-err")) == 2
+    lineage_id = mint_chain_lineage_id("seed-chain", "orch-error")
+    assert len(await event_store.replay_lineage(lineage_id)) == 2
 
 
 async def test_gen1_seed_is_idempotent_and_active_job_is_reused(
@@ -456,7 +493,8 @@ async def test_gen1_seed_is_idempotent_and_active_job_is_reused(
 
     assert first.meta["chained_ralph_job_id"] == "job_existing"
     assert second.meta["chained_ralph_job_id"] == "job_existing"
-    events = await event_store.replay_lineage("ralph-seed-chain-orch-reu")
+    lineage_id = mint_chain_lineage_id("seed-chain", "orch-reuse")
+    events = await event_store.replay_lineage(lineage_id)
     assert [event.type for event in events] == [
         "lineage.created",
         "lineage.generation.completed",
@@ -471,7 +509,9 @@ def test_checklist_conversion_preserves_seed_coverage_and_not_evaluated_shape() 
     seed = _seed()
     checklist = _rejected_result().meta["checklist"][:1]
     results = ac_results_from_checklist(seed, checklist)
-    summary = evaluation_summary_from_eval_meta(seed, {"final_approved": False, "checklist": checklist})
+    summary = evaluation_summary_from_eval_meta(
+        seed, {"final_approved": False, "checklist": checklist}
+    )
 
     assert len(results) == 2
     assert results[1].ac_content == "failing AC"
@@ -488,4 +528,14 @@ def test_single_ac_without_checklist_degrades_to_empty_ac_results() -> None:
         metadata=SeedMetadata(seed_id="single", ambiguity_score=0.1),
     )
     assert ac_results_from_checklist(seed, None) == ()
-    assert mint_chain_lineage_id("single", "orch-123456") == "ralph-single-orch-123"
+    lineage_id = mint_chain_lineage_id("single", "orch-123456")
+    assert lineage_id.startswith("ralph-single-")
+    assert len(lineage_id.rsplit("-", 1)[-1]) == 16
+
+
+def test_lineage_identity_uses_the_complete_session_id() -> None:
+    first = mint_chain_lineage_id("same-seed", "orch_abc111111111")
+    second = mint_chain_lineage_id("same-seed", "orch_abc222222222")
+
+    assert first != second
+    assert first == mint_chain_lineage_id("same-seed", "orch_abc111111111")

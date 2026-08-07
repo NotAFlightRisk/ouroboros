@@ -2799,8 +2799,10 @@ class TestRunGenerationFailures:
         events = await store.replay_lineage(f"lin_eval_{failure_mode}")
         completed = [event for event in events if event.type == "lineage.generation.completed"]
         assert completed[-1].data["evaluation_summary"]["final_approved"] is False
-        assert completed[-1].data["evaluation_summary"]["failure_reason"].startswith(
-            "evaluation errored:"
+        assert (
+            completed[-1]
+            .data["evaluation_summary"]["failure_reason"]
+            .startswith("evaluation errored:")
         )
 
     @pytest.mark.asyncio

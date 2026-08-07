@@ -992,6 +992,32 @@ class TestBuildExecuteSubagent:
         assert "ooo evaluate <session_id>" in p.prompt
         assert "ouroboros_start_evaluate" not in p.prompt
 
+    def test_harness_owned_seed_fields_are_removed_recursively(self) -> None:
+        seed = """goal: Build safely
+acceptance_criteria:
+  - description: Keep this obligation
+    artifacts: [result.json]
+    verifier:
+      verify_command: run SECRET_COMMAND
+      output_assertion: SECRET_ASSERTION
+"""
+        payload = build_execute_subagent(
+            seed_content=seed,
+            session_id="sess-hidden",
+            auto_evolve=False,
+            seed_handoff_id="seed_handoff_opaque",
+        )
+
+        visible = payload.prompt + str(payload.context)
+        assert "SECRET_COMMAND" not in visible
+        assert "SECRET_ASSERTION" not in visible
+        assert "verify_command" not in visible
+        assert "output_assertion" not in visible
+        assert "Keep this obligation" in visible
+        assert "result.json" in visible
+        assert payload.context["auto_evolve"] is False
+        assert payload.context["seed_handoff_id"] == "seed_handoff_opaque"
+
 
 # ---------------------------------------------------------------------------
 # Tool-specific builders: PM Interview

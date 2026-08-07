@@ -64,7 +64,8 @@ class TestDefinition:
         h = StartEvaluateHandler()
         inner = EvaluateHandler()
         assert {p.name for p in h.definition.parameters} == {
-            p.name for p in inner.definition.parameters
+            *(p.name for p in inner.definition.parameters),
+            "seed_handoff_id",
         }
 
 

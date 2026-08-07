@@ -23,6 +23,8 @@ start_execute_seed
 | Evaluation/Ralph bridge | Convert checklist verdicts and seed Gen1 idempotently | `src/ouroboros/mcp/tools/evaluate_ralph_chain.py` |
 | Evaluation terminal hook | Enqueue or reconnect Ralph after explicit rejection | `src/ouroboros/mcp/tools/evaluation_handlers.py` |
 | Execution chain | Evaluate completed success/failure runs | `src/ouroboros/mcp/tools/execution_handlers.py` |
+| Plugin Seed vault | Keep the raw Seed parent-owned and give workers only an opaque, session-bound handle | `src/ouroboros/mcp/tools/seed_handoff.py` |
+| Runtime composition adapter | Reuse the production handler graph for builtin runtime interception | `src/ouroboros/mcp/tools/runtime_tool_composition.py` |
 
 ## Key Decisions
 
@@ -33,3 +35,4 @@ start_execute_seed
 | Ralph owns convergence | Avoids duplicating loop termination, focus, and budget logic. |
 | Deterministic lineage ID | Evaluation retries reconnect to the same Seed/run lineage. |
 | Single-AC checklist absence yields no fabricated AC result | Existing full-graph focus fallback remains honest and safe. |
+| Raw Seed handoff is process-local | Persisting hidden verifier material in worker-queryable events would defeat the boundary. A server restart invalidates the opaque handle and evaluation fails closed instead of exposing the Seed. |

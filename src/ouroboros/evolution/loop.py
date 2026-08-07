@@ -1938,40 +1938,19 @@ class EvolutionaryLoop:
                 extra={"generation": generation_number},
             )
         elif execute and self.evaluator:
-            def _evaluation_error_summary(failure_text: str) -> EvaluationSummary:
-                return EvaluationSummary(
-                    final_approved=False,
-                    highest_stage_passed=1,
-                    score=0.0,
-                    failure_reason=f"evaluation errored: {failure_text}",
-                    approval_status="rejected",
-                    execution_completion_status="completed",
-                )
-
             try:
+                from ouroboros.evolution.evaluation_result import normalize_evaluator_result
+
                 eval_result = await focus.call(self.evaluator, current_seed, execution_output)
-                if hasattr(eval_result, "is_ok") and eval_result.is_ok:
-                    evaluation_summary = eval_result.value
-                elif hasattr(eval_result, "is_err") and eval_result.is_err:
-                    error = getattr(eval_result, "error", "unknown evaluation error")
-                    rendered = (
-                        error.format_details()
-                        if hasattr(error, "format_details")
-                        else str(error)
-                    )
-                    evaluation_summary = _evaluation_error_summary(rendered)
-                elif isinstance(eval_result, EvaluationSummary):
-                    evaluation_summary = eval_result
-                else:
-                    evaluation_summary = _evaluation_error_summary(
-                        f"unexpected evaluator result type: {type(eval_result).__name__}"
-                    )
+                evaluation_summary = normalize_evaluator_result(eval_result)
             except Exception as e:
                 logger.warning(
                     "evolution.evaluation.failed",
                     extra={"error": str(e), "generation": generation_number},
                 )
-                evaluation_summary = _evaluation_error_summary(str(e))
+                from ouroboros.evolution.evaluation_result import evaluation_error_summary
+
+                evaluation_summary = evaluation_error_summary(str(e))
 
         await self.event_store.append(
             loop_support.generation_phase_checkpoint(

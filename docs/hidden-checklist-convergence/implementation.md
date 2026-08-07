@@ -25,6 +25,10 @@ constructs bare handlers at runtime, which previously caused the first real
 Ralph iteration to terminate with `EvolutionaryLoop not configured` even
 though constructor-mocked tests passed.
 
+Passive OpenCode plugin interception now resolves through the same configured
+graph rather than the former lightweight definition factory. Other runtimes
+retain their existing dispatcher/server ownership model.
+
 When OpenCode passive-plugin dispatch is active, an evaluation with
 `auto_evolve: true` remains parent-owned and pollable. The parent runs the
 formal evaluator through its in-process path so it receives the verdict and
@@ -63,3 +67,7 @@ clamped to 1..10. Auto pipeline run dispatches explicitly set
   hints are deterministic.
 - Single-AC evaluations without checklist metadata use Ralph's existing
   full-graph focus fallback.
+- Plugin Seed handoffs are intentionally process-local. If the parent server
+  restarts before the child redeems a handoff, evaluation rejects the unknown
+  handle and the child reports the manual retry; raw verifier material is never
+  persisted into worker-queryable events.
