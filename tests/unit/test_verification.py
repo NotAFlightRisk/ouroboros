@@ -1556,6 +1556,84 @@ class TestSpecVerifier:
 
         assert summary.verified_count == 1
 
+    @pytest.mark.parametrize(
+        ("pattern", "content"),
+        [
+            (r".", "print('hello')\n"),
+            (r".+", "print('hello')\n"),
+            (r"[\s\S]", "print('hello')\n"),
+            (r"[A-Z]\w*", "Unrelated = object()\n"),
+            (r"\b", "print('hello')\n"),
+            (r"(?=m)", "print('hello')\n"),
+            (r"class\s+\w+", "class Unrelated:\n    pass\n"),
+            (r"interface\s+\w+", "interface Unrelated {}\n"),
+            (r"pub\s+trait\s+\w+", "pub trait Unrelated {}\n"),
+        ],
+        ids=[
+            "one-character",
+            "whole-input",
+            "any-character",
+            "generic-identifier",
+            "word-boundary",
+            "unrelated-lookahead",
+            "generic-class",
+            "generic-interface",
+            "generic-trait",
+        ],
+    )
+    def test_unrelated_model_regex_cannot_overturn_an_honest_agent_failure(
+        self, pattern: str, content: str
+    ) -> None:
+        """A match is evidence only when its subject contains the actual AC target."""
+        project = self._create_project({"main.py": content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider interface",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: False}
+        )
+
+        result = summary.reports[0].results[0]
+        assert summary.reports[0].verified_pass is False
+        assert summary.failed_count == 1
+        assert summary.discrepancy_count == 0, "the honest FAIL must remain an honest FAIL"
+        assert result.evidence_source == ""
+        assert result.evidence_target == ""
+        assert "criterion-bound" in result.detail
+
+    @pytest.mark.parametrize("pattern", [r"(?=CameraProvider)", r"class\s+\w+"])
+    def test_target_bound_zero_width_and_generic_patterns_remain_real_evidence(
+        self, pattern: str
+    ) -> None:
+        """The gate binds evidence to input; it does not require a consuming regex span."""
+        project = self._create_project({"main.py": "class CameraProvider:\n    pass\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider interface",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        result = summary.reports[0].results[0]
+        assert result.verified is True
+        assert result.evidence_source == "file_content"
+        assert result.evidence_target == "CameraProvider"
+        assert result.file_path.endswith("main.py")
+
 
 # -- Extractor Tests --
 
@@ -1630,6 +1708,63 @@ class TestAssertionExtractor:
         assert len(assertions) == 1
         assert assertions[0].tier == VerificationTier.T1_CONSTANT
         assert assertions[0].expected_value == "10"
+        assert assertions[0].input_binding_required is True
+        assert assertions[0].evidence_targets == ("WARMUP_FRAMES",)
+
+    @pytest.mark.asyncio
+    async def test_model_fields_cannot_redirect_evidence_away_from_the_input_ac(self) -> None:
+        """The extractor replaces model provenance with the indexed caller input."""
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "ac_text": "main.py exists",
+                    "tier": "t2_structural",
+                    "pattern": r".+",
+                    "expected_value": "CameraProvider",
+                    "file_hint": "*.py",
+                    "description": "Any file is enough",
+                }
+            ]
+        )
+
+        result = await extractor.extract(
+            "seed_bound_provenance", ("MUST define a CameraProvider interface",)
+        )
+
+        assert result.is_ok and len(result.value) == 1
+        assertion = result.value[0]
+        assert assertion.ac_text == "MUST define a CameraProvider interface"
+        assert assertion.evidence_targets == ("CameraProvider",)
+        assert assertion.input_binding_required is True
+
+        project = TestSpecVerifier()._create_project({"main.py": "class Unrelated:\n    pass\n"})
+        verification = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: False}
+        )
+        assert verification.reports[0].verified_pass is False
+        assert verification.reports[0].results[0].evidence_target == ""
+
+    @pytest.mark.asyncio
+    async def test_t1_expected_value_absent_from_the_input_ac_fails_closed(self) -> None:
+        """A model cannot choose the value whose presence will later be verified."""
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": r"MAX_RETRIES\s*=\s*",
+                    "expected_value": "5",
+                    "file_hint": "*.py",
+                    "description": "redirect the expected value",
+                }
+            ]
+        )
+
+        result = await extractor.extract("seed_unbound_expected", ("MAX_RETRIES must be seven",))
+
+        assert result.is_ok
+        assert result.value == ()
 
     @pytest.mark.asyncio
     async def test_t1_assertion_requires_expected_value_before_verifier(self) -> None:

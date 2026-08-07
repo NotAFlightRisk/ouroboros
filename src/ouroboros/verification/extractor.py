@@ -28,6 +28,7 @@ from ouroboros.providers.base import (
     Message,
     MessageRole,
 )
+from ouroboros.verification.binding import acceptance_targets, literal_is_bound
 from ouroboros.verification.models import SpecAssertion, VerificationTier
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,7 @@ Respond with a JSON array. Each element:
 
 Rules:
 - pattern: A regex pattern to search for in source files. For t1, include the variable/constant name. For t2, use file or class name pattern.
-- expected_value: The expected value for t1 (the actual number/string). For t2, the expected name. Empty for t3/t4.
+- expected_value: Required for t1 and t2. Copy the exact expected value/name from the AC text. Empty for t3/t4.
 - file_hint: Glob pattern for files to search (e.g., "*.py", "src/**/*.ts", "config.*"). Empty if unknown.
 - One AC may produce 0-3 assertions (e.g., an AC with multiple checkable values).
 - For t3/t4, still include the entry but with empty pattern/expected_value.
@@ -248,6 +249,43 @@ class AssertionExtractor:
                         item,
                     )
                     continue
+                if (
+                    tier
+                    in (
+                        VerificationTier.T1_CONSTANT,
+                        VerificationTier.T2_STRUCTURAL,
+                    )
+                    and text_fields["expected_value"].strip()
+                    and not literal_is_bound(ac_text, text_fields["expected_value"])
+                ):
+                    logger.warning(
+                        "Ignoring %s assertion whose expected_value is not bound to AC %d: %r",
+                        tier.value,
+                        ac_idx,
+                        item,
+                    )
+                    continue
+
+                targets = acceptance_targets(
+                    ac_text,
+                    text_fields["expected_value"],
+                    prefer_expected=tier is VerificationTier.T2_STRUCTURAL,
+                )
+                if (
+                    tier
+                    in (
+                        VerificationTier.T1_CONSTANT,
+                        VerificationTier.T2_STRUCTURAL,
+                    )
+                    and not targets
+                ):
+                    logger.warning(
+                        "Ignoring %s assertion with no target in AC %d: %r",
+                        tier.value,
+                        ac_idx,
+                        item,
+                    )
+                    continue
 
                 try:
                     assertions.append(
@@ -259,6 +297,8 @@ class AssertionExtractor:
                             expected_value=text_fields["expected_value"],
                             file_hint=text_fields["file_hint"],
                             description=text_fields["description"],
+                            evidence_targets=targets,
+                            input_binding_required=True,
                         )
                     )
                 except ValidationError as e:

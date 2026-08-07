@@ -497,6 +497,101 @@ Parallel Execution Verification Report
         assert summary.approval_status == "rejected"
         assert summary.run_verdict == "FAIL"
 
+    @pytest.mark.parametrize(
+        "pattern",
+        [r".+", r"\b", r"(?=m)", r"class\s+\w+"],
+        ids=["consuming", "boundary", "lookahead", "generic-declaration"],
+    )
+    def test_unrelated_regex_evidence_cannot_publish_a_formal_pass(
+        self, tmp_path: Any, pattern: str
+    ) -> None:
+        """Input-unbound model matches stay failed at the formal verdict boundary."""
+        ac_text = "MUST define a CameraProvider interface"
+        (tmp_path / "main.py").write_text("class Unrelated:\n    pass\n")
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+            input_binding_required=True,
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: False}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].final_verdict != "pass"
+        assert "criterion-bound" in summary.ac_results[0].evidence
+        assert summary.final_approved is False
+        assert summary.score == 0.0
+        assert summary.run_verdict == "FAIL"
+
+    def test_bound_zero_width_evidence_keeps_auditable_formal_provenance(
+        self, tmp_path: Any
+    ) -> None:
+        """A real target may verify without consuming it, and names its provenance."""
+        ac_text = "MUST define a CameraProvider interface"
+        (tmp_path / "main.py").write_text("class CameraProvider:\n    pass\n")
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"(?=CameraProvider)",
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+            input_binding_required=True,
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all((assertion,))
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        result = verification.reports[0].results[0]
+        assert result.evidence_source == "file_content"
+        assert result.evidence_target == "CameraProvider"
+        assert summary is not None and summary.ac_results[0].passed is True
+        assert (
+            "criterion target 'CameraProvider' from file content" in summary.ac_results[0].evidence
+        )
+
     def test_spec_verification_promotes_checked_reports_to_formal_ac_results(self) -> None:
         """Verifier-checked reports become formal AC verdicts without synthetic drift."""
         mechanical = EvaluationSummary(
