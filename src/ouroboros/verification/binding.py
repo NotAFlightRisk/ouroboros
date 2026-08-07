@@ -16,6 +16,7 @@ _CONSTANT_BINDING_SUFFIX = re.compile(
     r"(?:=|:|\bto\b|\bof\b|\bis\b|\bshould\s+be\b|\bmust\s+be\b)\s*$",
     re.IGNORECASE,
 )
+_TOKEN_PUNCTUATION = frozenset("._/:-+@#?&=%~")
 
 
 def _is_identifier_continue(character: str) -> bool:
@@ -35,19 +36,28 @@ def literal_spans(text: str, literal: str) -> tuple[tuple[int, int], ...]:
     if not literal:
         return ()
     spans: list[tuple[int, int]] = []
+    is_flag = literal.startswith("--")
+    boundary_punctuation = (
+        _TOKEN_PUNCTUATION
+        if any(character in _TOKEN_PUNCTUATION for character in literal)
+        else frozenset(".")
+        if literal.isdecimal()
+        else frozenset()
+    )
     for match in re.finditer(re.escape(literal), text, re.IGNORECASE):
-        if (
-            (literal[0].isalnum() or literal[0] == "_")
-            and match.start() > 0
-            and _is_identifier_continue(text[match.start() - 1])
-        ):
-            continue
-        if (
-            (literal[-1].isalnum() or literal[-1] == "_")
-            and match.end() < len(text)
-            and _is_identifier_continue(text[match.end()])
-        ):
-            continue
+        if match.start() > 0:
+            previous = text[match.start() - 1]
+            if (
+                (literal[0].isalnum() or literal[0] == "_" or is_flag)
+                and _is_identifier_continue(previous)
+            ) or previous in boundary_punctuation:
+                continue
+        if match.end() < len(text):
+            following = text[match.end()]
+            if (
+                (literal[-1].isalnum() or literal[-1] == "_") and _is_identifier_continue(following)
+            ) or following in boundary_punctuation:
+                continue
         spans.append((match.start(), match.end()))
     return tuple(spans)
 

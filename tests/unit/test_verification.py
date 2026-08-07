@@ -1757,9 +1757,93 @@ class TestSpecVerifier:
         assert summary.reports[0].results[0].evidence_target == ""
 
     @pytest.mark.parametrize(
+        ("content", "verified"),
+        [
+            ("--verbose\n", True),
+            ("not--verbose\n", False),
+            ("x--verbose-extra\n", False),
+            ("---verbose\n", False),
+        ],
+        ids=["exact-flag", "identifier-prefix", "extended-flag", "hyphen-prefix"],
+    )
+    def test_flag_target_requires_a_complete_cli_token(self, content: str, verified: bool) -> None:
+        project = self._create_project({"help.txt": content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="CLI accepts --verbose flag",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r".+",
+            expected_value="--verbose",
+            file_hint="*.txt",
+            evidence_targets=("--verbose",),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert bool(summary.verified_count) is verified
+        assert summary.reports[0].results[0].evidence_target == ("--verbose" if verified else "")
+
+    @pytest.mark.parametrize(
+        ("target", "content", "verified"),
+        [
+            ("foo.bar", "foo.bar\n", True),
+            ("foo.bar", "foo.bar.baz\n", False),
+            ("foo.bar", "x/foo.bar\n", False),
+            ("foo.bar", "foo.bar+extra\n", False),
+            ("foo:bar", "foo:bar\n", True),
+            ("foo:bar", "foo:bar:baz\n", False),
+            ("foo-bar", "foo-bar\n", True),
+            ("foo-bar", "foo-bar-baz\n", False),
+            ("foo-bar", "not-foo-bar\n", False),
+            ("v1.2.3", "v1.2.3\n", True),
+            ("v1.2.3", "v1.2.3.4\n", False),
+            ("v1.2.3", "v1.2.3-rc1\n", False),
+            ("v1.2.3", "v1.2.3+build\n", False),
+            ("pkg/name", "pkg/name\n", True),
+            ("pkg/name", "@pkg/name\n", False),
+            ("1.2.3", "1.2.3\n", True),
+            ("1.2.3", "1.2.3.4\n", False),
+            ("42", "42\n", True),
+            ("42", "42.0\n", False),
+        ],
+    )
+    def test_structured_literal_rejects_separator_token_extensions(
+        self, target: str, content: str, verified: bool
+    ) -> None:
+        project = self._create_project({"evidence.txt": content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=f"MUST expose `{target}`",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r".+",
+            expected_value=target,
+            file_hint="*.txt",
+            evidence_targets=(target,),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert bool(summary.verified_count) is verified
+        assert summary.reports[0].results[0].evidence_target == (target if verified else "")
+
+    @pytest.mark.parametrize(
         ("relative_path", "verified"),
-        [("pkg/CameraProvider.py", True), ("other/CameraProvider.py", False)],
-        ids=["exact-qualified-path", "wrong-directory"],
+        [
+            ("pkg/CameraProvider.py", True),
+            ("other/CameraProvider.py", False),
+            ("x/pkg/CameraProvider.py", False),
+            ("pkg/CameraProvider.py.bak", False),
+            ("Pkg/CameraProvider.py", False),
+        ],
+        ids=[
+            "exact-qualified-path",
+            "wrong-directory",
+            "prefixed-path",
+            "suffixed-path",
+            "case-variant",
+        ],
     )
     def test_qualified_file_target_binds_to_project_relative_path(
         self, relative_path: str, verified: bool
@@ -1771,7 +1855,7 @@ class TestSpecVerifier:
             tier=VerificationTier.T2_STRUCTURAL,
             pattern=r".+CameraProvider\.py",
             expected_value="pkg/CameraProvider.py",
-            file_hint="**/*.py",
+            file_hint="**/*",
             evidence_targets=("pkg/CameraProvider.py",),
             input_binding_required=True,
         )
@@ -2072,8 +2156,17 @@ class TestAssertionExtractor:
                 "pkg/CameraProvider.py",
                 r"CameraProvider\.py",
             ),
+            ("MUST expose `foo.bar`", "foo.bar", r".+"),
+            ("MUST expose `42`", "42", r".+"),
         ],
-        ids=["named-interface", "shall-interface", "exact-flag", "qualified-path"],
+        ids=[
+            "named-interface",
+            "shall-interface",
+            "exact-flag",
+            "qualified-path",
+            "quoted-dotted",
+            "quoted-numeric",
+        ],
     )
     async def test_conservative_structural_grammar_keeps_exact_literals(
         self, ac_text: str, expected: str, pattern: str
@@ -2095,6 +2188,46 @@ class TestAssertionExtractor:
 
         assert result.is_ok and len(result.value) == 1
         assert result.value[0].evidence_targets == (expected,)
+
+    @pytest.mark.asyncio
+    async def test_unsupported_leading_dot_literal_fails_closed(self) -> None:
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t2_structural",
+                    "pattern": r"\.env",
+                    "expected_value": ".env",
+                    "file_hint": "*",
+                    "description": "leading-dot file",
+                }
+            ]
+        )
+
+        result = await extractor.extract("leading_dot", ("MUST create file `.env`",))
+
+        assert result.is_ok
+        assert result.value == ()
+
+    @pytest.mark.asyncio
+    async def test_flag_expected_value_must_preserve_the_exact_cli_literal(self) -> None:
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t2_structural",
+                    "pattern": "verbose",
+                    "expected_value": "verbose",
+                    "file_hint": "*.txt",
+                    "description": "drop the flag delimiters",
+                }
+            ]
+        )
+
+        result = await extractor.extract("flag_redirect", ("CLI accepts --verbose flag",))
+
+        assert result.is_ok
+        assert result.value == ()
 
     @pytest.mark.asyncio
     async def test_multiple_constants_bind_to_their_nearest_symbols(self) -> None:

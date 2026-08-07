@@ -1049,6 +1049,18 @@ class SpecVerifier:
             )
 
         files = self._find_files(assertion.file_hint)
+        evidence_targets = self._evidence_targets(assertion)
+        qualified_paths = tuple(target for target in evidence_targets if "/" in target)
+        strict_qualified_paths = (
+            qualified_paths
+            if (
+                assertion.input_binding_required
+                and assertion.expected_value.strip()
+                and re.search(r"\b(?:file|directory)\b", assertion.ac_text, re.IGNORECASE)
+            )
+            else ()
+        )
+        blank_subject_contract = _matches_only_a_blank_subject(assertion.pattern)
 
         # First check: does the pattern match any filename?
         name_pattern = self._safe_compile(assertion.pattern, re.IGNORECASE)
@@ -1057,11 +1069,11 @@ class SpecVerifier:
             for file_path in files:
                 basename = os.path.basename(file_path)
                 relative_file = self._relative_file(file_path)
-                filename_subject = (
-                    relative_file
-                    if any("/" in target for target in self._evidence_targets(assertion))
-                    else basename
-                )
+                if strict_qualified_paths and not any(
+                    relative_file == target for target in strict_qualified_paths
+                ):
+                    continue
+                filename_subject = relative_file if qualified_paths else basename
                 bound = self._find_bound_match(
                     name_pattern,
                     filename_subject,
@@ -1085,6 +1097,14 @@ class SpecVerifier:
                         ),
                     )
 
+        if strict_qualified_paths and not blank_subject_contract:
+            return SpecVerificationResult(
+                assertion=assertion,
+                verified=False,
+                discrepancy=True,
+                detail="No exact project-relative path matched the criterion target",
+            )
+
         # Second check: search file contents for class/function/interface
         content_pattern = self._safe_compile(
             assertion.pattern, file_hint=assertion.file_hint, candidates=files
@@ -1098,6 +1118,10 @@ class SpecVerifier:
             )
 
         for file_path in files:
+            if strict_qualified_paths and not any(
+                self._relative_file(file_path) == target for target in strict_qualified_paths
+            ):
+                continue
             content = self._read_file(file_path)
             if content is None:
                 continue
@@ -1106,7 +1130,7 @@ class SpecVerifier:
             # pattern proves the file contents and the criterion target binds to
             # the project-relative file name rather than to content that, by
             # definition, is absent.
-            if bound is None and _matches_only_a_blank_subject(assertion.pattern):
+            if bound is None and blank_subject_contract:
                 bound = self._find_bound_match(
                     content_pattern,
                     content,
