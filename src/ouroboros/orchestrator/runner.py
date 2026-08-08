@@ -9355,7 +9355,10 @@ class OrchestratorRunner:
                 bounded_stream = direct_attempt_budget.wrap(message_stream)
                 async with (
                     bounded_stream.lifetime(),
-                    shielded_aclosing(message_stream),
+                    shielded_aclosing(
+                        message_stream,
+                        close_error_is_observe_only=lambda: bounded_stream.exhaustion is not None,
+                    ),
                 ):
                     async for message in bounded_stream:
                         messages_processed += 1
@@ -11381,7 +11384,10 @@ Note: This is a resumed session. Please continue from where execution was interr
                 bounded_stream = direct_attempt_budget.wrap(message_stream)
                 async with (
                     bounded_stream.lifetime(),
-                    shielded_aclosing(message_stream),
+                    shielded_aclosing(
+                        message_stream,
+                        close_error_is_observe_only=lambda: bounded_stream.exhaustion is not None,
+                    ),
                 ):
                     async for message in bounded_stream:
                         messages_processed += 1
@@ -11653,7 +11659,12 @@ Note: This is a resumed session. Please continue from where execution was interr
                     bounded_successor_stream = direct_attempt_budget.wrap(successor_stream)
                     async with (
                         bounded_successor_stream.lifetime(),
-                        shielded_aclosing(successor_stream),
+                        shielded_aclosing(
+                            successor_stream,
+                            close_error_is_observe_only=lambda: (
+                                bounded_successor_stream.exhaustion is not None
+                            ),
+                        ),
                     ):
                         async for message in bounded_successor_stream:
                             messages_processed += 1

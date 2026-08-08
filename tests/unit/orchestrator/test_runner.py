@@ -1208,12 +1208,14 @@ class TestOrchestratorRunner:
         assert recovery_event.data["persona"] == "hacker"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider_close_fails", (False, True))
     async def test_execute_seed_direct_stops_at_scaled_agentic_budget(
         self,
         runner: OrchestratorRunner,
         mock_adapter: MagicMock,
         mock_event_store: AsyncMock,
         sample_seed: Seed,
+        provider_close_fails: bool,
     ) -> None:
         """Whole-Seed direct calls get a finite per-root-AC step allowance."""
 
@@ -1235,14 +1237,18 @@ class TestOrchestratorRunner:
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             nonlocal produced
             del args, kwargs
-            for index in range(20):
-                produced += 1
-                yield AgentMessage(
-                    type="tool",
-                    content=f"tool {index}",
-                    tool_name="Read",
-                    resume_handle=live_handle,
-                )
+            try:
+                for index in range(20):
+                    produced += 1
+                    yield AgentMessage(
+                        type="tool",
+                        content=f"tool {index}",
+                        tool_name="Read",
+                        resume_handle=live_handle,
+                    )
+            finally:
+                if provider_close_fails:
+                    raise RuntimeError("provider close failed after step exhaustion")
 
         mock_adapter.execute_task = mock_execute
 

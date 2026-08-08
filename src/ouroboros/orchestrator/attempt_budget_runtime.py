@@ -167,8 +167,12 @@ class AttemptBudgetedMessageStream:
 
 
 @asynccontextmanager
-async def shielded_aclosing[T](stream: T) -> AsyncIterator[T]:
-    """Close an async provider to completion even when its owner is cancelled."""
+async def shielded_aclosing[T](
+    stream: T,
+    *,
+    close_error_is_observe_only: Callable[[], bool] | None = None,
+) -> AsyncIterator[T]:
+    """Close an async provider without replacing an authoritative exhaustion."""
 
     close = getattr(stream, "aclose", None)
     try:
@@ -207,6 +211,13 @@ async def shielded_aclosing[T](stream: T) -> AsyncIterator[T]:
                         error=str(exc),
                     )
                 raise
+            except Exception as exc:
+                if close_error_is_observe_only is None or not close_error_is_observe_only():
+                    raise
+                log.warning(
+                    "orchestrator.provider_stream.close_failed_after_exhaustion",
+                    error=str(exc),
+                )
 
 
 @dataclass(slots=True)

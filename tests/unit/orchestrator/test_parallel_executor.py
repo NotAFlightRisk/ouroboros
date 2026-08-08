@@ -5153,27 +5153,37 @@ async def test_atomic_attempt_external_cancellation_closes_runtime_stream(
 
 @pytest.mark.asyncio
 async def test_attempt_budget_exhaustion_skips_provider_recovery_paths() -> None:
-    """Bounce and alternate-harness recovery cannot renew an exhausted AC."""
-    exhaustion = AttemptBudgetExhaustion(
-        kind=AttemptBudgetKind.AGENTIC_STEPS,
-        limit=1.0,
-        observed=2.0,
-    )
-    exhausted = ACExecutionResult(
-        ac_index=0,
-        ac_content="Bound one attempt",
-        success=False,
-        error="Atomic attempt budget exhausted",
-        outcome=ACExecutionOutcome.FAILED,
-        attempt_budget_exhaustion=exhaustion,
-    )
+    """Cleanup failure cannot renew exhaustion through bounce or redispatch."""
+
+    class _CloseFailingStepRuntime(_FinalMessageRuntime):
+        def __init__(self) -> None:
+            super().__init__(
+                "must not reach terminal",
+                native_session_id="unused",
+                support_messages=(
+                    AgentMessage(type="assistant", content="tool 1", tool_name="Read"),
+                    AgentMessage(type="assistant", content="tool 2", tool_name="Read"),
+                ),
+            )
+            self.finalized = False
+
+        async def execute_task(self, **kwargs: Any):
+            try:
+                async for message in super().execute_task(**kwargs):
+                    yield message
+            finally:
+                self.finalized = True
+                raise RuntimeError("provider close failed after step exhaustion")
+
+    runtime = _CloseFailingStepRuntime()
+    event_store = AsyncMock()
     executor = ProcessLocalTestExecutor(
-        adapter=_FinalMessageRuntime("unused", native_session_id="unused"),
-        event_store=AsyncMock(),
+        adapter=runtime,
+        event_store=event_store,
         console=MagicMock(),
         enable_decomposition=False,
+        max_iterations_per_ac=1,
     )
-    executor._execute_atomic_ac = AsyncMock(return_value=exhausted)
     executor._maybe_recover_with_bounce_decomposition = AsyncMock(return_value=(None, None))
     executor._maybe_redispatch_alt_harness = AsyncMock(return_value=None)
 
@@ -5190,9 +5200,21 @@ async def test_attempt_budget_exhaustion_skips_provider_recovery_paths() -> None
     )
 
     assert result.success is False
-    assert result.attempt_budget_exhaustion == exhaustion
+    assert result.attempt_budget_exhaustion is not None
+    assert result.attempt_budget_exhaustion.kind is AttemptBudgetKind.AGENTIC_STEPS
+    assert result.attempt_budget_exhaustion.limit == 1
+    assert result.attempt_budget_exhaustion.observed == 2
+    assert retry_hints.is_retryable_failure(result) is False
+    assert runtime.call_count == 1
+    assert runtime.finalized is True
     executor._maybe_recover_with_bounce_decomposition.assert_not_awaited()
     executor._maybe_redispatch_alt_harness.assert_not_awaited()
+    budget_events = [
+        call.args[0]
+        for call in event_store.append.await_args_list
+        if call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
+    ]
+    assert len(budget_events) == 1
 
 
 @pytest.mark.asyncio

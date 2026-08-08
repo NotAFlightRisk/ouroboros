@@ -43,6 +43,7 @@ from ouroboros.core.filesystem_capability import (
     nofollow_directory_capabilities_available,
     open_nofollow_directory_chain,
 )
+from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
@@ -69,11 +70,25 @@ if TYPE_CHECKING:
     )
     from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 
+log = get_logger(__name__)
 
-async def _close_runtime_stream(stream: AsyncGenerator[AgentMessage, None]) -> None:
+
+async def _close_runtime_stream(
+    stream: AsyncGenerator[AgentMessage, None],
+    state: LeafDispatchState,
+) -> None:
     """Finish provider cleanup even when the consuming attempt is cancelled."""
-    with anyio.CancelScope(shield=True):
-        await stream.aclose()
+    try:
+        with anyio.CancelScope(shield=True):
+            await stream.aclose()
+    except Exception as exc:
+        if state.attempt_budget_exhaustion is None:
+            raise
+        log.warning(
+            "parallel_executor.provider_stream.close_failed_after_exhaustion",
+            budget_kind=state.attempt_budget_exhaustion.kind.value,
+            error=str(exc),
+        )
 
 
 def restored_attempt_budget_exhaustion(
@@ -817,7 +832,7 @@ class LeafDispatcher:
                     **execute_effort_kwargs,
                 ),
             )
-            stream_stack.push_async_callback(_close_runtime_stream, message_stream)
+            stream_stack.push_async_callback(_close_runtime_stream, message_stream, state)
             attempt_scope = stream_stack.enter_context(anyio.CancelScope(deadline=attempt_deadline))
             stall_scope = stream_stack.enter_context(
                 anyio.CancelScope(
