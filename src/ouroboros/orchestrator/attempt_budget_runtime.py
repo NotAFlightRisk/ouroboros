@@ -170,10 +170,30 @@ class AttemptBudgetedMessageStream:
 async def shielded_aclosing[T](stream: T) -> AsyncIterator[T]:
     """Close an async provider to completion even when its owner is cancelled."""
 
+    close = getattr(stream, "aclose", None)
     try:
         yield stream
-    finally:
-        close = getattr(stream, "aclose", None)
+    except BaseException:
+        if close is not None:
+            close_task = asyncio.ensure_future(close())
+            try:
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError:
+                try:
+                    await close_task
+                except Exception as exc:
+                    log.warning(
+                        "orchestrator.provider_stream.close_failed_during_cancellation",
+                        error=str(exc),
+                    )
+                raise
+            except Exception as exc:
+                log.warning(
+                    "orchestrator.provider_stream.close_failed_during_unwind",
+                    error=str(exc),
+                )
+        raise
+    else:
         if close is not None:
             close_task = asyncio.ensure_future(close())
             try:

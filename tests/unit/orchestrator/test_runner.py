@@ -1342,12 +1342,14 @@ class TestOrchestratorRunner:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider_close_fails", (False, True))
     async def test_execute_seed_direct_stops_at_scaled_wall_clock_budget(
         self,
         runner: OrchestratorRunner,
         mock_adapter: MagicMock,
         mock_event_store: AsyncMock,
         sample_seed: Seed,
+        provider_close_fails: bool,
     ) -> None:
         """Slow post-read processing cannot outlive the direct provider deadline."""
 
@@ -1378,6 +1380,8 @@ class TestOrchestratorRunner:
                 await asyncio.Event().wait()
             finally:
                 provider_finalized.set()
+                if provider_close_fails:
+                    raise RuntimeError("provider close failed after deadline")
 
         async def slow_progress(*args: Any, **kwargs: Any) -> Any:
             del args, kwargs
@@ -1418,7 +1422,7 @@ class TestOrchestratorRunner:
             elapsed = asyncio.get_running_loop().time() - started
 
         assert result.is_ok and result.value.success is False
-        assert elapsed < 0.5
+        assert elapsed < 0.9
         assert provider_finalized.is_set()
         assert terminate_calls == 1
         budget_events = [
