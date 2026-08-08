@@ -18,7 +18,7 @@ partial message list must remain visible for teardown.
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 import errno
@@ -76,17 +76,42 @@ log = get_logger(__name__)
 async def _close_runtime_stream(
     stream: AsyncGenerator[AgentMessage, None],
     state: LeafDispatchState,
+    timeout_exhausted: Callable[[], bool],
 ) -> None:
     """Finish provider cleanup even when the consuming attempt is cancelled."""
     try:
         with anyio.CancelScope(shield=True):
             await stream.aclose()
     except Exception as exc:
-        if state.attempt_budget_exhaustion is None:
+        exhaustion = state.attempt_budget_exhaustion
+        if exhaustion is None and not timeout_exhausted():
             raise
         log.warning(
             "parallel_executor.provider_stream.close_failed_after_exhaustion",
-            budget_kind=state.attempt_budget_exhaustion.kind.value,
+            budget_kind=(
+                exhaustion.kind.value
+                if exhaustion is not None
+                else AttemptBudgetKind.WALL_CLOCK.value
+            ),
+            error=str(exc),
+        )
+
+
+async def _iterate_runtime_stream(
+    stream: AsyncGenerator[AgentMessage, None],
+    *,
+    attempt_timed_out: Callable[[], bool],
+) -> AsyncIterator[AgentMessage]:
+    """Keep the attempt deadline authoritative if provider unwind fails."""
+
+    try:
+        async for message in stream:
+            yield message
+    except Exception as exc:
+        if not attempt_timed_out():
+            raise
+        log.warning(
+            "parallel_executor.provider_stream.failed_after_attempt_timeout",
             error=str(exc),
         )
 
@@ -832,14 +857,23 @@ class LeafDispatcher:
                     **execute_effort_kwargs,
                 ),
             )
-            stream_stack.push_async_callback(_close_runtime_stream, message_stream, state)
+            attempt_scope: anyio.CancelScope | None = None
+            stream_stack.push_async_callback(
+                _close_runtime_stream,
+                message_stream,
+                state,
+                lambda: attempt_scope is not None and attempt_scope.cancel_called,
+            )
             attempt_scope = stream_stack.enter_context(anyio.CancelScope(deadline=attempt_deadline))
             stall_scope = stream_stack.enter_context(
                 anyio.CancelScope(
                     deadline=anyio.current_time() + STALL_TIMEOUT_SECONDS,
                 )
             )
-            async for message in message_stream:
+            async for message in _iterate_runtime_stream(
+                message_stream,
+                attempt_timed_out=lambda: attempt_scope.cancel_called,
+            ):
                 # Reset stall deadline on every message (RC6 core)
                 stall_scope.deadline = anyio.current_time() + STALL_TIMEOUT_SECONDS
                 if message.resume_handle is not None:
@@ -1033,7 +1067,7 @@ class LeafDispatcher:
 
         # Check if stall was detected (CancelScope ate the Cancelled)
         state.stalled = stall_scope.cancelled_caught
-        if attempt_scope.cancelled_caught:
+        if attempt_scope.cancel_called:
             exhausted_progress = state.attempt_budget_progress(
                 max_agentic_steps=max_iterations_per_ac,
                 timeout_seconds=ac_attempt_timeout_seconds,

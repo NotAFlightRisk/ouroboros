@@ -5272,7 +5272,10 @@ async def test_attempt_budget_exhaustion_cannot_be_recovered_by_verify_gate(
 
 
 @pytest.mark.asyncio
-async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity() -> None:
+@pytest.mark.parametrize("provider_close_fails", (False, True))
+async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity(
+    provider_close_fails: bool,
+) -> None:
     """Progress messages may reset the idle watchdog but never the total deadline."""
 
     class _ActiveForeverRuntime:
@@ -5306,6 +5309,8 @@ async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity() -> None
                     await asyncio.sleep(0.001)
             finally:
                 self.closed = True
+                if provider_close_fails:
+                    raise RuntimeError("provider close failed after wall-clock exhaustion")
 
     runtime = _ActiveForeverRuntime()
     event_store = AsyncMock()
@@ -5337,6 +5342,12 @@ async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity() -> None
     assert result.attempt_budget_exhaustion.observed >= 0.02
     assert runtime.closed is True
     assert retry_hints.is_retryable_failure(result) is False
+    budget_events = [
+        call.args[0]
+        for call in event_store.append.await_args_list
+        if call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
+    ]
+    assert len(budget_events) == 1
 
 
 @pytest.mark.asyncio
@@ -5432,6 +5443,7 @@ async def test_parallel_attempt_resume_preserves_exact_near_max_remaining_time(
         def __init__(self, *, deadline: float = math.inf, shield: bool = False) -> None:
             del shield
             self.deadline = deadline
+            self.cancel_called = False
             self.cancelled_caught = False
             deadlines.append(deadline)
 
