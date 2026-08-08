@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable, Mapping
-from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -88,6 +87,7 @@ from ouroboros.orchestrator.adaptive_concurrency import adaptive_concurrency_pol
 from ouroboros.orchestrator.attempt_budget_runtime import (
     DirectAttemptBudget,
     direct_bounded_route_runtime_active,
+    shielded_aclosing,
     should_emit_progress_event,
     terminate_runtime_handle,
 )
@@ -9345,19 +9345,23 @@ class OrchestratorRunner:
                     )
                     if cancelled_result is not None:
                         return active_runtime_handle
-                async with aclosing(
-                    self._adapter.execute_task(  # type: ignore[type-var]
-                        prompt=direct_attempt_budget.decorate_prompt(prompt),
-                        tools=merged_tools,
-                        system_prompt=system_prompt,
-                        resume_handle=active_runtime_handle,
-                        **effort_kwargs,
-                    )
-                ) as message_stream:
-                    bounded_stream = direct_attempt_budget.wrap(message_stream)
+                message_stream = self._adapter.execute_task(  # type: ignore[type-var]
+                    prompt=direct_attempt_budget.decorate_prompt(prompt),
+                    tools=merged_tools,
+                    system_prompt=system_prompt,
+                    resume_handle=active_runtime_handle,
+                    **effort_kwargs,
+                )
+                bounded_stream = direct_attempt_budget.wrap(message_stream)
+                async with (
+                    bounded_stream.lifetime(),
+                    shielded_aclosing(message_stream),
+                ):
                     async for message in bounded_stream:
                         messages_processed += 1
                         projected = project_runtime_message(message)
+                        if message.resume_handle is not None:
+                            active_runtime_handle = message.resume_handle
 
                         # Check for cancellation periodically
                         if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
@@ -9377,9 +9381,6 @@ class OrchestratorRunner:
                             messages_processed,
                             tracker.session_id,
                         )
-                        if message.resume_handle is not None:
-                            active_runtime_handle = message.resume_handle
-
                         # Update workflow state tracker
                         state_tracker.process_runtime_message(message)
 
@@ -11370,19 +11371,23 @@ Note: This is a resumed session. Please continue from where execution was interr
                     )
                     if cancelled_result is not None:
                         return cancelled_result
-                async with aclosing(
-                    self._adapter.execute_task(  # type: ignore[type-var]
-                        prompt=direct_attempt_budget.decorate_prompt(resume_prompt),
-                        tools=merged_tools,
-                        system_prompt=system_prompt,
-                        resume_handle=runtime_handle,
-                        **effort_kwargs,
-                    )
-                ) as message_stream:
-                    bounded_stream = direct_attempt_budget.wrap(message_stream)
+                message_stream = self._adapter.execute_task(  # type: ignore[type-var]
+                    prompt=direct_attempt_budget.decorate_prompt(resume_prompt),
+                    tools=merged_tools,
+                    system_prompt=system_prompt,
+                    resume_handle=runtime_handle,
+                    **effort_kwargs,
+                )
+                bounded_stream = direct_attempt_budget.wrap(message_stream)
+                async with (
+                    bounded_stream.lifetime(),
+                    shielded_aclosing(message_stream),
+                ):
                     async for message in bounded_stream:
                         messages_processed += 1
                         projected = project_runtime_message(message)
+                        if message.resume_handle is not None:
+                            live_runtime_handle = message.resume_handle
 
                         # Check for cancellation periodically
                         if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
@@ -11402,9 +11407,6 @@ Note: This is a resumed session. Please continue from where execution was interr
                             messages_processed,
                             session_id,
                         )
-                        if message.resume_handle is not None:
-                            live_runtime_handle = message.resume_handle
-
                         # Update workflow state tracker
                         state_tracker.process_runtime_message(message)
 
@@ -11637,24 +11639,26 @@ Note: This is a resumed session. Please continue from where execution was interr
                     last_resume_final_message = None
                     recoverable_resume_failure = None
                     resume_pause_budget_progress = None
+                    successor_stream = self._adapter.execute_task(  # type: ignore[type-var]
+                        prompt=direct_attempt_budget.decorate_prompt(
+                            build_task_prompt(seed, strategy=strategy)
+                            + "\n\nThe resumed route failed. Continue in a fresh "
+                            "session and satisfy the same Seed contracts."
+                        ),
+                        tools=merged_tools,
+                        system_prompt=system_prompt,
+                        resume_handle=None,
+                        **successor_kwargs,
+                    )
+                    bounded_successor_stream = direct_attempt_budget.wrap(successor_stream)
                     async with (
-                        aclosing(
-                            self._adapter.execute_task(  # type: ignore[type-var]
-                                prompt=direct_attempt_budget.decorate_prompt(
-                                    build_task_prompt(seed, strategy=strategy)
-                                    + "\n\nThe resumed route failed. Continue in a fresh "
-                                    "session and satisfy the same Seed contracts."
-                                ),
-                                tools=merged_tools,
-                                system_prompt=system_prompt,
-                                resume_handle=None,
-                                **successor_kwargs,
-                            )
-                        ) as successor_stream
+                        bounded_successor_stream.lifetime(),
+                        shielded_aclosing(successor_stream),
                     ):
-                        bounded_successor_stream = direct_attempt_budget.wrap(successor_stream)
                         async for message in bounded_successor_stream:
                             messages_processed += 1
+                            if message.resume_handle is not None:
+                                live_runtime_handle = message.resume_handle
                             if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
                                 cancelled_result = await self._handle_requested_cancellation(
                                     session_id=session_id,
@@ -11671,8 +11675,6 @@ Note: This is a resumed session. Please continue from where execution was interr
                                 messages_processed,
                                 session_id,
                             )
-                            if message.resume_handle is not None:
-                                live_runtime_handle = message.resume_handle
                             state_tracker.process_runtime_message(message)
                             if message.is_final:
                                 last_resume_final_message = message

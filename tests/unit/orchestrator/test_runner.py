@@ -304,8 +304,9 @@ async def test_direct_attempt_resume_preserves_exact_near_max_remaining_time(
                 side_effect=lambda deadline: deadlines.append(deadline) or _Timeout(deadline),
             ),
         ):
-            message = await anext(stream)
-            captured = stream.progress()
+            async with stream.lifetime():
+                message = await anext(stream)
+                captured = stream.progress()
 
         assert message.content == "entered provider"
         assert captured.remaining_timeout_microseconds <= remaining_microseconds
@@ -1348,14 +1349,16 @@ class TestOrchestratorRunner:
         mock_event_store: AsyncMock,
         sample_seed: Seed,
     ) -> None:
-        """Progress messages cannot keep a direct provider call alive forever."""
+        """Slow post-read processing cannot outlive the direct provider deadline."""
 
         runner._max_iterations_per_ac = 100
         runner._ac_attempt_timeout_seconds = 1
         terminate_calls = 0
+        provider_finalized = asyncio.Event()
 
         async def terminate(_handle: RuntimeHandle) -> bool:
             nonlocal terminate_calls
+            assert provider_finalized.is_set()
             terminate_calls += 1
             return True
 
@@ -1366,13 +1369,20 @@ class TestOrchestratorRunner:
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             del args, kwargs
-            yield AgentMessage(
-                type="assistant",
-                content="still working",
-                resume_handle=live_handle,
-            )
+            try:
+                yield AgentMessage(
+                    type="assistant",
+                    content="entered slow consumer processing",
+                    resume_handle=live_handle,
+                )
+                await asyncio.Event().wait()
+            finally:
+                provider_finalized.set()
+
+        async def slow_progress(*args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
             await asyncio.sleep(1)
-            yield AgentMessage(type="result", content="too late")
+            raise AssertionError("post-read processing exceeded the fixed deadline")
 
         mock_adapter.execute_task = mock_execute
 
@@ -1401,16 +1411,23 @@ class TestOrchestratorRunner:
                 "mark_failed",
                 AsyncMock(return_value=Result.ok(None)),
             ),
+            patch.object(runner, "_update_and_persist_progress", slow_progress),
         ):
+            started = asyncio.get_running_loop().time()
             result = await runner.execute_seed(sample_seed, parallel=False)
+            elapsed = asyncio.get_running_loop().time() - started
 
         assert result.is_ok and result.value.success is False
+        assert elapsed < 0.5
+        assert provider_finalized.is_set()
         assert terminate_calls == 1
-        budget_event = next(
+        budget_events = [
             call.args[0]
             for call in mock_event_store.append.await_args_list
             if getattr(call.args[0], "type", None) == "execution.ac.attempt_budget_exhausted"
-        )
+        ]
+        assert len(budget_events) == 1
+        budget_event = budget_events[0]
         assert budget_event.data["budget_kind"] == "wall_clock"
         assert budget_event.data["limit"] == pytest.approx(0.03)
         assert budget_event.data["observed"] >= 0.03
@@ -7304,7 +7321,7 @@ class TestOrchestratorRunner:
         mock_event_store: AsyncMock,
         sample_seed: Seed,
     ) -> None:
-        """A quota pause cannot reset the deadline of the same direct attempt."""
+        """A resumed attempt's remainder also covers slow post-read processing."""
 
         runner._max_iterations_per_ac = 100
         runner._ac_attempt_timeout_seconds = 1
@@ -7327,9 +7344,11 @@ class TestOrchestratorRunner:
             }
         )
         terminate_calls = 0
+        provider_finalized = asyncio.Event()
 
         async def terminate(_handle: RuntimeHandle) -> bool:
             nonlocal terminate_calls
+            assert provider_finalized.is_set()
             terminate_calls += 1
             return True
 
@@ -7343,13 +7362,20 @@ class TestOrchestratorRunner:
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             del args, kwargs
-            yield AgentMessage(
-                type="assistant",
-                content="still working",
-                resume_handle=live_handle,
-            )
+            try:
+                yield AgentMessage(
+                    type="assistant",
+                    content="entered resumed slow consumer processing",
+                    resume_handle=live_handle,
+                )
+                await asyncio.Event().wait()
+            finally:
+                provider_finalized.set()
+
+        async def slow_progress(*args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
             await asyncio.sleep(1)
-            yield AgentMessage(type="result", content="too late")
+            raise AssertionError("resumed post-read processing exceeded the fixed deadline")
 
         mock_adapter.execute_task = mock_execute
         started = asyncio.get_running_loop().time()
@@ -7365,6 +7391,7 @@ class TestOrchestratorRunner:
                     "mark_failed",
                     AsyncMock(return_value=Result.ok(None)),
                 ),
+                patch.object(runner, "_update_and_persist_progress", slow_progress),
             ):
                 result = await runner.resume_session(
                     "sess_resume_time_budget",
@@ -7379,12 +7406,15 @@ class TestOrchestratorRunner:
         elapsed = asyncio.get_running_loop().time() - started
         assert result.is_ok and result.value.success is False
         assert elapsed < 0.5
+        assert provider_finalized.is_set()
         assert terminate_calls == 1
-        budget_event = next(
+        budget_events = [
             call.args[0]
             for call in mock_event_store.append.await_args_list
             if getattr(call.args[0], "type", None) == "execution.ac.attempt_budget_exhausted"
-        )
+        ]
+        assert len(budget_events) == 1
+        budget_event = budget_events[0]
         assert budget_event.data["budget_kind"] == "wall_clock"
         assert budget_event.data["limit"] == pytest.approx(3.0)
         assert budget_event.data["observed"] >= 3.0

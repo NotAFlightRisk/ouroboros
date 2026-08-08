@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 import os
@@ -112,43 +113,47 @@ class AttemptBudgetedMessageStream:
             remaining_timeout_microseconds=elapsed_progress.remaining_timeout_microseconds,
         )
 
-    async def __anext__(self) -> AgentMessage:
-        if self.exhaustion is not None:
-            raise StopAsyncIteration
+    def _record_wall_clock_exhaustion(self) -> None:
+        if self.exhaustion is None:
+            self.exhaustion = AttemptBudgetExhaustion(
+                kind=AttemptBudgetKind.WALL_CLOCK,
+                limit=self._timeout_seconds,
+                observed=self.elapsed_seconds,
+            )
 
+    @asynccontextmanager
+    async def lifetime(self) -> AsyncIterator[None]:
+        """Enforce one fixed deadline across provider reads and consumption."""
+
+        if self._started_at is not None:
+            raise RuntimeError("attempt-budget stream lifetime may only be entered once")
         loop = asyncio.get_running_loop()
-        if self._started_at is None:
-            self._started_at = loop.time()
+        self._started_at = loop.time()
         fixed_deadline = conservative_timeout_deadline(
             started_at=self._started_at,
             remaining_seconds=self._progress_at_start.remaining_timeout_seconds,
         )
-        elapsed_since_start = self._elapsed_since_start
-        elapsed = self._elapsed_before_start + elapsed_since_start
-        remaining_progress = self._progress_at_start.consume_elapsed_seconds(elapsed_since_start)
-        remaining = remaining_progress.remaining_timeout_seconds
-        if remaining <= 0:
-            self.exhaustion = AttemptBudgetExhaustion(
-                kind=AttemptBudgetKind.WALL_CLOCK,
-                limit=self._timeout_seconds,
-                observed=elapsed,
-            )
-            raise StopAsyncIteration
+        if self._progress_at_start.remaining_timeout_microseconds <= 0:
+            self._record_wall_clock_exhaustion()
+            yield
+            return
 
         deadline = asyncio.timeout_at(fixed_deadline)
         try:
             async with deadline:
-                message = await anext(self._source)
+                yield
         except TimeoutError:
             if not deadline.expired():
                 raise
-            elapsed = self.elapsed_seconds
-            self.exhaustion = AttemptBudgetExhaustion(
-                kind=AttemptBudgetKind.WALL_CLOCK,
-                limit=self._timeout_seconds,
-                observed=elapsed,
-            )
-            raise StopAsyncIteration from None
+            self._record_wall_clock_exhaustion()
+
+    async def __anext__(self) -> AgentMessage:
+        if self.exhaustion is not None:
+            raise StopAsyncIteration
+        if self._started_at is None:
+            raise RuntimeError("attempt-budget stream requires its lifetime context")
+
+        message = await anext(self._source)
 
         if project_runtime_message(message).is_tool_call:
             self._agentic_steps += 1
@@ -159,6 +164,29 @@ class AttemptBudgetedMessageStream:
                     observed=float(self._agentic_steps),
                 )
         return message
+
+
+@asynccontextmanager
+async def shielded_aclosing[T](stream: T) -> AsyncIterator[T]:
+    """Close an async provider to completion even when its owner is cancelled."""
+
+    try:
+        yield stream
+    finally:
+        close = getattr(stream, "aclose", None)
+        if close is not None:
+            close_task = asyncio.ensure_future(close())
+            try:
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError:
+                try:
+                    await close_task
+                except Exception as exc:
+                    log.warning(
+                        "orchestrator.provider_stream.close_failed_during_cancellation",
+                        error=str(exc),
+                    )
+                raise
 
 
 @dataclass(slots=True)
@@ -545,6 +573,7 @@ __all__ = [
     "build_decomposition_trace_summary",
     "direct_bounded_route_runtime_active",
     "should_emit_progress_event",
+    "shielded_aclosing",
     "terminalize_bounded_route_exhaustion",
     "terminate_runtime_handle",
 ]
