@@ -296,11 +296,14 @@ Key constraints:
   admits no later turn. `execution.ac_attempt_timeout_seconds` is a fixed total
   wall-clock bound (default 900, maximum 9,007,199,254 seconds so its durable
   microseconds remain exact). Activity resets the separate idle watchdog but
-  never either boundary. Budget exhaustion is terminal and bypasses same-AC
-  retry, verification recovery, bounce classification, alternate runtimes, and
-  route successors. Legacy whole-Seed direct/resume calls deterministically
-  scale both per-AC limits by the number of root ACs and fail closed if the
-  scaled timeout would exceed the durable boundary.
+  never either boundary. Provider finalization gets a separate finite shutdown
+  grace (one second, followed by a 100 ms cancellation observation); a wedged
+  finalizer cannot keep the exhausted attempt alive indefinitely, and cleanup
+  failure cannot replace the typed exhaustion. Budget exhaustion is terminal
+  and bypasses same-AC retry, verification recovery, bounce classification,
+  alternate runtimes, and route successors. Legacy whole-Seed direct/resume
+  calls deterministically scale both per-AC limits by the number of root ACs
+  and fail closed if the scaled timeout would exceed the durable boundary.
 - Children are dependency-sorted and executed within each level
 
 Values above `4` remain executable on the legacy path, but cannot authorize

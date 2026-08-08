@@ -46,6 +46,7 @@ from ouroboros.orchestrator.attempt_budget_runtime import (
     AttemptBudgetedMessageStream,
     DirectAttemptBudget,
     direct_bounded_route_runtime_active,
+    shielded_aclosing,
 )
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.coordinator import CoordinatorReview
@@ -316,6 +317,67 @@ async def test_direct_attempt_resume_preserves_exact_near_max_remaining_time(
         assert 0 < deadlines[0] - 100.0 <= progress.remaining_timeout_seconds
     finally:
         await source.aclose()
+
+
+@pytest.mark.asyncio
+async def test_direct_exhaustion_bounds_nonreturning_provider_finalizer() -> None:
+    """A wedged direct finalizer cannot retain exhausted provider authority."""
+
+    close_started = asyncio.Event()
+    close_cancelled = asyncio.Event()
+    allow_close = asyncio.Event()
+    close_finished = asyncio.Event()
+
+    async def nonreturning_provider() -> AsyncIterator[AgentMessage]:
+        try:
+            yield AgentMessage(type="assistant", content="tool", tool_name="Read")
+            yield AgentMessage(type="assistant", content="tool", tool_name="Read")
+        finally:
+            close_started.set()
+            while not allow_close.is_set():
+                try:
+                    await allow_close.wait()
+                except asyncio.CancelledError:
+                    close_cancelled.set()
+            close_finished.set()
+
+    source = nonreturning_provider()
+    stream = AttemptBudgetedMessageStream(
+        source,
+        max_agentic_steps=1,
+        timeout_seconds=10,
+    )
+
+    with (
+        patch(
+            "ouroboros.orchestrator.attempt_budget_runtime._PROVIDER_STREAM_CLOSE_TIMEOUT_SECONDS",
+            0.01,
+        ),
+        patch(
+            "ouroboros.orchestrator.attempt_budget_runtime._PROVIDER_STREAM_CANCEL_TIMEOUT_SECONDS",
+            0.01,
+        ),
+    ):
+        started = asyncio.get_running_loop().time()
+        async with (
+            stream.lifetime(),
+            shielded_aclosing(
+                source,
+                close_error_is_observe_only=lambda: stream.exhaustion is not None,
+            ),
+        ):
+            async for _message in stream:
+                pass
+        elapsed = asyncio.get_running_loop().time() - started
+
+    try:
+        assert stream.exhaustion is not None
+        assert close_started.is_set()
+        assert close_cancelled.is_set()
+        assert elapsed < 0.5
+    finally:
+        allow_close.set()
+        await asyncio.wait_for(close_finished.wait(), timeout=0.5)
 
 
 def _attach_live_process_local_contract(
@@ -1355,20 +1417,21 @@ class TestOrchestratorRunner:
         )
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("provider_close_fails", (False, True))
+    @pytest.mark.parametrize("provider_close_outcome", ("ok", "raises", "hangs"))
     async def test_execute_seed_direct_stops_at_scaled_wall_clock_budget(
         self,
         runner: OrchestratorRunner,
         mock_adapter: MagicMock,
         mock_event_store: AsyncMock,
         sample_seed: Seed,
-        provider_close_fails: bool,
+        provider_close_outcome: str,
     ) -> None:
         """Slow post-read processing cannot outlive the direct provider deadline."""
 
         runner._max_iterations_per_ac = 100
         runner._ac_attempt_timeout_seconds = 1
         terminate_calls = 0
+        provider_close_started = asyncio.Event()
         provider_finalized = asyncio.Event()
 
         async def terminate(_handle: RuntimeHandle) -> bool:
@@ -1392,8 +1455,15 @@ class TestOrchestratorRunner:
                 )
                 await asyncio.Event().wait()
             finally:
+                provider_close_started.set()
+                if provider_close_outcome == "hangs":
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        provider_finalized.set()
+                        raise
                 provider_finalized.set()
-                if provider_close_fails:
+                if provider_close_outcome == "raises":
                     raise RuntimeError("provider close failed after deadline")
 
         async def slow_progress(*args: Any, **kwargs: Any) -> Any:
@@ -1429,6 +1499,16 @@ class TestOrchestratorRunner:
                 AsyncMock(return_value=Result.ok(None)),
             ),
             patch.object(runner, "_update_and_persist_progress", slow_progress),
+            patch(
+                "ouroboros.orchestrator.attempt_budget_runtime."
+                "_PROVIDER_STREAM_CLOSE_TIMEOUT_SECONDS",
+                0.01,
+            ),
+            patch(
+                "ouroboros.orchestrator.attempt_budget_runtime."
+                "_PROVIDER_STREAM_CANCEL_TIMEOUT_SECONDS",
+                0.01,
+            ),
         ):
             started = asyncio.get_running_loop().time()
             result = await runner.execute_seed(sample_seed, parallel=False)
@@ -1436,6 +1516,7 @@ class TestOrchestratorRunner:
 
         assert result.is_ok and result.value.success is False
         assert elapsed < 0.9
+        assert provider_close_started.is_set()
         assert provider_finalized.is_set()
         assert terminate_calls == 1
         budget_events = [

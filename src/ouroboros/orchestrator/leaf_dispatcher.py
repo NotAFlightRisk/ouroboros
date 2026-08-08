@@ -45,6 +45,10 @@ from ouroboros.core.filesystem_capability import (
 )
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.attempt_budget_runtime import (
+    await_provider_operation_bounded,
+    close_provider_stream_bounded,
+)
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
     _runtime_message_effective_cwd,
@@ -81,7 +85,7 @@ async def _close_runtime_stream(
     """Finish provider cleanup even when the consuming attempt is cancelled."""
     try:
         with anyio.CancelScope(shield=True):
-            await stream.aclose()
+            await close_provider_stream_bounded(stream)
     except Exception as exc:
         exhaustion = state.attempt_budget_exhaustion
         if exhaustion is None and not timeout_exhausted():
@@ -105,7 +109,11 @@ async def _iterate_runtime_stream(
     """Keep the attempt deadline authoritative if provider unwind fails."""
 
     try:
-        async for message in stream:
+        while True:
+            try:
+                message = await await_provider_operation_bounded(anext(stream))
+            except StopAsyncIteration:
+                return
             yield message
     except Exception as exc:
         if not attempt_timed_out():

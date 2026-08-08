@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+import anyio
+
 from ouroboros.core.attempt_budget import (
     AttemptBudgetExhaustion,
     AttemptBudgetKind,
@@ -41,6 +43,122 @@ if TYPE_CHECKING:
     from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 
 log = get_logger(__name__)
+
+_PROVIDER_STREAM_CLOSE_TIMEOUT_SECONDS = 1.0
+_PROVIDER_STREAM_CANCEL_TIMEOUT_SECONDS = 0.1
+
+
+class ProviderStreamCloseTimeout(TimeoutError):
+    """Provider cleanup did not converge within the finite shutdown grace."""
+
+
+def _observe_detached_provider_task(task: asyncio.Future[Any]) -> None:
+    """Consume a late provider-task outcome after the bounded fallback returns."""
+
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        log.warning(
+            "orchestrator.provider_stream.detached_operation_failed",
+            error=str(exc),
+        )
+
+
+async def _cancel_provider_task_bounded(
+    task: asyncio.Future[Any],
+    *,
+    timeout_seconds: float | None = None,
+) -> bool:
+    """Request cancellation without awaiting a resistant provider forever."""
+
+    cancel_timeout = (
+        _PROVIDER_STREAM_CANCEL_TIMEOUT_SECONDS
+        if timeout_seconds is None
+        else max(0.0, timeout_seconds)
+    )
+    task.cancel()
+    try:
+        with anyio.CancelScope(shield=True):
+            done, _ = await asyncio.wait((task,), timeout=cancel_timeout)
+    except asyncio.CancelledError:
+        done = set()
+    if not done:
+        task.add_done_callback(_observe_detached_provider_task)
+        return False
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        log.warning(
+            "orchestrator.provider_stream.operation_failed_during_forced_shutdown",
+            error=str(exc),
+        )
+    return True
+
+
+async def await_provider_operation_bounded[T](operation: Awaitable[T]) -> T:
+    """Keep cancellation of one provider operation from owning the caller."""
+
+    task = asyncio.ensure_future(operation)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await _cancel_provider_task_bounded(task)
+        raise
+
+
+async def close_provider_stream_bounded(
+    stream: object,
+    *,
+    timeout_seconds: float | None = None,
+    cancel_timeout_seconds: float | None = None,
+) -> None:
+    """Close one provider stream without granting cleanup infinite authority.
+
+    A cooperative finalizer gets a short shielded grace.  If it does not
+    finish, cancellation is requested and observed for another finite grace.
+    A cancellation-resistant task is detached with an outcome observer so the
+    caller can terminalize the attempt instead of hanging forever.
+    """
+
+    close = getattr(stream, "aclose", None)
+    if close is None:
+        return
+    close_timeout = (
+        _PROVIDER_STREAM_CLOSE_TIMEOUT_SECONDS
+        if timeout_seconds is None
+        else max(0.0, timeout_seconds)
+    )
+    cancel_timeout = (
+        _PROVIDER_STREAM_CANCEL_TIMEOUT_SECONDS
+        if cancel_timeout_seconds is None
+        else max(0.0, cancel_timeout_seconds)
+    )
+    close_task = asyncio.ensure_future(close())
+    try:
+        done, _ = await asyncio.wait((close_task,), timeout=close_timeout)
+    except asyncio.CancelledError:
+        await _cancel_provider_task_bounded(
+            close_task,
+            timeout_seconds=cancel_timeout,
+        )
+        raise
+    if done:
+        await close_task
+        return
+
+    await _cancel_provider_task_bounded(
+        close_task,
+        timeout_seconds=cancel_timeout,
+    )
+
+    raise ProviderStreamCloseTimeout(
+        "provider stream did not close within the bounded shutdown grace "
+        f"({close_timeout:g}s + {cancel_timeout:g}s cancellation grace)"
+    )
 
 
 def terminalize_bounded_route_exhaustion[T](value: T) -> T:
@@ -153,7 +271,7 @@ class AttemptBudgetedMessageStream:
         if self._started_at is None:
             raise RuntimeError("attempt-budget stream requires its lifetime context")
 
-        message = await anext(self._source)
+        message = await await_provider_operation_bounded(anext(self._source))
 
         if project_runtime_message(message).is_tool_call:
             self._agentic_steps += 1
@@ -174,50 +292,27 @@ async def shielded_aclosing[T](
 ) -> AsyncIterator[T]:
     """Close an async provider without replacing an authoritative exhaustion."""
 
-    close = getattr(stream, "aclose", None)
     try:
         yield stream
     except BaseException:
-        if close is not None:
-            close_task = asyncio.ensure_future(close())
-            try:
-                await asyncio.shield(close_task)
-            except asyncio.CancelledError:
-                try:
-                    await close_task
-                except Exception as exc:
-                    log.warning(
-                        "orchestrator.provider_stream.close_failed_during_cancellation",
-                        error=str(exc),
-                    )
-                raise
-            except Exception as exc:
-                log.warning(
-                    "orchestrator.provider_stream.close_failed_during_unwind",
-                    error=str(exc),
-                )
+        try:
+            await close_provider_stream_bounded(stream)
+        except Exception as exc:
+            log.warning(
+                "orchestrator.provider_stream.close_failed_during_unwind",
+                error=str(exc),
+            )
         raise
     else:
-        if close is not None:
-            close_task = asyncio.ensure_future(close())
-            try:
-                await asyncio.shield(close_task)
-            except asyncio.CancelledError:
-                try:
-                    await close_task
-                except Exception as exc:
-                    log.warning(
-                        "orchestrator.provider_stream.close_failed_during_cancellation",
-                        error=str(exc),
-                    )
+        try:
+            await close_provider_stream_bounded(stream)
+        except Exception as exc:
+            if close_error_is_observe_only is None or not close_error_is_observe_only():
                 raise
-            except Exception as exc:
-                if close_error_is_observe_only is None or not close_error_is_observe_only():
-                    raise
-                log.warning(
-                    "orchestrator.provider_stream.close_failed_after_exhaustion",
-                    error=str(exc),
-                )
+            log.warning(
+                "orchestrator.provider_stream.close_failed_after_exhaustion",
+                error=str(exc),
+            )
 
 
 @dataclass(slots=True)

@@ -5351,6 +5351,98 @@ async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity(
 
 
 @pytest.mark.asyncio
+async def test_atomic_wall_clock_exhaustion_bounds_nonreturning_finalizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wedged parallel finalizer cannot keep an exhausted attempt alive."""
+
+    class _NonreturningFinalizerRuntime:
+        _runtime_handle_backend = "opencode"
+        _cwd = "/tmp/project"
+        _permission_mode = "acceptEdits"
+
+        def __init__(self) -> None:
+            self.close_started = asyncio.Event()
+            self.close_cancelled = asyncio.Event()
+            self.allow_close = asyncio.Event()
+            self.close_finished = asyncio.Event()
+
+        @property
+        def runtime_backend(self) -> str:
+            return self._runtime_handle_backend
+
+        @property
+        def working_directory(self) -> str:
+            return self._cwd
+
+        @property
+        def permission_mode(self) -> str:
+            return self._permission_mode
+
+        async def execute_task(self, **_kwargs: Any):
+            try:
+                while True:
+                    yield AgentMessage(
+                        type="system",
+                        content="still working",
+                        data={"subtype": "progress"},
+                    )
+                    await asyncio.sleep(0.001)
+            finally:
+                self.close_started.set()
+                while not self.allow_close.is_set():
+                    try:
+                        await self.allow_close.wait()
+                    except asyncio.CancelledError:
+                        self.close_cancelled.set()
+                self.close_finished.set()
+
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.attempt_budget_runtime._PROVIDER_STREAM_CLOSE_TIMEOUT_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.attempt_budget_runtime._PROVIDER_STREAM_CANCEL_TIMEOUT_SECONDS",
+        0.01,
+    )
+    runtime = _NonreturningFinalizerRuntime()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        max_iterations_per_ac=100,
+        ac_attempt_timeout_seconds=0.01,
+    )
+
+    started = asyncio.get_running_loop().time()
+    result = await executor._execute_atomic_ac(
+        ac_index=0,
+        ac_content="Never-ending provider finalizer",
+        session_id="sess_budget_nonreturning_close",
+        execution_id="exec_budget_nonreturning_close",
+        tools=["Read"],
+        system_prompt="system",
+        seed_goal="Bound provider ownership",
+        depth=0,
+        start_time=datetime.now(UTC),
+    )
+    elapsed = asyncio.get_running_loop().time() - started
+
+    try:
+        assert result.success is False
+        assert result.attempt_budget_exhaustion is not None
+        assert result.attempt_budget_exhaustion.kind is AttemptBudgetKind.WALL_CLOCK
+        assert retry_hints.is_retryable_failure(result) is False
+        assert runtime.close_started.is_set()
+        assert not runtime.close_finished.is_set()
+        assert elapsed < 0.5
+    finally:
+        runtime.allow_close.set()
+        await asyncio.wait_for(runtime.close_finished.wait(), timeout=0.5)
+
+
+@pytest.mark.asyncio
 async def test_resumed_atomic_attempt_with_zero_time_never_enters_provider() -> None:
     """A zero-allowance durable snapshot must terminalize before adapter entry."""
 
