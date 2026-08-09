@@ -137,14 +137,22 @@ _EXPLICIT_REQUIRED_CAUSAL_SUFFIX = re.compile(
     rf")$",
     re.IGNORECASE,
 )
+_LOCATION_BODY = (
+    r"(?:(?:an?|the)\s+)?(?:[\w-]+\s+){0,2}"
+    r"(?:project|config(?:uration)?|codebase|repository|module|package|source)"
+)
 _EXPLICIT_REQUIRED_LOCATION_SUFFIX = re.compile(
-    r"^in\s+(?:(?:an?|the)\s+)?(?:[\w-]+\s+){0,2}"
-    r"(?:project|config(?:uration)?|codebase|repository|module|package|source)\s*$",
+    rf"^in\s+{_LOCATION_BODY}\s*$",
     re.IGNORECASE,
 )
-_REQUIRED_VALUE_DISALLOWED_TAIL = re.compile(
-    r"\b(?:because|so|plus|although|though|however|except|unless|then|for)\b"
-    r"|\b(?:in\s+order\s+to|to\s+(?:avoid|ensure|omit|prevent))\b",
+_VALUE_OPERATOR = r"(?:(?:=|:)|(?:to|of|is)\b|(?:must|shall|should)\s+be\b)"
+_VALUE_SCALAR = r"(?:`[^`\r\n]+`|'[^'\r\n]+'|\"[^\"\r\n]+\"|[^\s,;()\[\]{}<>]+)"
+_COMPOUND_CONSTANT_KEY = r"(?:--[\w][\w-]*|[A-Z][A-Z0-9_]*(?:[./:-][A-Z0-9_]+)*)"
+_REQUIRED_VALUE_TAIL = re.compile(
+    rf"^\s*{_VALUE_OPERATOR}\s*{_VALUE_SCALAR}"
+    rf"(?:\s+in\s+{_LOCATION_BODY})?"
+    rf"(?:\s+and\s+{_COMPOUND_CONSTANT_KEY}\s*{_VALUE_OPERATOR}\s*{_VALUE_SCALAR}"
+    rf"(?:\s+in\s+{_LOCATION_BODY})?)*\s*$",
     re.IGNORECASE,
 )
 _EXPLICIT_REQUIRED_VALUE_SUFFIX = re.compile(
@@ -187,9 +195,9 @@ def _required_target_suffix_is_bounded(_target: str, target_suffix: str) -> bool
 
 
 def _required_value_tail_is_bounded(target_suffix: str) -> bool:
-    """Reject causal or discourse clauses after an otherwise valid scalar."""
+    """Require the complete scalar tail to match one bounded value grammar."""
     suffix = _strip_terminal_target_marks(target_suffix)
-    return _REQUIRED_VALUE_DISALLOWED_TAIL.search(suffix) is None
+    return _REQUIRED_VALUE_TAIL.fullmatch(suffix) is not None
 
 
 def _has_explicit_required_target(
