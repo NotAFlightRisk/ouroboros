@@ -441,6 +441,16 @@ _ARBITRARY_CAUSAL_TARGETS = (
     "FrobNicator",
 )
 
+_UNSUPPORTED_BARE_IMPERATIVES = (
+    "Delete",
+    "Remove",
+    "Deprecate",
+    "Document",
+    "Mention",
+    "Rename",
+    "Test",
+)
+
 _CAUSAL_COMMAND_SPOOFS = (
     'MUST say "MUST define a CameraProvider class to ensure errors must not remain"',
     "MUST document the phrase 'MUST define a CameraProvider class to ensure errors must not remain'",
@@ -581,6 +591,56 @@ def test_stale_unproven_causal_target_never_publishes_formal_pass(
 
     assert verification.reports[0].results[0].verified is False
     assert formal.final_approved is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("predicate", _UNSUPPORTED_BARE_IMPERATIVES)
+@pytest.mark.parametrize("target", _ARBITRARY_CAUSAL_TARGETS)
+@pytest.mark.parametrize("target_present", [True, False], ids=["present", "absent"])
+async def test_unsupported_bare_imperative_never_mints_formal_evidence(
+    tmp_path: Any,
+    predicate: str,
+    target: str,
+    target_present: bool,
+) -> None:
+    """Unknown commands fail at extraction and again at verifier re-derivation."""
+    ac_text = f"{predicate} the {target} class"
+    payload = [
+        {
+            "ac_index": 0,
+            "tier": "t2_structural",
+            "pattern": rf"class\s+{target}",
+            "expected_value": target,
+            "file_hint": "*.py",
+            "description": "Unsupported command cannot require target presence",
+        }
+    ]
+
+    assertions = await _extract(ac_text, payload)
+    assert assertions == ()
+
+    stale_assertion = SpecAssertion(
+        ac_index=0,
+        ac_text=ac_text,
+        tier="t2_structural",
+        pattern=rf"class\s+{target}",
+        expected_value=target,
+        file_hint="*.py",
+        evidence_targets=(target,),
+        evidence_polarity=EvidencePolarity.REQUIRED,
+        input_binding_required=True,
+    )
+    content = f"class {target}:\n    pass\n" if target_present else "class Unrelated:\n    pass\n"
+    (tmp_path / "main.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all((stale_assertion,))
+    formal = _formal_verdict(ac_text, verification)
+
+    result = verification.reports[0].results[0]
+    assert result.verified is False
+    assert "polarity is ambiguous or stale" in result.detail
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
 
 
 @pytest.mark.asyncio
