@@ -50,6 +50,14 @@ from ouroboros.cli.commands import (
 from ouroboros.cli.commands.plugin_dispatch import build_plugin_dispatch_command
 from ouroboros.cli.formatters import console
 from ouroboros.cli.streams import UnicodeSafeTyperGroup
+from ouroboros.config import load_config
+from ouroboros.core.errors import ConfigError
+from ouroboros.observability import (
+    LoggingConfig as RuntimeLoggingConfig,
+)
+from ouroboros.observability import (
+    configure_logging,
+)
 
 
 class _PluginAwareGroup(UnicodeSafeTyperGroup):
@@ -149,9 +157,24 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _configure_cli_logging() -> None:
+    """Bridge the persisted CLI log level into the observability runtime."""
+    try:
+        log_level = load_config().logging.level.upper()
+    except ConfigError:
+        log_level = "INFO"
+
+    configure_logging(
+        RuntimeLoggingConfig(
+            log_level=log_level,
+            enable_file_logging=False,
+        )
+    )
+
+
 @app.callback()
 def main(
-    version: Annotated[
+    _version: Annotated[
         bool | None,
         typer.Option(
             "--version",
@@ -176,7 +199,7 @@ def main(
 
     Use [bold cyan]ouroboros COMMAND --help[/] for command-specific help.
     """
-    pass
+    _configure_cli_logging()
 
 
 __all__ = ["app", "main"]
