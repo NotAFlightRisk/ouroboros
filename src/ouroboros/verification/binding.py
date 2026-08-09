@@ -35,11 +35,6 @@ _FORBIDDEN_TARGET_PREFIX = re.compile(
     r")$",
     re.IGNORECASE,
 )
-_UNBOUND_TARGET_PREFIX_NEGATION = re.compile(
-    r"\b(?:without|no|avoid\w*|prevent\w*|omit\w*|forbid\w*|prohibit\w*|"
-    r"disallow\w*|exclude\w*)\b",
-    re.IGNORECASE,
-)
 _FORBIDDEN_TARGET_SUFFIX = re.compile(
     r"^\s*(?:(?:\w+\s+){0,2}(?:class|interface|struct|trait|function|file|directory|"
     r"flag|constant|value|setting|assignment|definition|declaration)\s+)?(?:"
@@ -51,136 +46,52 @@ _FORBIDDEN_TARGET_SUFFIX = re.compile(
     r")",
     re.IGNORECASE,
 )
-_UNBOUND_TARGET_SUFFIX_NEGATION = re.compile(
-    r"\b(?:(?:must|shall|should)\s+(?:not|never)|(?:do|does)\s+not)\b",
+_UNPROVEN_NEGATION = re.compile(
+    r"\b(?:not|never|no|without|cannot|can't|won't|doesn't|isn't|aren't|"
+    r"avoid\w*|prevent\w*|omit\w*|forbid\w*|prohibit\w*|disallow\w*|exclude\w*|"
+    r"fail(?:s|ed|ing)?\s+to)\b",
     re.IGNORECASE,
 )
-_EFFECT_EQUIVALENCE_CLASSES = (
-    frozenset(
-        {
-            "ambiguities",
-            "ambiguity",
-            "bug",
-            "bugs",
-            "conflict",
-            "conflicts",
-            "corruption",
-            "crash",
-            "crashes",
-            "deadlock",
-            "deadlocks",
-            "defect",
-            "defects",
-            "downtime",
-            "drift",
-            "duplicate",
-            "duplicates",
-            "error",
-            "errors",
-            "exception",
-            "exceptions",
-            "failure",
-            "failures",
-            "incident",
-            "incidents",
-            "inconsistencies",
-            "inconsistency",
-            "issue",
-            "issues",
-            "leak",
-            "leaks",
-            "outage",
-            "outages",
-            "race",
-            "races",
-            "regression",
-            "regressions",
-            "risk",
-            "risks",
-            "staleness",
-            "warning",
-            "warnings",
-        }
-    ),
+_UNPROVEN_PREDICATE = re.compile(
+    r"\b(?:must|shall|should|may|can|is|are|was|were|be|becomes?)\b",
+    re.IGNORECASE,
 )
-_CAUSAL_EFFECT_WORD = "|".join(
-    re.escape(word)
-    for word in sorted(
-        set().union(*_EFFECT_EQUIVALENCE_CLASSES),
-        key=lambda word: (-len(word), word),
-    )
+_TARGET_RELATIVE_PREDICATE = re.compile(
+    r"(?:^|[;,])\s*(?:(?:\w+\s+){0,2}(?:class|interface|struct|trait|function|file|"
+    r"directory|flag|constant|value|setting|assignment|definition|declaration)\s+)?"
+    r"(?:must|shall|should|may|can|is|are|was|were|be|becomes?)\b",
+    re.IGNORECASE,
 )
-_CAUSAL_EFFECT_SUBJECT = rf"(?:\w+\s+){{0,2}}(?:{_CAUSAL_EFFECT_WORD})\s+"
-_CAUSAL_TARGET_SUFFIX_NEGATION = re.compile(
-    r"^\s*(?:(?:\w+\s+){0,2}(?:class|interface|struct|trait|function|file|directory|"
-    r"flag|constant|value|setting|assignment|definition|declaration)\s+)?(?:"
-    rf"for\s+(?P<for_subject>{_CAUSAL_EFFECT_SUBJECT})that\s+"
-    r"|to\s+(?:prevent|avoid|ensure|reduce|stop|keep|omit)\s+"
-    rf"(?P<to_subject>{_CAUSAL_EFFECT_SUBJECT})(?:that\s+)?"
-    r")(?:(?:must|shall|should)\s+(?:not|never)|(?:do|does)\s+not)\b",
+_EXPLICIT_REQUIRED_TARGET_PREFIX = re.compile(
+    r"^\s*(?:"
+    r"(?:must|shall|should)\s+"
+    r"(?:add|create|declare|define|expose|implement|include|provide|retain|set|use)\s+"
+    r"(?:(?:an?|the)\s+)?(?:(?:class|interface|struct|trait|function|file|directory|"
+    r"flag|constant|value|setting|assignment|definition|declaration)\s+)?(?:named\s+)?"
+    r"|(?:an?|the)\s+(?:class|interface|struct|trait|function|file|directory|flag|"
+    r"constant|value|setting|assignment|definition|declaration)\s+"
+    r"(?:must|shall|should)\s+be\s+"
+    r")[`'\"]?$",
+    re.IGNORECASE,
+)
+_EXPLICIT_REQUIRED_VALUE_SUFFIX = re.compile(
+    r"^\s*(?:(?:=|:)|(?:must|shall|should)\s+be\s+(?!not\b|never\b))",
     re.IGNORECASE,
 )
 
 
-def _word_parts(text: str) -> tuple[str, ...]:
-    """Split prose and common identifier styles into case-folded word parts."""
-    result: list[str] = []
-    for token in re.findall(r"[^\W\d_]+", text, re.UNICODE):
-        parts = re.findall(
-            r"[A-Z]+(?=[A-Z][a-z]|\b)|[A-Z]?[a-z]+|[A-Z]+",
-            token,
-        ) or [token]
-        for part in parts:
-            result.append(part.casefold())
-    return tuple(result)
+def _has_explicit_required_target(ac_prefix: str) -> bool:
+    """Whether the AC starts with a bounded command that requires this target."""
+    return bool(_EXPLICIT_REQUIRED_TARGET_PREFIX.search(ac_prefix))
 
 
-def _word_forms(text: str) -> frozenset[str]:
-    """Return conservative case/morphology forms for prose/code word collisions."""
-    forms: set[str] = set()
-    for folded in _word_parts(text):
-        forms.add(folded)
-        if len(folded) > 3 and folded.endswith("ies"):
-            forms.add(f"{folded[:-3]}y")
-        elif len(folded) > 3 and folded.endswith(("ches", "shes", "xes", "zes", "sses")):
-            forms.add(folded[:-2])
-        elif len(folded) > 2 and folded.endswith("s") and not folded.endswith("ss"):
-            forms.add(folded[:-1])
-    return frozenset(forms)
-
-
-def _effect_class(subject: str) -> frozenset[str]:
-    """Return the complete semantic effect class named by a causal subject."""
-    subject_forms = _word_forms(subject)
-    matches = tuple(
-        effect_class
-        for effect_class in _EFFECT_EQUIVALENCE_CLASSES
-        if not subject_forms.isdisjoint(effect_class)
-    )
-    return frozenset().union(*matches)
-
-
-def _identifier_collides_with_effect(target: str, effect_class: frozenset[str]) -> bool:
-    """Detect effect aliases in split and uncamelized prefix/suffix identifiers."""
-    parts = _word_parts(target)
-    compact = "".join(parts)
-    target_forms = _word_forms(target) | ({compact} if compact else set())
-    aliases = frozenset().union(*(_word_forms(alias) for alias in effect_class))
-    return any(
-        form == alias or form.startswith(alias) or form.endswith(alias)
-        for form in target_forms
-        for alias in aliases
-    )
-
-
-def _has_distinct_causal_subject(target_suffix: str, target: str) -> bool:
-    """Accept a causal negation only when its effect subject is not the target."""
-    match = _CAUSAL_TARGET_SUFFIX_NEGATION.search(target_suffix)
+def _has_explicit_required_value(target: str, target_suffix: str) -> bool:
+    """Whether assignment syntax positively binds a scalar target."""
+    match = _EXPLICIT_REQUIRED_VALUE_SUFFIX.search(target_suffix)
     if match is None:
         return False
-    subject = match.group("for_subject") or match.group("to_subject") or ""
-    effect_class = _effect_class(subject)
-    return bool(effect_class) and not _identifier_collides_with_effect(target, effect_class)
+    operator = match.group(0).strip()
+    return operator[:1] in {"=", ":"} or (target.isascii() and target.isupper())
 
 
 def _is_identifier_continue(character: str) -> bool:
@@ -393,11 +304,13 @@ def acceptance_polarity(
                 or _FORBIDDEN_TARGET_SUFFIX.search(target_suffix)
             ):
                 target_polarities.add(EvidencePolarity.FORBIDDEN)
-            elif _has_distinct_causal_subject(target_suffix, target):
+            elif _has_explicit_required_value(target, target_suffix):
                 target_polarities.add(EvidencePolarity.REQUIRED)
-            elif _UNBOUND_TARGET_PREFIX_NEGATION.search(
-                target_prefix
-            ) or _UNBOUND_TARGET_SUFFIX_NEGATION.search(target_suffix):
+            elif _TARGET_RELATIVE_PREDICATE.search(ac_text[end:]):
+                return None
+            elif _has_explicit_required_target(ac_text[:start]):
+                target_polarities.add(EvidencePolarity.REQUIRED)
+            elif _UNPROVEN_NEGATION.search(ac_text) or _UNPROVEN_PREDICATE.search(ac_text):
                 return None
             else:
                 target_polarities.add(EvidencePolarity.REQUIRED)
