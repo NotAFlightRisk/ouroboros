@@ -307,7 +307,10 @@ class TestCodexSetup:
         assert 'OUROBOROS_LLM_BACKEND = "codex"' in contents
         assert "tool_timeout_sec" not in contents
         assert 'command = "/usr/local/bin/uvx"' in contents
-        assert 'args = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]' in contents
+        assert (
+            'args = ["--python", ">=3.12", "--from", "ouroboros-ai[mcp]", '
+            '"ouroboros", "mcp", "serve"]' in contents
+        )
 
     def test_register_codex_mcp_server_uses_direct_executable_for_dev_build(
         self, tmp_path: Path
@@ -7463,6 +7466,8 @@ class TestHermesSetup:
         config = yaml.safe_load((hermes_dir / "config.yaml").read_text(encoding="utf-8"))
         assert config["mcp_servers"]["ouroboros"]["command"] == "uvx"
         assert config["mcp_servers"]["ouroboros"]["args"] == [
+            "--python",
+            ">=3.12",
             "--from",
             "ouroboros-ai[mcp]",
             "ouroboros",
@@ -7551,6 +7556,8 @@ class TestHermesSetup:
         result = yaml.safe_load((hermes_dir / "config.yaml").read_text(encoding="utf-8"))
         assert result["mcp_servers"]["ouroboros"]["command"] == "uvx"
         assert result["mcp_servers"]["ouroboros"]["args"] == [
+            "--python",
+            ">=3.12",
             "--from",
             "ouroboros-ai[mcp]",
             "ouroboros",
@@ -9440,6 +9447,8 @@ class TestGjcSetup:
 
         assert entry["command"] == "uvx"
         assert entry["args"] == [
+            "--python",
+            ">=3.12",
             "--from",
             "ouroboros-ai[mcp]",
             "ouroboros",
