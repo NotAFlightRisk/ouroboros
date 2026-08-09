@@ -56,7 +56,8 @@ _FOLLOWING_AMBIGUOUS_CLAUSE = re.compile(
 )
 _FOLLOWING_CONJUNCTIVE_PREDICATE = re.compile(
     r"\band\b[\s\S]*\b"
-    r"(?:must|shall|should|may|can|is|are|was|were|be|becomes?|do|does|did)\b",
+    r"(?:must|shall|should|may|can|is|are|was|were|be|becomes?|do|does|did|not|never|"
+    r"without|avoid|prevent|omit|remove|delete|forbid|prohibit|exclude|exists?|remains?)\b",
     re.IGNORECASE,
 )
 _FORBIDDEN_COMMAND_PREFIX = re.compile(
@@ -119,70 +120,31 @@ _EXPLICIT_REQUIRED_STRUCTURAL_SUFFIX = re.compile(
     r"flag|constant|value|setting|assignment|definition|declaration)\b",
     re.IGNORECASE,
 )
+_DISTINCT_CAUSAL_EFFECT = (
+    r"(?:outages?|(?:decorator\s+)?boilerplate|(?:runtime\s+)?errors?|"
+    r"(?:(?:transient|stale-state)\s+)?failures?|(?:accidental\s+)?failure\s+loops?|"
+    r"(?:redundant\s+)?error\s+retries|retry/bounce\s+chains?)"
+)
+_DISTINCT_CAUSAL_PREDICATE = (
+    r"(?:that\s+)?(?:must|shall|should)\s+(?:not|never)\s+"
+    r"(?:remain|recur|persist|occur|appear|exist)"
+)
 _EXPLICIT_REQUIRED_CAUSAL_SUFFIX = re.compile(
-    r"^(?:to\s+(?:avoid|ensure|omit|prevent)|in\s+order\s+to\s+ensure|because|for|so)\b",
+    rf"^(?:"
+    rf"to\s+(?:avoid|omit|prevent)\s+{_DISTINCT_CAUSAL_EFFECT}"
+    rf"|(?:to\s+ensure|in\s+order\s+to\s+ensure|because|for|so)\s+"
+    rf"{_DISTINCT_CAUSAL_EFFECT}(?:\s+{_DISTINCT_CAUSAL_PREDICATE})?"
+    rf")$",
     re.IGNORECASE,
 )
-_TARGET_REFERENT_WORDS = frozenset(
-    {
-        "class",
-        "component",
-        "constant",
-        "declaration",
-        "definition",
-        "directory",
-        "entity",
-        "file",
-        "flag",
-        "function",
-        "implementation",
-        "instance",
-        "interface",
-        "it",
-        "its",
-        "object",
-        "provider",
-        "referenced",
-        "said",
-        "same",
-        "service",
-        "setting",
-        "struct",
-        "symbol",
-        "target",
-        "thing",
-        "this",
-        "trait",
-        "value",
-        "widget",
-    }
+_EXPLICIT_REQUIRED_LOCATION_SUFFIX = re.compile(
+    r"^in\s+(?:(?:an?|the)\s+)?(?:[\w-]+\s+){0,2}"
+    r"(?:project|config(?:uration)?|codebase|repository|module|package|source)\s*$",
+    re.IGNORECASE,
 )
-_DISTINCT_CAUSAL_EFFECT_WORDS = frozenset(
-    {
-        "boilerplate",
-        "chain",
-        "chains",
-        "cycle",
-        "cycles",
-        "defect",
-        "defects",
-        "error",
-        "errors",
-        "failure",
-        "failures",
-        "loop",
-        "loops",
-        "outage",
-        "outages",
-        "retries",
-        "retry",
-        "state",
-        "states",
-    }
-)
-_MODAL_OR_NEGATION = re.compile(
-    r"\b(?:must|shall|should|may|can|is|are|was|were|be|becomes?|do|does|did|not|never|"
-    r"no|without|absent|forbidden|prohibited|excluded)\b",
+_REQUIRED_VALUE_DISALLOWED_TAIL = re.compile(
+    r"\b(?:because|so|plus|although|though|however|except|unless|then|for)\b"
+    r"|\b(?:in\s+order\s+to|to\s+(?:avoid|ensure|omit|prevent))\b",
     re.IGNORECASE,
 )
 _EXPLICIT_REQUIRED_VALUE_SUFFIX = re.compile(
@@ -200,7 +162,7 @@ def _strip_terminal_target_marks(target_suffix: str) -> str:
     return suffix
 
 
-def _required_target_suffix_is_bounded(target: str, target_suffix: str) -> bool:
+def _required_target_suffix_is_bounded(_target: str, target_suffix: str) -> bool:
     """Accept only known structural, qualifier, or distinct-cause suffixes.
 
     The positive command before a target is not authority over arbitrary prose
@@ -218,15 +180,16 @@ def _required_target_suffix_is_bounded(target: str, target_suffix: str) -> bool:
         if not suffix:
             return True
 
-    causal = _EXPLICIT_REQUIRED_CAUSAL_SUFFIX.match(suffix)
-    if causal is not None:
-        causal_words = set(re.findall(r"\w+", suffix[causal.end() :].casefold()))
-        target_words = set(re.findall(r"\w+", target.casefold()))
-        return bool(causal_words.intersection(_DISTINCT_CAUSAL_EFFECT_WORDS)) and not (
-            causal_words.intersection(_TARGET_REFERENT_WORDS | target_words)
-        )
+    if _EXPLICIT_REQUIRED_CAUSAL_SUFFIX.fullmatch(suffix):
+        return True
 
-    return suffix.casefold().startswith("in ") and _MODAL_OR_NEGATION.search(suffix) is None
+    return _EXPLICIT_REQUIRED_LOCATION_SUFFIX.fullmatch(suffix) is not None
+
+
+def _required_value_tail_is_bounded(target_suffix: str) -> bool:
+    """Reject causal or discourse clauses after an otherwise valid scalar."""
+    suffix = _strip_terminal_target_marks(target_suffix)
+    return _REQUIRED_VALUE_DISALLOWED_TAIL.search(suffix) is None
 
 
 def _has_explicit_required_target(
@@ -493,6 +456,7 @@ def acceptance_polarity(
             )
             target_prefix = ac_text[clause_start:start]
             target_suffix = ac_text[end:clause_end]
+            complete_target_suffix = ac_text[end:]
             if _FOLLOWING_SENTENCE_CONTENT.search(ac_text[end:]):
                 return None
             if _UNRECOGNIZED_CLAUSE_SEPARATOR.search(ac_text[end:]):
@@ -501,17 +465,27 @@ def acceptance_polarity(
                 return None
             if _FOLLOWING_CONJUNCTIVE_PREDICATE.search(ac_text[end:]):
                 return None
+            required_value = _has_explicit_required_value(target, target_suffix)
+            forbidden_command = _FORBIDDEN_COMMAND_PREFIX.search(target_prefix)
+            if required_value and not _required_value_tail_is_bounded(complete_target_suffix):
+                return None
             if (
-                _FORBIDDEN_COMMAND_PREFIX.search(target_prefix)
+                forbidden_command
+                and not required_value
+                and not _required_target_suffix_is_bounded(target, complete_target_suffix)
+            ):
+                return None
+            if (
+                forbidden_command
                 or _FORBIDDEN_TARGET_PREFIX.search(target_prefix)
                 or _FORBIDDEN_TARGET_SUFFIX.search(target_suffix)
             ):
                 target_polarities.add(EvidencePolarity.FORBIDDEN)
-            elif _has_explicit_required_value(target, target_suffix):
+            elif required_value:
                 target_polarities.add(EvidencePolarity.REQUIRED)
             elif _TARGET_RELATIVE_PREDICATE.search(ac_text[end:]):
                 return None
-            elif _has_explicit_required_target(ac_text[:start], target, ac_text[end:]):
+            elif _has_explicit_required_target(ac_text[:start], target, complete_target_suffix):
                 target_polarities.add(EvidencePolarity.REQUIRED)
             else:
                 # Only an explicit, bounded positive grammar can mint REQUIRED

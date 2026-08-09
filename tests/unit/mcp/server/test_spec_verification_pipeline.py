@@ -363,6 +363,10 @@ _SENTENCE_BOUNDARY_CONTRADICTIONS = (
     "MUST define a CameraProvider class because the object must not exist",
     "MUST define a CameraProvider class because the object's errors must not remain",
     "MUST define a CameraProvider class to prevent the widget from existing",
+    "MUST define a CameraProvider class because errors must not remain although that one must not exist",
+    "MUST define a CameraProvider class so failures must not remain although the former must not exist",
+    "MUST define a CameraProvider class because handler errors must not remain although the handler must not exist",
+    "MUST define a CameraProvider class to prevent module outages although the module must not exist",
     "MUST define a CameraProvider class and the deeply referenced target class definitely must not exist",
     "MUST define a CameraProvider class\r\nThe class must not exist",
     "MUST NOT define a CameraProvider class! The class must exist",
@@ -478,6 +482,58 @@ async def test_decimal_constant_does_not_look_like_a_second_sentence(tmp_path: A
     assert assertions[0].evidence_polarity is EvidencePolarity.REQUIRED
     assert verification.reports[0].results[0].verified is True
     assert formal.final_approved is True
+
+
+_VALUE_TRAILING_CONTRADICTIONS = (
+    "MUST set RETRIES=10 because it must not exist",
+    "MUST set RETRIES=10 so the setting must not exist",
+    "MUST set RETRIES=10 plus it must not exist",
+    "MUST set RETRIES=10 although it must not exist",
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ac_text", _VALUE_TRAILING_CONTRADICTIONS)
+async def test_value_trailing_clause_never_mints_formal_evidence(
+    tmp_path: Any,
+    ac_text: str,
+) -> None:
+    """A valid scalar prefix cannot bypass complete-tail polarity validation."""
+    payload = [
+        {
+            "ac_index": 0,
+            "tier": "t1_constant",
+            "pattern": r"RETRIES\s*=\s*",
+            "expected_value": "10",
+            "file_hint": "*.py",
+            "description": "Trailing value clauses cannot mint evidence",
+        }
+    ]
+
+    assertions = await _extract(ac_text, payload)
+    assert assertions == ()
+
+    stale_assertion = SpecAssertion(
+        ac_index=0,
+        ac_text=ac_text,
+        tier="t1_constant",
+        pattern=r"RETRIES\s*=\s*",
+        expected_value="10",
+        file_hint="*.py",
+        evidence_targets=("RETRIES",),
+        evidence_polarity=EvidencePolarity.REQUIRED,
+        input_binding_required=True,
+    )
+    (tmp_path / "config.py").write_text("RETRIES = 10\n")
+
+    verification = SpecVerifier(str(tmp_path)).verify_all((stale_assertion,))
+    formal = _formal_verdict(ac_text, verification)
+
+    result = verification.reports[0].results[0]
+    assert result.verified is False
+    assert "polarity is ambiguous or stale" in result.detail
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
 
 
 _UNKNOWN_SUFFIX_NEGATIONS = (
