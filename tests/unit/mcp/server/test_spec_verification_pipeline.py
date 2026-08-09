@@ -936,6 +936,183 @@ async def test_dash_line_comment_termination_preserves_live_evidence(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("suffix", "tier", "ac_text", "pattern", "expected", "content"),
+    [
+        (
+            "lua",
+            "t1_constant",
+            "MUST set RETRIES=10",
+            r"RETRIES",
+            "10",
+            "--[[\nRETRIES = 10\n]]\n",
+        ),
+        (
+            "lua",
+            "t2_structural",
+            "MUST define a CameraProvider class",
+            r"CameraProvider",
+            "CameraProvider",
+            "--[=[\nclass CameraProvider {}\n]=]\n",
+        ),
+        (
+            "lua",
+            "t1_constant",
+            "MUST set RETRIES=10",
+            r"RETRIES",
+            "10",
+            "--[=[ mismatched closer ]]\nRETRIES = 10\n",
+        ),
+        (
+            "hs",
+            "t2_structural",
+            "MUST define a CameraProvider class",
+            r"CameraProvider",
+            "CameraProvider",
+            "{-\nclass CameraProvider a where\n-}\n",
+        ),
+        (
+            "hs",
+            "t2_structural",
+            "MUST define a CameraProvider class",
+            r"CameraProvider",
+            "CameraProvider",
+            "{- outer {- class CameraProvider a where -} outer -}\n",
+        ),
+        (
+            "hs",
+            "t2_structural",
+            "MUST define a CameraProvider class",
+            r"CameraProvider",
+            "CameraProvider",
+            "{- outer {- decoy -}\nclass CameraProvider a where\n",
+        ),
+        (
+            "lhs",
+            "t2_structural",
+            "MUST define a CameraProvider class",
+            r"CameraProvider",
+            "CameraProvider",
+            "{- outer {- class CameraProvider a where -} outer -}\n",
+        ),
+    ],
+    ids=[
+        "lua-long-comment",
+        "lua-equals-long-comment",
+        "lua-mismatched-long-comment-closer",
+        "haskell-block-comment",
+        "haskell-nested-comment",
+        "haskell-unterminated-nested-comment",
+        "literate-haskell-nested-comment",
+    ],
+)
+async def test_language_block_comments_cannot_mint_formal_evidence(
+    tmp_path: Any,
+    suffix: str,
+    tier: str,
+    ac_text: str,
+    pattern: str,
+    expected: str,
+    content: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": tier,
+                "pattern": pattern,
+                "expected_value": expected,
+                "file_hint": f"*.{suffix}",
+                "description": "language block comment is non-code",
+            }
+        ],
+    )
+    (tmp_path / f"main.{suffix}").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("suffix", "tier", "ac_text", "pattern", "expected", "content"),
+    [
+        (
+            "lua",
+            "t1_constant",
+            "MUST set RETRIES=10",
+            r"RETRIES",
+            "10",
+            "--[[ RETRIES = 9 ]]\nRETRIES = 10\n",
+        ),
+        (
+            "lua",
+            "t2_structural",
+            "MUST define a CameraProvider class",
+            r"CameraProvider",
+            "CameraProvider",
+            "--[=[ decoy CameraProvider ]=]\nclass CameraProvider {}\n",
+        ),
+        (
+            "hs",
+            "t2_structural",
+            "MUST define a CameraProvider class",
+            r"CameraProvider",
+            "CameraProvider",
+            "{- decoy CameraProvider -}\nclass CameraProvider a where\n",
+        ),
+        (
+            "hs",
+            "t2_structural",
+            "MUST define a CameraProvider class",
+            r"CameraProvider",
+            "CameraProvider",
+            "{- outer {- decoy CameraProvider -} outer -}\nclass CameraProvider a where\n",
+        ),
+    ],
+    ids=[
+        "lua-long-comment-live-assignment",
+        "lua-equals-long-comment-live-declaration",
+        "haskell-block-comment-live-declaration",
+        "haskell-nested-comment-live-declaration",
+    ],
+)
+async def test_language_block_comment_termination_preserves_live_evidence(
+    tmp_path: Any,
+    suffix: str,
+    tier: str,
+    ac_text: str,
+    pattern: str,
+    expected: str,
+    content: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": tier,
+                "pattern": pattern,
+                "expected_value": expected,
+                "file_hint": f"*.{suffix}",
+                "description": "live evidence after language block comment",
+            }
+        ],
+    )
+    (tmp_path / f"main.{suffix}").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is True
+    assert formal.final_approved is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "separator",
     ["\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"],
     ids=["vt", "ff", "fs", "gs", "rs", "nel", "ls", "ps"],

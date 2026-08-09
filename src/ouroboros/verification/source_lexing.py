@@ -129,6 +129,39 @@ def _nested_comment_end(text: str, index: int) -> int:
     return len(text)
 
 
+def _haskell_comment_end(text: str, index: int) -> int:
+    """Return the end of a possibly nested Haskell ``{- ... -}`` comment."""
+    depth = 1
+    cursor = index + 2
+    while cursor < len(text):
+        if text.startswith("{-", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("-}", cursor):
+            depth -= 1
+            cursor += 2
+            if depth == 0:
+                return cursor
+        else:
+            cursor += 1
+    return len(text)
+
+
+def _lua_long_comment_end(text: str, index: int) -> int | None:
+    """Return the end of a Lua long comment with a matched equals delimiter."""
+    if not text.startswith("--[", index):
+        return None
+    cursor = index + 3
+    while cursor < len(text) and text[cursor] == "=":
+        cursor += 1
+    if cursor >= len(text) or text[cursor] != "[":
+        return None
+    equals = text[index + 3 : cursor]
+    terminator = f"]{equals}]"
+    closing = text.find(terminator, cursor + 1)
+    return len(text) if closing < 0 else closing + len(terminator)
+
+
 def _cpp_raw_string_end(text: str, index: int) -> int | None:
     """Return a C++ raw-string end, including custom delimiters."""
     if index and _identifier_continue(text[index - 1]):
@@ -374,9 +407,10 @@ def classify_source(text: str, source_path: str | None = None) -> SourceLexicalM
     they start a regex.  Ambiguous block boundaries prefer regex/non-code.
     """
     line_starts, line_ends = _line_layout(text)
-    dash_line_comments = bool(
-        source_path and source_path.casefold().endswith((".lua", ".sql", ".hs", ".lhs"))
-    )
+    source_extension = source_path.casefold().rsplit(".", 1)[-1] if source_path else ""
+    lua_source = source_extension == "lua"
+    haskell_source = source_extension in {"hs", "lhs"}
+    dash_line_comments = source_extension in {"lua", "sql", "hs", "lhs"}
     regions: list[tuple[int, int]] = []
     can_end_expression: bool | None = False
     pending_control_paren = False
@@ -408,11 +442,21 @@ def classify_source(text: str, source_path: str | None = None) -> SourceLexicalM
             add_region(index, end)
             index = end
             continue
+        if haskell_source and text.startswith("{-", index):
+            end = _haskell_comment_end(text, index)
+            add_region(index, end)
+            index = end
+            continue
         if text.startswith("<!--", index):
             closing = text.find("-->", index + 4)
             end = len(text) if closing < 0 else closing + 3
             add_region(index, end)
             index = end
+            continue
+        lua_long_comment_end = _lua_long_comment_end(text, index) if lua_source else None
+        if lua_long_comment_end is not None:
+            add_region(index, lua_long_comment_end)
+            index = lua_long_comment_end
             continue
         dash_comment = dash_line_comments and text.startswith("--", index)
         if character == "#" or text.startswith("//", index) or dash_comment:
