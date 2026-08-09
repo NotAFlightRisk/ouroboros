@@ -35,6 +35,11 @@ _FORBIDDEN_TARGET_PREFIX = re.compile(
     r")$",
     re.IGNORECASE,
 )
+_UNBOUND_TARGET_PREFIX_NEGATION = re.compile(
+    r"\b(?:without|no|avoid\w*|prevent\w*|omit\w*|forbid\w*|prohibit\w*|"
+    r"disallow\w*|exclude\w*)\b",
+    re.IGNORECASE,
+)
 _FORBIDDEN_TARGET_SUFFIX = re.compile(
     r"^\s*(?:(?:\w+\s+){0,2}(?:class|interface|struct|trait|function|file|directory|"
     r"flag|constant|value|setting|assignment|definition|declaration)\s+)?(?:"
@@ -262,7 +267,9 @@ def acceptance_polarity(
                 or _FORBIDDEN_TARGET_SUFFIX.search(target_suffix)
             ):
                 target_polarities.add(EvidencePolarity.FORBIDDEN)
-            elif _UNBOUND_TARGET_SUFFIX_NEGATION.search(target_suffix):
+            elif _UNBOUND_TARGET_PREFIX_NEGATION.search(
+                target_prefix
+            ) or _UNBOUND_TARGET_SUFFIX_NEGATION.search(target_suffix):
                 return None
             else:
                 target_polarities.add(EvidencePolarity.REQUIRED)
