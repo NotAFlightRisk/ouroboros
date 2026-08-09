@@ -33,7 +33,8 @@ _FORBIDDEN_TARGET_PREFIX = re.compile(
     re.IGNORECASE,
 )
 _FORBIDDEN_TARGET_SUFFIX = re.compile(
-    r"^\s*(?:\w+\s+){0,2}(?:"
+    r"^\s*(?:(?:class|interface|struct|trait|function|file|directory|flag|constant|"
+    r"value|setting|assignment|definition|declaration)\s+){0,2}(?:"
     r"(?:is|are|must\s+be|should\s+be|shall\s+be)\s+"
     r"(?:forbidden|prohibited|disallowed|absent|excluded)\b"
     r"|(?:must|shall|should)\s+(?:not|never)\s+"
