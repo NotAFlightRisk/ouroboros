@@ -147,12 +147,17 @@ _EXPLICIT_REQUIRED_LOCATION_SUFFIX = re.compile(
 )
 _VALUE_OPERATOR = r"(?:(?:=|:)|(?:to|of|is)\b|(?:must|shall|should)\s+be\b)"
 _VALUE_SCALAR = r"(?:`[^`\r\n]+`|'[^'\r\n]+'|\"[^\"\r\n]+\"|[^\s,;()\[\]{}<>]+)"
-_COMPOUND_CONSTANT_KEY = r"(?:--[\w][\w-]*|[A-Z][A-Z0-9_]*(?:[./:-][A-Z0-9_]+)*)"
+_COMPOUND_CONSTANT_KEY = r"(?:--[\w][\w-]*|(?-i:[A-Z][A-Z0-9_]*(?:[./:-][A-Z0-9_]+)*))"
 _REQUIRED_VALUE_TAIL = re.compile(
     rf"^\s*{_VALUE_OPERATOR}\s*{_VALUE_SCALAR}"
     rf"(?:\s+in\s+{_LOCATION_BODY})?"
     rf"(?:\s+and\s+{_COMPOUND_CONSTANT_KEY}\s*{_VALUE_OPERATOR}\s*{_VALUE_SCALAR}"
     rf"(?:\s+in\s+{_LOCATION_BODY})?)*\s*$",
+    re.IGNORECASE,
+)
+_CONSTANT_ASSIGNMENT = re.compile(
+    rf"(?<![\w./:-])(?P<key>{_COMPOUND_CONSTANT_KEY})\s*{_VALUE_OPERATOR}\s*"
+    rf"(?P<scalar>{_VALUE_SCALAR})",
     re.IGNORECASE,
 )
 _EXPLICIT_REQUIRED_VALUE_SUFFIX = re.compile(
@@ -198,6 +203,12 @@ def _required_value_tail_is_bounded(target_suffix: str) -> bool:
     """Require the complete scalar tail to match one bounded value grammar."""
     suffix = _strip_terminal_target_marks(target_suffix)
     return _REQUIRED_VALUE_TAIL.fullmatch(suffix) is not None
+
+
+def _has_duplicate_constant_keys(ac_text: str) -> bool:
+    """Whether one AC assigns more than one scalar clause to the same key."""
+    keys = [match.group("key") for match in _CONSTANT_ASSIGNMENT.finditer(ac_text)]
+    return len(keys) != len(set(keys))
 
 
 def _has_explicit_required_target(
@@ -446,6 +457,8 @@ def acceptance_polarity(
     Mixed-polarity multi-target assertions are ambiguous and return ``None``;
     callers must split them or fail closed.
     """
+    if _has_duplicate_constant_keys(ac_text):
+        return None
     polarities: list[EvidencePolarity] = []
     boundaries = tuple(_CLAUSE_BOUNDARY.finditer(ac_text))
     for target in targets:
