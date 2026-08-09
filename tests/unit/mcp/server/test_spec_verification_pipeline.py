@@ -221,7 +221,16 @@ async def test_forbidden_scan_ignores_model_predicate_and_scope(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("purpose", ["prevent outages", "omit decorator boilerplate"])
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "to prevent outages",
+        "to omit decorator boilerplate",
+        "because errors must not remain",
+        "so failures must never remain",
+    ],
+    ids=["prevent-purpose", "omit-purpose", "because-reason", "so-reason"],
+)
 @pytest.mark.parametrize(
     ("content", "approved"),
     [("class CameraProvider:\n    pass\n", True), ("class Unrelated:\n    pass\n", False)],
@@ -229,11 +238,11 @@ async def test_forbidden_scan_ignores_model_predicate_and_scope(
 )
 async def test_negative_purpose_words_after_target_do_not_flip_positive_polarity(
     tmp_path: Any,
-    purpose: str,
+    suffix: str,
     content: str,
     approved: bool,
 ) -> None:
-    ac_text = f"MUST define a CameraProvider class to {purpose}"
+    ac_text = f"MUST define a CameraProvider class {suffix}"
     assertions = await _extract(
         ac_text,
         [
