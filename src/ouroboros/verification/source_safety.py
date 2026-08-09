@@ -162,6 +162,137 @@ def _delimited_noncode_ranges(
     return tuple(ranges)
 
 
+def _cpp_raw_string_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
+    """Return C++ raw strings, including encoding-prefixed forms."""
+    opener = re.compile(r'(?<![\w])(?:u8|u|U|L)?R"(?P<delimiter>[^\s()\\]{0,16})\(')
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    while match := opener.search(text, cursor):
+        closer = f'){match.group("delimiter")}"'
+        end = text.find(closer, match.end())
+        if end < 0:
+            return None
+        end += len(closer)
+        ranges.append((match.start(), end))
+        cursor = end
+    return tuple(ranges)
+
+
+def _triple_quote_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
+    """Return multiline strings delimited by triple double quotes."""
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    while (start := text.find('"""', cursor)) >= 0:
+        end = start + 3
+        while True:
+            end = text.find('"""', end)
+            if end < 0:
+                return None
+            backslashes = 0
+            check = end - 1
+            while check >= 0 and text[check] == "\\":
+                backslashes += 1
+                check -= 1
+            if backslashes % 2 == 0:
+                break
+            end += 3
+        end += 3
+        ranges.append((start, end))
+        cursor = end
+    return tuple(ranges)
+
+
+def _csharp_literal_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
+    """Return C# raw and verbatim strings that generic quote rules misread."""
+    ranges: list[tuple[int, int]] = []
+    raw_opener = re.compile(r'(?<!")(?P<quotes>"{3,})(?!")')
+    cursor = 0
+    while match := raw_opener.search(text, cursor):
+        delimiter = match.group("quotes")
+        end = text.find(delimiter, match.end())
+        if end < 0:
+            return None
+        end += len(delimiter)
+        ranges.append((match.start(), end))
+        cursor = end
+
+    masked = _mask_ranges(text, ranges)
+    cursor = 0
+    while (start := masked.find('@"', cursor)) >= 0:
+        end = start + 2
+        while end < len(masked):
+            if masked.startswith('""', end):
+                end += 2
+                continue
+            if masked[end] == '"':
+                end += 1
+                break
+            end += 1
+        else:
+            return None
+        ranges.append((start, end))
+        cursor = end
+    return tuple(ranges)
+
+
+def _swift_extended_string_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
+    """Return Swift extended raw strings and multiline raw strings."""
+    opener = re.compile(r'(?<![\w#])(?P<hashes>#+)(?P<quotes>"{1,3})')
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    while match := opener.search(text, cursor):
+        closer = match.group("quotes") + match.group("hashes")
+        end = text.find(closer, match.end())
+        if end < 0:
+            return None
+        end += len(closer)
+        ranges.append((match.start(), end))
+        cursor = end
+    return tuple(ranges)
+
+
+def _c_style_noncode_ranges(text: str, suffix: str) -> tuple[tuple[int, int], ...] | None:
+    """Scan C-family comments and every supported multiline/raw literal."""
+    special: tuple[tuple[int, int], ...] | None = ()
+    if suffix in {".cc", ".cpp", ".h", ".hpp"}:
+        special = _cpp_raw_string_ranges(text)
+    elif suffix in {".java", ".kt", ".kts"}:
+        special = _triple_quote_ranges(text)
+    elif suffix == ".swift":
+        extended = _swift_extended_string_ranges(text)
+        if extended is None:
+            return None
+        triples = _triple_quote_ranges(_mask_ranges(text, extended))
+        special = None if triples is None else (*extended, *triples)
+    elif suffix == ".cs":
+        special = _csharp_literal_ranges(text)
+    if special is None:
+        return None
+    masked = _mask_ranges(text, special)
+    ordinary = _delimited_noncode_ranges(
+        masked,
+        line_markers=("//",),
+        block_markers=(("/*", "*/"),),
+    )
+    return None if ordinary is None else (*special, *ordinary)
+
+
+def _rust_raw_string_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
+    """Return Rust raw strings, whose bodies may contain ordinary quotes."""
+    opener = re.compile(r'(?<![\w])(?:br|cr|r)(?P<hashes>#{0,255})"')
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    while match := opener.search(text, cursor):
+        closer = '"' + match.group("hashes")
+        end = text.find(closer, match.end())
+        if end < 0:
+            return None
+        end += len(closer)
+        ranges.append((match.start(), end))
+        cursor = end
+    return tuple(ranges)
+
+
 def _lua_long_delimiter(text: str, index: int) -> tuple[int, str] | None:
     """Return a Lua long-bracket opener length and its exact closer."""
     if index >= len(text) or text[index] != "[":
@@ -220,7 +351,7 @@ def _lua_noncode_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
 
 def _can_start_javascript_regex(text: str, index: int) -> bool:
     prefix = text[:index].rstrip()
-    if not prefix or prefix[-1] in "=(:,[!&|?{};":
+    if not prefix or prefix.endswith("=>") or prefix[-1] in "=(:,[!&|?{};+-*%^~<>":
         return True
     word = re.search(r"([A-Za-z_$][\w$]*)$", prefix)
     return bool(
@@ -232,6 +363,10 @@ def _can_start_javascript_regex(text: str, index: int) -> bool:
             "delete",
             "in",
             "instanceof",
+            "do",
+            "else",
+            "extends",
+            "new",
             "of",
             "return",
             "throw",
@@ -240,6 +375,20 @@ def _can_start_javascript_regex(text: str, index: int) -> bool:
             "yield",
         }
     )
+
+
+def _is_confident_javascript_division(text: str, index: int) -> bool:
+    """Whether a slash is unambiguously division rather than a regex.
+
+    Ambiguous slash contexts fail the whole source closed instead of
+    exposing a possible regex body as executable evidence.
+    """
+    prefix = text[:index]
+    stripped = prefix.rstrip(" \t")
+    if not stripped or "\n" in prefix[len(stripped) :] or "\r" in prefix[len(stripped) :]:
+        return False
+    previous = stripped[-1]
+    return previous.isalnum() or previous in "_$]'\"`"
 
 
 def _javascript_noncode_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
@@ -300,6 +449,8 @@ def _javascript_noncode_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
             ranges.append((index, cursor))
             index = cursor
             continue
+        if text[index] == "/" and not _is_confident_javascript_division(text, index):
+            return None
         index += 1
     return tuple(ranges)
 
@@ -367,23 +518,22 @@ def mask_non_executable_source(
         ranges = _python_noncode_ranges(text)
         return None if ranges is None else _mask_ranges(text, ranges)
     if suffix in _C_STYLE_SUFFIXES:
-        ranges = _delimited_noncode_ranges(
-            text,
-            line_markers=("//",),
-            block_markers=(("/*", "*/"),),
-        )
+        ranges = _c_style_noncode_ranges(text, suffix)
         return None if ranges is None else _mask_ranges(text, ranges)
     if suffix in _JAVASCRIPT_SUFFIXES:
         ranges = _javascript_noncode_ranges(text)
         return None if ranges is None else _mask_ranges(text, ranges)
     if suffix == ".rs":
+        raw_ranges = _rust_raw_string_ranges(text)
+        if raw_ranges is None:
+            return None
         ranges = _delimited_noncode_ranges(
-            text,
+            _mask_ranges(text, raw_ranges),
             line_markers=("//",),
             block_markers=(("/*", "*/"),),
             nested_blocks=True,
         )
-        return None if ranges is None else _mask_ranges(text, ranges)
+        return None if ranges is None else _mask_ranges(text, (*raw_ranges, *ranges))
     if suffix in _HASH_STYLE_SUFFIXES:
         ranges = _delimited_noncode_ranges(text, line_markers=("#",), block_markers=())
         return None if ranges is None else _mask_ranges(text, ranges)

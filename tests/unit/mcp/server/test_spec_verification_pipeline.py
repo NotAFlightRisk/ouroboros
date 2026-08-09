@@ -173,6 +173,30 @@ async def test_positive_structure_survives_extractor_verifier_and_formal_adapter
             "main.js",
             "const declaration = /class CameraProvider/;\n",
         ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"class\s+CameraProvider",
+            "CameraProvider",
+            "main.js",
+            "const makePattern = () => /class CameraProvider/;\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"class\s+CameraProvider",
+            "CameraProvider",
+            "main.cpp",
+            'const char* decoy = R"TAG(foo " class CameraProvider)TAG";\n',
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"class\s+CameraProvider",
+            "CameraProvider",
+            "Main.java",
+            'String decoy = """\nfoo " class CameraProvider\n""";\n',
+        ),
     ],
     ids=[
         "comment-only-structure",
@@ -185,6 +209,9 @@ async def test_positive_structure_survives_extractor_verifier_and_formal_adapter
         "json-string",
         "yaml-scalar",
         "javascript-regex-literal",
+        "javascript-arrow-regex-literal",
+        "cpp-raw-string",
+        "java-text-block",
     ],
 )
 async def test_comment_only_evidence_cannot_reach_formal_pass(

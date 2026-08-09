@@ -278,6 +278,62 @@ class TestSpecVerifier:
                 r"class\s+CameraProvider",
                 "CameraProvider",
             ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "main.js",
+                "const makePattern = () => /class CameraProvider/;\n",
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "main.js",
+                "if (ready) {} else /class CameraProvider/.test(value);\n",
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "main.cpp",
+                'const char* decoy = R"TAG(foo " class CameraProvider)TAG";\n',
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "Main.java",
+                'String decoy = """\nfoo " class CameraProvider\n""";\n',
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "main.rs",
+                'let decoy = r#"foo " class CameraProvider"#;\n',
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "Main.cs",
+                'var decoy = @"foo "" class CameraProvider";\n',
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "Main.cs",
+                'var decoy = """foo " class CameraProvider""";\n',
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "main.swift",
+                'let decoy = #"foo " class CameraProvider"#\n',
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
         ],
         ids=[
             "lua-structure-comment",
@@ -292,6 +348,14 @@ class TestSpecVerifier:
             "json-string",
             "yaml-scalar",
             "javascript-regex-literal",
+            "javascript-arrow-regex-literal",
+            "javascript-else-regex-literal",
+            "cpp-raw-string",
+            "java-text-block",
+            "rust-raw-string",
+            "csharp-verbatim-string",
+            "csharp-raw-string",
+            "swift-extended-string",
         ],
     )
     def test_comment_only_source_cannot_verify_positive_evidence(
@@ -369,10 +433,19 @@ class TestSpecVerifier:
             ("main.lua", "--[=[ ignored ]=]\nclass CameraProvider\n"),
             (
                 "main.js",
-                "const ignored = /class CameraProvider/;\nclass CameraProvider {}\n",
+                "const ignored = () => /class CameraProvider/;\nclass CameraProvider {}\n",
+            ),
+            (
+                "main.cpp",
+                'const char* ignored = R"TAG(foo " class Unrelated)TAG";\n'
+                "class CameraProvider {};\n",
+            ),
+            (
+                "Main.java",
+                'String ignored = """\nfoo " class Unrelated\n""";\nclass CameraProvider {}\n',
             ),
         ],
-        ids=["rust", "haskell", "lua", "javascript"],
+        ids=["rust", "haskell", "lua", "javascript", "cpp", "java"],
     )
     def test_complex_noncode_mask_preserves_following_executable_evidence(
         self, filename: str, content: str
