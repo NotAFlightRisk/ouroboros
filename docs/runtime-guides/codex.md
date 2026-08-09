@@ -5,6 +5,8 @@ doc_metadata:
 
 # Running Ouroboros with Codex CLI
 
+> 한국어: [codex.ko.md](./codex.ko.md) (설치까지 번역됨, 이후 절은 이 문서를 보세요)
+
 > For installation and first-run onboarding, see [Getting Started](../getting-started.md).
 
 Ouroboros can use **OpenAI Codex** as a runtime backend. [Codex CLI](https://github.com/openai/codex) is the local execution surface that the adapter talks to; on macOS, setup also detects the executable bundled with the ChatGPT app when it is not on your `PATH`. In Ouroboros, that backend is presented as a **session-oriented runtime** with the same specification-first workflow harness (acceptance criteria, evaluation principles, deterministic exit conditions), even though the adapter itself communicates with the local `codex` executable. By default, Ouroboros uses the model currently selected by Codex and supplies only the role's reasoning effort.
