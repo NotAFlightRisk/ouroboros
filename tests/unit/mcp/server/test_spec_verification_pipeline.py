@@ -12,6 +12,7 @@ from ouroboros.core.lineage import EvaluationSummary, TaskResult
 from ouroboros.core.types import Result
 from ouroboros.mcp.server.adapter import _evaluation_summary_from_spec_verification
 from ouroboros.providers.base import CompletionResponse
+from ouroboros.verification.binding import _EFFECT_EQUIVALENCE_CLASSES
 from ouroboros.verification.extractor import AssertionExtractor
 from ouroboros.verification.models import EvidencePolarity, SpecAssertion
 from ouroboros.verification.verifier import SpecVerifier
@@ -431,74 +432,116 @@ def test_unknown_target_suffix_never_publishes_a_direct_formal_pass(
     assert formal.final_approved is False
 
 
-_EFFECT_TARGET_REFERENT_CASES = (
-    ("Failure", "The class Failure to ensure the failure must not remain"),
-    ("Error", "The class Error for this error that must not remain"),
-    ("Warning", "The class Warning to ensure that warning must not remain"),
-    ("Bug", "The class Bug for the bug that must not remain"),
-    ("Failures", "The class Failures to ensure the failure must not remain"),
+_EFFECT_CLASS_CASES = tuple(
+    pytest.param(effect_class, id="-".join(sorted(effect_class)))
+    for effect_class in _EFFECT_EQUIVALENCE_CLASSES
+)
+
+
+def _effect_target_shapes(alias: str) -> tuple[str, ...]:
+    titled = alias.title()
+    return (
+        alias.casefold(),
+        f"{titled}Mode",
+        f"Runtime{titled}",
+        f"{alias.casefold()}_mode",
+        f"runtime-{alias.casefold()}",
+        f"{alias.casefold()}mode",
+        f"runtime{alias.casefold()}",
+    )
+
+
+_EFFECT_SUBJECT_CASES = tuple(
+    pytest.param(subject, id=subject)
+    for effect_class in _EFFECT_EQUIVALENCE_CLASSES
+    for subject in sorted(effect_class)
 )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("target", "ac_text"),
-    _EFFECT_TARGET_REFERENT_CASES,
-    ids=["failure", "error", "warning", "bug", "plural-failure"],
+    "subject",
+    _EFFECT_SUBJECT_CASES,
 )
-async def test_causal_effect_subject_cannot_refer_back_to_target(
-    target: str,
-    ac_text: str,
+@pytest.mark.parametrize(
+    ("content", "approved"),
+    [("class CameraProvider:\n    pass\n", True), ("class Unrelated:\n    pass\n", False)],
+    ids=["target-present", "target-absent"],
+)
+async def test_disjoint_causal_effect_subject_remains_required(
+    tmp_path: Any,
+    subject: str,
+    content: str,
+    approved: bool,
 ) -> None:
+    ac_text = f"The class CameraProvider to ensure {subject} must not remain"
     assertions = await _extract(
         ac_text,
         [
             {
                 "ac_index": 0,
                 "tier": "t2_structural",
-                "pattern": rf"class\s+{target}",
-                "expected_value": target,
+                "pattern": r"class\s+CameraProvider",
+                "expected_value": "CameraProvider",
                 "file_hint": "*.py",
-                "description": "Effect noun is the criterion target",
+                "description": "Disjoint target prevents a causal effect",
             }
         ],
     )
+    (tmp_path / "main.py").write_text(content)
 
-    assert assertions == ()
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert assertions[0].evidence_polarity is EvidencePolarity.REQUIRED
+    assert formal.final_approved is approved
 
 
 @pytest.mark.parametrize(
-    ("target", "ac_text"),
-    _EFFECT_TARGET_REFERENT_CASES,
-    ids=["failure", "error", "warning", "bug", "plural-failure"],
+    "effect_class",
+    _EFFECT_CLASS_CASES,
 )
 @pytest.mark.parametrize("target_present", [True, False], ids=["present", "absent"])
-def test_stale_required_effect_target_never_publishes_formal_pass(
+def test_stale_required_effect_target_cross_product_never_publishes_formal_pass(
     tmp_path: Any,
-    target: str,
-    ac_text: str,
+    effect_class: frozenset[str],
     target_present: bool,
 ) -> None:
-    assertion = SpecAssertion(
-        ac_index=0,
-        ac_text=ac_text,
-        tier="t2_structural",
-        pattern=rf"class\s+{target}",
-        expected_value=target,
-        file_hint="*.py",
-        evidence_targets=(target,),
-        evidence_polarity=EvidencePolarity.REQUIRED,
-        input_binding_required=True,
-    )
-    content = f"class {target}:\n    pass\n" if target_present else "class Unrelated:\n    pass\n"
-    (tmp_path / "main.py").write_text(content)
+    for subject in sorted(effect_class):
+        for alias in sorted(effect_class):
+            for target in _effect_target_shapes(alias):
+                ac_text = f"The class {target} to ensure {subject} must not remain"
+                assertion = SpecAssertion(
+                    ac_index=0,
+                    ac_text=ac_text,
+                    tier="t2_structural",
+                    pattern=rf"class\s+{target}",
+                    expected_value=target,
+                    file_hint="*.py",
+                    evidence_targets=(target,),
+                    evidence_polarity=EvidencePolarity.REQUIRED,
+                    input_binding_required=True,
+                )
+                content = (
+                    f"class {target}:\n    pass\n"
+                    if target_present
+                    else "class Unrelated:\n    pass\n"
+                )
+                (tmp_path / "main.py").write_text(content)
 
-    verification = SpecVerifier(str(tmp_path)).verify_all((assertion,))
-    formal = _formal_verdict(ac_text, verification)
+                verification = SpecVerifier(str(tmp_path)).verify_all((assertion,))
+                formal = _formal_verdict(ac_text, verification)
+                result = verification.reports[0].results[0]
 
-    assert verification.reports[0].results[0].verified is False
-    assert "polarity is ambiguous or stale" in verification.reports[0].results[0].detail
-    assert formal.final_approved is False
+                assert result.verified is False, (subject, target, target_present)
+                assert any(
+                    message in result.detail
+                    for message in (
+                        "polarity is ambiguous or stale",
+                        "No criterion-bound target is available",
+                    )
+                ), (subject, target, target_present, result.detail)
+                assert formal.final_approved is False, (subject, target, target_present)
 
 
 _UNKNOWN_PREFIX_NEGATIONS = (
