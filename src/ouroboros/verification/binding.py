@@ -20,17 +20,21 @@ _CONSTANT_BINDING_SUFFIX = re.compile(
 )
 _TOKEN_PUNCTUATION = frozenset("._/:-+@#?&=%~")
 _CLAUSE_BOUNDARY = re.compile(r"\b(?:and|but|while|whereas)\b|[;,]", re.IGNORECASE)
-_FORBIDDEN_CLAUSE = re.compile(
-    r"(?:"
-    r"\b(?:must|shall|should|may|can)\s+(?:not|never)\b"
-    r"|\b(?:do|does|did)\s+not\b"
-    r"|\b(?:avoid(?:s|ed|ing)?|prevent(?:s|ed|ing)?|omit(?:s|ted|ting)?)\b"
-    r"|\b(?:forbid(?:s|den)?|prohibit(?:s|ed)?|disallow(?:s|ed)?|absent|excluded?)\b"
-    r")",
+_FORBIDDEN_COMMAND_PREFIX = re.compile(
+    r"(?:\b(?:must|shall|should|may|can)\s+(?:not|never)\b|\b(?:do|does|did)\s+not\b)",
     re.IGNORECASE,
 )
 _FORBIDDEN_TARGET_PREFIX = re.compile(
-    r"\b(?:without|no)\s+(?:(?:an?|the)\s+)?(?:\w+\s+){0,2}$",
+    r"\b(?:"
+    r"(?:without|no)\s+(?:(?:an?|the)\s+)?(?:\w+\s+){0,2}"
+    r"|(?:avoid|prevent|omit|forbid|prohibit|disallow|exclude)\w*\s+"
+    r"(?:(?:defin|creat|set|includ|us)\w*\s+)?(?:(?:an?|the)\s+)?(?:\w+\s+){0,2}"
+    r")$",
+    re.IGNORECASE,
+)
+_FORBIDDEN_TARGET_SUFFIX = re.compile(
+    r"^\s*(?:\w+\s+){0,2}(?:is|are|must\s+be|should\s+be|shall\s+be)\s+"
+    r"(?:forbidden|prohibited|disallowed|absent|excluded)\b",
     re.IGNORECASE,
 )
 
@@ -237,12 +241,13 @@ def acceptance_polarity(
                 (match.start() for match in boundaries if match.start() >= end),
                 default=len(ac_text),
             )
-            clause = ac_text[clause_start:clause_end]
             target_prefix = ac_text[clause_start:start]
+            target_suffix = ac_text[end:clause_end]
             target_polarities.add(
                 EvidencePolarity.FORBIDDEN
-                if _FORBIDDEN_CLAUSE.search(clause)
+                if _FORBIDDEN_COMMAND_PREFIX.search(target_prefix)
                 or _FORBIDDEN_TARGET_PREFIX.search(target_prefix)
+                or _FORBIDDEN_TARGET_SUFFIX.search(target_suffix)
                 else EvidencePolarity.REQUIRED
             )
         if len(target_polarities) != 1:
