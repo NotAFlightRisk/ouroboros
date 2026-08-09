@@ -1745,6 +1745,44 @@ class TestSpecVerifier:
 
         assert completed.returncode == 0, completed.stderr
 
+    def test_unanchored_lazy_repeat_retry_is_rejected_before_execution(self) -> None:
+        """A lazy prefix must not retry from every byte of a 50KB subject."""
+        project = self._create_project({"main.py": "A" * 49_000 + "\nRETRIES = 10\n"})
+        script = textwrap.dedent(
+            f"""
+            from ouroboros.verification.models import SpecAssertion, VerificationTier
+            from ouroboros.verification.verifier import SpecVerifier
+
+            assertion = SpecAssertion(
+                ac_index=0,
+                ac_text="MUST set RETRIES=10",
+                tier=VerificationTier.T1_CONSTANT,
+                pattern=r"A*?;RETRIES\\WZ",
+                expected_value="10",
+                file_hint="*.py",
+                evidence_targets=("RETRIES",),
+                input_binding_required=True,
+            )
+            summary = SpecVerifier(project_dir={project!r}).verify_all((assertion,))
+            result = summary.reports[0].results[0]
+            assert result.verified is False
+            assert summary.override_approval is False
+            assert "Unusable regex pattern" in result.detail
+            """
+        )
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail("unanchored lazy repeat retried across the full subject")
+
+        assert completed.returncode == 0, completed.stderr
+
     @pytest.mark.parametrize(
         "pattern",
         [r"(?=[\s\S]*CameraProvider)", r"(?m)^(?=[\s\S]*CameraProvider)"],

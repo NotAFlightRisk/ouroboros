@@ -336,6 +336,34 @@ async def test_positive_structure_survives_extractor_verifier_and_formal_adapter
             "t2_structural",
             r"CameraProvider",
             "CameraProvider",
+            "value =~ tr{class CameraProvider}{replacement};\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "value =~ y{class CameraProvider}{replacement};\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "%q{class CameraProvider}\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "/* outer\n /* inner */\n class CameraProvider\n*/\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
             "cat <<EOF\nCameraProvider\nEOF\n",
         ),
         (
@@ -429,6 +457,188 @@ async def test_positive_structure_survives_extractor_verifier_and_formal_adapter
             "10",
             "const decoy = /RETRIES(10);/;\n",
         ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "do /class CameraProvider/; while (false);\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "break\n/class CameraProvider/;\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "continue\n/class CameraProvider/;\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "debugger\n/class CameraProvider/;\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "export default /class CameraProvider/;\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES",
+            "10",
+            "while (ready) break\n/RETRIES = 10/;\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "cat <<'END DOC'\nclass CameraProvider {}\nEND DOC\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "cat <<\\END-DOC\nclass CameraProvider {}\nEND-DOC\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "cat <<123\nclass CameraProvider {}\n123\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "cat <<$EOF\nclass CameraProvider {}\n$EOF\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "cat <<-'END-DOC'\nclass CameraProvider {}\n\tEND-DOC\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "cat <<$(delimiter)\nclass CameraProvider {}\ndelimiter\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "my $decoy = m\nclass CameraProvider\n;\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES",
+            "10",
+            "my $decoy = qr\nRETRIES = 10\n;\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "value =~ s\nold\nclass CameraProvider\n;\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "=pod\nclass CameraProvider {}\n=cut\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "=begin\nclass CameraProvider {}\n=end\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES",
+            "10",
+            "const options = { RETRIES: 10 };\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES",
+            "10",
+            "RETRIES: 10\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES",
+            "10",
+            "/* outer\n /* inner */\n RETRIES = 10\n*/\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES",
+            "10",
+            "cat <<EOF\n  EOF\nRETRIES = 10\nEOF\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES",
+            "10",
+            "cat <<EOF\nEOF;\nRETRIES = 10\nEOF\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES",
+            "10",
+            "m{RETRIES = 10;}\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES",
+            "10",
+            "qr!RETRIES = 10!\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES",
+            "10",
+            "%q{RETRIES = 10;}\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES",
+            "10",
+            'const char* x = R"(prefix " RETRIES = 10;)";\n',
+        ),
     ],
     ids=[
         "t2-zero-width",
@@ -465,6 +675,10 @@ async def test_positive_structure_survives_extractor_verifier_and_formal_adapter
         "t1-perl-qr-bang",
         "t2-perl-substitute-paired",
         "t2-perl-substitute-unpaired",
+        "t2-perl-transliterate-paired",
+        "t2-perl-y-paired",
+        "t2-ruby-percent-q",
+        "t2-nested-rust-comment",
         "t2-heredoc",
         "t2-lowercase-heredoc",
         "t2-heredoc-indented-plain-terminator",
@@ -479,6 +693,32 @@ async def test_positive_structure_survives_extractor_verifier_and_formal_adapter
         "t2-call-site",
         "t1-call-site",
         "t1-regex-literal",
+        "t2-js-do-regex-statement",
+        "t2-js-break-asi-regex",
+        "t2-js-continue-asi-regex",
+        "t2-js-debugger-asi-regex",
+        "t2-js-export-default-regex",
+        "t1-js-while-break-asi-regex",
+        "t2-heredoc-quoted-space-delimiter",
+        "t2-heredoc-escaped-hyphen-delimiter",
+        "t2-heredoc-numeric-delimiter",
+        "t2-heredoc-variable-delimiter",
+        "t2-heredoc-quoted-hyphen-dash-mode",
+        "t2-heredoc-unknown-opener-fails-closed",
+        "t2-perl-m-newline-delimiter",
+        "t1-perl-qr-newline-delimiter",
+        "t2-perl-substitute-newline-delimiter",
+        "t2-perl-pod",
+        "t2-ruby-begin-end-comment",
+        "t1-js-object-key-colon",
+        "t1-python-annotation-colon",
+        "t1-nested-rust-comment",
+        "t1-heredoc-indented-terminator",
+        "t1-heredoc-semicolon-terminator",
+        "t1-perl-m-paired",
+        "t1-perl-qr-unpaired",
+        "t1-ruby-percent-q",
+        "t1-cpp-raw-string",
     ],
 )
 async def test_unrelated_regex_and_target_cannot_formally_approve_by_file_copresence(
@@ -637,6 +877,66 @@ async def test_unicode_logical_lines_cannot_join_unrelated_target_evidence(
             "CameraProvider",
             "cat <<~EOF\ndecoy\n  EOF\nclass CameraProvider {}\n",
         ),
+        (
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "cat <<'END DOC'\ndecoy\nEND DOC\nclass CameraProvider {}\n",
+        ),
+        (
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "cat <<\\END-DOC\ndecoy\nEND-DOC\nclass CameraProvider {}\n",
+        ),
+        (
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "cat <<123\ndecoy\n123\nclass CameraProvider {}\n",
+        ),
+        (
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "cat <<$EOF\ndecoy\n$EOF\nclass CameraProvider {}\n",
+        ),
+        (
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "cat <<-'END-DOC'\ndecoy\n\tEND-DOC\nclass CameraProvider {}\n",
+        ),
+        (
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "my $decoy = m\nUnrelated\n; class CameraProvider {}\n",
+        ),
+        (
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "=pod\ndecoy\n=cut\nclass CameraProvider {}\n",
+        ),
+        (
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "=begin\ndecoy\n=end\nclass CameraProvider {}\n",
+        ),
+        (
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "/* outer\n /* inner */\n decoy\n*/\nclass CameraProvider {}\n",
+        ),
+        (
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            'const char* x = R"tag(decoy " text)tag"; class CameraProvider {}\n',
+        ),
     ],
     ids=[
         "t2-target-lookahead",
@@ -651,6 +951,16 @@ async def test_unicode_logical_lines_cannot_join_unrelated_target_evidence(
         "t2-declaration-after-tabbed-heredoc",
         "t2-declaration-after-quoted-heredoc",
         "t2-declaration-after-squiggly-heredoc",
+        "t2-declaration-after-space-delimiter-heredoc",
+        "t2-declaration-after-escaped-heredoc",
+        "t2-declaration-after-numeric-heredoc",
+        "t2-declaration-after-variable-heredoc",
+        "t2-declaration-after-quoted-hyphen-heredoc",
+        "t2-declaration-after-perl-newline-regex",
+        "t2-declaration-after-perl-pod",
+        "t2-declaration-after-ruby-block-comment",
+        "t2-declaration-after-nested-rust-comment",
+        "t2-declaration-after-cpp-raw-string",
     ],
 )
 async def test_target_bound_zero_width_evidence_preserves_formal_controls(
@@ -683,6 +993,62 @@ async def test_target_bound_zero_width_evidence_preserves_formal_controls(
 
     assert verification.reports[0].verified_pass is True
     assert formal.final_approved is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "content", "approved"),
+    [
+        ("config.yaml", "RETRIES: 10\n", True),
+        ("config.yml", "'RETRIES': 10\n", True),
+        ("config.json", '{"RETRIES": 10}\n', True),
+        ("config.toml", "RETRIES = 10\n", True),
+        ("service.env", "RETRIES=10\n", True),
+        ("main.js", "const options = { RETRIES: 10 };\n", False),
+        ("main.ts", "const options = { RETRIES: 10 };\n", False),
+        ("main.py", "RETRIES: 10\n", False),
+        ("config.unknown", "RETRIES: 10\n", False),
+    ],
+    ids=[
+        "yaml-unquoted-mapping",
+        "yml-quoted-mapping",
+        "json-quoted-mapping",
+        "toml-equals",
+        "env-equals",
+        "javascript-object-key",
+        "typescript-object-key",
+        "python-annotation",
+        "unknown-colon",
+    ],
+)
+async def test_t1_colon_evidence_obeys_data_file_grammar(
+    tmp_path: Any,
+    filename: str,
+    content: str,
+    approved: bool,
+) -> None:
+    ac_text = "MUST set RETRIES=10"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t1_constant",
+                "pattern": r"RETRIES",
+                "expected_value": "10",
+                "file_hint": filename,
+                "description": "T1 mapping grammar is file-type specific",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is approved
+    assert formal.final_approved is approved
+    assert formal.ac_results[0].final_verdict == ("pass" if approved else "fail")
 
 
 @pytest.mark.asyncio

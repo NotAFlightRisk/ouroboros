@@ -14,20 +14,22 @@ import re
 
 _LOGICAL_LINE_BOUNDARY = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
 _PAIRED_DELIMITERS = {"(": ")", "[": "]", "{": "}", "<": ">"}
-_HEREDOC_OPENER = re.compile(
-    r"<<(?P<indent>[-~]?)[ \t]*(?:(?P<quote>['\"`])"
-    r"(?P<quoted>[A-Za-z_][A-Za-z0-9_]*)"
-    r"(?P=quote)|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))"
-)
 _SINGLE_QUOTE_LIKE = ("qr", "qq", "qx", "qw", "%r", "%q", "%Q", "m", "q")
 _DOUBLE_QUOTE_LIKE = ("tr", "s", "y")
+_CPP_RAW_PREFIXES = ('u8R"', 'uR"', 'UR"', 'LR"', 'R"')
 _REGEX_PREFIX_KEYWORDS = frozenset(
     {
         "await",
+        "break",
         "case",
         "const",
+        "continue",
+        "debugger",
         "delete",
+        "default",
+        "do",
         "else",
+        "export",
         "extends",
         "in",
         "instanceof",
@@ -72,6 +74,13 @@ class _HeredocBounds:
     scan_end: int
 
 
+@dataclass(frozen=True, slots=True)
+class _HeredocOpener:
+    delimiter: str | None
+    indent_mode: str
+    end: int
+
+
 def _identifier_start(character: str) -> bool:
     return character == "_" or character == "$" or character.isalpha()
 
@@ -102,6 +111,43 @@ def _quoted_end(text: str, index: int, quote: str) -> int:
     return len(text)
 
 
+def _nested_comment_end(text: str, index: int) -> int:
+    """Return the end of a possibly nested ``/* ... */`` comment."""
+    depth = 1
+    cursor = index + 2
+    while cursor < len(text):
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+            if depth == 0:
+                return cursor
+        else:
+            cursor += 1
+    return len(text)
+
+
+def _cpp_raw_string_end(text: str, index: int) -> int | None:
+    """Return a C++ raw-string end, including custom delimiters."""
+    if index and _identifier_continue(text[index - 1]):
+        return None
+    prefix = next((item for item in _CPP_RAW_PREFIXES if text.startswith(item, index)), None)
+    if prefix is None:
+        return None
+    delimiter_start = index + len(prefix)
+    opening = text.find("(", delimiter_start, min(len(text), delimiter_start + 17))
+    if opening < 0:
+        return None
+    delimiter = text[delimiter_start:opening]
+    if any(character.isspace() or character in "()\\" for character in delimiter):
+        return None
+    terminator = ")" + delimiter + '"'
+    closing = text.find(terminator, opening + 1)
+    return len(text) if closing < 0 else closing + len(terminator)
+
+
 def _delimited_end(text: str, opening_index: int) -> int:
     opening = text[opening_index]
     closing = _PAIRED_DELIMITERS.get(opening, opening)
@@ -128,8 +174,8 @@ def _unopened_delimited_end(text: str, index: int, delimiter: str) -> int:
         if text[cursor] == "\\":
             cursor += min(2, len(text) - cursor)
             continue
-        if text[cursor] == delimiter:
-            return cursor + 1
+        if text.startswith(delimiter, cursor):
+            return cursor + len(delimiter)
         cursor += 1
     return len(text)
 
@@ -153,16 +199,23 @@ def _quote_like_end(text: str, index: int) -> int | None:
         cursor += 1
     if cursor >= len(text):
         return None
-    delimiter = text[cursor]
-    if delimiter == "\\" or delimiter.isspace() or _identifier_continue(delimiter):
-        return None
+    newline = _LOGICAL_LINE_BOUNDARY.match(text, cursor)
+    if newline is not None:
+        delimiter = newline.group()
+        first_end = _unopened_delimited_end(text, newline.end(), delimiter)
+    else:
+        delimiter = text[cursor]
+        if delimiter == "\\" or delimiter.isspace() or _identifier_continue(delimiter):
+            return None
+        first_end = _delimited_end(text, cursor)
 
-    first_end = _delimited_end(text, cursor)
+    if not delimiter:
+        return None
     if operator not in _DOUBLE_QUOTE_LIKE:
         end = first_end
     elif first_end >= len(text):
         return len(text)
-    elif delimiter in _PAIRED_DELIMITERS:
+    elif len(delimiter) == 1 and delimiter in _PAIRED_DELIMITERS:
         second_start = first_end
         while second_start < len(text) and text[second_start] in " \t":
             second_start += 1
@@ -175,6 +228,80 @@ def _quote_like_end(text: str, index: int) -> int | None:
     while end < len(text) and text[end].isalpha():
         end += 1
     return end
+
+
+def _heredoc_opener(text: str, index: int, line_end: int) -> _HeredocOpener | None:
+    """Parse one shell/Ruby-style heredoc opener conservatively.
+
+    Once ``<<`` is seen, unsupported delimiter syntax is still returned as an
+    opener with no delimiter.  Its body therefore fails closed through EOF
+    instead of being mistaken for executable source.
+    """
+    if not text.startswith("<<", index):
+        return None
+    if (index and text[index - 1] == "<") or text.startswith("<<<", index):
+        return None
+
+    cursor = index + 2
+    indent_mode = ""
+    if cursor < line_end and text[cursor] in "-~":
+        indent_mode = text[cursor]
+        cursor += 1
+    while cursor < line_end and text[cursor] in " \t":
+        cursor += 1
+    if cursor >= line_end:
+        return _HeredocOpener(None, indent_mode, cursor)
+
+    if text[cursor] in "'\"`":
+        quote = text[cursor]
+        delimiter_start = cursor + 1
+        closing = text.find(quote, delimiter_start, line_end)
+        if closing < 0 or closing == delimiter_start:
+            return _HeredocOpener(None, indent_mode, line_end)
+        return _HeredocOpener(text[delimiter_start:closing], indent_mode, closing + 1)
+
+    escaped = text[cursor] == "\\"
+    if escaped:
+        cursor += 1
+    delimiter_start = cursor
+    while cursor < line_end and not text[cursor].isspace():
+        if text[cursor] in ";|&()<>\"'`\\":
+            break
+        cursor += 1
+    if cursor == delimiter_start:
+        return _HeredocOpener(None, indent_mode, max(cursor, delimiter_start))
+
+    delimiter = text[delimiter_start:cursor]
+    if cursor < line_end and not text[cursor].isspace() and text[cursor] not in ";|&":
+        return _HeredocOpener(None, indent_mode, cursor)
+    return _HeredocOpener(delimiter, indent_mode, cursor)
+
+
+def _block_comment_end(
+    text: str,
+    index: int,
+    line_starts: tuple[int, ...],
+    line_ends: tuple[int, ...],
+) -> int | None:
+    """Return the end of a Perl POD or Ruby embedded-document block."""
+    line_index = bisect_right(line_starts, index) - 1
+    if line_index < 0 or line_starts[line_index] != index:
+        return None
+    line = text[index : line_ends[line_index]]
+    if line == "=begin":
+        terminator = "=end"
+    elif line == "=pod" or line.startswith(("=pod ", "=pod\t")):
+        terminator = "=cut"
+    else:
+        return None
+
+    for candidate in range(line_index + 1, len(line_starts)):
+        candidate_line = text[line_starts[candidate] : line_ends[candidate]]
+        if candidate_line == terminator:
+            if candidate + 1 < len(line_starts):
+                return line_starts[candidate + 1]
+            return line_ends[candidate]
+    return len(text)
 
 
 def _regex_end(text: str, index: int) -> int:
@@ -205,21 +332,22 @@ def _heredoc_bounds(
     line_starts: tuple[int, ...],
     line_ends: tuple[int, ...],
 ) -> _HeredocBounds | None:
-    if (index and text[index - 1] == "<") or text.startswith("<<<", index):
+    line_index = max(0, bisect_right(line_starts, index) - 1)
+    opener = _heredoc_opener(text, index, line_ends[line_index])
+    if opener is None:
         return None
-    match = _HEREDOC_OPENER.match(text, index)
-    if match is None:
-        return None
-    delimiter = match.group("quoted") or match.group("bare")
-    opener_line = max(0, bisect_right(line_starts, match.end()) - 1)
+    opener_line = max(0, bisect_right(line_starts, opener.end) - 1)
     if opener_line + 1 >= len(line_starts):
-        return _HeredocBounds(match.end(), len(text), len(text))
+        return _HeredocBounds(opener.end, len(text), len(text))
     body_start = line_starts[opener_line + 1]
-    if text.find("<<", match.end(), line_ends[opener_line]) >= 0:
+    if opener.delimiter is None:
+        return _HeredocBounds(body_start, len(text), len(text))
+    if text.find("<<", opener.end, line_ends[opener_line]) >= 0:
         # Multiple queued heredocs require shell parsing to pair bodies with
         # delimiters.  Until that grammar is supported, no later body is code.
         return _HeredocBounds(body_start, len(text), len(text))
-    indent_mode = match.group("indent")
+    delimiter = opener.delimiter
+    indent_mode = opener.indent_mode
     for line_index in range(opener_line + 1, len(line_starts)):
         line_start = line_starts[line_index]
         line_end = line_ends[line_index]
@@ -265,9 +393,15 @@ def classify_source(text: str) -> SourceLexicalMap:
         if character.isspace():
             index += 1
             continue
+        block_comment_end = _block_comment_end(text, index, line_starts, line_ends)
+        if block_comment_end is not None:
+            add_region(index, block_comment_end)
+            index = block_comment_end
+            can_end_expression = False
+            pending_control_paren = False
+            continue
         if text.startswith("/*", index):
-            closing = text.find("*/", index + 2)
-            end = len(text) if closing < 0 else closing + 2
+            end = _nested_comment_end(text, index)
             add_region(index, end)
             index = end
             continue
@@ -289,6 +423,14 @@ def classify_source(text: str) -> SourceLexicalMap:
             add_region(heredoc.body_start, heredoc.body_end)
             index = heredoc.scan_end
             can_end_expression = False
+            pending_control_paren = False
+            continue
+
+        cpp_raw_end = _cpp_raw_string_end(text, index)
+        if cpp_raw_end is not None:
+            add_region(index, cpp_raw_end)
+            index = cpp_raw_end
+            can_end_expression = True
             pending_control_paren = False
             continue
 

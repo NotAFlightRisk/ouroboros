@@ -638,10 +638,50 @@ def _target_has_structural_declaration(
     return type_declaration or function_declaration
 
 
-def _target_has_scalar_assignment(text: str, target_span: tuple[int, int]) -> bool:
-    """Whether the target token is followed by an assignment operator."""
-    index = _skip_inline_space(text, target_span[1])
-    return index < len(text) and text[index] in "=:"
+def _mapping_key_prefix_is_valid(text: str, key_start: int) -> bool:
+    """Whether a data-file key starts at a block or flow-mapping boundary."""
+    line_start = max(text.rfind("\n", 0, key_start), text.rfind("\r", 0, key_start)) + 1
+    prefix = text[line_start:key_start].strip()
+    return not prefix or prefix == "-" or prefix.endswith(("{", ","))
+
+
+def _target_has_scalar_assignment(
+    text: str,
+    target_span: tuple[int, int],
+    source_path: str | None,
+    *,
+    target_is_live: bool,
+) -> bool:
+    """Whether a target is a live assignment or a data-file mapping key.
+
+    ``=`` remains the language-neutral assignment form, but only for live code.
+    A colon is ambiguous in source languages, so it is evidence only where the
+    file grammar makes it a mapping operator: YAML keys may be quoted or plain,
+    while JSON keys must be double quoted.
+    """
+    start, end = target_span
+    quote = ""
+    if start > 0 and end < len(text) and text[start - 1] in "\"'":
+        candidate = text[start - 1]
+        if text[end] == candidate:
+            quote = candidate
+
+    operator_index = _skip_inline_space(text, end + (1 if quote else 0))
+    if operator_index >= len(text):
+        return False
+    operator = text[operator_index]
+    if operator == "=":
+        return target_is_live and not quote
+    if operator != ":" or source_path is None:
+        return False
+
+    extension = os.path.splitext(source_path)[1].casefold()
+    key_start = start - (1 if quote else 0)
+    if extension in {".yaml", ".yml"}:
+        return _mapping_key_prefix_is_valid(text, key_start)
+    if extension == ".json":
+        return quote == '"' and _mapping_key_prefix_is_valid(text, key_start)
+    return False
 
 
 def _match_binds_target_span(
@@ -879,6 +919,12 @@ def _has_complete_scalar_terminator(text: str, index: int, operator: str | None)
 def _extract_following_scalar(content: str, index: int) -> str:
     """Extract a scalar only when an assignment operator binds it."""
     index = _skip_inline_space(content, index)
+    # A target-only pattern ends inside a quoted YAML/JSON key. Advance over
+    # the validated closing quote so the mapping operator and value are parsed.
+    if index < len(content) and content[index] in "\"'":
+        after_quote = _skip_inline_space(content, index + 1)
+        if after_quote < len(content) and content[after_quote] == ":":
+            index = after_quote
     if index < len(content) and content[index] in "=:":
         operator = content[index]
         scanned = _scan_scalar(content, index + 1)
@@ -1098,6 +1144,7 @@ class SpecVerifier:
         *,
         binding_text: str | None = None,
         source_kind: str = "content",
+        source_path: str | None = None,
     ) -> tuple[re.Match, str] | None:
         """Find a regex match that is grounded in the acceptance-criterion input.
 
@@ -1120,6 +1167,7 @@ class SpecVerifier:
                 assertion,
                 binding_text=binding_text,
                 source_kind=source_kind,
+                source_path=source_path,
             ),
             None,
         )
@@ -1132,6 +1180,7 @@ class SpecVerifier:
         *,
         binding_text: str | None = None,
         source_kind: str = "content",
+        source_path: str | None = None,
     ) -> Iterator[tuple[re.Match, str]]:
         """Return all criterion-bound matches in deterministic search order."""
         if not assertion.input_binding_required:
@@ -1174,11 +1223,23 @@ class SpecVerifier:
             code_spans = [(target, span, (0, len(searched_text))) for target, span in target_spans]
         else:
             source_map = self._source_map(searched_text)
-            code_spans = [
-                (target, span, source_map.line_bounds(span[0]))
-                for target, span in target_spans
-                if not source_map.is_noncode(span[0])
-            ]
+            if assertion.tier == VerificationTier.T1_CONSTANT:
+                code_spans = [
+                    (target, span, source_map.line_bounds(span[0]))
+                    for target, span in target_spans
+                    if _target_has_scalar_assignment(
+                        searched_text,
+                        span,
+                        source_path,
+                        target_is_live=not source_map.is_noncode(span[0]),
+                    )
+                ]
+            else:
+                code_spans = [
+                    (target, span, source_map.line_bounds(span[0]))
+                    for target, span in target_spans
+                    if not source_map.is_noncode(span[0])
+                ]
         if assertion.tier == VerificationTier.T2_STRUCTURAL and source_kind == "content":
             structural_kind = _structural_evidence_kind(assertion.ac_text)
             code_spans = [
@@ -1190,12 +1251,6 @@ class SpecVerifier:
                     structural_kind,
                     line_bounds,
                 )
-            ]
-        elif assertion.tier == VerificationTier.T1_CONSTANT and source_kind == "content":
-            code_spans = [
-                (target, span, line_bounds)
-                for target, span, line_bounds in code_spans
-                if _target_has_scalar_assignment(searched_text, span)
             ]
         if not code_spans:
             return
@@ -1499,7 +1554,12 @@ class SpecVerifier:
             if content is None:
                 continue
 
-            bounds = self._bound_matches(pattern, content, assertion)
+            bounds = self._bound_matches(
+                pattern,
+                content,
+                assertion,
+                source_path=file_path,
+            )
             first_bound = next(bounds, None)
             if first_bound is None and blank_subject_contract:
                 bounds = self._bound_matches(
@@ -1507,6 +1567,7 @@ class SpecVerifier:
                     content,
                     assertion,
                     binding_text=self._relative_file(file_path),
+                    source_path=file_path,
                 )
             elif first_bound is not None:
                 bounds = chain((first_bound,), bounds)
@@ -1695,7 +1756,12 @@ class SpecVerifier:
             content = self._read_file(file_path)
             if content is None:
                 continue
-            bound = self._find_bound_match(content_pattern, content, assertion)
+            bound = self._find_bound_match(
+                content_pattern,
+                content,
+                assertion,
+                source_path=file_path,
+            )
             # Preserve #1837's exact named-file blank-subject contract: the
             # pattern proves the file contents and the criterion target binds to
             # the project-relative file name rather than to content that, by
@@ -1706,6 +1772,7 @@ class SpecVerifier:
                     content,
                     assertion,
                     binding_text=self._relative_file(file_path),
+                    source_path=file_path,
                 )
             if bound:
                 _match, evidence_target = bound
