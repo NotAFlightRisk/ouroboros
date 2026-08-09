@@ -23,6 +23,13 @@ class VerificationTier(StrEnum):
     T4_UNVERIFIABLE = "t4_unverifiable"
 
 
+class EvidencePolarity(StrEnum):
+    """Whether criterion-bound evidence is required or forbidden."""
+
+    REQUIRED = "required"
+    FORBIDDEN = "forbidden"
+
+
 class SpecAssertion(BaseModel, frozen=True):
     """A verifiable assertion extracted from an acceptance criterion.
 
@@ -39,6 +46,8 @@ class SpecAssertion(BaseModel, frozen=True):
     description: str = ""
     evidence_targets: tuple[str, ...] = ()
     """Targets deterministically copied from the caller-authored AC."""
+    evidence_polarity: EvidencePolarity = EvidencePolarity.REQUIRED
+    """Caller-authored polarity for the bound target's criterion clause."""
     input_binding_required: bool = False
     """Whether this assertion crossed the model-extraction trust boundary."""
 
@@ -53,7 +62,7 @@ class SpecVerificationResult(BaseModel, frozen=True):
     discrepancy: bool = False
     detail: str = ""
     evidence_source: str = ""
-    """Where passing evidence came from: ``filename`` or ``file_content``."""
+    """Where passing evidence came from: filename, file content, or project scan."""
     evidence_target: str = ""
     """Caller-authored acceptance-criterion literal bound to that evidence."""
 
