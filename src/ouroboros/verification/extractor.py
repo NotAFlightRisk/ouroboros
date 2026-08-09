@@ -28,8 +28,12 @@ from ouroboros.providers.base import (
     Message,
     MessageRole,
 )
-from ouroboros.verification.binding import acceptance_targets, literal_is_bound
-from ouroboros.verification.models import SpecAssertion, VerificationTier
+from ouroboros.verification.binding import (
+    acceptance_polarity,
+    acceptance_targets,
+    literal_is_bound,
+)
+from ouroboros.verification.models import EvidencePolarity, SpecAssertion, VerificationTier
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +279,7 @@ class AssertionExtractor:
                     ac_text,
                     text_fields["expected_value"],
                     prefer_expected=tier is VerificationTier.T2_STRUCTURAL,
+                    pattern=text_fields["pattern"],
                 )
                 if tier is VerificationTier.T2_STRUCTURAL:
                     expected = text_fields["expected_value"].strip()
@@ -295,6 +300,23 @@ class AssertionExtractor:
                     )
                     continue
 
+                polarity = acceptance_polarity(ac_text, targets)
+                if (
+                    tier
+                    in (
+                        VerificationTier.T1_CONSTANT,
+                        VerificationTier.T2_STRUCTURAL,
+                    )
+                    and polarity is None
+                ):
+                    logger.warning(
+                        "Ignoring %s assertion with ambiguous target polarity in AC %d: %r",
+                        tier.value,
+                        ac_idx,
+                        item,
+                    )
+                    continue
+
                 try:
                     assertions.append(
                         SpecAssertion(
@@ -306,6 +328,7 @@ class AssertionExtractor:
                             file_hint=text_fields["file_hint"],
                             description=text_fields["description"],
                             evidence_targets=targets,
+                            evidence_polarity=polarity or EvidencePolarity.REQUIRED,
                             input_binding_required=True,
                         )
                     )

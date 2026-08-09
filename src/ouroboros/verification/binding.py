@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from ouroboros.verification.models import EvidencePolarity
+
 _TARGET_TOKEN = re.compile(r"--[\w][\w-]*|[\w][\w./:-]*", re.UNICODE)
 _QUOTED_TOKEN = re.compile(
     r"(?P<quote>[`'\"])(?P<token>--[\w][\w-]*|[\w][\w./:-]*)(?P=quote)",
@@ -17,6 +19,19 @@ _CONSTANT_BINDING_SUFFIX = re.compile(
     re.IGNORECASE,
 )
 _TOKEN_PUNCTUATION = frozenset("._/:-+@#?&=%~")
+_CLAUSE_BOUNDARY = re.compile(r"\b(?:and|but|while|whereas)\b|[;,]", re.IGNORECASE)
+_FORBIDDEN_CLAUSE = re.compile(
+    r"(?:"
+    r"\b(?:must|shall|should|may|can)\s+(?:not|never)\b"
+    r"|\b(?:do|does|did)\s+not\b"
+    r"|\b(?:forbid(?:s|den)?|prohibit(?:s|ed)?|disallow(?:s|ed)?|absent|excluded?)\b"
+    r")",
+    re.IGNORECASE,
+)
+_FORBIDDEN_TARGET_PREFIX = re.compile(
+    r"\b(?:without|no)\s+(?:(?:an?|the)\s+)?(?:\w+\s+){0,2}$",
+    re.IGNORECASE,
+)
 
 
 def _is_identifier_continue(character: str) -> bool:
@@ -139,8 +154,8 @@ def _structural_targets(ac_text: str) -> tuple[str, ...]:
     return unique if len(unique) == 1 else ()
 
 
-def _constant_target(ac_text: str, expected: str) -> tuple[str, ...]:
-    """Bind a scalar only to an explicit code literal in its own clause."""
+def _constant_targets(ac_text: str, expected: str) -> tuple[str, ...]:
+    """Return every explicit code literal bound to an equal scalar occurrence."""
     value_spans = literal_spans(ac_text, expected)
     if not value_spans:
         return ()
@@ -149,13 +164,91 @@ def _constant_target(ac_text: str, expected: str) -> tuple[str, ...]:
         for candidate in _token_candidates(ac_text)
         if candidate[3] or _looks_constant_literal(candidate[0])
     ]
+    selected: list[str] = []
     for value_start, _value_end in value_spans:
         for token, _start, end, _quoted in reversed(candidates):
             if end > value_start:
                 continue
             if _CONSTANT_BINDING_SUFFIX.fullmatch(ac_text[end:value_start].strip()):
-                return (token,)
-    return ()
+                selected.append(token)
+                break
+    return tuple(dict.fromkeys(selected))
+
+
+def _pattern_binds_target(pattern: str, target: str, expected: str) -> bool:
+    """Whether a regex match consumes the candidate key in a synthetic clause."""
+    try:
+        compiled = re.compile(pattern)
+    except (re.error, OverflowError):
+        return False
+    probes = (
+        f"{target} = {expected}",
+        f"{target}: {expected}",
+        f"{target} is {expected}",
+        f"{target} = ",
+    )
+    for probe in probes:
+        target_spans = literal_spans(probe, target)
+        for match in compiled.finditer(probe):
+            if any(start < match.end() and end > match.start() for start, end in target_spans):
+                return True
+    return False
+
+
+def _constant_target(ac_text: str, expected: str, pattern: str) -> tuple[str, ...]:
+    """Bind a repeated scalar to the unique caller key selected by its regex.
+
+    The model controls the regex, so it cannot create a key. It may only select
+    one of the explicit caller-authored clauses by consuming that clause's key.
+    A generic regex that selects more than one equal-valued clause fails closed.
+    """
+    targets = _constant_targets(ac_text, expected)
+    if len(targets) <= 1:
+        return targets
+    selected = tuple(
+        target for target in targets if _pattern_binds_target(pattern, target, expected)
+    )
+    return selected if len(selected) == 1 else ()
+
+
+def acceptance_polarity(
+    ac_text: str,
+    targets: tuple[str, ...],
+) -> EvidencePolarity | None:
+    """Derive one clause-level polarity for trusted criterion targets.
+
+    Mixed-polarity multi-target assertions are ambiguous and return ``None``;
+    callers must split them or fail closed.
+    """
+    polarities: list[EvidencePolarity] = []
+    boundaries = tuple(_CLAUSE_BOUNDARY.finditer(ac_text))
+    for target in targets:
+        spans = literal_spans(ac_text, target)
+        if not spans:
+            return None
+        target_polarities: set[EvidencePolarity] = set()
+        for start, end in spans:
+            clause_start = max(
+                (match.end() for match in boundaries if match.end() <= start),
+                default=0,
+            )
+            clause_end = min(
+                (match.start() for match in boundaries if match.start() >= end),
+                default=len(ac_text),
+            )
+            clause = ac_text[clause_start:clause_end]
+            target_prefix = ac_text[clause_start:start]
+            target_polarities.add(
+                EvidencePolarity.FORBIDDEN
+                if _FORBIDDEN_CLAUSE.search(clause)
+                or _FORBIDDEN_TARGET_PREFIX.search(target_prefix)
+                else EvidencePolarity.REQUIRED
+            )
+        if len(target_polarities) != 1:
+            return None
+        polarities.append(next(iter(target_polarities)))
+    unique = set(polarities)
+    return next(iter(unique)) if len(unique) == 1 else None
 
 
 def acceptance_targets(
@@ -163,6 +256,7 @@ def acceptance_targets(
     expected_value: str = "",
     *,
     prefer_expected: bool = False,
+    pattern: str = "",
 ) -> tuple[str, ...]:
     """Return exact code literals derived only from caller-authored criterion text.
 
@@ -177,5 +271,5 @@ def acceptance_targets(
     if prefer_expected:
         return _structural_targets(ac_text)
     if expected:
-        return _constant_target(ac_text, expected)
+        return _constant_target(ac_text, expected, pattern)
     return ()
