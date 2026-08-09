@@ -7,7 +7,7 @@ doc_metadata:
 
 > English: [codex.md](./codex.md)
 >
-> **번역 진행 상황**: 이 문서는 설치까지(시작하기 · 독립 설치 · Codex CLI 설치 · 플랫폼 · 설정 · 빠른 시작)를 옮긴 1부입니다. 그 뒤 절(Command Surface, How It Works, CLI 옵션, 문제 해결, 비용, Active Conductor)은 아직 영문입니다 — [codex.md](./codex.md)를 보세요. 진행은 [#1988](https://github.com/Q00/ouroboros/issues/1988)에서 추적합니다.
+> **번역 진행 상황**: 명령 표면 · 동작 방식 · 런타임 차이 · CLI 옵션 · Seed 레퍼런스까지 옮겼습니다. 문제 해결 · 비용 · Active Conductor는 아직 영문입니다 — [codex.md](./codex.md)를 보세요. 진행은 [#1988](https://github.com/Q00/ouroboros/issues/1988)에서 추적합니다.
 
 > 설치와 첫 실행 흐름 전체는 [Getting Started](../getting-started.md)(영문)를 보세요.
 
@@ -202,6 +202,8 @@ codex --version
 - 손대지 않은 레거시 자동생성 `ouroboros-*.config.toml` 태스크 프로파일 앵커만 정리합니다. 사용자가 만든 Codex 프로파일은 보존됩니다
 - 관리되는 `ouroboros-worker.config.toml`을 등록해서, Agent OS 워커 서브프로세스가 MCP/env 연결을 잃지 않고도 대화형 Codex 기본값에서 빠질 수 있게 합니다
 
+`~/.codex/` 밖의 전역 산출물도 함께 생깁니다. `ensure_config_dir()`가 `~/.ouroboros/data/`와 `~/.ouroboros/logs/`를 만들고([`setup.py:2632`](../../src/ouroboros/cli/commands/setup.py)), 설정이 처음이면 `~/.ouroboros/credentials.yaml`을 `0600` 권한으로 새로 씁니다([`setup.py:2771`](../../src/ouroboros/cli/commands/setup.py)).
+
 `~/.codex/config.toml`은 **Ouroboros 스테이지 모델 핀을 둘 자리가 아닙니다.** 설정 UI나 그에 대응하는 `~/.ouroboros/config.yaml` 값을 쓰고, 명시적인 `--profile`이 필요할 때만 사용자가 관리하는 네이티브 Codex 프로파일을 유지하세요. 장기 실행 URL 기반 Ouroboros MCP 서버를 직접 운영한다면 그 URL 항목을 `~/.codex/config.toml`에 그대로 두면 됩니다. `ouroboros setup --runtime codex`가 기본적으로 보존합니다. setup이 그 항목을 관리형 command-spawn 서버로 **바꾸길 원할 때만** `--mcp-mode stdio`를 쓰세요.
 
 ### 워커 서브프로세스 격리 (Agent OS `runtime_profile`)
@@ -236,10 +238,16 @@ sandbox = "workspace-write"
 
 `ouroboros setup --runtime codex`를 돌리고 나면 번들 `ooo` 스킬이 `~/.codex/skills/ouroboros-*`에, 라우팅 규칙이 `~/.codex/rules/`에 설치됩니다. Ouroboros를 올린 뒤 **그 산출물만** 갱신하려면 `ouroboros codex refresh`를 쓰세요. `~/.codex/config.toml`도 `~/.ouroboros/config.yaml`도 건드리지 않습니다.
 
-아래 표는 각 스킬과, 터미널만 쓰는 사람을 위한 CLI 대응입니다.
+현재 스냅숏 기준 setup은 `skills/*/SKILL.md` 디렉터리 **21개**를 패키징합니다. 아래 표는 그 전부와, 터미널만 쓰는 사람을 위한 CLI 대응입니다.
 
 | `ooo` 스킬 | Codex 세션 | CLI 대응 (터미널) |
 |-------------|---------------|--------------------------|
+| `ooo` (인자 없이) | O | *(디스패처가 라우팅. 세션에서 시작점으로 씀)* |
+| `ooo auto` | O | `ouroboros auto "goal"` (관리 규칙이 `ouroboros_start_auto`로 라우팅) |
+| `ooo brownfield` | O | *(MCP 전용)* |
+| `ooo config` | O | `ouroboros config show` |
+| `ooo pm` | O | *(MCP 전용)* |
+| `ooo resume-session` | O | `ouroboros run workflow --resume <session_id> ...` |
 | `ooo interview` | O | `ouroboros init start --llm-backend codex "your idea"` |
 | `ooo seed` | O | *(`ouroboros init start`에 포함됨)* |
 | `ooo run` | O | `ouroboros run workflow --runtime codex seed.yaml` |
@@ -314,7 +322,7 @@ Codex CLI와 Claude Code는 **서로 독립적인 런타임 백엔드**이고, �
 | 항목 | Codex CLI | Claude Code |
 |--------|-----------|-------------|
 | 정체 | Codex CLI 전송을 쓰는 Ouroboros 세션 런타임 | Anthropic의 에이전틱 코딩 도구 |
-| 인증 | OpenAI API 키 | Max Plan 구독 |
+| 인증 | Codex 계정 로그인 또는 OpenAI API 키 | Max Plan 구독 |
 | 모델 | Codex의 현재 기본 모델 (권장) | Claude (claude-agent-sdk 경유) |
 | 샌드박스 | Codex CLI 자체 샌드박스 모델 | Claude Code의 권한 시스템 |
 | 도구 표면 | Codex 네이티브 도구 (파일 I/O, 셸) | Read, Write, Edit, Bash, Glob, Grep |
@@ -358,7 +366,9 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 | `metadata` | O | 생성 메타데이터 |
 | `metadata.ambiguity_score` | X | 생성 시점 모호도. 기본 `0.15`, 허용 범위 `0.0`~`1.0` |
 
-> **`ambiguity_score`의 0.2 임계값이 실제로 걸리는 지점:** 이 필드 자체는 `0.0`~`1.0`을 허용합니다([`core/seed.py:409`](../../src/ouroboros/core/seed.py)). 0.2 게이트는 **seed 생성 시점**에 걸립니다. 인터뷰가 0.2 아래로 못 내려가면 seed를 안 만들어 주는 것이고, 여기에는 명시적 우회 선택지가 있습니다. CLI의 "Generate Seed anyway", MCP의 `force` 파라미터입니다. 우회해도 **실제 점수는 그대로 메타데이터에 기록되고 감사 로그에 남습니다.** 그리고 `ouroboros auto`는 실행 중에 이 readiness를 다시 확인합니다([`auto/grading.py:226`](../../src/ouroboros/auto/grading.py)).
+> **`ambiguity_score`의 0.2 임계값이 실제로 걸리는 지점:** 이 필드 자체는 `0.0`~`1.0`을 허용합니다([`core/seed.py:409`](../../src/ouroboros/core/seed.py)). 0.2 게이트는 **seed 생성 시점**에 걸립니다. 인터뷰가 0.2 아래로 못 내려가면 seed를 안 만들어 주는 것이고, 여기에는 명시적 우회 선택지가 있습니다. CLI의 "Generate Seed anyway", MCP의 `force` 파라미터입니다. 우회해도 **실제 점수는 그대로 메타데이터에 기록되고 감사 로그에 남습니다.**
+>
+> `ouroboros auto`는 실행 중에 readiness를 다시 보긴 하지만 **조건부입니다.** 인터뷰가 ledger 근거로 닫혔거나(`closure_mode`가 `ledger_only`·`safe_default`), Seed가 `degraded`로 표시돼 있으면 `high_ambiguity_score` 블로커가 억제됩니다([`auto/grading.py:225-226`](../../src/ouroboros/auto/grading.py)). 그런 닫힘에서는 **ledger의 구조적 완결성이 수용 신호이고 LLM이 매긴 점수는 설계상 낡은 값**이라서, 0.2를 크게 웃도는 Seed도 A 등급을 받고 실행될 수 있습니다. 나머지 채점 축은 그대로 적용됩니다.
 >
 > 실무적으로: 손으로 쓴 seed에 높은 `ambiguity_score`를 박아도 `ouroboros run workflow`가 막지는 않습니다. 이 값은 **강제 차단 장치가 아니라 출처 기록(provenance)**입니다.
 
