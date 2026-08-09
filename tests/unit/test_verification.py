@@ -2299,6 +2299,30 @@ class TestAssertionExtractor:
         summary = SpecVerifier(project_dir=project).verify_all(result.value)
         assert summary.verified_count == 2
 
+    def test_repeated_scalar_identity_never_executes_pathological_model_regex(self) -> None:
+        """Clause selection is static even when the model pattern catastrophically backtracks."""
+        script = textwrap.dedent(
+            """
+            from ouroboros.verification.binding import acceptance_targets
+
+            repeated_key = "A" * 32
+            ac_text = f"MUST set {repeated_key}=10 and RETRIES=10"
+            assert acceptance_targets(ac_text, "10", pattern=r"(A+)+$") == ()
+            """
+        )
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail("repeated-scalar identity executed the model-controlled regex")
+
+        assert completed.returncode == 0, completed.stderr
+
     @pytest.mark.asyncio
     async def test_wrapped_invalid_regex_assertion_rejected_before_verifier(self) -> None:
         """Invalid T1/T2 regexes are unusable and must not become assertions."""

@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import re
 
+# Read model-supplied patterns without executing them.  This is the same
+# CPython parser used by the verifier's bounded structural checks and is
+# available on every supported interpreter (3.12--3.14).
+from re import _parser as regex_parser
+
 from ouroboros.verification.models import EvidencePolarity
 
 _TARGET_TOKEN = re.compile(r"--[\w][\w-]*|[\w][\w./:-]*", re.UNICODE)
@@ -19,6 +24,7 @@ _CONSTANT_BINDING_SUFFIX = re.compile(
     re.IGNORECASE,
 )
 _TOKEN_PUNCTUATION = frozenset("._/:-+@#?&=%~")
+_MAX_IDENTITY_PATTERN_LENGTH = 200
 _SENTENCE_BOUNDARY = r"(?:[!?]+|\.+(?=\s|$|[A-Z])|[\r\n]+)"
 _CLAUSE_BOUNDARY = re.compile(
     r"\b(?:in\s+order\s+to|because|so|and|but|while|whereas)\b|[;,]|" + _SENTENCE_BOUNDARY,
@@ -27,6 +33,21 @@ _CLAUSE_BOUNDARY = re.compile(
 _FOLLOWING_SENTENCE_CONTENT = re.compile(
     r"(?:[!?！？]+|…+|[\r\n]+)\s*(?=[^\s!?！？.。．｡…])"
     r"|[.。．｡]+(?:\s+(?=\S)|(?=[^\s\d!?！？.。．｡…]))"
+)
+_UNRECOGNIZED_CLAUSE_SEPARATOR = re.compile(
+    # Commas, semicolons, sentence marks, and the explicit causal joiners in
+    # ``_CLAUSE_BOUNDARY`` are recognized elsewhere.  Dashes, brackets, and
+    # prose slashes/pipes are not grammar: content after one can be a hidden
+    # second predicate and therefore makes polarity unknowable.
+    r"(?:"
+    r"(?:(?<=\s)-(?=\s|\w))"
+    r"|[\u058a\u05be\u1400\u1806\u2010-\u2015\u2e17\u2e1a\u2e3a-\u2e3b\u2e40\u301c\u3030\ufe31-\ufe32\ufe58\ufe63\uff0d]"
+    r"|[()\[\]{}（）［］｛｝]"
+    r"|(?<=\s)[/|\\](?=\s|\w)"
+    r"|(?<=\S)[:：]\s*(?=\S)"
+    r"|(?:=>|->|[→⇒⟶])"
+    r"|[\"'`“”‘’«»‹›]\s*(?=\w)"
+    r")\s*(?=\S)"
 )
 _FORBIDDEN_COMMAND_PREFIX = re.compile(
     r"(?:\b(?:must|shall|should|may|can)\s+(?:not|never)\b|\b(?:do|does|did)\s+not\b)",
@@ -256,24 +277,60 @@ def _constant_targets(ac_text: str, expected: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(selected))
 
 
-def _pattern_binds_target(pattern: str, target: str, expected: str) -> bool:
-    """Whether a regex match consumes the candidate key in a synthetic clause."""
+def _regex_literal_runs(sequence: object) -> tuple[str, ...]:
+    """Return fixed literal runs from a parsed regex without matching it.
+
+    The result is deliberately incomplete.  Character classes, backreferences,
+    flags, and other computed constructs cannot establish caller-clause identity;
+    an honest repeated-scalar pattern must name the key as fixed syntax.  A
+    conservative miss rejects evidence, while executing the model pattern here
+    would permit catastrophic backtracking before verifier checks run.
+    """
+    runs: list[str] = []
+    current: list[str] = []
+
+    def flush() -> None:
+        if current:
+            runs.append("".join(current))
+            current.clear()
+
+    for opcode, argument in sequence:  # type: ignore[attr-defined]
+        name = getattr(opcode, "name", str(opcode))
+        if name == "LITERAL":
+            current.append(chr(argument))
+            continue
+        flush()
+        if name == "SUBPATTERN":
+            runs.extend(_regex_literal_runs(argument[-1]))
+        elif name == "BRANCH":
+            for branch in argument[1]:
+                runs.extend(_regex_literal_runs(branch))
+        elif name in {
+            "ASSERT",
+            "ASSERT_NOT",
+            "MAX_REPEAT",
+            "MIN_REPEAT",
+            "POSSESSIVE_REPEAT",
+        }:
+            runs.extend(_regex_literal_runs(argument[-1]))
+        elif name == "ATOMIC_GROUP":
+            runs.extend(_regex_literal_runs(argument))
+    flush()
+    return tuple(runs)
+
+
+def _pattern_literal_targets(pattern: str, targets: tuple[str, ...]) -> tuple[str, ...]:
+    """Select caller targets named by fixed regex literals, without execution."""
+    if not pattern or len(pattern) > _MAX_IDENTITY_PATTERN_LENGTH:
+        return ()
     try:
-        compiled = re.compile(pattern)
-    except (re.error, OverflowError):
-        return False
-    probes = (
-        f"{target} = {expected}",
-        f"{target}: {expected}",
-        f"{target} is {expected}",
-        f"{target} = ",
+        parsed = regex_parser.parse(pattern, 0)
+    except (re.error, OverflowError, RecursionError):
+        return ()
+    literal_runs = _regex_literal_runs(parsed)
+    return tuple(
+        target for target in targets if any(literal_is_bound(run, target) for run in literal_runs)
     )
-    for probe in probes:
-        target_spans = literal_spans(probe, target)
-        for match in compiled.finditer(probe):
-            if any(start < match.end() and end > match.start() for start, end in target_spans):
-                return True
-    return False
 
 
 def _constant_target(ac_text: str, expected: str, pattern: str) -> tuple[str, ...]:
@@ -286,9 +343,7 @@ def _constant_target(ac_text: str, expected: str, pattern: str) -> tuple[str, ..
     targets = _constant_targets(ac_text, expected)
     if len(targets) <= 1:
         return targets
-    selected = tuple(
-        target for target in targets if _pattern_binds_target(pattern, target, expected)
-    )
+    selected = _pattern_literal_targets(pattern, targets)
     return selected if len(selected) == 1 else ()
 
 
@@ -320,6 +375,8 @@ def acceptance_polarity(
             target_prefix = ac_text[clause_start:start]
             target_suffix = ac_text[end:clause_end]
             if _FOLLOWING_SENTENCE_CONTENT.search(ac_text[end:]):
+                return None
+            if _UNRECOGNIZED_CLAUSE_SEPARATOR.search(ac_text[end:]):
                 return None
             if (
                 _FORBIDDEN_COMMAND_PREFIX.search(target_prefix)
