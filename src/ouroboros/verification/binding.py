@@ -55,20 +55,18 @@ _UNBOUND_TARGET_SUFFIX_NEGATION = re.compile(
     r"\b(?:(?:must|shall|should)\s+(?:not|never)|(?:do|does)\s+not)\b",
     re.IGNORECASE,
 )
-_TARGET_REFERENT_SUBJECT = (
-    r"(?:(?:(?:this|that|these|those|the|same|such|above|aforementioned|current|"
-    r"former|latter|target)\s+){0,2}"
-    r"(?:class|interface|struct|trait|function|file|directory|flag|constant|value|"
-    r"setting|assignment|definition|declaration|implementation|component|object|"
-    r"artifact|item|member|symbol|target)|(?:this|that|these|those|it|its|itself|"
-    r"they|their|them|themselves|he|his|him|she|her|herself|same|target))\b"
+_CAUSAL_EFFECT_SUBJECT = (
+    r"(?:\w+\s+){0,2}(?:bugs?|conflicts?|crashes?|deadlocks?|defects?|duplicates?|"
+    r"errors?|exceptions?|failures?|incidents?|inconsistenc(?:y|ies)|issues?|leaks?|"
+    r"outages?|races?|regressions?|risks?|warnings?|ambiguities|ambiguity|corruption|"
+    r"downtime|drift|staleness)\s+"
 )
 _CAUSAL_TARGET_SUFFIX_NEGATION = re.compile(
     r"^\s*(?:(?:\w+\s+){0,2}(?:class|interface|struct|trait|function|file|directory|"
     r"flag|constant|value|setting|assignment|definition|declaration)\s+)?(?:"
-    rf"for\s+(?!{_TARGET_REFERENT_SUBJECT})(?:\w+\s+){{0,3}}that\s+"
+    rf"for\s+{_CAUSAL_EFFECT_SUBJECT}that\s+"
     r"|to\s+(?:prevent|avoid|ensure|reduce|stop|keep|omit)\s+"
-    rf"(?!{_TARGET_REFERENT_SUBJECT})(?:\w+\s+){{1,3}}(?:that\s+)?"
+    rf"{_CAUSAL_EFFECT_SUBJECT}(?:that\s+)?"
     r")(?:(?:must|shall|should)\s+(?:not|never)|(?:do|does)\s+not)\b",
     re.IGNORECASE,
 )
