@@ -1682,6 +1682,7 @@ class TestSpecVerifier:
             r"CameraProviderA*A*$",
             r"CameraProvider(A*)A*$",
             r"CameraProvider(A*)(A*)$",
+            r"CameraProvider(A*)(?(1)A*|A*)$",
             r"(?i)CameraProviderİ*I*$",
             r"CameraProvider(?i:A*)A*$",
             r"(?=CameraProvider(A+)+$)",
@@ -1696,6 +1697,7 @@ class TestSpecVerifier:
             "adjacent-overlapping-repeats",
             "wrapped-adjacent-repeat",
             "two-wrapped-adjacent-repeats",
+            "conditional-cross-wrapper-repeats",
             "unicode-ignorecase-overlap",
             "scoped-ignorecase-overlap",
             "nested-repeat-in-lookahead",
@@ -1788,8 +1790,8 @@ class TestSpecVerifier:
     @pytest.mark.parametrize(
         ("pattern", "content"),
         [
-            (r"CameraProvider[ ]+$", "CameraProvider   \n"),
-            (r"(?:AB)+\s+CameraProvider", "ABAB CameraProvider\n"),
+            (r"class[ ]+CameraProvider[ ]+$", "class CameraProvider   \n"),
+            (r"(?:AB)+\s+class\s+CameraProvider", "ABAB class CameraProvider\n"),
             (r"(?=.*CameraProvider)", "class CameraProvider:\n"),
         ],
         ids=["single-repeat", "fixed-width-repeat-body", "target-lookahead"],

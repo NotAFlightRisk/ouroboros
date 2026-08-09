@@ -375,6 +375,8 @@ def _has_ambiguous_repeats(
             continue
         if name == "GROUPREF_EXISTS":
             _reference, yes_arm, no_arm = argument
+            if _contains_repeat(yes_arm) or (no_arm is not None and _contains_repeat(no_arm)):
+                return True
             if _has_ambiguous_repeats(yes_arm, fixed_groups, allow_repeated_assertions, depth + 1):
                 return True
             if no_arm is not None and _has_ambiguous_repeats(
