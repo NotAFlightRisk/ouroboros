@@ -267,7 +267,7 @@ Codex CLI and Claude Code are independent runtime backends with different tool s
 | Aspect | Codex CLI | Claude Code |
 |--------|-----------|-------------|
 | What it is | Ouroboros session runtime backed by Codex CLI transport | Anthropic's agentic coding tool |
-| Authentication | OpenAI API key | Max Plan subscription |
+| Authentication | Codex account sign-in or OpenAI API key | Max Plan subscription |
 | Model | Codex's current default model (recommended) | Claude (via claude-agent-sdk) |
 | Sandbox | Codex CLI's own sandbox model | Claude Code's permission system |
 | Tool surface | Codex-native tools (file I/O, shell) | Read, Write, Edit, Bash, Glob, Grep |
@@ -315,8 +315,15 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 > ([`core/seed.py:409`](../../src/ouroboros/core/seed.py)). The 0.2 gate is enforced at **seed
 > generation**: if the interview cannot get below it, no seed is produced. That gate has an explicit
 > opt-out — the CLI's "Generate Seed anyway" and the MCP `force` parameter. Bypassing it still records
-> the real score in seed metadata and emits the bypass to the audit log. `ouroboros auto` re-checks the
-> same readiness during a run ([`auto/grading.py:226`](../../src/ouroboros/auto/grading.py)).
+> the real score in seed metadata and emits the bypass to the audit log.
+>
+> `ouroboros auto` re-checks readiness during a run, but **conditionally**. The
+> `high_ambiguity_score` blocker is suppressed when the interview closed on ledger
+> evidence (`closure_mode` of `ledger_only` or `safe_default`) or when the Seed is
+> marked `degraded` ([`auto/grading.py:225-226`](../../src/ouroboros/auto/grading.py)).
+> Under those closures the ledger's structural completeness is the acceptance
+> signal and the LLM-derived score is stale by design, so a Seed scoring well above
+> 0.2 can grade A and run. Other grading axes still apply.
 >
 > In practice: a hand-written seed carrying a high `ambiguity_score` is not blocked by
 > `ouroboros run workflow`. The field is provenance, not an enforcement gate.
