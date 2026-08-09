@@ -156,7 +156,7 @@ When `runtime_profile` is unset (the default), Ouroboros emits `codex exec` exac
 
 ### `ooo` Skill Availability on Codex
 
-After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are installed into `~/.codex/skills/ouroboros-*` and the routing rules into `~/.codex/rules/`. To refresh only those artifacts after upgrading Ouroboros, run `ouroboros codex refresh`; it does not modify `~/.codex/config.toml` or `~/.ouroboros/config.yaml`. The table below shows each skill and its CLI equivalent for terminal-only workflows.
+After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are installed into `~/.codex/skills/ouroboros-*` and the routing rules into `~/.codex/rules/`. To refresh only those artifacts after upgrading Ouroboros, run `ouroboros codex refresh`; it does not modify `~/.codex/config.toml` or `~/.ouroboros/config.yaml`. `resolve_packaged_codex_assets()` currently resolves and installs 22 `skills/*/SKILL.md` bundles. The table below is a **subset** — the ones most often driven from a terminal — with their CLI equivalents. See the Korean guide for the complete 22-row table.
 
 | `ooo` Skill | Codex session | CLI equivalent (Terminal) |
 |-------------|---------------|--------------------------|
@@ -273,7 +273,7 @@ Codex CLI and Claude Code are independent runtime backends with different tool s
 | Sandbox | Codex CLI's own sandbox model | Claude Code's permission system |
 | Tool surface | Codex-native tools (file I/O, shell) | Read, Write, Edit, Bash, Glob, Grep |
 | Session model | Session-aware via runtime handles, resume IDs, and skill dispatch | Native Claude session context |
-| Cost model | OpenAI API usage charges | Included in Max Plan subscription |
+| Cost model | Follows whatever your Codex CLI is configured for — Codex OAuth or OpenAI API key | Included in Max Plan subscription |
 | Windows (native) | Not supported | Experimental |
 
 > **Note:** The Ouroboros workflow model (Seed files, acceptance criteria, evaluation principles) is identical across runtimes. However, because Codex CLI and Claude Code have different underlying agent capabilities, tool access, and sandboxing, they may produce different execution paths and results for the same Seed file.

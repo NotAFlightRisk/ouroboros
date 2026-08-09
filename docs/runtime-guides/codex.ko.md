@@ -238,16 +238,16 @@ sandbox = "workspace-write"
 
 `ouroboros setup --runtime codex`를 돌리고 나면 번들 `ooo` 스킬이 `~/.codex/skills/ouroboros-*`에, 라우팅 규칙이 `~/.codex/rules/`에 설치됩니다. Ouroboros를 올린 뒤 **그 산출물만** 갱신하려면 `ouroboros codex refresh`를 쓰세요. `~/.codex/config.toml`도 `~/.ouroboros/config.yaml`도 건드리지 않습니다.
 
-현재 스냅숏 기준 setup은 `skills/*/SKILL.md` 디렉터리 **21개**를 패키징합니다. 아래 표는 그 전부와, 터미널만 쓰는 사람을 위한 CLI 대응입니다.
+현재 스냅숏 기준 `resolve_packaged_codex_assets()`는 `skills/*/SKILL.md` 번들 **22개**를 해석해 설치합니다(맨 `ooo`와 `welcome` 포함). 아래 표는 그 전부와, 터미널만 쓰는 사람을 위한 CLI 대응입니다.
 
 | `ooo` 스킬 | Codex 세션 | CLI 대응 (터미널) |
 |-------------|---------------|--------------------------|
 | `ooo` (인자 없이) | O | *(디스패처가 라우팅. 세션에서 시작점으로 씀)* |
 | `ooo auto` | O | `ouroboros auto "goal"` (관리 규칙이 `ouroboros_start_auto`로 라우팅) |
-| `ooo brownfield` | O | *(MCP 전용)* |
-| `ooo config` | O | `ouroboros config show` |
-| `ooo pm` | O | *(MCP 전용)* |
-| `ooo resume-session` | O | `ouroboros run workflow --resume <session_id> ...` |
+| `ooo brownfield` | O | `ouroboros setup scan` / `setup list` / `setup default` |
+| `ooo config` | O | `ouroboros config` (설정 화면. `config show`는 읽기 전용 출력이라 다릅니다) |
+| `ooo pm` | O | `ouroboros pm` |
+| `ooo resume-session` | O | `ouroboros resume` (진행 중 세션을 나열합니다. `run workflow --resume`는 그 탐색 단계를 건너뜁니다) |
 | `ooo interview` | O | `ouroboros init start --llm-backend codex "your idea"` |
 | `ooo seed` | O | *(`ouroboros init start`에 포함됨)* |
 | `ooo run` | O | `ouroboros run workflow --runtime codex seed.yaml` |
@@ -261,7 +261,7 @@ sandbox = "workspace-write"
 | `ooo welcome` | O | *(MCP 전용)* |
 | `ooo update` | O | `ouroboros update` |
 | `ooo help` | O | `ouroboros --help` |
-| `ooo qa` | O | *(MCP 전용)* |
+| `ooo qa` | O | `ouroboros qa` |
 | `ooo setup` | O | `ouroboros setup --runtime codex` |
 | `ooo publish` | O | *(`ouroboros publish` 서브커맨드는 없음. 스킬/런타임 흐름이 `gh` CLI를 씀)* |
 
@@ -327,7 +327,7 @@ Codex CLI와 Claude Code는 **서로 독립적인 런타임 백엔드**이고, �
 | 샌드박스 | Codex CLI 자체 샌드박스 모델 | Claude Code의 권한 시스템 |
 | 도구 표면 | Codex 네이티브 도구 (파일 I/O, 셸) | Read, Write, Edit, Bash, Glob, Grep |
 | 세션 모델 | 런타임 핸들·resume ID·스킬 디스패치로 세션 인지 | 네이티브 Claude 세션 컨텍스트 |
-| 비용 모델 | OpenAI API 사용 요금 | Max Plan 구독에 포함 |
+| 비용 모델 | Codex CLI에 설정된 경로를 따름 — Codex OAuth 또는 OpenAI API 키 | Max Plan 구독에 포함 |
 | Windows (네이티브) | 미지원 | 실험적 |
 
 > **참고:** Ouroboros의 워크플로 모델(Seed 파일, 검수 기준, 평가 원칙)은 런타임과 무관하게 동일합니다. 다만 Codex CLI와 Claude Code는 바탕이 되는 에이전트 능력·도구 접근·샌드박싱이 다르기 때문에, **같은 Seed 파일에서도 실행 경로와 결과가 달라질 수 있습니다.**
