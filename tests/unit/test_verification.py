@@ -24,7 +24,29 @@ from ouroboros.verification.models import (
     VerificationTier,
 )
 import ouroboros.verification.verifier as verifier_module
-from ouroboros.verification.verifier import SpecVerifier
+from ouroboros.verification.verifier import SpecVerifier as PublicSpecVerifier
+
+
+class SpecVerifier(PublicSpecVerifier):
+    """Run pre-binding unit fixtures through the explicit trusted compatibility path."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        kwargs.setdefault("_allow_trusted_unbound_assertions", True)
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+
+    def verify_all(
+        self,
+        assertions: tuple[SpecAssertion, ...],
+        agent_results: dict[int, bool] | None = None,
+    ) -> SpecVerificationSummary:
+        legacy_assertions = tuple(
+            assertion.model_copy(update={"input_binding_required": False})
+            if "input_binding_required" not in assertion.model_fields_set
+            else assertion
+            for assertion in assertions
+        )
+        return super().verify_all(legacy_assertions, agent_results)
+
 
 # -- Model Tests --
 
@@ -1834,10 +1856,10 @@ class TestSpecVerifier:
         calls = 0
         original = verifier_module.classify_source
 
-        def counted(text: str):  # type: ignore[no-untyped-def]
+        def counted(text: str, source_path: str | None = None):  # type: ignore[no-untyped-def]
             nonlocal calls
             calls += 1
-            return original(text)
+            return original(text, source_path)
 
         monkeypatch.setattr(verifier_module, "classify_source", counted)
         decoys = "".join(f"const decoy_{index} = /CameraProvider/;\n" for index in range(200))

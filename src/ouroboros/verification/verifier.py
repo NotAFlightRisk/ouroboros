@@ -957,7 +957,8 @@ class SpecVerifier:
     """
 
     project_dir: str
-    _source_map_cache: dict[str, SourceLexicalMap] = field(
+    _allow_trusted_unbound_assertions: bool = field(default=False, repr=False)
+    _source_map_cache: dict[tuple[str, str], SourceLexicalMap] = field(
         default_factory=dict,
         init=False,
         repr=False,
@@ -968,12 +969,14 @@ class SpecVerifier:
         repr=False,
     )
 
-    def _source_map(self, text: str) -> SourceLexicalMap:
+    def _source_map(self, text: str, source_path: str | None = None) -> SourceLexicalMap:
         """Classify each distinct file body at most once per verification run."""
-        source_map = self._source_map_cache.get(text)
+        extension = os.path.splitext(source_path)[1].casefold() if source_path else ""
+        cache_key = (extension, text)
+        source_map = self._source_map_cache.get(cache_key)
         if source_map is None:
-            source_map = classify_source(text)
-            self._source_map_cache[text] = source_map
+            source_map = classify_source(text, source_path)
+            self._source_map_cache[cache_key] = source_map
         return source_map
 
     def verify_all(
@@ -997,8 +1000,11 @@ class SpecVerifier:
 
         # Group assertions by AC index
         by_ac: dict[int, list[SpecAssertion]] = {}
-        for a in assertions:
-            by_ac.setdefault(a.ac_index, []).append(a)
+        for assertion in assertions:
+            effective = assertion
+            if not assertion.input_binding_required and not self._allow_trusted_unbound_assertions:
+                effective = assertion.model_copy(update={"input_binding_required": True})
+            by_ac.setdefault(effective.ac_index, []).append(effective)
 
         reports: list[ACVerificationReport] = []
         for ac_idx in sorted(by_ac.keys()):
@@ -1222,7 +1228,7 @@ class SpecVerifier:
         if source_kind == "filename":
             code_spans = [(target, span, (0, len(searched_text))) for target, span in target_spans]
         else:
-            source_map = self._source_map(searched_text)
+            source_map = self._source_map(searched_text, source_path)
             if assertion.tier == VerificationTier.T1_CONSTANT:
                 code_spans = [
                     (target, span, source_map.line_bounds(span[0]))
@@ -1261,16 +1267,14 @@ class SpecVerifier:
         if _pattern_is_zero_width(pattern.pattern, pattern.flags):
             attempts = 0
             for target, span, line_bounds in code_spans:
-                for position in range(span[0], span[1] + 1):
+                line_start, _line_end = line_bounds
+                attempt_start = max(line_start, span[0] - _MAX_DECLARATION_CONTEXT)
+                for position in range(attempt_start, span[1] + 1):
                     if attempts >= _MAX_BOUND_MATCHES_PER_SUBJECT:
                         return
                     attempts += 1
                     match = pattern.match(searched_text, position)
-                    if match is not None and _match_binds_target_span(
-                        match,
-                        span,
-                        line_bounds,
-                    ):
+                    if match is not None:
                         yield match, target
             return
 
@@ -1574,12 +1578,16 @@ class SpecVerifier:
             for match, evidence_target in bounds:
                 # Extract the value after the pattern
                 value_index = match.end()
-                if match.start() == match.end() and evidence_target:
+                if evidence_target:
                     target_span = next(
                         (
                             span
                             for span in literal_spans(content, evidence_target)
-                            if span[0] <= match.start() <= span[1]
+                            if (
+                                span[0] <= match.start() <= span[1]
+                                if match.start() == match.end()
+                                else span[0] < match.end() and span[1] > match.start()
+                            )
                         ),
                         None,
                     )

@@ -1193,10 +1193,12 @@ Parallel Execution Verification Report
             tier=tier,
             pattern=pattern,
             file_hint="marker.txt",
+            input_binding_required=False,
         )
-        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
-            (assertion,), agent_results={0: True}
-        )
+        verification = SpecVerifier(
+            project_dir=str(tmp_path),
+            _allow_trusted_unbound_assertions=True,
+        ).verify_all((assertion,), agent_results={0: True})
         mechanical = EvaluationSummary(
             final_approved=True,
             highest_stage_passed=2,
@@ -1317,10 +1319,12 @@ Parallel Execution Verification Report
             tier=tier,
             pattern=pattern,
             file_hint="marker.txt",
+            input_binding_required=False,
         )
-        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
-            (assertion,), agent_results={0: True}
-        )
+        verification = SpecVerifier(
+            project_dir=str(tmp_path),
+            _allow_trusted_unbound_assertions=True,
+        ).verify_all((assertion,), agent_results={0: True})
         mechanical = EvaluationSummary(
             final_approved=True,
             highest_stage_passed=2,
@@ -1400,10 +1404,12 @@ Parallel Execution Verification Report
             tier=tier,
             pattern=pattern,
             file_hint="marker.txt",
+            input_binding_required=False,
         )
-        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
-            (assertion,), agent_results={0: True}
-        )
+        verification = SpecVerifier(
+            project_dir=str(tmp_path),
+            _allow_trusted_unbound_assertions=True,
+        ).verify_all((assertion,), agent_results={0: True})
         mechanical = EvaluationSummary(
             final_approved=True,
             highest_stage_passed=2,
@@ -1464,10 +1470,12 @@ Parallel Execution Verification Report
             tier=tier,
             pattern=pattern,
             file_hint="marker.txt",
+            input_binding_required=False,
         )
-        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
-            (assertion,), agent_results={0: True}
-        )
+        verification = SpecVerifier(
+            project_dir=str(tmp_path),
+            _allow_trusted_unbound_assertions=True,
+        ).verify_all((assertion,), agent_results={0: True})
         mechanical = EvaluationSummary(
             final_approved=True,
             highest_stage_passed=2,

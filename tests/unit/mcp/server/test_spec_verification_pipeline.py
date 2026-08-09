@@ -13,7 +13,7 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.server.adapter import _evaluation_summary_from_spec_verification
 from ouroboros.providers.base import CompletionResponse
 from ouroboros.verification.extractor import AssertionExtractor
-from ouroboros.verification.models import EvidencePolarity, SpecAssertion
+from ouroboros.verification.models import EvidencePolarity, SpecAssertion, VerificationTier
 from ouroboros.verification.verifier import SpecVerifier
 
 
@@ -754,6 +754,186 @@ async def test_unrelated_regex_and_target_cannot_formally_approve_by_file_copres
     assert formal.ac_results[0].final_verdict == "fail"
 
 
+@pytest.mark.parametrize(
+    ("ac_text", "tier", "pattern", "expected", "filename", "content"),
+    [
+        (
+            "MUST set RETRIES=10",
+            VerificationTier.T1_CONSTANT,
+            r"RETRIES\s*=\s*",
+            "10",
+            "main.py",
+            "# RETRIES = 10\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            VerificationTier.T2_STRUCTURAL,
+            r"CameraProvider",
+            "CameraProvider",
+            "main.py",
+            "# CameraProvider\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            VerificationTier.T2_STRUCTURAL,
+            r".+\\.py",
+            "CameraProvider",
+            "unrelated.py",
+            "class Unrelated {}\n",
+        ),
+    ],
+    ids=["t1-comment", "t2-comment", "generic-filename"],
+)
+@pytest.mark.parametrize(
+    "binding_override",
+    [None, False],
+    ids=["omitted-binding", "explicit-false-binding"],
+)
+def test_public_assertion_defaults_fail_closed_through_formal_verdict(
+    tmp_path: Any,
+    ac_text: str,
+    tier: VerificationTier,
+    pattern: str,
+    expected: str,
+    filename: str,
+    content: str,
+    binding_override: bool | None,
+) -> None:
+    """Direct public callers inherit the same binding boundary as extraction."""
+    assertion_data: dict[str, Any] = {
+        "ac_index": 0,
+        "ac_text": ac_text,
+        "tier": tier,
+        "pattern": pattern,
+        "expected_value": expected,
+        "file_hint": "*.py",
+    }
+    if binding_override is not None:
+        assertion_data["input_binding_required"] = binding_override
+    assertion = SpecAssertion(**assertion_data)
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all((assertion,))
+    formal = _formal_verdict(ac_text, verification)
+
+    assert assertion.input_binding_required is (binding_override is None)
+    assert verification.reports[0].verified_pass is False
+    assert verification.reports[0].results[0].assertion.input_binding_required is True
+    assert verification.override_approval is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("suffix", "tier", "ac_text", "pattern", "expected", "content"),
+    [
+        (
+            "lua",
+            "t2_structural",
+            "MUST define a CameraProvider class",
+            r"CameraProvider",
+            "CameraProvider",
+            "-- class CameraProvider\n",
+        ),
+        ("lua", "t1_constant", "MUST set RETRIES=10", r"RETRIES", "10", "-- RETRIES = 10\n"),
+        (
+            "sql",
+            "t2_structural",
+            "MUST define a CameraProvider class",
+            r"CameraProvider",
+            "CameraProvider",
+            "-- class CameraProvider\n",
+        ),
+        ("sql", "t1_constant", "MUST set RETRIES=10", r"RETRIES", "10", "-- RETRIES = 10\n"),
+    ],
+    ids=["lua-t2", "lua-t1", "sql-t2", "sql-t1"],
+)
+async def test_dash_line_comments_cannot_mint_formal_evidence(
+    tmp_path: Any,
+    suffix: str,
+    tier: str,
+    ac_text: str,
+    pattern: str,
+    expected: str,
+    content: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": tier,
+                "pattern": pattern,
+                "expected_value": expected,
+                "file_hint": f"*.{suffix}",
+                "description": "dash comment is non-code",
+            }
+        ],
+    )
+    (tmp_path / f"main.{suffix}").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("suffix", "tier", "ac_text", "pattern", "expected", "content"),
+    [
+        (
+            "lua",
+            "t2_structural",
+            "MUST define a CameraProvider class",
+            r"CameraProvider",
+            "CameraProvider",
+            "-- decoy\nclass CameraProvider {}\n",
+        ),
+        (
+            "sql",
+            "t1_constant",
+            "MUST set RETRIES=10",
+            r"RETRIES",
+            "10",
+            "SELECT 1; -- decoy\nRETRIES = 10\n",
+        ),
+    ],
+    ids=["lua-live-declaration", "sql-live-assignment"],
+)
+async def test_dash_line_comment_termination_preserves_live_evidence(
+    tmp_path: Any,
+    suffix: str,
+    tier: str,
+    ac_text: str,
+    pattern: str,
+    expected: str,
+    content: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": tier,
+                "pattern": pattern,
+                "expected_value": expected,
+                "file_hint": f"*.{suffix}",
+                "description": "live evidence after dash comment",
+            }
+        ],
+    )
+    (tmp_path / f"main.{suffix}").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is True
+    assert formal.final_approved is True
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "separator",
@@ -812,6 +992,12 @@ async def test_unicode_logical_lines_cannot_join_unrelated_target_evidence(
             "class CameraProvider:\n    pass\n",
         ),
         (
+            "t2_structural",
+            r"(?=class CameraProvider)",
+            "CameraProvider",
+            "class CameraProvider:\n    pass\n",
+        ),
+        (
             "t1_constant",
             r"(?=RETRIES\s*=\s*10)",
             "10",
@@ -826,6 +1012,12 @@ async def test_unicode_logical_lines_cannot_join_unrelated_target_evidence(
         (
             "t1_constant",
             r"RETRIES",
+            "10",
+            "RETRIES = 10\n",
+        ),
+        (
+            "t1_constant",
+            r"RETRIES\s*=\s*10",
             "10",
             "RETRIES = 10\n",
         ),
@@ -940,9 +1132,11 @@ async def test_unicode_logical_lines_cannot_join_unrelated_target_evidence(
     ],
     ids=[
         "t2-target-lookahead",
+        "t2-declaration-lookahead",
         "t1-target-lookahead",
         "t2-exact-target-declaration",
         "t1-exact-target-assignment",
+        "t1-consuming-target-assignment",
         "t2-declaration-after-regex",
         "t2-declaration-after-heredoc",
         "t2-declaration-after-division",

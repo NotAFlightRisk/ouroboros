@@ -48,8 +48,8 @@ class SpecAssertion(BaseModel, frozen=True):
     """Targets deterministically copied from the caller-authored AC."""
     evidence_polarity: EvidencePolarity = EvidencePolarity.REQUIRED
     """Caller-authored polarity for the bound target's criterion clause."""
-    input_binding_required: bool = False
-    """Whether this assertion crossed the model-extraction trust boundary."""
+    input_binding_required: bool = True
+    """Whether verifier evidence must bind to caller-authored criterion input."""
 
 
 class SpecVerificationResult(BaseModel, frozen=True):

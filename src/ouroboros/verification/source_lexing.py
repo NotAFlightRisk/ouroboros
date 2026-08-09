@@ -366,7 +366,7 @@ def _heredoc_bounds(
     return _HeredocBounds(body_start, len(text), len(text))
 
 
-def classify_source(text: str) -> SourceLexicalMap:
+def classify_source(text: str, source_path: str | None = None) -> SourceLexicalMap:
     """Classify source in one bounded linear pass.
 
     Slash tokens use JavaScript's expression-ending distinction: after an
@@ -374,6 +374,9 @@ def classify_source(text: str) -> SourceLexicalMap:
     they start a regex.  Ambiguous block boundaries prefer regex/non-code.
     """
     line_starts, line_ends = _line_layout(text)
+    dash_line_comments = bool(
+        source_path and source_path.casefold().endswith((".lua", ".sql", ".hs", ".lhs"))
+    )
     regions: list[tuple[int, int]] = []
     can_end_expression: bool | None = False
     pending_control_paren = False
@@ -411,7 +414,8 @@ def classify_source(text: str) -> SourceLexicalMap:
             add_region(index, end)
             index = end
             continue
-        if character == "#" or text.startswith("//", index):
+        dash_comment = dash_line_comments and text.startswith("--", index)
+        if character == "#" or text.startswith("//", index) or dash_comment:
             boundary = _LOGICAL_LINE_BOUNDARY.search(text, index)
             end = len(text) if boundary is None else boundary.start()
             add_region(index, end)
