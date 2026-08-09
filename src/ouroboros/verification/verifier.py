@@ -583,13 +583,81 @@ def _pattern_is_zero_width(pattern: str, flags: int) -> bool:
     return maximum == 0
 
 
+_PAIRED_LITERAL_DELIMITERS = {"(": ")", "[": "]", "{": "}", "<": ">"}
+_HEREDOC_OPENER = re.compile(
+    r"(?:<<<|<<[-~]?)[ \t]*(?:(['\"`])([A-Za-z_][A-Za-z0-9_]*)\1|"
+    r"([A-Za-z_][A-Za-z0-9_]*))"
+)
+
+
+def _paired_literal_end(text: str, index: int) -> int | None:
+    """Return the end of a Perl/Ruby-style regex literal, if one starts here."""
+    prefix_length = 2 if text.startswith(("qr", "%r"), index) else 0
+    if not prefix_length or index + prefix_length >= len(text):
+        return None
+    opening = text[index + prefix_length]
+    closing = _PAIRED_LITERAL_DELIMITERS.get(opening)
+    if closing is None:
+        return None
+    depth = 1
+    cursor = index + prefix_length + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == opening:
+            depth += 1
+        elif text[cursor] == closing:
+            depth -= 1
+            if depth == 0:
+                return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def _heredoc_region(text: str, index: int) -> tuple[int, int] | None:
+    """Return body bounds for a recognised shell/Perl/PHP heredoc opener."""
+    match = _HEREDOC_OPENER.match(text, index)
+    if match is None:
+        return None
+    delimiter = match.group(2) or match.group(3)
+    boundary = _LOGICAL_LINE_BOUNDARY.search(text, match.end())
+    if boundary is None:
+        return match.end(), len(text)
+    body_start = boundary.end()
+    cursor = body_start
+    for line in text[body_start:].splitlines(keepends=True):
+        logical = _LOGICAL_LINE_BOUNDARY.sub("", line).strip()
+        if logical.rstrip(";") == delimiter:
+            return body_start, cursor
+        cursor += len(line)
+    return body_start, len(text)
+
+
 def _target_is_inside_noncode_region(text: str, target_start: int) -> bool:
     """Track comment and source-string state up to one target occurrence."""
     index = 0
     quote = ""
+    regex_class = False
     while index < target_start:
         if quote:
-            if text.startswith(quote, index):
+            if quote == "/":
+                if text[index] in "\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029":
+                    quote = ""
+                    regex_class = False
+                    index += 1
+                    continue
+                if text[index] == "[":
+                    regex_class = True
+                elif text[index] == "]":
+                    regex_class = False
+                elif text[index] == "/" and not regex_class:
+                    quote = ""
+                    index += 1
+                    while index < len(text) and text[index].isalpha():
+                        index += 1
+                    continue
+            if quote != "/" and text.startswith(quote, index):
                 index += len(quote)
                 quote = ""
                 continue
@@ -617,6 +685,19 @@ def _target_is_inside_noncode_region(text: str, target_start: int) -> bool:
                 return True
             index = boundary.end()
             continue
+        heredoc = _heredoc_region(text, index)
+        if heredoc is not None:
+            body_start, body_end = heredoc
+            if body_start <= target_start < body_end:
+                return True
+            index = max(index + 1, body_end)
+            continue
+        paired_end = _paired_literal_end(text, index)
+        if paired_end is not None:
+            if paired_end > target_start:
+                return True
+            index = paired_end
+            continue
         if text.startswith('"""', index) or text.startswith("'''", index):
             quote = text[index : index + 3]
             index += 3
@@ -625,8 +706,74 @@ def _target_is_inside_noncode_region(text: str, target_start: int) -> bool:
             quote = text[index]
             index += 1
             continue
+        if text[index] == "/":
+            quote = "/"
+            regex_class = False
+            index += 1
+            continue
         index += 1
     return bool(quote)
+
+
+_TYPE_DECLARATION_PREFIX = re.compile(
+    r"(?:^|[^\w$])(?:class|interface|struct|trait|enum|record|type)\s+$"
+)
+_FUNCTION_DECLARATION_PREFIX = re.compile(r"(?:^|[^\w$])(?:def|function|fn|func|sub)\s+$")
+_TYPE_ASSIGNMENT_SUFFIX = re.compile(r"^\s*=\s*(?:class|interface)\b")
+_FUNCTION_ASSIGNMENT_SUFFIX = re.compile(
+    r"^\s*=\s*(?:async\s+)?(?:function\b|\([^\r\n)]*\)\s*=>|"
+    r"[A-Za-z_$][\w$]*\s*=>)"
+)
+
+
+def _structural_evidence_kind(ac_text: str) -> str:
+    """Derive the required source predicate from trusted acceptance text."""
+    words = {word.casefold() for word in re.findall(r"[A-Za-z]+", ac_text)}
+    if words & {"file", "directory"}:
+        return "path"
+    if words & {"function", "method", "callback"}:
+        return "function"
+    if words & {"class", "interface", "struct", "trait", "enum", "record", "type"}:
+        return "type"
+    if words & {"define", "definition", "declare", "declaration", "create"}:
+        return "declaration"
+    return "literal"
+
+
+def _target_has_structural_declaration(
+    text: str,
+    target_span: tuple[int, int],
+    kind: str,
+) -> bool:
+    """Whether a live target span is an actual declaration of the AC kind."""
+    if kind == "path":
+        return False
+    if kind == "literal":
+        return True
+    start, end = target_span
+    previous = tuple(_LOGICAL_LINE_BOUNDARY.finditer(text, 0, start))
+    line_start = previous[-1].end() if previous else 0
+    boundary = _LOGICAL_LINE_BOUNDARY.search(text, end)
+    line_end = boundary.start() if boundary is not None else len(text)
+    prefix = text[line_start:start]
+    suffix = text[end:line_end]
+    type_declaration = bool(
+        _TYPE_DECLARATION_PREFIX.search(prefix) or _TYPE_ASSIGNMENT_SUFFIX.match(suffix)
+    )
+    function_declaration = bool(
+        _FUNCTION_DECLARATION_PREFIX.search(prefix) or _FUNCTION_ASSIGNMENT_SUFFIX.match(suffix)
+    )
+    if kind == "type":
+        return type_declaration
+    if kind == "function":
+        return function_declaration
+    return type_declaration or function_declaration
+
+
+def _target_has_scalar_assignment(text: str, target_span: tuple[int, int]) -> bool:
+    """Whether the target token is followed by an assignment operator."""
+    index = _skip_inline_space(text, target_span[1])
+    return index < len(text) and text[index] in "=:"
 
 
 def _match_binds_target_span(
@@ -868,7 +1015,7 @@ def _has_complete_scalar_terminator(text: str, index: int, operator: str | None)
 
 
 def _extract_following_scalar(content: str, index: int) -> str:
-    """Extract a direct, assigned, or parenthesized scalar at index."""
+    """Extract a scalar only when an assignment operator binds it."""
     index = _skip_inline_space(content, index)
     if index < len(content) and content[index] in "=:":
         operator = content[index]
@@ -877,20 +1024,13 @@ def _extract_following_scalar(content: str, index: int) -> str:
             return ""
         value, end = scanned
         return value if _has_complete_scalar_terminator(content, end, operator) else ""
-    if index < len(content) and content[index] == "(":
-        scanned = _scan_scalar(content, index + 1)
-        if scanned is None:
-            return ""
-        value, end = scanned
-        end = _skip_inline_space(content, end)
-        if end >= len(content) or content[end] != ")":
-            return ""
-        return value if _has_complete_scalar_terminator(content, end + 1, None) else ""
     scanned = _scan_scalar(content, index)
     if scanned is None:
         return ""
     value, end = scanned
     operator = _preceding_assignment_operator(content, index)
+    if operator is None:
+        return ""
     return value if _has_complete_scalar_terminator(content, end, operator) else ""
 
 
@@ -1077,6 +1217,7 @@ class SpecVerifier:
         assertion: SpecAssertion,
         *,
         binding_text: str | None = None,
+        source_kind: str = "content",
     ) -> tuple[re.Match, str] | None:
         """Find a regex match that is grounded in the acceptance-criterion input.
 
@@ -1098,6 +1239,7 @@ class SpecVerifier:
                 searched_text,
                 assertion,
                 binding_text=binding_text,
+                source_kind=source_kind,
             ),
             None,
         )
@@ -1109,6 +1251,7 @@ class SpecVerifier:
         assertion: SpecAssertion,
         *,
         binding_text: str | None = None,
+        source_kind: str = "content",
     ) -> Iterator[tuple[re.Match, str]]:
         """Return all criterion-bound matches in deterministic search order."""
         if not assertion.input_binding_required:
@@ -1147,11 +1290,32 @@ class SpecVerifier:
                 yield match, target_spans[0][0]
             return
 
-        code_spans = [
-            (target, span)
-            for target, span in target_spans
-            if not _target_is_inside_noncode_region(searched_text, span[0])
-        ]
+        code_spans = (
+            target_spans
+            if source_kind == "filename"
+            else [
+                (target, span)
+                for target, span in target_spans
+                if not _target_is_inside_noncode_region(searched_text, span[0])
+            ]
+        )
+        if assertion.tier == VerificationTier.T2_STRUCTURAL and source_kind == "content":
+            structural_kind = _structural_evidence_kind(assertion.ac_text)
+            code_spans = [
+                (target, span)
+                for target, span in code_spans
+                if _target_has_structural_declaration(
+                    searched_text,
+                    span,
+                    structural_kind,
+                )
+            ]
+        elif assertion.tier == VerificationTier.T1_CONSTANT and source_kind == "content":
+            code_spans = [
+                (target, span)
+                for target, span in code_spans
+                if _target_has_scalar_assignment(searched_text, span)
+            ]
         if not code_spans:
             return
 
@@ -1361,7 +1525,12 @@ class SpecVerifier:
         filename_subject: str,
         assertion: SpecAssertion,
     ) -> tuple[re.Match, str] | None:
-        bound = self._find_bound_match(pattern, filename_subject, assertion)
+        bound = self._find_bound_match(
+            pattern,
+            filename_subject,
+            assertion,
+            source_kind="filename",
+        )
         if bound is None:
             return None
         match, target = bound
@@ -1566,6 +1735,7 @@ class SpecVerifier:
             else ()
         )
         blank_subject_contract = _matches_only_a_blank_subject(assertion.pattern)
+        structural_kind = _structural_evidence_kind(assertion.ac_text)
 
         # First check: does the pattern match any filename?
         name_pattern = self._safe_compile(
@@ -1574,7 +1744,7 @@ class SpecVerifier:
             target_directed=assertion.input_binding_required,
         )
 
-        if name_pattern:
+        if name_pattern and (not assertion.input_binding_required or structural_kind == "path"):
             for file_path in files:
                 basename = os.path.basename(file_path)
                 relative_file = self._relative_file(file_path)
