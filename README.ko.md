@@ -476,7 +476,7 @@ uv run ouroboros tui monitor
 | `3` | **Logs** | 레벨별 색상 구분, 필터링 가능한 로그 뷰어 |
 | `4` | **Debug** | 상태 인스펙터, 원시 이벤트, 설정 |
 
-> 자세한 내용은 [TUI 사용 가이드](./docs/guides/tui-usage.md)를 참고하세요.
+> 자세한 내용은 [TUI 사용 가이드](./docs/guides/tui-usage.ko.md)를 참고하세요.
 
 ---
 
@@ -507,7 +507,7 @@ Ouroboros는 MIT 라이선스로 공개 개발되는 오픈소스입니다. 이 
 
 ## 활동
 
-여기 있는 숫자는 이 페이지를 열 때 GitHub API에서 실시간으로 읽어옵니다.
+여기 있는 숫자는 GitHub 데이터를 바탕으로 생성되어 자동으로 갱신되며, 캐시로 인해 업데이트가 지연될 수 있습니다.
 
 <p align="center">
   <a href="https://github.com/Q00/ouroboros/graphs/contributors"><img src="https://img.shields.io/github/contributors/Q00/ouroboros?color=orange" alt="Contributors"></a>
