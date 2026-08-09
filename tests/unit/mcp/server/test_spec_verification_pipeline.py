@@ -323,6 +323,101 @@ async def test_postfix_modal_negation_controls_the_target_clause(
     assert formal.final_approved is approved
 
 
+_SENTENCE_BOUNDARY_CONTRADICTIONS = (
+    "MUST define a CameraProvider class! The class must not exist",
+    "MUST define a CameraProvider class? The class must not exist",
+    "MUST define a CameraProvider class. The class must not exist",
+    "MUST define a CameraProvider class?! The class must not exist",
+    "MUST define a CameraProvider class!\nThe class must not exist",
+    "MUST define a CameraProvider class\nThe class must not exist",
+    "MUST define a CameraProvider class!The deeply referenced target class must not exist",
+    "MUST define a CameraProvider class?The class does not exist",
+    "MUST define a CameraProvider class.The class must not exist",
+    "MUST define a CameraProvider class\r\nThe class must not exist",
+    "MUST NOT define a CameraProvider class! The class must exist",
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ac_text", _SENTENCE_BOUNDARY_CONTRADICTIONS)
+@pytest.mark.parametrize("target_present", [True, False], ids=["present", "absent"])
+async def test_sentence_boundary_contradiction_never_mints_formal_evidence(
+    tmp_path: Any,
+    ac_text: str,
+    target_present: bool,
+) -> None:
+    """A later target-relative predicate makes the whole bound polarity ambiguous."""
+    payload = [
+        {
+            "ac_index": 0,
+            "tier": "t2_structural",
+            "pattern": r"class\s+CameraProvider",
+            "expected_value": "CameraProvider",
+            "file_hint": "*.py",
+            "description": "Punctuation cannot hide contradictory target semantics",
+        }
+    ]
+
+    assertions = await _extract(ac_text, payload)
+    assert assertions == ()
+
+    stale_assertion = SpecAssertion(
+        ac_index=0,
+        ac_text=ac_text,
+        tier="t2_structural",
+        pattern=r"class\s+CameraProvider",
+        expected_value="CameraProvider",
+        file_hint="*.py",
+        evidence_targets=("CameraProvider",),
+        evidence_polarity=EvidencePolarity.REQUIRED,
+        input_binding_required=True,
+    )
+    content = (
+        "class CameraProvider:\n    pass\n" if target_present else "class Unrelated:\n    pass\n"
+    )
+    (tmp_path / "main.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all((stale_assertion,))
+    formal = _formal_verdict(ac_text, verification)
+
+    result = verification.reports[0].results[0]
+    assert result.verified is False
+    assert "criterion-bound" in result.detail.casefold()
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminator", ["!", "?", ".", "...", "?!", "\n"])
+async def test_terminal_sentence_punctuation_preserves_one_positive_requirement(
+    tmp_path: Any,
+    terminator: str,
+) -> None:
+    """A terminal boundary is harmless when no second predicate follows it."""
+    ac_text = f"MUST define a CameraProvider class{terminator}"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"class\s+CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": "*.py",
+                "description": "One explicit positive sentence",
+            }
+        ],
+    )
+    (tmp_path / "main.py").write_text("class CameraProvider:\n    pass\n")
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert assertions[0].evidence_polarity is EvidencePolarity.REQUIRED
+    assert verification.reports[0].results[0].verified is True
+    assert formal.final_approved is True
+
+
 _UNKNOWN_SUFFIX_NEGATIONS = (
     "The CameraProvider mysterious widget must not exist",
     "The CameraProvider class for legacy clients must not exist",

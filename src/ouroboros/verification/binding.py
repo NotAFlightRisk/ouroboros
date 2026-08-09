@@ -19,10 +19,12 @@ _CONSTANT_BINDING_SUFFIX = re.compile(
     re.IGNORECASE,
 )
 _TOKEN_PUNCTUATION = frozenset("._/:-+@#?&=%~")
+_SENTENCE_BOUNDARY = r"(?:[!?]+|\.+(?=\s|$|[A-Z])|[\r\n]+)"
 _CLAUSE_BOUNDARY = re.compile(
-    r"\b(?:in\s+order\s+to|because|so|and|but|while|whereas)\b|[;,]",
+    r"\b(?:in\s+order\s+to|because|so|and|but|while|whereas)\b|[;,]|" + _SENTENCE_BOUNDARY,
     re.IGNORECASE,
 )
+_FOLLOWING_SENTENCE_CONTENT = re.compile(r"(?:[!?]+(?=[^!?])|\.+(?=\s|[A-Z])|[\r\n]+)\s*\S")
 _FORBIDDEN_COMMAND_PREFIX = re.compile(
     r"(?:\b(?:must|shall|should|may|can)\s+(?:not|never)\b|\b(?:do|does|did)\s+not\b)",
     re.IGNORECASE,
@@ -202,7 +204,7 @@ def _structural_targets(ac_text: str) -> tuple[str, ...]:
     selected: list[str] = []
 
     for word, word_start, word_end, _quoted in words:
-        folded = word.casefold()
+        folded = word.casefold().rstrip(".")
         if folded not in _STRUCTURAL_WORDS:
             continue
         previous = next((item for item in reversed(words) if item[2] <= word_start), None)
@@ -314,6 +316,8 @@ def acceptance_polarity(
             )
             target_prefix = ac_text[clause_start:start]
             target_suffix = ac_text[end:clause_end]
+            if _FOLLOWING_SENTENCE_CONTENT.search(ac_text[end:]):
+                return None
             if (
                 _FORBIDDEN_COMMAND_PREFIX.search(target_prefix)
                 or _FORBIDDEN_TARGET_PREFIX.search(target_prefix)
