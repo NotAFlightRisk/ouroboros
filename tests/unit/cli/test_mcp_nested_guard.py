@@ -8,12 +8,16 @@ Ensures that:
 
 from __future__ import annotations
 
+import asyncio
+import importlib
 import os
-from unittest.mock import AsyncMock, patch
+import sys
+from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
 from typer.testing import CliRunner
 
-from ouroboros.cli.commands.mcp import app
+from ouroboros.cli.commands.mcp import _require_mcp_dependency, _run_mcp_server, app
 from ouroboros.package_profiles import UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE
 
 runner = CliRunner()
@@ -54,6 +58,74 @@ def test_serve_sets_nested_env_var(monkeypatch):
 
     # _OUROBOROS_NESTED should have been set to "1" before asyncio.run was called
     assert captured_env.get("_OUROBOROS_NESTED") == "1"
+
+
+def test_run_mcp_server_checks_dependency_before_startup(monkeypatch):
+    """A missing MCP SDK must not initialize the server or stores."""
+    monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+    preflight = Mock(side_effect=ImportError("mcp package not installed"))
+    shell_env = Mock()
+
+    with (
+        patch("ouroboros.cli.commands.mcp._require_mcp_dependency", preflight),
+        patch("ouroboros.cli.commands.mcp._ensure_shell_env", shell_env),
+    ):
+        with pytest.raises(ImportError, match="mcp package not installed"):
+            asyncio.run(_run_mcp_server("localhost", 8080, "stdio"))
+
+    preflight.assert_called_once_with()
+    shell_env.assert_not_called()
+
+
+def test_dependency_preflight_rejects_importable_incompatible_sdk(tmp_path, monkeypatch):
+    """An MCP 1.x-like package root must not satisfy the MCP v2 boundary."""
+    package_dir = tmp_path / "mcp"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    (package_dir / "server.py").write_text("class Server: pass\n", encoding="utf-8")
+
+    for module_name in tuple(sys.modules):
+        if module_name == "mcp" or module_name.startswith("mcp."):
+            monkeypatch.delitem(sys.modules, module_name)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+
+    try:
+        assert importlib.import_module("mcp") is not None
+        with pytest.raises(ImportError, match="MCP SDK v2 server API unavailable"):
+            _require_mcp_dependency()
+    finally:
+        # ``monkeypatch.delitem`` restores modules that existed before this
+        # test, but cannot remove synthetic modules imported afterward.
+        for module_name in tuple(sys.modules):
+            if module_name == "mcp" or module_name.startswith("mcp."):
+                sys.modules.pop(module_name, None)
+        importlib.invalidate_caches()
+
+
+def test_serve_reports_missing_mcp_dependency(monkeypatch):
+    """The CLI returns one actionable failure for a missing MCP SDK."""
+    monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+
+    with patch(
+        "ouroboros.cli.commands.mcp._run_mcp_server",
+        new=AsyncMock(
+            side_effect=ImportError(
+                "MCP SDK v2 server API unavailable. Install with: pip install 'ouroboros-ai[mcp]'"
+            )
+        ),
+    ):
+        result = runner.invoke(app, ["serve", "--runtime", "claude-cli"])
+
+    assert result.exit_code == 1
+    normalized_output = " ".join(result.output.split())
+    assert "MCP dependencies not installed: MCP SDK v2 server API unavailable" in normalized_output
+    assert "Install with:" in result.output
+    assert "pip install" in result.output
+    assert "ouroboros-ai[mcp]" in result.output
+    assert (
+        "uvx --python '>=3.12' --from 'ouroboros-ai[mcp]' ouroboros mcp serve --runtime claude-cli"
+    ) in normalized_output
 
 
 def test_serve_defaults_to_port_8080_when_port_omitted(monkeypatch):
