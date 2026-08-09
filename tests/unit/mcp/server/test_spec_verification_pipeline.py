@@ -132,6 +132,117 @@ async def test_negative_structure_polarity_reaches_formal_verdict(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "tier", "pattern", "expected", "hidden_content"),
+    [
+        (
+            "MUST NOT define a CameraProvider class",
+            "t2_structural",
+            r"interface\s+\w+",
+            "CameraProvider",
+            "class CameraProvider:\n    pass\n",
+        ),
+        (
+            "MUST NOT set RETRIES=10",
+            "t1_constant",
+            r"RETRIES\s*=\s*5",
+            "10",
+            "RETRIES = 10\n",
+        ),
+    ],
+    ids=["hidden-structure", "hidden-constant"],
+)
+async def test_forbidden_scan_ignores_model_predicate_and_scope(
+    tmp_path: Any,
+    ac_text: str,
+    tier: str,
+    pattern: str,
+    expected: str,
+    hidden_content: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": tier,
+                "pattern": pattern,
+                "expected_value": expected,
+                "file_hint": "safe.py",
+                "description": "Model-selected narrow negative scan",
+            }
+        ],
+    )
+    (tmp_path / "safe.py").write_text("# safe\n")
+    (tmp_path / "hidden.py").write_text(hidden_content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert assertions[0].evidence_polarity is EvidencePolarity.FORBIDDEN
+    assert verification.reports[0].verified_pass is False
+    assert verification.reports[0].results[0].evidence_source == "trusted_project_scan"
+    assert formal.final_approved is False
+
+
+@pytest.mark.asyncio
+async def test_avoid_wording_is_forbidden_instead_of_defaulting_to_required(
+    tmp_path: Any,
+) -> None:
+    ac_text = "MUST avoid defining a CameraProvider class"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"class\s+\w+",
+                "expected_value": "CameraProvider",
+                "file_hint": "*.py",
+                "description": "Avoid CameraProvider",
+            }
+        ],
+    )
+    (tmp_path / "main.py").write_text("class CameraProvider:\n    pass\n")
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert assertions[0].evidence_polarity is EvidencePolarity.FORBIDDEN
+    assert formal.final_approved is False
+
+
+@pytest.mark.asyncio
+async def test_forbidden_absence_fails_closed_when_project_inventory_is_truncated(
+    tmp_path: Any,
+) -> None:
+    ac_text = "MUST NOT define a CameraProvider class"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": "*.py",
+                "description": "CameraProvider is forbidden",
+            }
+        ],
+    )
+    for index in range(101):
+        (tmp_path / f"safe_{index}.py").write_text("# safe\n")
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    result = verification.reports[0].results[0]
+    assert result.verified is False
+    assert "inventory exceeds 100 files" in result.detail
+    assert formal.final_approved is False
+
+
+@pytest.mark.asyncio
 async def test_repeated_constant_values_keep_clause_identity_through_formal_adapter(
     tmp_path: Any,
 ) -> None:
@@ -253,6 +364,31 @@ async def test_target_specific_filename_regex_still_reaches_formal_pass(tmp_path
         ],
     )
     (tmp_path / "CameraProvider.py").write_text("# provider\n")
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].results[0].evidence_source == "filename"
+    assert formal.final_approved is True
+
+
+@pytest.mark.asyncio
+async def test_palindrome_filename_keeps_exact_filename_evidence(tmp_path: Any) -> None:
+    ac_text = "MUST create file aba.py"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"aba\.py",
+                "expected_value": "aba.py",
+                "file_hint": "*.py",
+                "description": "Find aba.py",
+            }
+        ],
+    )
+    (tmp_path / "aba.py").write_text("# palindrome\n")
 
     verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
     formal = _formal_verdict(ac_text, verification)

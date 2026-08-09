@@ -24,6 +24,7 @@ _FORBIDDEN_CLAUSE = re.compile(
     r"(?:"
     r"\b(?:must|shall|should|may|can)\s+(?:not|never)\b"
     r"|\b(?:do|does|did)\s+not\b"
+    r"|\b(?:avoid(?:s|ed|ing)?|prevent(?:s|ed|ing)?|omit(?:s|ted|ting)?)\b"
     r"|\b(?:forbid(?:s|den)?|prohibit(?:s|ed)?|disallow(?:s|ed)?|absent|excluded?)\b"
     r")",
     re.IGNORECASE,
