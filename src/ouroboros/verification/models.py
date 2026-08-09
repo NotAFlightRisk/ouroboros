@@ -48,11 +48,10 @@ class SpecAssertion(BaseModel, frozen=True):
     """Targets deterministically copied from the caller-authored AC."""
     evidence_polarity: EvidencePolarity = EvidencePolarity.REQUIRED
     """Caller-authored polarity for the bound target's criterion clause."""
-    # ``False`` is the compatibility path for trusted, caller-authored
-    # assertions. Model-produced assertions must always set this to ``True``;
-    # AssertionExtractor is the sole production constructor and does so.
-    input_binding_required: bool = False
-    """Whether this assertion crossed the model-extraction trust boundary."""
+    # False is an explicit compatibility path for trusted, caller-authored
+    # assertions. Public/deserialized construction fails closed by default.
+    input_binding_required: bool = True
+    """Whether criterion-derived target and polarity binding must be enforced."""
 
 
 class SpecVerificationResult(BaseModel, frozen=True):

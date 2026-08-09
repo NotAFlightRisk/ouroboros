@@ -91,6 +91,64 @@ async def test_positive_structure_survives_extractor_verifier_and_formal_adapter
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("ac_text", "tier", "pattern", "expected", "filename", "content"),
+    [
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"class\s+CameraProvider",
+            "CameraProvider",
+            "main.lua",
+            "-- class CameraProvider\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES\s*=\s*",
+            "10",
+            "settings.sql",
+            "-- RETRIES = 10\n",
+        ),
+    ],
+    ids=["comment-only-structure", "comment-only-constant"],
+)
+async def test_comment_only_evidence_cannot_reach_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    tier: str,
+    pattern: str,
+    expected: str,
+    filename: str,
+    content: str,
+) -> None:
+    """Extractor-bound assertions reject comments before formal promotion."""
+    suffix = filename[filename.rfind(".") :]
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": tier,
+                "pattern": pattern,
+                "expected_value": expected,
+                "file_hint": f"*{suffix}",
+                "description": "Comment text is not executable evidence",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert assertions[0].input_binding_required is True
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("content", "approved"),
     [
         ("class CameraProvider:\n    pass\n", False),

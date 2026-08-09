@@ -36,6 +36,7 @@ from ouroboros.verification.models import (
     VerificationTier,
 )
 from ouroboros.verification.regex_safety import pattern_has_bounded_execution
+from ouroboros.verification.source_safety import mask_non_executable_source
 
 logger = logging.getLogger(__name__)
 
@@ -982,9 +983,9 @@ class SpecVerifier:
         """Verify all assertions against project files.
 
         Args:
-            assertions: Assertions to verify. Model-derived assertions must set
-                ``input_binding_required=True``; ``False`` is only a compatibility
-                path for trusted direct callers.
+            assertions: Assertions to verify. Input binding is fail-closed by
+                default; False is only an explicit compatibility path for
+                trusted direct callers.
             agent_results: Map of ac_index → agent-reported pass/fail.
 
         Returns:
@@ -1516,13 +1517,16 @@ class SpecVerifier:
             content = self._read_file(file_path)
             if content is None:
                 continue
+            evidence_content = mask_non_executable_source(content, file_path)
+            if evidence_content is None:
+                continue
 
-            bounds = self._bound_matches(pattern, content, assertion)
+            bounds = self._bound_matches(pattern, evidence_content, assertion)
             first_bound = next(bounds, None)
             if first_bound is None and blank_subject_contract:
                 bounds = self._bound_matches(
                     pattern,
-                    content,
+                    evidence_content,
                     assertion,
                     binding_text=self._relative_file(file_path),
                 )
@@ -1695,7 +1699,10 @@ class SpecVerifier:
             content = self._read_file(file_path)
             if content is None:
                 continue
-            bound = self._find_bound_match(content_pattern, content, assertion)
+            evidence_content = mask_non_executable_source(content, file_path)
+            if evidence_content is None:
+                continue
+            bound = self._find_bound_match(content_pattern, evidence_content, assertion)
             # Preserve #1837's exact named-file blank-subject contract: the
             # pattern proves the file contents and the criterion target binds to
             # the project-relative file name rather than to content that, by
@@ -1703,7 +1710,7 @@ class SpecVerifier:
             if bound is None and blank_subject_contract:
                 bound = self._find_bound_match(
                     content_pattern,
-                    content,
+                    evidence_content,
                     assertion,
                     binding_text=self._relative_file(file_path),
                 )

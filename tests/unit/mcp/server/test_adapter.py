@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime
+from functools import partial
 import json
 import re
 from types import SimpleNamespace
@@ -52,12 +53,17 @@ from ouroboros.orchestrator.control_bus import ControlBus, ControlBusDrainError
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.verification.models import (
     ACVerificationReport,
-    SpecAssertion,
     SpecVerificationResult,
     SpecVerificationSummary,
     VerificationTier,
 )
+from ouroboros.verification.models import (
+    SpecAssertion as _SpecAssertion,
+)
 from ouroboros.verification.verifier import SpecVerifier
+
+# Legacy hand-authored fixtures exercise the explicit trusted-caller path.
+SpecAssertion = partial(_SpecAssertion, input_binding_required=False)
 
 
 class _FakeEventStore:
@@ -496,6 +502,42 @@ Parallel Execution Verification Report
         assert summary.ac_results[0].evidence == "No files matched hint: *.rs"
         assert summary.approval_status == "rejected"
         assert summary.run_verdict == "FAIL"
+
+    def test_omitted_binding_flag_cannot_publish_a_formal_pass(self, tmp_path: Any) -> None:
+        """The public model default is bound; omission cannot select compatibility."""
+        ac_text = "MUST define a CameraProvider class"
+        (tmp_path / "main.py").write_text("class Unrelated:\n    pass\n")
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+Unrelated",
+            expected_value="CameraProvider",
+            file_hint="*.py",
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all((assertion,))
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert assertion.input_binding_required is True
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.ac_results[0].final_verdict == "fail"
 
     @pytest.mark.parametrize(
         "pattern",

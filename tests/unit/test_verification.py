@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 import json
 import os
 import re
@@ -18,13 +19,19 @@ from ouroboros.providers.base import CompletionResponse
 from ouroboros.verification.extractor import AssertionExtractor
 from ouroboros.verification.models import (
     ACVerificationReport,
-    SpecAssertion,
     SpecVerificationResult,
     SpecVerificationSummary,
     VerificationTier,
 )
+from ouroboros.verification.models import (
+    SpecAssertion as _SpecAssertion,
+)
 from ouroboros.verification.regex_safety import pattern_has_bounded_execution
 from ouroboros.verification.verifier import SpecVerifier
+
+# Legacy hand-authored fixtures exercise the explicit trusted-caller path.
+SpecAssertion = partial(_SpecAssertion, input_binding_required=False)
+
 
 # -- Model Tests --
 
@@ -33,7 +40,7 @@ class TestVerificationModels:
     """Tests for verification data models."""
 
     def test_spec_assertion_frozen(self) -> None:
-        a = SpecAssertion(
+        a = _SpecAssertion(
             ac_index=0,
             ac_text="WARMUP_FRAMES=10",
             tier=VerificationTier.T1_CONSTANT,
@@ -42,11 +49,12 @@ class TestVerificationModels:
         )
         assert a.ac_index == 0
         assert a.tier == VerificationTier.T1_CONSTANT
+        assert a.input_binding_required is True
         with pytest.raises(Exception):
             a.ac_index = 1  # type: ignore[misc]
 
     def test_verification_result_discrepancy(self) -> None:
-        assertion = SpecAssertion(
+        assertion = _SpecAssertion(
             ac_index=0,
             ac_text="test",
             tier=VerificationTier.T1_CONSTANT,
@@ -164,6 +172,112 @@ class TestSpecVerifier:
         with open(os.path.join(tmpdir, "pyproject.toml"), "w") as f:
             f.write('[project]\nname = "test"\n')
         return tmpdir
+
+    def test_omitted_binding_flag_fails_closed(self) -> None:
+        """Public assertion construction cannot silently select unbound matching."""
+        project = self._create_project({"main.py": "class Unrelated:\n    pass\n"})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+Unrelated",
+            expected_value="CameraProvider",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert assertion.input_binding_required is True
+        assert summary.reports[0].verified_pass is False
+        assert "criterion-bound" in summary.reports[0].results[0].detail
+
+    @pytest.mark.parametrize(
+        ("tier", "filename", "content", "pattern", "expected"),
+        [
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "main.lua",
+                "-- class CameraProvider\n",
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T1_CONSTANT,
+                "settings.sql",
+                "-- RETRIES = 10\n",
+                r"RETRIES\s*=\s*",
+                "10",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "main.py",
+                'DESCRIPTION = "class CameraProvider"\n',
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T1_CONSTANT,
+                "settings.py",
+                'HELP = "RETRIES = 10"\n',
+                r"RETRIES\s*=\s*",
+                "10",
+            ),
+        ],
+        ids=[
+            "lua-structure-comment",
+            "sql-constant-comment",
+            "python-structure-string",
+            "python-constant-string",
+        ],
+    )
+    def test_comment_only_source_cannot_verify_positive_evidence(
+        self,
+        tier: VerificationTier,
+        filename: str,
+        content: str,
+        pattern: str,
+        expected: str,
+    ) -> None:
+        """Comments and strings are not executable T1/T2 evidence."""
+        target = "CameraProvider" if tier is VerificationTier.T2_STRUCTURAL else "RETRIES"
+        ac_text = (
+            "MUST define a CameraProvider class"
+            if tier is VerificationTier.T2_STRUCTURAL
+            else "MUST set RETRIES=10"
+        )
+        project = self._create_project({filename: content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=pattern,
+            expected_value=expected,
+            file_hint=f"*{os.path.splitext(filename)[1]}",
+            evidence_targets=(target,),
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.reports[0].verified_pass is False
+        assert summary.reports[0].results[0].evidence_source == ""
+
+    def test_comment_mask_preserves_following_executable_evidence(self) -> None:
+        """Masking a comment does not shift or erase later source evidence."""
+        project = self._create_project({"main.lua": "-- class Unrelated\nclass CameraProvider\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+CameraProvider",
+            expected_value="CameraProvider",
+            file_hint="*.lua",
+            evidence_targets=("CameraProvider",),
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.reports[0].verified_pass is True
+        assert summary.reports[0].results[0].evidence_source == "file_content"
 
     def test_t1_constant_found_correct(self) -> None:
         """T1: expected value matches actual → verified."""
@@ -821,6 +935,7 @@ class TestSpecVerifier:
                         tier=tier,
                         pattern=pattern,
                         file_hint="marker.txt",
+                        input_binding_required=False,
                     )
                     summary = SpecVerifier(project_dir={project!r}).verify_all(
                         (assertion,), agent_results={{0: True}}
