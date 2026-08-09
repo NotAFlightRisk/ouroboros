@@ -81,6 +81,44 @@ def _contains_unbounded_repeat(sequence: object, depth: int = 0) -> bool:
     return False
 
 
+def _contains_unbounded_lazy_repeat(sequence: object, depth: int = 0) -> bool:
+    """Whether a lazy repeat can retry across an unbounded subject suffix."""
+    if depth > _MAX_PARSE_DEPTH:
+        return True
+    try:
+        items = list(sequence)  # type: ignore[call-overload]
+    except TypeError:
+        return True
+    for opcode, argument in items:
+        name = getattr(opcode, "name", str(opcode))
+        if name in _REPEATS:
+            if name == "MIN_REPEAT" and argument[1] == regex_parser.MAXREPEAT:
+                return True
+            if _contains_unbounded_lazy_repeat(argument[2], depth + 1):
+                return True
+        elif name in {"SUBPATTERN", "ATOMIC_GROUP", "ASSERT", "ASSERT_NOT"}:
+            child = (
+                argument[-1]
+                if name == "SUBPATTERN"
+                else argument[1]
+                if name in {"ASSERT", "ASSERT_NOT"}
+                else argument
+            )
+            if _contains_unbounded_lazy_repeat(child, depth + 1):
+                return True
+        elif name == "BRANCH" and any(
+            _contains_unbounded_lazy_repeat(branch, depth + 1) for branch in argument[1]
+        ):
+            return True
+        elif name == "GROUPREF_EXISTS":
+            _reference, yes_arm, no_arm = argument
+            if _contains_unbounded_lazy_repeat(yes_arm, depth + 1) or (
+                no_arm is not None and _contains_unbounded_lazy_repeat(no_arm, depth + 1)
+            ):
+                return True
+    return False
+
+
 def _is_start_anchored(sequence: object, flags: int, depth: int = 0) -> bool:
     if depth > _MAX_PARSE_DEPTH:
         return False
@@ -440,9 +478,10 @@ def pattern_has_bounded_execution(
         return False
     _minimum, maximum = parsed.getwidth()
     effective_flags = parsed.state.flags
-    allow_repeated_assertions = (target_directed and maximum == 0) or _is_start_anchored(
-        parsed, effective_flags
-    )
+    start_anchored = _is_start_anchored(parsed, effective_flags)
+    if maximum > 0 and not start_anchored and _contains_unbounded_lazy_repeat(parsed):
+        return False
+    allow_repeated_assertions = (target_directed and maximum == 0) or start_anchored
     return not _has_ambiguous_repeats(
         parsed,
         frozenset(groups),
