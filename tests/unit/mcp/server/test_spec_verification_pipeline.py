@@ -323,6 +323,13 @@ _UNKNOWN_SUFFIX_NEGATIONS = (
     "The CameraProvider mysterious widget must not exist",
     "The CameraProvider class for legacy clients must not exist",
     "The CameraProvider class to be removed must not exist",
+    "The CameraProvider class to ensure this class must not remain",
+    "The CameraProvider class for this class that must not remain",
+    "The CameraProvider class to ensure it must not remain",
+    "The CameraProvider class to ensure the same class must not remain",
+    "The CameraProvider class for the target class that must not remain",
+    "The CameraProvider class for the CameraProvider class that must not remain",
+    "The CameraProvider class to ensure its class must not remain",
 )
 
 
@@ -330,7 +337,18 @@ _UNKNOWN_SUFFIX_NEGATIONS = (
 @pytest.mark.parametrize(
     "ac_text",
     _UNKNOWN_SUFFIX_NEGATIONS,
-    ids=["unknown-widget", "for-target-qualifier", "to-target-qualifier"],
+    ids=[
+        "unknown-widget",
+        "for-target-qualifier",
+        "to-target-qualifier",
+        "to-purpose-target-referent",
+        "for-purpose-target-referent",
+        "to-purpose-target-pronoun",
+        "to-purpose-same-target",
+        "for-purpose-explicit-target",
+        "for-purpose-named-target",
+        "to-purpose-possessive-target",
+    ],
 )
 async def test_unknown_noncausal_postfix_modifier_fails_closed(ac_text: str) -> None:
     assertions = await _extract(
@@ -353,7 +371,18 @@ async def test_unknown_noncausal_postfix_modifier_fails_closed(ac_text: str) -> 
 @pytest.mark.parametrize(
     "ac_text",
     _UNKNOWN_SUFFIX_NEGATIONS,
-    ids=["unknown-widget", "for-target-qualifier", "to-target-qualifier"],
+    ids=[
+        "unknown-widget",
+        "for-target-qualifier",
+        "to-target-qualifier",
+        "to-purpose-target-referent",
+        "for-purpose-target-referent",
+        "to-purpose-target-pronoun",
+        "to-purpose-same-target",
+        "for-purpose-explicit-target",
+        "for-purpose-named-target",
+        "to-purpose-possessive-target",
+    ],
 )
 @pytest.mark.parametrize(
     "content",
