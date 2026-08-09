@@ -20,7 +20,7 @@ _CONSTANT_BINDING_SUFFIX = re.compile(
 )
 _TOKEN_PUNCTUATION = frozenset("._/:-+@#?&=%~")
 _CLAUSE_BOUNDARY = re.compile(
-    r"\b(?:in\s+order\s+to|because|so|to|for|and|but|while|whereas)\b|[;,]",
+    r"\b(?:in\s+order\s+to|because|so|and|but|while|whereas)\b|[;,]",
     re.IGNORECASE,
 )
 _FORBIDDEN_COMMAND_PREFIX = re.compile(
@@ -53,6 +53,15 @@ _FORBIDDEN_TARGET_SUFFIX = re.compile(
 )
 _UNBOUND_TARGET_SUFFIX_NEGATION = re.compile(
     r"\b(?:(?:must|shall|should)\s+(?:not|never)|(?:do|does)\s+not)\b",
+    re.IGNORECASE,
+)
+_CAUSAL_TARGET_SUFFIX_NEGATION = re.compile(
+    r"^\s*(?:(?:\w+\s+){0,2}(?:class|interface|struct|trait|function|file|directory|"
+    r"flag|constant|value|setting|assignment|definition|declaration)\s+)?(?:"
+    r"for\s+(?:\w+\s+){0,3}that\s+"
+    r"|to\s+(?:prevent|avoid|ensure|reduce|stop|keep|omit)\s+"
+    r"(?:\w+\s+){1,3}(?:that\s+)?"
+    r")(?:(?:must|shall|should)\s+(?:not|never)|(?:do|does)\s+not)\b",
     re.IGNORECASE,
 )
 
@@ -267,6 +276,8 @@ def acceptance_polarity(
                 or _FORBIDDEN_TARGET_SUFFIX.search(target_suffix)
             ):
                 target_polarities.add(EvidencePolarity.FORBIDDEN)
+            elif _CAUSAL_TARGET_SUFFIX_NEGATION.search(target_suffix):
+                target_polarities.add(EvidencePolarity.REQUIRED)
             elif _UNBOUND_TARGET_PREFIX_NEGATION.search(
                 target_prefix
             ) or _UNBOUND_TARGET_SUFFIX_NEGATION.search(target_suffix):

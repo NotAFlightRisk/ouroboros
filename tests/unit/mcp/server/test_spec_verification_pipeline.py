@@ -229,6 +229,7 @@ async def test_forbidden_scan_ignores_model_predicate_and_scope(
         "because errors must not remain",
         "so failures must never remain",
         "for failures that must not remain",
+        "to ensure errors must not remain",
         "in order to ensure errors must not remain",
     ],
     ids=[
@@ -237,6 +238,7 @@ async def test_forbidden_scan_ignores_model_predicate_and_scope(
         "because-reason",
         "so-reason",
         "for-reason",
+        "to-purpose-subject",
         "in-order-purpose",
     ],
 )
@@ -317,9 +319,20 @@ async def test_postfix_modal_negation_controls_the_target_clause(
     assert formal.final_approved is approved
 
 
+_UNKNOWN_SUFFIX_NEGATIONS = (
+    "The CameraProvider mysterious widget must not exist",
+    "The CameraProvider class for legacy clients must not exist",
+    "The CameraProvider class to be removed must not exist",
+)
+
+
 @pytest.mark.asyncio
-async def test_unknown_noncausal_postfix_modifier_fails_closed() -> None:
-    ac_text = "The CameraProvider mysterious widget must not exist"
+@pytest.mark.parametrize(
+    "ac_text",
+    _UNKNOWN_SUFFIX_NEGATIONS,
+    ids=["unknown-widget", "for-target-qualifier", "to-target-qualifier"],
+)
+async def test_unknown_noncausal_postfix_modifier_fails_closed(ac_text: str) -> None:
     assertions = await _extract(
         ac_text,
         [
@@ -335,6 +348,42 @@ async def test_unknown_noncausal_postfix_modifier_fails_closed() -> None:
     )
 
     assert assertions == ()
+
+
+@pytest.mark.parametrize(
+    "ac_text",
+    _UNKNOWN_SUFFIX_NEGATIONS,
+    ids=["unknown-widget", "for-target-qualifier", "to-target-qualifier"],
+)
+@pytest.mark.parametrize(
+    "content",
+    ["class CameraProvider:\n    pass\n", "class Unrelated:\n    pass\n"],
+    ids=["target-present", "target-absent"],
+)
+def test_unknown_target_suffix_never_publishes_a_direct_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    content: str,
+) -> None:
+    assertion = SpecAssertion(
+        ac_index=0,
+        ac_text=ac_text,
+        tier="t2_structural",
+        pattern=r"CameraProvider",
+        expected_value="CameraProvider",
+        file_hint="*.py",
+        evidence_targets=("CameraProvider",),
+        evidence_polarity=EvidencePolarity.REQUIRED,
+        input_binding_required=True,
+    )
+    (tmp_path / "main.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all((assertion,))
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].results[0].verified is False
+    assert "polarity is ambiguous or stale" in verification.reports[0].results[0].detail
+    assert formal.final_approved is False
 
 
 _UNKNOWN_PREFIX_NEGATIONS = (
