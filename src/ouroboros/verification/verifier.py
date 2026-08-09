@@ -35,6 +35,7 @@ from ouroboros.verification.models import (
     SpecVerificationSummary,
     VerificationTier,
 )
+from ouroboros.verification.regex_safety import pattern_has_bounded_execution
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,236 @@ _NOISE_DIRECTORY_NAMES = frozenset({"__pycache__", ".git", "node_modules", ".ven
 # is a number that is read rather than a number of steps that are taken. So the
 # analysis is linear in the pattern no matter what the pattern says.
 _MAX_PARSE_DEPTH = 40
+
+
+def _literal_run_binds_target(run: str, target: str, flags: int) -> bool:
+    """Apply Python's literal case semantics, then trusted token boundaries."""
+    if not flags & re.IGNORECASE:
+        return literal_is_bound(run, target)
+    literal_flags = re.IGNORECASE | (re.ASCII if flags & re.ASCII else 0)
+    for match in re.finditer(re.escape(target), run, literal_flags):
+        matched_spelling = run[match.start() : match.end()]
+        if (match.start(), match.end()) in literal_spans(run, matched_spelling):
+            return True
+    return False
+
+
+def _sequence_requires_target_literal(
+    sequence: object,
+    target: str,
+    flags: int,
+    depth: int = 0,
+) -> bool:
+    """Whether every successful path through a sequence names ``target``.
+
+    A required sequential component is sufficient. A branch is required only
+    when every arm requires the target, and a repeat only when it executes at
+    least once. Assertions are excluded here and handled as positional finite
+    witnesses instead.
+    """
+    if depth > _MAX_PARSE_DEPTH:
+        return False
+    try:
+        items = list(sequence)  # type: ignore[call-overload]
+    except TypeError:  # pragma: no cover - the parser always supplies a sequence
+        return False
+
+    current: list[str] = []
+
+    def current_requires_target() -> bool:
+        run = "".join(current)
+        current.clear()
+        return bool(run) and _literal_run_binds_target(run, target, flags)
+
+    for opcode, argument in items:
+        name = getattr(opcode, "name", str(opcode))
+        if name == "LITERAL":
+            current.append(chr(argument))
+            continue
+        if current_requires_target():
+            return True
+        if name == "SUBPATTERN":
+            if _sequence_requires_target_literal(argument[-1], target, flags, depth + 1):
+                return True
+        elif name == "ATOMIC_GROUP":
+            if _sequence_requires_target_literal(argument, target, flags, depth + 1):
+                return True
+        elif name == "BRANCH":
+            branches = argument[1]
+            if branches and all(
+                _sequence_requires_target_literal(branch, target, flags, depth + 1)
+                for branch in branches
+            ):
+                return True
+        elif name in _REPEATS:
+            minimum = argument[0]
+            if minimum > 0 and _sequence_requires_target_literal(
+                argument[-1], target, flags, depth + 1
+            ):
+                return True
+        elif name == "GROUPREF_EXISTS":
+            _reference, yes_arm, no_arm = argument
+            if (
+                no_arm is not None
+                and _sequence_requires_target_literal(yes_arm, target, flags, depth + 1)
+                and _sequence_requires_target_literal(no_arm, target, flags, depth + 1)
+            ):
+                return True
+    return current_requires_target()
+
+
+_LITERAL_MATCH_FLAGS = re.IGNORECASE | re.ASCII | re.LOCALE | re.UNICODE
+
+
+def _has_scoped_literal_flags(sequence: object, depth: int = 0) -> bool:
+    """Whether scoped flags can change how a fixed target literal is matched."""
+    if depth > _MAX_PARSE_DEPTH:
+        return True
+    try:
+        items = list(sequence)  # type: ignore[call-overload]
+    except TypeError:  # pragma: no cover - the parser always supplies a sequence
+        return True
+    for opcode, argument in items:
+        name = getattr(opcode, "name", str(opcode))
+        if name == "SUBPATTERN":
+            _group, add_flags, del_flags, body = argument
+            if (add_flags | del_flags) & _LITERAL_MATCH_FLAGS:
+                return True
+            if _has_scoped_literal_flags(body, depth + 1):
+                return True
+        elif name in _REPEATS:
+            if _has_scoped_literal_flags(argument[-1], depth + 1):
+                return True
+        elif name == "ATOMIC_GROUP":
+            if _has_scoped_literal_flags(argument, depth + 1):
+                return True
+        elif name == "BRANCH":
+            if any(_has_scoped_literal_flags(branch, depth + 1) for branch in argument[1]):
+                return True
+        elif name in {"ASSERT", "ASSERT_NOT"}:
+            if _has_scoped_literal_flags(argument[1], depth + 1):
+                return True
+        elif name == "GROUPREF_EXISTS":
+            _reference, yes_arm, no_arm = argument
+            if _has_scoped_literal_flags(yes_arm, depth + 1) or (
+                no_arm is not None and _has_scoped_literal_flags(no_arm, depth + 1)
+            ):
+                return True
+    return False
+
+
+def _pattern_consumes_target_literal(pattern: re.Pattern, target: str) -> bool:
+    """Whether every successful consuming path names the complete target."""
+    try:
+        parsed = regex_parser.parse(pattern.pattern, pattern.flags)
+    except Exception:  # pragma: no cover - the pattern is already compiled
+        return False
+    if _has_scoped_literal_flags(parsed):
+        return False
+    return _sequence_requires_target_literal(parsed, target, pattern.flags)
+
+
+def _finite_target_assertions(
+    pattern: re.Pattern,
+    target: str,
+) -> tuple[tuple[int, int, int], ...]:
+    """Return finite positive witnesses as ``(direction, offset, width)``."""
+    try:
+        parsed = regex_parser.parse(pattern.pattern, pattern.flags)
+    except Exception:  # pragma: no cover - the pattern is already compiled
+        return ()
+    if _has_scoped_literal_flags(parsed):
+        return ()
+    witnesses: list[tuple[int, int, int]] = []
+    for direction, offset, assertion_body in _direct_positive_assertions(parsed):
+        _minimum, maximum = assertion_body.getwidth()  # type: ignore[attr-defined]
+        if maximum >= regex_parser.MAXWIDTH:
+            continue
+        if _sequence_requires_target_literal(assertion_body, target, pattern.flags):
+            witnesses.append((direction, offset, maximum))
+    return tuple(witnesses)
+
+
+def _fixed_item_width(sequence: object, item: tuple[object, object]) -> int | None:
+    """Return an item's exact finite width, or ``None`` when it can vary."""
+    try:
+        state = sequence.state  # type: ignore[attr-defined]
+        minimum, maximum = regex_parser.SubPattern(state, [item]).getwidth()
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if minimum != maximum or maximum >= regex_parser.MAXWIDTH:
+        return None
+    return maximum
+
+
+def _direct_positive_assertions(
+    sequence: object,
+    depth: int = 0,
+    offset: int = 0,
+) -> Iterator[tuple[int, int, object]]:
+    """Yield required positive assertions at their exact match-relative offset.
+
+    Plain groups and atomic groups do not move a zero-width match position and
+    are safe to unwrap while their preceding width remains exact. Branches and
+    repetitions are deliberately not unwrapped: an assertion on an untaken or
+    optional path cannot be a required witness. Once a variable-width item is
+    crossed, later assertion positions are unknown and fail closed.
+    """
+    if depth > _MAX_PARSE_DEPTH:
+        return
+    try:
+        items = list(sequence)  # type: ignore[call-overload]
+    except TypeError:  # pragma: no cover - the parser always supplies a sequence
+        return
+    current_offset: int | None = offset
+    for opcode, argument in items:
+        name = getattr(opcode, "name", str(opcode))
+        if current_offset is not None:
+            if name == "ASSERT" and argument[0] in {-1, 1}:
+                yield argument[0], current_offset, argument[1]
+            elif name == "SUBPATTERN":
+                yield from _direct_positive_assertions(argument[-1], depth + 1, current_offset)
+            elif name == "ATOMIC_GROUP":
+                yield from _direct_positive_assertions(argument, depth + 1, current_offset)
+        width = _fixed_item_width(sequence, (opcode, argument))
+        if current_offset is None or width is None:
+            current_offset = None
+        else:
+            current_offset += width
+
+
+def _literal_occurrences(
+    subject: str,
+    literal: str,
+    start: int,
+    end: int,
+    flags: int,
+) -> tuple[tuple[int, int], ...]:
+    """Return all raw literal occurrences in a bounded runtime witness window."""
+    start = max(0, start)
+    end = min(len(subject), end)
+    if start >= end or not literal:
+        return ()
+    window = subject[start:end]
+    literal_flags = re.IGNORECASE if flags & re.IGNORECASE else 0
+    return tuple(
+        (start + match.start(), start + match.end())
+        for match in re.finditer(re.escape(literal), window, literal_flags)
+    )
+
+
+def _window_has_one_trusted_target(
+    subject: str,
+    literal: str,
+    start: int,
+    end: int,
+    trusted_spans: tuple[tuple[int, int], ...],
+    flags: int,
+) -> bool:
+    """Tie a mandatory regex literal to one unambiguous trusted source span."""
+    occurrences = _literal_occurrences(subject, literal, start, end, flags)
+    return len(occurrences) == 1 and occurrences[0] in trusted_spans
+
 
 # Consumes at least one character, so a sequence containing one cannot be empty.
 _CONSUMING = frozenset({"LITERAL", "NOT_LITERAL", "IN", "ANY", "RANGE", "CATEGORY"})
@@ -751,7 +982,9 @@ class SpecVerifier:
         """Verify all assertions against project files.
 
         Args:
-            assertions: Assertions to verify.
+            assertions: Assertions to verify. Model-derived assertions must set
+                ``input_binding_required=True``; ``False`` is only a compatibility
+                path for trusted direct callers.
             agent_results: Map of ac_index → agent-reported pass/fail.
 
         Returns:
@@ -901,6 +1134,7 @@ class SpecVerifier:
         assertion: SpecAssertion,
         *,
         binding_text: str | None = None,
+        filename_binding: bool = False,
     ) -> tuple[re.Match, str] | None:
         """Find a regex match that is grounded in the acceptance-criterion input.
 
@@ -908,8 +1142,9 @@ class SpecVerifier:
         evidence only when the subject it matched contains a literal target from
         the caller's actual AC. For consuming matches the target must overlap
         the matched span. Zero-width lookarounds are preserved by requiring the
-        target in their asserted subject; this keeps discriminating lookaheads
-        valid while ``\\b`` and ``(?=m)`` cannot verify an unrelated filename.
+        target in a finite positive lookaround anchored at the match position;
+        this keeps discriminating lookaheads valid while global co-presence
+        lookaheads cannot verify unrelated evidence.
 
         ``binding_text`` is used for whole-file blank evidence: the regex proves
         content is absent, while the criterion target binds that proof to the
@@ -921,6 +1156,7 @@ class SpecVerifier:
                 searched_text,
                 assertion,
                 binding_text=binding_text,
+                filename_binding=filename_binding,
             ),
             None,
         )
@@ -932,6 +1168,7 @@ class SpecVerifier:
         assertion: SpecAssertion,
         *,
         binding_text: str | None = None,
+        filename_binding: bool = False,
     ) -> Iterator[tuple[re.Match, str]]:
         """Return all criterion-bound matches in deterministic search order."""
         if not assertion.input_binding_required:
@@ -941,72 +1178,139 @@ class SpecVerifier:
         if not targets:
             return
         bound_subject = searched_text if binding_text is None else binding_text
-        for match in pattern.finditer(searched_text):
-            for target in targets:
-                spans = literal_spans(bound_subject, target)
-                if not spans:
+        target_spans: list[
+            tuple[
+                str,
+                str,
+                tuple[tuple[int, int], ...],
+                bool,
+                tuple[tuple[int, int, int], ...],
+            ]
+        ] = []
+        for target in targets:
+            spans = literal_spans(bound_subject, target)
+            if not spans:
+                continue
+            evidence_literal = target.rpartition("/")[2] if filename_binding else target
+            if filename_binding:
+                evidence_spans = tuple(
+                    (target_end - len(evidence_literal), target_end)
+                    for _target_start, target_end in spans
+                    if bound_subject[target_end - len(evidence_literal) : target_end]
+                    == evidence_literal
+                )
+            else:
+                evidence_spans = spans
+            if not evidence_spans:
+                continue
+            consumes_target = _pattern_consumes_target_literal(pattern, evidence_literal)
+            finite_witnesses = _finite_target_assertions(pattern, evidence_literal)
+            if binding_text is None and not consumes_target and not finite_witnesses:
+                continue
+            target_spans.append(
+                (
+                    target,
+                    evidence_literal,
+                    evidence_spans,
+                    consumes_target,
+                    finite_witnesses,
+                )
+            )
+        if not target_spans:
+            return
+        if not pattern_has_bounded_execution(
+            pattern.pattern,
+            pattern.flags,
+            externally_anchored=filename_binding,
+        ):
+            logger.warning(
+                "Criterion-bound regex has unbounded backtracking risk, skipping: %r",
+                pattern.pattern,
+            )
+            return
+        if filename_binding:
+            full_match = pattern.fullmatch(searched_text)
+            matches = () if full_match is None else (full_match,)
+        else:
+            matches = pattern.finditer(searched_text)
+        for match in matches:
+            for (
+                target,
+                evidence_literal,
+                evidence_spans,
+                consumes_target,
+                finite_witnesses,
+            ) in target_spans:
+                if binding_text is not None:
+                    yield match, target
+                    break
+                if match.start() == match.end():
+                    if self._match_has_target_witness(
+                        match,
+                        searched_text,
+                        evidence_literal,
+                        evidence_spans,
+                        finite_witnesses,
+                        pattern.flags,
+                    ):
+                        yield match, target
+                        break
                     continue
-                if binding_text is not None or match.start() == match.end():
+                has_bound_target = _window_has_one_trusted_target(
+                    searched_text,
+                    evidence_literal,
+                    match.start(),
+                    match.end(),
+                    evidence_spans,
+                    pattern.flags,
+                )
+                if has_bound_target and (
+                    consumes_target
+                    or self._match_has_target_witness(
+                        match,
+                        searched_text,
+                        evidence_literal,
+                        evidence_spans,
+                        finite_witnesses,
+                        pattern.flags,
+                    )
+                ):
                     yield match, target
                     break
-                if any(start < match.end() and end > match.start() for start, end in spans):
-                    yield match, target
-                    break
+
+    @staticmethod
+    def _match_has_target_witness(
+        match: re.Match,
+        searched_text: str,
+        evidence_literal: str,
+        evidence_spans: tuple[tuple[int, int], ...],
+        finite_witnesses: tuple[tuple[int, int, int], ...],
+        flags: int,
+    ) -> bool:
+        """Require a bounded positive assertion to witness the target locally.
+
+        An unbounded lookahead can prove only that a target occurs somewhere in
+        the file. It cannot tie that target to a separate condition at this
+        match position. The accepted witness therefore has finite width, names
+        the trusted target as fixed positive syntax, and overlaps its file span.
+        """
+        for direction, offset, maximum in finite_witnesses:
+            assertion_position = match.start() + offset
+            witness_start = assertion_position if direction == 1 else assertion_position - maximum
+            witness_end = assertion_position + maximum if direction == 1 else assertion_position
+            if _window_has_one_trusted_target(
+                searched_text,
+                evidence_literal,
+                witness_start,
+                witness_end,
+                evidence_spans,
+                flags,
+            ):
+                return True
+        return False
 
     def _relative_file(self, file_path: str) -> str:
         return os.path.relpath(file_path, self.project_dir).replace(os.sep, "/")
-
-    @staticmethod
-    def _filename_counterfactual_targets(target: str) -> tuple[str, ...]:
-        """Build distinct deterministic near-targets without preserving the token."""
-        prefix, separator, basename = target.rpartition("/")
-        stem, dot, suffix = basename.partition(".")
-        immutable_prefix = f"{prefix}{separator}" if separator else ""
-        body = immutable_prefix + stem
-        mutable = tuple(
-            index
-            for index, character in enumerate(body)
-            if index >= len(immutable_prefix) and character.isalnum()
-        )
-        counterfactuals: list[str] = []
-        for index in mutable:
-            replacement = "x" if body[index].casefold() != "x" else "y"
-            mutated_body = body[:index] + replacement + body[index + 1 :]
-            candidate = mutated_body + (dot + suffix if dot else "")
-            if candidate != target and not literal_is_bound(candidate, target):
-                counterfactuals.append(candidate)
-        # A one-character name has no mutation that retains any original name
-        # signal. Add a boundary-breaking candidate so a one-letter lookaround
-        # or unanchored literal cannot masquerade as exact filename evidence.
-        if len(mutable) == 1:
-            candidate = "x" + target
-            if not literal_is_bound(candidate, target):
-                counterfactuals.append(candidate)
-        return tuple(dict.fromkeys(counterfactuals))
-
-    def _filename_pattern_is_target_specific(
-        self,
-        pattern: re.Pattern,
-        filename_subject: str,
-        target: str,
-    ) -> bool:
-        r"""Reject filename matches that survive a target-order counterfactual.
-
-        One-character mutations retain every other target character plus path
-        and extension scaffolding. Therefore ``.``, ``.+``, ``\b``, one-letter
-        lookarounds, extension-only patterns, and generic identifier regexes
-        still match at least one counterfactual, while an exact target regex
-        does not. Palindromes are handled because no reversal is involved.
-        """
-        counterfactuals = self._filename_counterfactual_targets(target)
-        spans = literal_spans(filename_subject, target)
-        if not counterfactuals or not spans:
-            return False
-        return all(
-            pattern.search(filename_subject[:start] + decoy + filename_subject[end:]) is None
-            for start, end in spans
-            for decoy in counterfactuals
-        )
 
     def _trusted_project_inventory(self) -> tuple[tuple[tuple[str, str], ...], str]:
         """Read a complete bounded project inventory without model scope input."""
@@ -1136,15 +1440,12 @@ class SpecVerifier:
         filename_subject: str,
         assertion: SpecAssertion,
     ) -> tuple[re.Match, str] | None:
-        bound = self._find_bound_match(pattern, filename_subject, assertion)
-        if bound is None:
-            return None
-        match, target = bound
-        if assertion.input_binding_required and not self._filename_pattern_is_target_specific(
-            pattern, filename_subject, target
-        ):
-            return None
-        return match, target
+        return self._find_bound_match(
+            pattern,
+            filename_subject,
+            assertion,
+            filename_binding=assertion.input_binding_required,
+        )
 
     def _verify_constant(self, assertion: SpecAssertion) -> SpecVerificationResult:
         """Verify a T1 constant/config assertion by searching source files."""
@@ -1199,7 +1500,9 @@ class SpecVerifier:
             )
 
         pattern = self._safe_compile(
-            assertion.pattern, file_hint=assertion.file_hint, candidates=files
+            assertion.pattern,
+            file_hint=assertion.file_hint,
+            candidates=files,
         )
         if pattern is None:
             return SpecVerificationResult(
@@ -1325,7 +1628,10 @@ class SpecVerifier:
         blank_subject_contract = _matches_only_a_blank_subject(assertion.pattern)
 
         # First check: does the pattern match any filename?
-        name_pattern = self._safe_compile(assertion.pattern, re.IGNORECASE)
+        name_pattern = self._safe_compile(
+            assertion.pattern,
+            re.IGNORECASE,
+        )
 
         if name_pattern:
             for file_path in files:
@@ -1369,7 +1675,9 @@ class SpecVerifier:
 
         # Second check: search file contents for class/function/interface
         content_pattern = self._safe_compile(
-            assertion.pattern, file_hint=assertion.file_hint, candidates=files
+            assertion.pattern,
+            file_hint=assertion.file_hint,
+            candidates=files,
         )
         if content_pattern is None:
             return SpecVerificationResult(

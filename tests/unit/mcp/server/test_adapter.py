@@ -609,7 +609,7 @@ Parallel Execution Verification Report
             ac_index=0,
             ac_text=ac_text,
             tier=VerificationTier.T2_STRUCTURAL,
-            pattern=r".+",
+            pattern=re.escape("--verbose"),
             expected_value="--verbose",
             file_hint="*.txt",
             evidence_targets=("--verbose",),

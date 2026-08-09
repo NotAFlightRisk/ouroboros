@@ -23,6 +23,7 @@ from ouroboros.verification.models import (
     SpecVerificationSummary,
     VerificationTier,
 )
+from ouroboros.verification.regex_safety import pattern_has_bounded_execution
 from ouroboros.verification.verifier import SpecVerifier
 
 # -- Model Tests --
@@ -1609,11 +1610,19 @@ class TestSpecVerifier:
         assert result.evidence_target == ""
         assert "criterion-bound" in result.detail
 
-    @pytest.mark.parametrize("pattern", [r"(?=CameraProvider)", r"class\s+\w+"])
-    def test_target_bound_zero_width_and_generic_patterns_remain_real_evidence(
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            r"(?=class CameraProvider)",
+            r"class\s+CameraProvider",
+            r"(?=(?:class CameraProvider|interface CameraProvider))",
+            r"(?:class CameraProvider|interface CameraProvider)",
+        ],
+    )
+    def test_target_specific_zero_width_and_consuming_patterns_remain_real_evidence(
         self, pattern: str
     ) -> None:
-        """The gate binds evidence to input; it does not require a consuming regex span."""
+        """Both match shapes remain valid when their success depends on the target."""
         project = self._create_project({"main.py": "class CameraProvider:\n    pass\n"})
         assertion = SpecAssertion(
             ac_index=0,
@@ -1633,6 +1642,349 @@ class TestSpecVerifier:
         assert result.evidence_source == "file_content"
         assert result.evidence_target == "CameraProvider"
         assert result.file_path.endswith("main.py")
+
+    @pytest.mark.parametrize(
+        ("tier", "ac_text", "pattern", "expected", "content"),
+        [
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"(?=class)",
+                "CameraProvider",
+                "class Unrelated:\n    pass\n# CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"[\s\S]+",
+                "CameraProvider",
+                "class Unrelated:\n    pass\n# CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"(?=[\s\S]*CameraProvider)(?=class)",
+                "CameraProvider",
+                "class Unrelated:\n    pass\n# CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"(?=.{0,100})(?=[\s\S]*CameraProvider)",
+                "CameraProvider",
+                "class Unrelated:\n    pass\n# CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"(?=[\s\S]*CameraProvider)[\s\S]+",
+                "CameraProvider",
+                "class Unrelated:\n    pass\n# CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"CameraProvider|[\s\S]+",
+                "CameraProvider",
+                "class Unrelated:\n    pass\n# CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"(?:CameraProvider)?[\s\S]+",
+                "CameraProvider",
+                "class Unrelated:\n    pass\n# CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"(?=(?:CameraProvider|class))",
+                "CameraProvider",
+                "class X: # CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"CameraProvider(?=X)|[\s\S]+",
+                "CameraProvider",
+                "class Unrelated:\n    pass\n# CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"(?=(?:CameraProvider)?[\s\S]{1,80})",
+                "CameraProvider",
+                "class X: # CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"(?=CameraProvider|[\s\S]{1,80})",
+                "CameraProvider",
+                "class X: # CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"CameraProvider[\s\S]+",
+                "CameraProvider",
+                "CameraProviderFake = 1\n# CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"(?i)cameraprovider[\s\S]+",
+                "CameraProvider",
+                "cameraprovider unrelated\n# CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"(?i)(?-i:cameraprovider)[\s\S]+",
+                "CameraProvider",
+                "cameraprovider unrelated\n# CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"(?i:CameraProvider)[\s\S]+",
+                "CameraProvider",
+                "cameraprovider unrelated\n# CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r"(?i:class\s+CameraProvider)[\s\S]+",
+                "CameraProvider",
+                "class cameraprovider_fake:\n    pass\n# CameraProvider\n",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a StraßeProvider class",
+                r"(?i)STRASSEPROVIDER[\s\S]+",
+                "StraßeProvider",
+                "STRASSEPROVIDER_fake = 1\n# StraßeProvider\n",
+            ),
+            (
+                VerificationTier.T1_CONSTANT,
+                "MUST set RETRIES=10",
+                r"(?=10)(?=[\s\S]*RETRIES)",
+                "10",
+                "10\n# RETRIES is not assigned\n",
+            ),
+            (
+                VerificationTier.T1_CONSTANT,
+                "MUST set RETRIES=10",
+                r"(?=10)",
+                "10",
+                "# RETRIES is not assigned\n10\n",
+            ),
+        ],
+        ids=[
+            "t2-zero-width",
+            "t2-consuming",
+            "t2-split-lookaheads",
+            "t2-finite-generic-witness",
+            "t2-global-target-consuming",
+            "t2-target-free-branch",
+            "t2-optional-target",
+            "t2-zero-width-target-free-branch",
+            "t2-target-on-failing-branch",
+            "t2-zero-width-optional-target",
+            "t2-zero-width-target-free-alternative",
+            "t2-embedded-runtime-literal",
+            "t2-ignorecase-runtime-decoy",
+            "t2-scoped-case-runtime-decoy",
+            "t2-scoped-ignorecase-addition",
+            "t2-scoped-ignorecase-embedded",
+            "t2-unicode-casefold-expansion",
+            "t1-split-lookaheads",
+            "t1-zero-width",
+        ],
+    )
+    def test_regex_and_target_copresence_is_not_causal_evidence(
+        self,
+        tier: VerificationTier,
+        ac_text: str,
+        pattern: str,
+        expected: str,
+        content: str,
+    ) -> None:
+        """A regex path that does not require the target cannot mint a PASS."""
+        project = self._create_project({"main.py": content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=pattern,
+            expected_value=expected,
+            file_hint="*.py",
+            evidence_targets=("RETRIES" if tier is VerificationTier.T1_CONSTANT else expected,),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        result = summary.reports[0].results[0]
+        assert summary.reports[0].verified_pass is False
+        assert result.verified is False
+        assert result.evidence_source == ""
+        assert result.evidence_target == ""
+        assert "criterion-bound" in result.detail
+
+    def test_target_free_static_pattern_is_rejected_before_model_regex_execution(self) -> None:
+        """A failed target-causality prefilter must not open a new ReDoS path."""
+
+        class NeverRunPattern:
+            pattern = r"(?=[\s\S]*CameraProvider)|(A+)+$"
+            flags = 0
+
+            def finditer(self, _subject: str) -> object:
+                raise AssertionError("target-free model regex must not execute")
+
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=NeverRunPattern.pattern,
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+            input_binding_required=True,
+        )
+
+        matches = tuple(
+            SpecVerifier(project_dir=".")._bound_matches(
+                NeverRunPattern(),  # type: ignore[arg-type]
+                "CameraProvider\n" + "A" * 100,
+                assertion,
+            )
+        )
+
+        assert matches == ()
+
+    @pytest.mark.parametrize(
+        ("tier", "ac_text", "pattern", "expected", "content", "evidence_target"),
+        [
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider class",
+                r".{16}(?=CameraProvider)",
+                "CameraProvider",
+                "CameraProvider XCameraProvider\n",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T1_CONSTANT,
+                "MUST set RETRIES=10",
+                r"[\s\S]{10}(?=10[\s\S]X.RETRIES)",
+                "10",
+                "# RETRIES\n10\nXXRETRIES\n",
+                "RETRIES",
+            ),
+        ],
+        ids=["t2-shifted-lookahead-decoy", "t1-shifted-lookahead-decoy"],
+    )
+    def test_finite_assertion_binds_at_its_actual_match_offset(
+        self,
+        tier: VerificationTier,
+        ac_text: str,
+        pattern: str,
+        expected: str,
+        content: str,
+        evidence_target: str,
+    ) -> None:
+        """A trusted occurrence cannot authorize an assertion over a later decoy."""
+        project = self._create_project({"main.py": content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=pattern,
+            expected_value=expected,
+            file_hint="*.py",
+            evidence_targets=(evidence_target,),
+            input_binding_required=True,
+        )
+
+        report = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0]
+
+        assert report.verified_pass is False
+        assert report.results[0].verified is False
+        assert report.results[0].evidence_target == ""
+
+    def test_target_bound_nested_repeat_is_refused_before_regex_execution(self) -> None:
+        """Naming the trusted target does not make catastrophic backtracking safe."""
+        project = self._create_project({"main.py": "CameraProvider " + "x" * 30})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"CameraProvider (x+x+)+y",
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+            input_binding_required=True,
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is False
+        assert "criterion-bound" in result.detail
+
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            r"CameraProvider(A+)+$",
+            r"CameraProvider(?:A|AA)+$",
+            r"CameraProvider(?:A?)+$",
+            r"CameraProviderA*A*$",
+            r"CameraProvider(A*)A*$",
+            r"CameraProvider(A*)(A*)$",
+            r"CameraProvider(A*)(?(1)A*|A*)$",
+            r"(?i)CameraProviderİ*I*$",
+            r"CameraProvider(?i:A*)A*$",
+            r"(?=CameraProvider(A+)+$)",
+            r"CameraProvider(A+)\1+$",
+            r"CameraProvider(A+)\1$",
+            r"CameraProviderA{999999999}$",
+            r"A*?;RETRIES\WZ",
+            r"(?=.*Z)(?=CameraProvider)",
+            r"a*$CameraProvider",
+            r"a+zCameraProvider",
+            r"CameraProvider\S*Z",
+            r"CameraProvider\D*Z",
+            r"(a*)z CameraProvider",
+            r"a{10000}z CameraProvider",
+            r"(?a)é\W+Z CameraProvider",
+            r"(?a)١\D+Z CameraProvider",
+            r"(?:CameraProvider){10000}",
+            "CameraProvider" + "(?:a|aa)" * 23 + "Z",
+        ],
+    )
+    def test_target_bound_backtracking_families_fail_static_execution_proof(
+        self, pattern: str
+    ) -> None:
+        assert pattern_has_bounded_execution(pattern) is False
+
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            r"CameraProvider",
+            r"class\s+CameraProvider",
+            r"RETRIES\s*=\s*",
+            r"(?=CameraProvider)",
+            r"CameraProvider[^\n]*",
+        ],
+    )
+    def test_common_target_bound_patterns_pass_static_execution_proof(self, pattern: str) -> None:
+        assert pattern_has_bounded_execution(pattern) is True
+
+    def test_leading_filename_repeat_requires_anchored_execution(self) -> None:
+        pattern = r".+CameraProvider\.py"
+
+        assert pattern_has_bounded_execution(pattern) is False
+        assert pattern_has_bounded_execution(pattern, externally_anchored=True) is True
 
     @pytest.mark.parametrize(
         "content",
@@ -1784,7 +2136,7 @@ class TestSpecVerifier:
             ac_index=0,
             ac_text="CLI accepts --verbose flag",
             tier=VerificationTier.T2_STRUCTURAL,
-            pattern=r".+",
+            pattern=re.escape("--verbose"),
             expected_value="--verbose",
             file_hint="*.txt",
             evidence_targets=("--verbose",),
@@ -1828,7 +2180,7 @@ class TestSpecVerifier:
             ac_index=0,
             ac_text=f"MUST expose `{target}`",
             tier=VerificationTier.T2_STRUCTURAL,
-            pattern=r".+",
+            pattern=re.escape(target),
             expected_value=target,
             file_hint="*.txt",
             evidence_targets=(target,),
@@ -1901,6 +2253,24 @@ class TestSpecVerifier:
         summary = SpecVerifier(project_dir=project).verify_all((assertion,))
 
         assert bool(summary.verified_count) is verified
+
+    def test_one_character_filename_stem_rejects_partial_lookahead(self) -> None:
+        project = self._create_project({"a.py": "# one-letter stem\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST create file a.py",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"(?=a)",
+            expected_value="a.py",
+            file_hint="*.py",
+            evidence_targets=("a.py",),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.verified_count == 0
+        assert summary.reports[0].results[0].evidence_target == ""
 
 
 # -- Extractor Tests --

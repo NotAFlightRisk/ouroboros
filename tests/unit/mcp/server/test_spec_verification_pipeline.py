@@ -71,7 +71,7 @@ async def test_positive_structure_survives_extractor_verifier_and_formal_adapter
             {
                 "ac_index": 0,
                 "tier": "t2_structural",
-                "pattern": r"class\s+\w+",
+                "pattern": r"class\s+CameraProvider",
                 "expected_value": "CameraProvider",
                 "file_hint": "*.py",
                 "description": "CameraProvider exists",
@@ -110,7 +110,7 @@ async def test_negative_structure_polarity_reaches_formal_verdict(
             {
                 "ac_index": 0,
                 "tier": "t2_structural",
-                "pattern": r"class\s+\w+",
+                "pattern": r"class\s+CameraProvider",
                 "expected_value": "CameraProvider",
                 "file_hint": "*.py",
                 "description": "CameraProvider is forbidden",
@@ -264,7 +264,7 @@ async def test_negative_purpose_words_after_target_do_not_flip_positive_polarity
             {
                 "ac_index": 0,
                 "tier": "t2_structural",
-                "pattern": r"class\s+\w+",
+                "pattern": r"class\s+CameraProvider",
                 "expected_value": "CameraProvider",
                 "file_hint": "*.py",
                 "description": "CameraProvider is required",
@@ -1196,6 +1196,185 @@ async def test_target_specific_filename_regex_still_reaches_formal_pass(tmp_path
 
     assert verification.reports[0].results[0].evidence_source == "filename"
     assert formal.final_approved is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "tier", "pattern", "expected", "content"),
+    [
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"(?=class)",
+            "CameraProvider",
+            "class Unrelated:\n    pass\n# CameraProvider\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"[\s\S]+",
+            "CameraProvider",
+            "class Unrelated:\n    pass\n# CameraProvider\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"(?=[\s\S]*CameraProvider)(?=class)",
+            "CameraProvider",
+            "class Unrelated:\n    pass\n# CameraProvider\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"(?=[\s\S]*CameraProvider)[\s\S]+",
+            "CameraProvider",
+            "class Unrelated:\n    pass\n# CameraProvider\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider|[\s\S]+",
+            "CameraProvider",
+            "class Unrelated:\n    pass\n# CameraProvider\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"(?=(?:CameraProvider|class))",
+            "CameraProvider",
+            "class X: # CameraProvider\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"(?i)cameraprovider[\s\S]+",
+            "CameraProvider",
+            "cameraprovider unrelated\n# CameraProvider\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"(?i:CameraProvider)[\s\S]+",
+            "CameraProvider",
+            "cameraprovider unrelated\n# CameraProvider\n",
+        ),
+        (
+            "MUST define a StraßeProvider class",
+            "t2_structural",
+            r"(?i)STRASSEPROVIDER[\s\S]+",
+            "StraßeProvider",
+            "STRASSEPROVIDER_fake = 1\n# StraßeProvider\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"(?=10)(?=[\s\S]*RETRIES)",
+            "10",
+            "10\n# RETRIES is not assigned\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"(?=10)",
+            "10",
+            "# RETRIES is not assigned\n10\n",
+        ),
+    ],
+    ids=[
+        "t2-zero-width",
+        "t2-consuming",
+        "t2-split-lookaheads",
+        "t2-global-target-consuming",
+        "t2-target-free-branch",
+        "t2-zero-width-target-free-branch",
+        "t2-ignorecase-runtime-decoy",
+        "t2-scoped-ignorecase-addition",
+        "t2-unicode-casefold-expansion",
+        "t1-split-lookaheads",
+        "t1-zero-width",
+    ],
+)
+async def test_copresent_regex_and_target_cannot_reach_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    tier: str,
+    pattern: str,
+    expected: str,
+    content: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": tier,
+                "pattern": pattern,
+                "expected_value": expected,
+                "file_hint": "*.py",
+                "description": "Model regex and target are independently co-present",
+            }
+        ],
+    )
+    (tmp_path / "main.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "tier", "pattern", "expected", "content"),
+    [
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"(?=class CameraProvider)",
+            "CameraProvider",
+            "class CameraProvider:\n    pass\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES\s*=\s*",
+            "10",
+            "RETRIES = 10\n",
+        ),
+    ],
+    ids=["t2-target-lookahead", "t1-target-assignment"],
+)
+async def test_target_causal_regex_controls_reach_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    tier: str,
+    pattern: str,
+    expected: str,
+    content: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": tier,
+                "pattern": pattern,
+                "expected_value": expected,
+                "file_hint": "*.py",
+                "description": "Regex satisfaction depends on the trusted target",
+            }
+        ],
+    )
+    (tmp_path / "main.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is True
+    assert formal.final_approved is True
+    assert formal.ac_results[0].final_verdict == "pass"
 
 
 @pytest.mark.asyncio
