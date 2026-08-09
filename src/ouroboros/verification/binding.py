@@ -64,12 +64,41 @@ _CAUSAL_EFFECT_SUBJECT = (
 _CAUSAL_TARGET_SUFFIX_NEGATION = re.compile(
     r"^\s*(?:(?:\w+\s+){0,2}(?:class|interface|struct|trait|function|file|directory|"
     r"flag|constant|value|setting|assignment|definition|declaration)\s+)?(?:"
-    rf"for\s+{_CAUSAL_EFFECT_SUBJECT}that\s+"
+    rf"for\s+(?P<for_subject>{_CAUSAL_EFFECT_SUBJECT})that\s+"
     r"|to\s+(?:prevent|avoid|ensure|reduce|stop|keep|omit)\s+"
-    rf"{_CAUSAL_EFFECT_SUBJECT}(?:that\s+)?"
+    rf"(?P<to_subject>{_CAUSAL_EFFECT_SUBJECT})(?:that\s+)?"
     r")(?:(?:must|shall|should)\s+(?:not|never)|(?:do|does)\s+not)\b",
     re.IGNORECASE,
 )
+
+
+def _word_forms(text: str) -> frozenset[str]:
+    """Return conservative case/morphology forms for prose/code word collisions."""
+    forms: set[str] = set()
+    for token in re.findall(r"[^\W\d_]+", text, re.UNICODE):
+        parts = re.findall(
+            r"[A-Z]+(?=[A-Z][a-z]|\b)|[A-Z]?[a-z]+|[A-Z]+",
+            token,
+        ) or [token]
+        for part in parts:
+            folded = part.casefold()
+            forms.add(folded)
+            if len(folded) > 3 and folded.endswith("ies"):
+                forms.add(f"{folded[:-3]}y")
+            elif len(folded) > 3 and folded.endswith(("ches", "shes", "xes", "zes", "sses")):
+                forms.add(folded[:-2])
+            elif len(folded) > 2 and folded.endswith("s") and not folded.endswith("ss"):
+                forms.add(folded[:-1])
+    return frozenset(forms)
+
+
+def _has_distinct_causal_subject(target_suffix: str, target: str) -> bool:
+    """Accept a causal negation only when its effect subject is not the target."""
+    match = _CAUSAL_TARGET_SUFFIX_NEGATION.search(target_suffix)
+    if match is None:
+        return False
+    subject = match.group("for_subject") or match.group("to_subject") or ""
+    return _word_forms(subject).isdisjoint(_word_forms(target))
 
 
 def _is_identifier_continue(character: str) -> bool:
@@ -282,9 +311,7 @@ def acceptance_polarity(
                 or _FORBIDDEN_TARGET_SUFFIX.search(target_suffix)
             ):
                 target_polarities.add(EvidencePolarity.FORBIDDEN)
-            elif _CAUSAL_TARGET_SUFFIX_NEGATION.search(target_suffix) and not literal_is_bound(
-                target_suffix, target
-            ):
+            elif _has_distinct_causal_subject(target_suffix, target):
                 target_polarities.add(EvidencePolarity.REQUIRED)
             elif _UNBOUND_TARGET_PREFIX_NEGATION.search(
                 target_prefix
