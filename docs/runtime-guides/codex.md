@@ -300,14 +300,26 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `goal` | Yes | Primary objective |
-| `task_type` | No | Execution strategy: `code` (default), `research`, or `analysis` |
+| `goal` | Yes | Primary objective. Cannot be empty |
+| `task_type` | No | Execution strategy: `code` (default), `research`, `analysis`, `artifact`, `document`, `documentation`, or `presentation` |
+| `brownfield_context` | No | Existing-codebase context. Empty means greenfield |
 | `constraints` | No | Hard constraints to satisfy |
 | `acceptance_criteria` | No | Specific success criteria |
 | `ontology_schema` | Yes | Output structure definition |
 | `evaluation_principles` | No | Principles for evaluation |
 | `exit_conditions` | No | Termination conditions |
-| `metadata.ambiguity_score` | Yes | Must be <= 0.2 |
+| `metadata` | Yes | Generation metadata |
+| `metadata.ambiguity_score` | No | Ambiguity at generation time. Defaults to `0.15`, accepts `0.0`-`1.0` |
+
+> **Where the 0.2 threshold actually applies.** The field itself accepts `0.0`-`1.0`
+> ([`core/seed.py:409`](../../src/ouroboros/core/seed.py)). The 0.2 gate is enforced at **seed
+> generation**: if the interview cannot get below it, no seed is produced. That gate has an explicit
+> opt-out — the CLI's "Generate Seed anyway" and the MCP `force` parameter. Bypassing it still records
+> the real score in seed metadata and emits the bypass to the audit log. `ouroboros auto` re-checks the
+> same readiness during a run ([`auto/grading.py:226`](../../src/ouroboros/auto/grading.py)).
+>
+> In practice: a hand-written seed carrying a high `ambiguity_score` is not blocked by
+> `ouroboros run workflow`. The field is provenance, not an enforcement gate.
 
 ## Troubleshooting
 

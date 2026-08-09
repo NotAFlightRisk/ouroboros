@@ -145,14 +145,190 @@ ouroboros --help
 
 ---
 
+## 명령 표면 (Command Surface)
+
+사용자 눈에 Codex 연동은 **세션 지향 Ouroboros 런타임**으로 보입니다. Claude 런타임을 굴리는 것과 같은, 명세 우선(specification-first) 워크플로 하네스입니다.
+
+내부적으로 `CodexCliRuntime`은 여전히 로컬 `codex` 실행 파일과 대화하지만, Codex 고유의 세션 ID와 resume 핸들을 보존하고, Codex 명령 디스패처가 `ooo` 스타일 스킬 명령을 인프로세스 Ouroboros MCP 서버로 넘길 수 있습니다.
+
+`ouroboros setup --runtime codex`가 현재 하는 일:
+
+- `PATH`에서 `codex` 바이너리를 찾습니다
+- `~/.ouroboros/config.yaml`에 `orchestrator.runtime_backend: codex`와 `llm.backend: codex`를 씁니다
+- Codex LLM 호출과 에이전트 런타임 세션용으로, 빠져 있는 공급자 중립 `llm_profiles`·`llm_role_profiles` 기본값을 채웁니다. 호출마다 reasoning effort가 적용되고 모델 핀은 걸지 않습니다
+- 가능하면 `orchestrator.codex_cli_path`를 기록합니다
+- 관리되는 Ouroboros 규칙을 `~/.codex/rules/`에 설치합니다
+- 관리되는 Ouroboros 스킬을 `~/.codex/skills/`에 설치합니다
+- `~/.codex/config.toml`에 Ouroboros MCP/env 연결이 없으면 등록하고, setup이 관리하는 stdio 블록은 갱신하되, 사용자가 관리하는 URL·커스텀 항목은 기본적으로 보존합니다
+- 손대지 않은 레거시 자동생성 `ouroboros-*.config.toml` 태스크 프로파일 앵커만 정리합니다. 사용자가 만든 Codex 프로파일은 보존됩니다
+- 관리되는 `ouroboros-worker.config.toml`을 등록해서, Agent OS 워커 서브프로세스가 MCP/env 연결을 잃지 않고도 대화형 Codex 기본값에서 빠질 수 있게 합니다
+
+`~/.codex/config.toml`은 **Ouroboros 스테이지 모델 핀을 둘 자리가 아닙니다.** 설정 UI나 그에 대응하는 `~/.ouroboros/config.yaml` 값을 쓰고, 명시적인 `--profile`이 필요할 때만 사용자가 관리하는 네이티브 Codex 프로파일을 유지하세요. 장기 실행 URL 기반 Ouroboros MCP 서버를 직접 운영한다면 그 URL 항목을 `~/.codex/config.toml`에 그대로 두면 됩니다. `ouroboros setup --runtime codex`가 기본적으로 보존합니다. setup이 그 항목을 관리형 command-spawn 서버로 **바꾸길 원할 때만** `--mcp-mode stdio`를 쓰세요.
+
+### 워커 서브프로세스 격리 (Agent OS `runtime_profile`)
+
+대화형 `codex` 세션과 Ouroboros가 띄우는 워커 서브프로세스는 서로 다른 기본값을 원할 때가 있습니다. 모델, 샌드박스, notify 훅 같은 것들이요. 오케스트레이터 수준의 런타임 프로파일을 `worker`로 두면, Ouroboros가 띄우는 모든 `codex exec` 호출이 관리형 `~/.codex/ouroboros-worker.config.toml` 프로파일을 쓰게 됩니다.
+
+```yaml
+# ~/.ouroboros/config.yaml
+orchestrator:
+  runtime_backend: codex
+  runtime_profile:
+    backend_profile: worker   # 선택. 기본값(미설정)은 지금 동작을 그대로 유지
+```
+
+한 번만 다르게 돌리고 싶으면 환경변수로:
+
+```bash
+OUROBOROS_RUNTIME_PROFILE=worker ouroboros run workflow --runtime codex seed.yaml
+```
+
+워커 오버라이드는 `~/.codex/ouroboros-worker.config.toml`에서 직접 고칩니다:
+
+```toml
+model = "o3-mini"
+notify = []
+sandbox = "workspace-write"
+```
+
+`runtime_profile`이 미설정이면(기본) Ouroboros는 예전과 똑같이 `codex exec`를 내보냅니다. 프로파일 플래그 없이, 사용자 설정을 전부 상속합니다. 이건 런타임 공통 Agent OS 프로파일 계약의 Codex 쪽 매핑이고, OpenCode·Hermes·Claude Code·LiteLLM은 각자의 백엔드 로컬 매핑을 따로 추가할 수 있습니다.
+
+### Codex에서 쓸 수 있는 `ooo` 스킬
+
+`ouroboros setup --runtime codex`를 돌리고 나면 번들 `ooo` 스킬이 `~/.codex/skills/ouroboros-*`에, 라우팅 규칙이 `~/.codex/rules/`에 설치됩니다. Ouroboros를 올린 뒤 **그 산출물만** 갱신하려면 `ouroboros codex refresh`를 쓰세요. `~/.codex/config.toml`도 `~/.ouroboros/config.yaml`도 건드리지 않습니다.
+
+아래 표는 각 스킬과, 터미널만 쓰는 사람을 위한 CLI 대응입니다.
+
+| `ooo` 스킬 | Codex 세션 | CLI 대응 (터미널) |
+|-------------|---------------|--------------------------|
+| `ooo interview` | O | `ouroboros init start --llm-backend codex "your idea"` |
+| `ooo seed` | O | *(`ouroboros init start`에 포함됨)* |
+| `ooo run` | O | `ouroboros run workflow --runtime codex seed.yaml` |
+| `ooo status` | O | `ouroboros status execution <execution_id>` |
+| `ooo evaluate` | O | *(MCP 전용)* |
+| `ooo evolve` | O | *(MCP 전용)* |
+| `ooo ralph` | O | MCP가 소유하는 `ouroboros_ralph` 백그라운드 작업. job 도구로 모니터링 |
+| `ooo cancel` | O | `ouroboros cancel execution <execution_id>` |
+| `ooo unstuck` | O | *(MCP 전용)* |
+| `ooo tutorial` | O | *(MCP 전용)* |
+| `ooo welcome` | O | *(MCP 전용)* |
+| `ooo update` | O | `ouroboros update` |
+| `ooo help` | O | `ouroboros --help` |
+| `ooo qa` | O | *(MCP 전용)* |
+| `ooo setup` | O | `ouroboros setup --runtime codex` |
+| `ooo publish` | O | *(`ouroboros publish` 서브커맨드는 없음. 스킬/런타임 흐름이 `gh` CLI를 씀)* |
+
+> **Ralph 주의 (#528):** `ooo ralph`는 이제 MCP가 소유하는 `ouroboros_ralph` 백그라운드 작업 하나를 시작하고, 표준 job 도구로 감시합니다. 스킬이 클라이언트 쪽 `evolve_step` 폴링으로 다세대 루프를 다시 구현하지 않습니다. 돌고 있는 Ralph를 멈추려면 MCP 작업 취소 도구 `ouroboros_cancel_job(job_id)`를 쓰세요. **`ouroboros cancel execution <execution_id>`는 실행 세션 전용이라 Ralph의 job ID를 취소하지 못합니다.**
+
+> **`ooo seed`와 `ooo interview`의 차이:** 별개의 스킬이고 역할이 다릅니다. `ooo interview`는 소크라테스식 문답 세션을 돌리고 `session_id`를 돌려줍니다. `ooo seed`는 그 `session_id`를 받아 구조화된 Seed YAML을 만듭니다(모호도 채점 포함). 터미널에서는 두 단계가 `ouroboros init start` 한 번에 함께 수행됩니다.
+
+> **`ooo publish` 주의:** Codex 세션에서 `ooo publish`는 setup이 관리형 규칙과 스킬을 설치한 뒤 스킬/런타임 표면으로 제공됩니다. 지금은 전용 `ouroboros publish` 셸 서브커맨드가 아니라, 외부 `gh` CLI와 GitHub 인증에 의존합니다.
+
+Codex는 정확한 `ooo` 및 `/ouroboros:` 스킬 디스패치에 공통 무상태 `ouroboros.router` 리졸버를 씁니다. 명령을 추가하거나 바꾸려면 해당 `SKILL.md`의 frontmatter만 고치면 되고, 런타임은 로깅·메시지 조립·MCP 호출을 로컬에 유지합니다. [Shared `ooo` Skill Dispatch Router](../guides/ooo-skill-dispatch-router.md)(영문)를 보세요.
+
+## 동작 방식
+
+```
++-----------------+     +------------------+     +-----------------+
+|   Seed YAML     | --> |   Orchestrator   | --> |   Codex CLI     |
+|  (your task)    |     | (runtime_factory)|     |   (runtime)     |
++-----------------+     +------------------+     +-----------------+
+                                |
+                                v
+                        +------------------+
+                        |  Codex executes  |
+                        |  with its own    |
+                        |  tool set and    |
+                        |  sandbox model   |
+                        +------------------+
+```
+
+`CodexCliRuntime` 어댑터는 `codex`(또는 `codex-cli`)를 전송 계층으로 띄우되, 세션 핸들·resume 지원·결정적 스킬/MCP 디스패치로 감싸서 런타임이 지속적인 Ouroboros 세션처럼 동작하게 합니다.
+
+### 실행 파일 버전 증명 (attestation)
+
+어댑터는 런타임을 만들 때 성공한 `codex --version` 증거를 선택된 경로, 실제 대상의 device/inode 쌍, 콘텐츠 다이제스트, 심링크 동일성과 함께 기록해 두고, 실행할 때마다 그 증거를 검증합니다. 정책은 fail-closed지만, **증거를 못 얻은 것과 변조가 확인된 것을 혼동하지 않습니다.**
+
+- 초기화 중 타임아웃이나 실행 실패가 나면 긍정적 기준선이 남지 않으므로 실행이 차단되고, 새 런타임 세션이 필요합니다.
+- 이후 검사에서 타임아웃이나 실행 실패가 나면 그 시도는 차단되지만 **증명 증거 없음**으로 보고됩니다. 같은 런타임을 다시 시도할 수 있습니다.
+- 선택된 실행 파일을 `--version`으로 돌리기 **전에**, 어댑터는 실행하지 않는 방식으로 경로·콘텐츠·device/inode·완전한 의미론적 심링크 증거를 검증된 초기화 기준선과 비교합니다. 알려진 변조는 바뀐 후보를 실행하지 않고 거부합니다.
+- 시작된 프로브는 타임아웃이나 실패로 끝나도 전부 사후 샘플링됩니다. 그 증거가 프로브 구간 중 변조를 입증하면, 변조가 일시적 프로브 결과보다 우선합니다.
+- 상위 디렉터리의 generation 변화만으로는 실행 파일 동일성보다 범위가 넓습니다. 무관한 형제 항목이나 항목 교체 후 복원에서도 생길 수 있습니다. 그래서 이 경우는 실행 파일 변조가 확인됐다고 주장하지 않고, **재시도 가능한 불확정 권위**로 fail-closed 처리합니다.
+- 버전 변조는 **성공한 버전 증명 두 개가 서로 다를 때만** 보고됩니다. 경로·콘텐츠·심링크·device/inode·프로브 구간 generation 변조는 두 번째 성공 프로브 전에 fail-closed될 수 있습니다. 증명이 두 번 없었다는 사실은 실행 파일이 안 바뀌었다는 증거가 되지 않습니다.
+
+Copilot·Gemini·Goose·Grok 런타임도 같은 증명·비교 정책을 상속합니다.
+
+> 전체 런타임 백엔드 비교는 [runtime capability matrix](../runtime-capability-matrix.md)(영문)를 보세요.
+
+## Codex CLI의 강점
+
+- **세션을 아는 Codex 런타임** — Ouroboros가 워크플로 단계 전반에서 Codex 세션 핸들과 resume 상태를 보존합니다
+- **강한 코딩·추론** — Codex가 현재 선택한 모델을 쓰고, Ouroboros는 작업에 맞는 reasoning effort를 적용합니다
+- **에이전틱 작업 실행** — 복잡한 작업을 순차 단계로 쪼개고 자율적으로 반복하는 데 강합니다
+- **오픈소스** — Codex CLI는 오픈소스(Apache 2.0)라 열어보고 기여할 수 있습니다
+- **Ouroboros 하네스** — 명세 우선 워크플로 엔진이 Codex CLI 위에 구조화된 검수 기준, 평가 원칙, 결정적 종료 조건을 얹습니다
+
+## 런타임 차이
+
+Codex CLI와 Claude Code는 **서로 독립적인 런타임 백엔드**이고, 도구 집합·권한 모델·샌드박싱 동작이 다릅니다. 같은 Seed 파일이 양쪽에서 동작하지만, 실행 경로는 달라질 수 있습니다.
+
+| 항목 | Codex CLI | Claude Code |
+|--------|-----------|-------------|
+| 정체 | Codex CLI 전송을 쓰는 Ouroboros 세션 런타임 | Anthropic의 에이전틱 코딩 도구 |
+| 인증 | OpenAI API 키 | Max Plan 구독 |
+| 모델 | Codex의 현재 기본 모델 (권장) | Claude (claude-agent-sdk 경유) |
+| 샌드박스 | Codex CLI 자체 샌드박스 모델 | Claude Code의 권한 시스템 |
+| 도구 표면 | Codex 네이티브 도구 (파일 I/O, 셸) | Read, Write, Edit, Bash, Glob, Grep |
+| 세션 모델 | 런타임 핸들·resume ID·스킬 디스패치로 세션 인지 | 네이티브 Claude 세션 컨텍스트 |
+| 비용 모델 | OpenAI API 사용 요금 | Max Plan 구독에 포함 |
+| Windows (네이티브) | 미지원 | 실험적 |
+
+> **참고:** Ouroboros의 워크플로 모델(Seed 파일, 검수 기준, 평가 원칙)은 런타임과 무관하게 동일합니다. 다만 Codex CLI와 Claude Code는 바탕이 되는 에이전트 능력·도구 접근·샌드박싱이 다르기 때문에, **같은 Seed 파일에서도 실행 경로와 결과가 달라질 수 있습니다.**
+
+## CLI 옵션
+
+### 워크플로 명령
+
+```bash
+# 워크플로 실행 (Codex 런타임)
+# ouroboros init이 만든 seed는 ~/.ouroboros/seeds/seed_{id}.yaml에 저장됩니다
+uv run ouroboros run workflow --runtime codex ~/.ouroboros/seeds/seed_abcd1234ef56.yaml
+
+# 드라이런 (실행하지 않고 seed만 검증)
+uv run ouroboros run workflow --dry-run ~/.ouroboros/seeds/seed_abcd1234ef56.yaml
+
+# 디버그 출력 (로그와 에이전트 출력 표시)
+uv run ouroboros run workflow --runtime codex --debug ~/.ouroboros/seeds/seed_abcd1234ef56.yaml
+
+# 이전 세션 이어서 실행
+uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros/seeds/seed_abcd1234ef56.yaml
+```
+
+## Seed 파일 레퍼런스
+
+| 필드 | 필수 | 설명 |
+|-------|----------|-------------|
+| `goal` | O | 주 목표. 빈 문자열 불가 |
+| `task_type` | X | 실행 전략. `code`(기본), `research`, `analysis`, `artifact`, `document`, `documentation`, `presentation` |
+| `brownfield_context` | X | 기존 코드베이스 컨텍스트. 비어 있으면 greenfield로 취급 |
+| `constraints` | X | 반드시 만족해야 하는 제약 |
+| `acceptance_criteria` | X | 성공 판정 기준 |
+| `ontology_schema` | O | 출력 구조 정의 |
+| `evaluation_principles` | X | 평가 원칙 |
+| `exit_conditions` | X | 종료 조건 |
+| `metadata` | O | 생성 메타데이터 |
+| `metadata.ambiguity_score` | X | 생성 시점 모호도. 기본 `0.15`, 허용 범위 `0.0`~`1.0` |
+
+> **`ambiguity_score`의 0.2 임계값이 실제로 걸리는 지점:** 이 필드 자체는 `0.0`~`1.0`을 허용합니다([`core/seed.py:409`](../../src/ouroboros/core/seed.py)). 0.2 게이트는 **seed 생성 시점**에 걸립니다. 인터뷰가 0.2 아래로 못 내려가면 seed를 안 만들어 주는 것이고, 여기에는 명시적 우회 선택지가 있습니다. CLI의 "Generate Seed anyway", MCP의 `force` 파라미터입니다. 우회해도 **실제 점수는 그대로 메타데이터에 기록되고 감사 로그에 남습니다.** 그리고 `ouroboros auto`는 실행 중에 이 readiness를 다시 확인합니다([`auto/grading.py:226`](../../src/ouroboros/auto/grading.py)).
+>
+> 실무적으로: 손으로 쓴 seed에 높은 `ambiguity_score`를 박아도 `ouroboros run workflow`가 막지는 않습니다. 이 값은 **강제 차단 장치가 아니라 출처 기록(provenance)**입니다.
+
+---
+
 ## 이후 절
 
 아래 내용은 아직 영문입니다. [codex.md](./codex.md)에서 이어 보세요.
 
-- Command Surface (`ouroboros setup --runtime codex`가 실제로 건드리는 것 11가지, 워커 서브프로세스 격리, `ooo` 스킬 가용성)
-- How It Works (실행 파일 버전 증명 포함)
-- Codex CLI의 강점 / 런타임 차이
-- CLI 옵션 / Seed 파일 레퍼런스
 - 문제 해결 (Codex CLI를 못 찾을 때, 인증 오류, 헬스체크 경고, EventStore 미초기화)
 - 비용
 - Active Conductor와 Synapse
