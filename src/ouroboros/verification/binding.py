@@ -46,16 +46,6 @@ _FORBIDDEN_TARGET_SUFFIX = re.compile(
     r")",
     re.IGNORECASE,
 )
-_UNPROVEN_NEGATION = re.compile(
-    r"\b(?:not|never|no|without|cannot|can't|won't|doesn't|isn't|aren't|"
-    r"avoid\w*|prevent\w*|omit\w*|forbid\w*|prohibit\w*|disallow\w*|exclude\w*|"
-    r"fail(?:s|ed|ing)?\s+to)\b",
-    re.IGNORECASE,
-)
-_UNPROVEN_PREDICATE = re.compile(
-    r"\b(?:must|shall|should|may|can|is|are|was|were|be|becomes?)\b",
-    re.IGNORECASE,
-)
 _TARGET_RELATIVE_PREDICATE = re.compile(
     r"(?:^|[;,])\s*(?:(?:\w+\s+){0,2}(?:class|interface|struct|trait|function|file|"
     r"directory|flag|constant|value|setting|assignment|definition|declaration)\s+)?"
@@ -74,15 +64,41 @@ _EXPLICIT_REQUIRED_TARGET_PREFIX = re.compile(
     r")[`'\"]?$",
     re.IGNORECASE,
 )
+_EXPLICIT_REQUIRED_HAS_TARGET_PREFIX = re.compile(
+    r"^\s*has\s+(?:(?:an?|the)\s+)?(?:class|interface|struct|trait|function|file|"
+    r"directory|flag|constant|value|setting|assignment|definition|declaration)\s+"
+    r"(?:named\s+)?$",
+    re.IGNORECASE,
+)
+_EXPLICIT_REQUIRED_CLI_FLAG_PREFIX = re.compile(
+    r"^\s*(?:the\s+)?cli\s+accepts\s+$",
+    re.IGNORECASE,
+)
+_EXPLICIT_REQUIRED_CLI_FLAG_SUFFIX = re.compile(
+    r"^\s+flag\s*[.!?]?\s*$",
+    re.IGNORECASE,
+)
 _EXPLICIT_REQUIRED_VALUE_SUFFIX = re.compile(
     r"^\s*(?:(?:=|:)|(?:must|shall|should)\s+be\s+(?!not\b|never\b))",
     re.IGNORECASE,
 )
 
 
-def _has_explicit_required_target(ac_prefix: str) -> bool:
+def _has_explicit_required_target(
+    ac_prefix: str,
+    target: str,
+    target_suffix: str,
+) -> bool:
     """Whether the AC starts with a bounded command that requires this target."""
-    return bool(_EXPLICIT_REQUIRED_TARGET_PREFIX.search(ac_prefix))
+    if _EXPLICIT_REQUIRED_TARGET_PREFIX.search(ac_prefix):
+        return True
+    if _EXPLICIT_REQUIRED_HAS_TARGET_PREFIX.fullmatch(ac_prefix):
+        return not target_suffix.strip()
+    return bool(
+        target.startswith("--")
+        and _EXPLICIT_REQUIRED_CLI_FLAG_PREFIX.fullmatch(ac_prefix)
+        and _EXPLICIT_REQUIRED_CLI_FLAG_SUFFIX.fullmatch(target_suffix)
+    )
 
 
 def _has_explicit_required_value(target: str, target_suffix: str) -> bool:
@@ -308,12 +324,13 @@ def acceptance_polarity(
                 target_polarities.add(EvidencePolarity.REQUIRED)
             elif _TARGET_RELATIVE_PREDICATE.search(ac_text[end:]):
                 return None
-            elif _has_explicit_required_target(ac_text[:start]):
+            elif _has_explicit_required_target(ac_text[:start], target, target_suffix):
                 target_polarities.add(EvidencePolarity.REQUIRED)
-            elif _UNPROVEN_NEGATION.search(ac_text) or _UNPROVEN_PREDICATE.search(ac_text):
-                return None
             else:
-                target_polarities.add(EvidencePolarity.REQUIRED)
+                # Only an explicit, bounded positive grammar can mint REQUIRED
+                # evidence. Unknown commands and implicit prose fail closed;
+                # expanding this allowlist requires end-to-end proof.
+                return None
         if len(target_polarities) != 1:
             return None
         polarities.append(next(iter(target_polarities)))
