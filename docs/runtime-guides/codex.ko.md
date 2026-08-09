@@ -329,7 +329,10 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 
 > **`ambiguity_score`의 0.2 임계값이 실제로 걸리는 지점:** 이 필드 자체는 `0.0`~`1.0`을 허용합니다([`core/seed.py:409`](../../src/ouroboros/core/seed.py)). 0.2 게이트는 **seed 생성 시점**에 걸립니다. 인터뷰가 0.2 아래로 못 내려가면 seed를 안 만들어 주는 것이고, 여기에는 명시적 우회 선택지가 있습니다. CLI의 "Generate Seed anyway", MCP의 `force` 파라미터입니다. 우회해도 **실제 점수는 그대로 메타데이터에 기록되고 감사 로그에 남습니다.**
 >
-> `ouroboros auto`는 실행 중에 readiness를 다시 보긴 하지만 **조건부입니다.** 인터뷰가 ledger 근거로 닫혔거나(`closure_mode`가 `ledger_only`·`safe_default`), Seed가 `degraded`로 표시돼 있으면 `high_ambiguity_score` 블로커가 억제됩니다([`auto/grading.py:225-226`](../../src/ouroboros/auto/grading.py)). 그런 닫힘에서는 **ledger의 구조적 완결성이 수용 신호이고 LLM이 매긴 점수는 설계상 낡은 값**이라서, 0.2를 크게 웃도는 Seed도 A 등급을 받고 실행될 수 있습니다. 나머지 채점 축은 그대로 적용됩니다.
+> `ouroboros auto`는 실행 중에 readiness를 다시 보긴 하지만 **조건부이고, 억제되는 두 경우의 결과가 정반대입니다** ([`auto/grading.py:225-226`](../../src/ouroboros/auto/grading.py)):
+>
+> - **ledger 닫힘**(`closure_mode`가 `ledger_only`·`safe_default`이고 degraded가 아닐 때): **ledger의 구조적 완결성이 수용 신호이고 LLM이 매긴 점수는 설계상 낡은 값**이라, 0.2를 크게 웃도는 Seed도 A 등급을 받고 **실행됩니다.** 나머지 채점 축은 그대로 적용됩니다.
+> - **degraded Seed**: 블로커가 억제되는 건 **부분 산출물을 내보내기 위해서일 뿐입니다.** 블로커가 없는 degraded Seed는 **등급이나 `may_run`과 무관하게** 곧바로 partial-product 종단(`AutoPhase.COMPLETE`)으로 갑니다([`auto/pipeline.py:1286`](../../src/ouroboros/auto/pipeline.py)). **RUN에는 절대 도달하지 않습니다.** 남아 있는 블로커는 하드 안전 블로커라 그대로 실행을 종료시킵니다.
 >
 > 실무적으로: 손으로 쓴 seed에 높은 `ambiguity_score`를 박아도 `ouroboros run workflow`가 막지는 않습니다. 이 값은 **강제 차단 장치가 아니라 출처 기록(provenance)**입니다.
 
