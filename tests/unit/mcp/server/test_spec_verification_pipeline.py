@@ -228,8 +228,17 @@ async def test_forbidden_scan_ignores_model_predicate_and_scope(
         "to omit decorator boilerplate",
         "because errors must not remain",
         "so failures must never remain",
+        "for failures that must not remain",
+        "in order to ensure errors must not remain",
     ],
-    ids=["prevent-purpose", "omit-purpose", "because-reason", "so-reason"],
+    ids=[
+        "prevent-purpose",
+        "omit-purpose",
+        "because-reason",
+        "so-reason",
+        "for-reason",
+        "in-order-purpose",
+    ],
 )
 @pytest.mark.parametrize(
     ("content", "approved"),
@@ -267,16 +276,25 @@ async def test_negative_purpose_words_after_target_do_not_flip_positive_polarity
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "ac_text",
+    [
+        "The CameraProvider class must not exist",
+        "The CameraProvider implementation class must not exist",
+        "The CameraProvider service class must never be present",
+    ],
+    ids=["direct-class", "implementation-class", "service-class"],
+)
+@pytest.mark.parametrize(
     ("content", "approved"),
     [("class CameraProvider:\n    pass\n", False), ("class Unrelated:\n    pass\n", True)],
     ids=["forbidden-present", "forbidden-absent"],
 )
 async def test_postfix_modal_negation_controls_the_target_clause(
     tmp_path: Any,
+    ac_text: str,
     content: str,
     approved: bool,
 ) -> None:
-    ac_text = "The CameraProvider class must not exist"
     assertions = await _extract(
         ac_text,
         [
@@ -297,6 +315,26 @@ async def test_postfix_modal_negation_controls_the_target_clause(
 
     assert assertions[0].evidence_polarity is EvidencePolarity.FORBIDDEN
     assert formal.final_approved is approved
+
+
+@pytest.mark.asyncio
+async def test_unknown_noncausal_postfix_modifier_fails_closed() -> None:
+    ac_text = "The CameraProvider mysterious widget must not exist"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": "*.py",
+                "description": "Unknown target-relative negation grammar",
+            }
+        ],
+    )
+
+    assert assertions == ()
 
 
 @pytest.mark.asyncio
