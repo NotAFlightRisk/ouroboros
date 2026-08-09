@@ -173,7 +173,7 @@ After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are in
 | `ooo welcome` | Yes | *(MCP only)* |
 | `ooo update` | Yes | `ouroboros update` |
 | `ooo help` | Yes | `ouroboros --help` |
-| `ooo qa` | Yes | *(MCP only)* |
+| `ooo qa` | Yes | `ouroboros qa` |
 | `ooo setup` | Yes | `ouroboros setup --runtime codex` |
 | `ooo publish` | Yes | *(no direct `ouroboros publish` subcommand; skill/runtime flow uses `gh` CLI)* |
 
@@ -318,13 +318,20 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 > opt-out — the CLI's "Generate Seed anyway" and the MCP `force` parameter. Bypassing it still records
 > the real score in seed metadata and emits the bypass to the audit log.
 >
-> `ouroboros auto` re-checks readiness during a run, but **conditionally**. The
-> `high_ambiguity_score` blocker is suppressed when the interview closed on ledger
-> evidence (`closure_mode` of `ledger_only` or `safe_default`) or when the Seed is
-> marked `degraded` ([`auto/grading.py:225-226`](../../src/ouroboros/auto/grading.py)).
-> Under those closures the ledger's structural completeness is the acceptance
-> signal and the LLM-derived score is stale by design, so a Seed scoring well above
-> 0.2 can grade A and run. Other grading axes still apply.
+> `ouroboros auto` re-checks readiness during a run, but **conditionally**, and the
+> two suppression cases have opposite consequences
+> ([`auto/grading.py:225-226`](../../src/ouroboros/auto/grading.py)):
+>
+> - **Ledger closure** (`closure_mode` of `ledger_only` or `safe_default`, not
+>   degraded): the ledger's structural completeness is the acceptance signal and
+>   the LLM-derived score is stale by design, so a Seed scoring well above 0.2 can
+>   grade A and **run**. Other grading axes still apply.
+> - **Degraded Seed**: the blocker is suppressed only so the run can emit a typed
+>   partial product. A blocker-free degraded Seed goes straight to the
+>   partial-product terminal as `AutoPhase.COMPLETE` **regardless of grade or
+>   `may_run`** ([`auto/pipeline.py:1286`](../../src/ouroboros/auto/pipeline.py)).
+>   It never reaches RUN. Remaining blockers are hard safety blockers and still
+>   terminate.
 >
 > In practice: a hand-written seed carrying a high `ambiguity_score` is not blocked by
 > `ouroboros run workflow`. The field is provenance, not an enforcement gate.
