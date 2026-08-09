@@ -950,20 +950,32 @@ class SpecVerifier:
         return os.path.relpath(file_path, self.project_dir).replace(os.sep, "/")
 
     @staticmethod
-    def _permuted_filename_target(target: str) -> str | None:
-        """Build a same-vocabulary decoy that preserves path/extension scaffolding."""
+    def _filename_counterfactual_targets(target: str) -> tuple[str, ...]:
+        """Build distinct deterministic near-targets without preserving the token."""
         prefix, separator, basename = target.rpartition("/")
         stem, dot, suffix = basename.partition(".")
-
-        def reverse_words(value: str) -> str:
-            return re.sub(r"[\w-]+", lambda match: match.group(0)[::-1], value)
-
-        decoy_stem = reverse_words(stem)
-        decoy_prefix = reverse_words(prefix)
-        decoy = (f"{decoy_prefix}{separator}" if separator else "") + decoy_stem
-        if dot:
-            decoy += dot + suffix
-        return decoy if decoy and decoy != target else None
+        immutable_prefix = f"{prefix}{separator}" if separator else ""
+        body = immutable_prefix + stem
+        mutable = tuple(
+            index
+            for index, character in enumerate(body)
+            if index >= len(immutable_prefix) and character.isalnum()
+        )
+        counterfactuals: list[str] = []
+        for index in mutable:
+            replacement = "x" if body[index].casefold() != "x" else "y"
+            mutated_body = body[:index] + replacement + body[index + 1 :]
+            candidate = mutated_body + (dot + suffix if dot else "")
+            if candidate != target and not literal_is_bound(candidate, target):
+                counterfactuals.append(candidate)
+        # A one-character name has no mutation that retains any original name
+        # signal. Add a boundary-breaking candidate so a one-letter lookaround
+        # or unanchored literal cannot masquerade as exact filename evidence.
+        if len(mutable) == 1:
+            candidate = "x" + target
+            if not literal_is_bound(candidate, target):
+                counterfactuals.append(candidate)
+        return tuple(dict.fromkeys(counterfactuals))
 
     def _filename_pattern_is_target_specific(
         self,
@@ -973,19 +985,122 @@ class SpecVerifier:
     ) -> bool:
         r"""Reject filename matches that survive a target-order counterfactual.
 
-        Reversing caller-authored name tokens retains their characters, word
-        boundaries, path separators, and extension. Therefore ``.``, ``.+``,
-        ``\b``, ``(?=m)``, extension-only patterns, and generic identifier
-        regexes still match the decoy, while a regex that actually identifies
-        the requested filename does not.
+        One-character mutations retain every other target character plus path
+        and extension scaffolding. Therefore ``.``, ``.+``, ``\b``, one-letter
+        lookarounds, extension-only patterns, and generic identifier regexes
+        still match at least one counterfactual, while an exact target regex
+        does not. Palindromes are handled because no reversal is involved.
         """
-        decoy = self._permuted_filename_target(target)
+        counterfactuals = self._filename_counterfactual_targets(target)
         spans = literal_spans(filename_subject, target)
-        if decoy is None or not spans:
+        if not counterfactuals or not spans:
             return False
         return all(
             pattern.search(filename_subject[:start] + decoy + filename_subject[end:]) is None
             for start, end in spans
+            for decoy in counterfactuals
+        )
+
+    def _trusted_project_inventory(self) -> tuple[tuple[tuple[str, str], ...], str]:
+        """Read a complete bounded project inventory without model scope input."""
+        real_project = os.path.realpath(self.project_dir)
+        candidates = sorted(glob.glob(os.path.join(self.project_dir, "**/*"), recursive=True))
+        files = [
+            path
+            for path in candidates
+            if os.path.isfile(path)
+            and os.path.realpath(path).startswith(real_project + os.sep)
+            and not any(
+                skip in path for skip in ("__pycache__", ".git", "node_modules", ".venv", ".tox")
+            )
+        ]
+        if len(files) > MAX_FILES_PER_HINT:
+            return (), (
+                f"Trusted forbidden-evidence inventory exceeds {MAX_FILES_PER_HINT} files; "
+                "absence cannot be proven"
+            )
+        inventory: list[tuple[str, str]] = []
+        for file_path in files:
+            content = self._read_file(file_path)
+            if content is None:
+                return (), (
+                    f"Trusted forbidden-evidence inventory could not read "
+                    f"{self._relative_file(file_path)}; absence cannot be proven"
+                )
+            inventory.append((file_path, content))
+        return tuple(inventory), ""
+
+    def _verify_forbidden_constant(self, assertion: SpecAssertion) -> SpecVerificationResult:
+        """Verify a forbidden scalar from trusted target/value and complete scope."""
+        inventory, error = self._trusted_project_inventory()
+        if error:
+            return SpecVerificationResult(
+                assertion=assertion,
+                verified=False,
+                discrepancy=True,
+                detail=error,
+            )
+        target = self._evidence_targets(assertion)[0]
+        expected = assertion.expected_value.strip()
+        for file_path, content in inventory:
+            for _start, end in literal_spans(content, target):
+                actual = _extract_following_scalar(content, end).strip()
+                if actual == expected:
+                    return SpecVerificationResult(
+                        assertion=assertion,
+                        verified=False,
+                        actual_value=actual,
+                        file_path=file_path,
+                        discrepancy=True,
+                        evidence_source="trusted_project_scan",
+                        evidence_target=target,
+                        detail=(
+                            f"Forbidden value '{expected}' found in "
+                            f"{os.path.basename(file_path)}; criterion target '{target}' "
+                            "from trusted project scan"
+                        ),
+                    )
+        return SpecVerificationResult(
+            assertion=assertion,
+            verified=True,
+            evidence_source="trusted_project_scan",
+            evidence_target=target,
+            detail=f"Forbidden criterion target '{target}' with value '{expected}' was not found",
+        )
+
+    def _verify_forbidden_structural(self, assertion: SpecAssertion) -> SpecVerificationResult:
+        """Verify forbidden target absence without model regex or file-hint scope."""
+        inventory, error = self._trusted_project_inventory()
+        if error:
+            return SpecVerificationResult(
+                assertion=assertion,
+                verified=False,
+                discrepancy=True,
+                detail=error,
+            )
+        target = self._evidence_targets(assertion)[0]
+        for file_path, content in inventory:
+            relative_file = self._relative_file(file_path)
+            source = "filename" if literal_is_bound(relative_file, target) else "file_content"
+            if source == "filename" or literal_is_bound(content, target):
+                return SpecVerificationResult(
+                    assertion=assertion,
+                    verified=False,
+                    file_path=file_path,
+                    discrepancy=True,
+                    evidence_source="trusted_project_scan",
+                    evidence_target=target,
+                    detail=(
+                        f"Forbidden criterion target '{target}' found in {relative_file} "
+                        f"{source} by trusted project scan"
+                    ),
+                )
+        return SpecVerificationResult(
+            assertion=assertion,
+            verified=True,
+            evidence_source="trusted_project_scan",
+            evidence_target=target,
+            detail=f"Forbidden criterion target '{target}' was not found",
         )
 
     def _find_filename_bound_match(
@@ -1044,6 +1159,8 @@ class SpecVerifier:
                 discrepancy=True,
                 detail="Criterion-bound evidence polarity is ambiguous or stale",
             )
+        if polarity is EvidencePolarity.FORBIDDEN:
+            return self._verify_forbidden_constant(assertion)
 
         files = self._find_files(assertion.file_hint)
         if not files:
@@ -1086,23 +1203,6 @@ class SpecVerifier:
                 actual = self._extract_value_after_match(content, match)
                 if assertion.expected_value:
                     verified = assertion.expected_value.strip() == actual.strip()
-                    if polarity is EvidencePolarity.FORBIDDEN:
-                        if not verified:
-                            continue
-                        return SpecVerificationResult(
-                            assertion=assertion,
-                            verified=False,
-                            actual_value=actual,
-                            file_path=file_path,
-                            discrepancy=True,
-                            evidence_source="file_content",
-                            evidence_target=evidence_target,
-                            detail=(
-                                f"Forbidden value '{assertion.expected_value}' found in "
-                                f"{os.path.basename(file_path)}; criterion target "
-                                f"'{evidence_target}' from file content"
-                            ),
-                        )
                     return SpecVerificationResult(
                         assertion=assertion,
                         verified=verified,
@@ -1140,19 +1240,6 @@ class SpecVerifier:
                         ),
                     )
 
-        if polarity is EvidencePolarity.FORBIDDEN:
-            evidence_target = self._evidence_targets(assertion)[0]
-            return SpecVerificationResult(
-                assertion=assertion,
-                verified=True,
-                evidence_source="project_scan",
-                evidence_target=evidence_target,
-                detail=(
-                    f"Forbidden criterion target '{evidence_target}' with value "
-                    f"'{assertion.expected_value}' was not found"
-                ),
-            )
-
         # Pattern not found in any file
         return SpecVerificationResult(
             assertion=assertion,
@@ -1186,6 +1273,8 @@ class SpecVerifier:
                 discrepancy=True,
                 detail="Criterion-bound evidence polarity is ambiguous or stale",
             )
+        if polarity is EvidencePolarity.FORBIDDEN:
+            return self._verify_forbidden_structural(assertion)
 
         files = self._find_files(assertion.file_hint)
         if not files:
@@ -1229,17 +1318,12 @@ class SpecVerifier:
                     _match, evidence_target = bound
                     return SpecVerificationResult(
                         assertion=assertion,
-                        verified=polarity is EvidencePolarity.REQUIRED,
+                        verified=True,
                         file_path=file_path,
-                        discrepancy=polarity is EvidencePolarity.FORBIDDEN,
                         evidence_source="filename",
                         evidence_target=evidence_target,
                         detail=(
-                            (
-                                f"Found forbidden file: {basename}"
-                                if polarity is EvidencePolarity.FORBIDDEN
-                                else f"Found file: {basename}"
-                            )
+                            f"Found file: {basename}"
                             + (
                                 f"; criterion target '{evidence_target}' from filename"
                                 if evidence_target
@@ -1248,11 +1332,7 @@ class SpecVerifier:
                         ),
                     )
 
-        if (
-            strict_qualified_paths
-            and not blank_subject_contract
-            and polarity is EvidencePolarity.REQUIRED
-        ):
+        if strict_qualified_paths and not blank_subject_contract:
             return SpecVerificationResult(
                 assertion=assertion,
                 verified=False,
@@ -1296,17 +1376,12 @@ class SpecVerifier:
                 _match, evidence_target = bound
                 return SpecVerificationResult(
                     assertion=assertion,
-                    verified=polarity is EvidencePolarity.REQUIRED,
+                    verified=True,
                     file_path=file_path,
-                    discrepancy=polarity is EvidencePolarity.FORBIDDEN,
                     evidence_source="file_content",
                     evidence_target=evidence_target,
                     detail=(
-                        (
-                            f"Forbidden pattern found in {os.path.basename(file_path)}"
-                            if polarity is EvidencePolarity.FORBIDDEN
-                            else f"Pattern found in {os.path.basename(file_path)}"
-                        )
+                        f"Pattern found in {os.path.basename(file_path)}"
                         + (
                             f"; criterion target '{evidence_target}' from file content"
                             if evidence_target
@@ -1314,16 +1389,6 @@ class SpecVerifier:
                         )
                     ),
                 )
-
-        if polarity is EvidencePolarity.FORBIDDEN:
-            evidence_target = evidence_targets[0]
-            return SpecVerificationResult(
-                assertion=assertion,
-                verified=True,
-                evidence_source="project_scan",
-                evidence_target=evidence_target,
-                detail=f"Forbidden criterion target '{evidence_target}' was not found",
-            )
 
         return SpecVerificationResult(
             assertion=assertion,
