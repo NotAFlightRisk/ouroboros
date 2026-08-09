@@ -12,7 +12,6 @@ from ouroboros.core.lineage import EvaluationSummary, TaskResult
 from ouroboros.core.types import Result
 from ouroboros.mcp.server.adapter import _evaluation_summary_from_spec_verification
 from ouroboros.providers.base import CompletionResponse
-from ouroboros.verification.binding import _EFFECT_EQUIVALENCE_CLASSES
 from ouroboros.verification.extractor import AssertionExtractor
 from ouroboros.verification.models import EvidencePolarity, SpecAssertion
 from ouroboros.verification.verifier import SpecVerifier
@@ -432,49 +431,59 @@ def test_unknown_target_suffix_never_publishes_a_direct_formal_pass(
     assert formal.final_approved is False
 
 
-_EFFECT_CLASS_CASES = tuple(
-    pytest.param(effect_class, id="-".join(sorted(effect_class)))
-    for effect_class in _EFFECT_EQUIVALENCE_CLASSES
+_ARBITRARY_CAUSAL_TARGETS = (
+    "FailureMode",
+    "DefectHandler",
+    "PreErrorPost",
+    "FailingState",
+    "CameraProvider",
+    "QuartzBeacon",
+    "FrobNicator",
 )
 
-
-def _effect_target_shapes(alias: str) -> tuple[str, ...]:
-    titled = alias.title()
-    return (
-        alias.casefold(),
-        f"{titled}Mode",
-        f"Runtime{titled}",
-        f"{alias.casefold()}_mode",
-        f"runtime-{alias.casefold()}",
-        f"{alias.casefold()}mode",
-        f"runtime{alias.casefold()}",
-    )
-
-
-_EFFECT_SUBJECT_CASES = tuple(
-    pytest.param(subject, id=subject)
-    for effect_class in _EFFECT_EQUIVALENCE_CLASSES
-    for subject in sorted(effect_class)
+_CAUSAL_COMMAND_SPOOFS = (
+    'MUST say "MUST define a CameraProvider class to ensure errors must not remain"',
+    "MUST document the phrase 'MUST define a CameraProvider class to ensure errors must not remain'",
+    "`MUST define a CameraProvider class to ensure errors must not remain` is an example only",
+    "The documentation quotes MUST define a CameraProvider class to ensure errors must not remain",
+    "The documentation records an example, MUST define a CameraProvider class to ensure errors must not remain",
+    "MUST document this example, MUST define a CameraProvider class to ensure errors must not remain",
+    "MUST document this example; MUST define a CameraProvider class to ensure errors must not remain",
+    "MUST explain because, MUST define a CameraProvider class to ensure errors must not remain",
+    "MUST say MUST define a CameraProvider class to ensure errors must not remain",
+    "MUST explain because MUST define a CameraProvider class to ensure errors must not remain",
+    "MUST document (MUST define a CameraProvider class to ensure errors must not remain)",
+    "The CameraProvider class because errors must not remain",
+    "The CameraProvider class so failures must never remain",
+    "The CameraProvider class in order to ensure errors must not remain",
+    "The CameraProvider class while errors must not remain",
+    "The CameraProvider class whereas failures must never remain",
+    "The CameraProvider class; errors must not remain",
+    "The CameraProvider class\nerrors must not remain",
+    "MUST avoid using this component, the CameraProvider class",
+    "MUST prevent creation of this component; the CameraProvider class",
+    "MUST omit this implementation, the CameraProvider class",
+    "MUST NOT define the provider, the CameraProvider class",
+    "WITHOUT any provider, the CameraProvider class",
+    "MUST remove the CameraProvider class",
+    "MUST delete the CameraProvider class",
+    "MUST eliminate the CameraProvider class",
+    "MUST drop the CameraProvider class",
+    "MUST deprecate the CameraProvider class",
+    "MUST erase the CameraProvider class",
+    "MUST get rid of the CameraProvider class",
+    "The CameraProvider class must be removed",
+    "The CameraProvider class must disappear",
+    "The CameraProvider class should be deleted",
+    "The CameraProvider class shall be eliminated",
+    "The CameraProvider class is deprecated",
+    "The CameraProvider class is banned",
 )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "subject",
-    _EFFECT_SUBJECT_CASES,
-)
-@pytest.mark.parametrize(
-    ("content", "approved"),
-    [("class CameraProvider:\n    pass\n", True), ("class Unrelated:\n    pass\n", False)],
-    ids=["target-present", "target-absent"],
-)
-async def test_disjoint_causal_effect_subject_remains_required(
-    tmp_path: Any,
-    subject: str,
-    content: str,
-    approved: bool,
-) -> None:
-    ac_text = f"The class CameraProvider to ensure {subject} must not remain"
+@pytest.mark.parametrize("ac_text", _CAUSAL_COMMAND_SPOOFS)
+async def test_quoted_or_nested_positive_command_cannot_prove_target(ac_text: str) -> None:
     assertions = await _extract(
         ac_text,
         [
@@ -484,11 +493,127 @@ async def test_disjoint_causal_effect_subject_remains_required(
                 "pattern": r"class\s+CameraProvider",
                 "expected_value": "CameraProvider",
                 "file_hint": "*.py",
-                "description": "Disjoint target prevents a causal effect",
+                "description": "Quoted or nested command is not a target requirement",
             }
         ],
     )
+
+    assert assertions == ()
+
+
+@pytest.mark.parametrize("ac_text", _CAUSAL_COMMAND_SPOOFS)
+@pytest.mark.parametrize("target_present", [True, False], ids=["present", "absent"])
+def test_stale_nested_causal_command_never_publishes_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    target_present: bool,
+) -> None:
+    assertion = SpecAssertion(
+        ac_index=0,
+        ac_text=ac_text,
+        tier="t2_structural",
+        pattern=r"class\s+CameraProvider",
+        expected_value="CameraProvider",
+        file_hint="*.py",
+        evidence_targets=("CameraProvider",),
+        evidence_polarity=EvidencePolarity.REQUIRED,
+        input_binding_required=True,
+    )
+    content = (
+        "class CameraProvider:\n    pass\n" if target_present else "class Unrelated:\n    pass\n"
+    )
     (tmp_path / "main.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all((assertion,))
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].results[0].verified is False
+    assert formal.final_approved is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", _ARBITRARY_CAUSAL_TARGETS)
+async def test_unproven_causal_target_fails_closed_without_name_semantics(
+    target: str,
+) -> None:
+    ac_text = f"The class {target} to ensure errors must not remain"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": rf"class\s+{target}",
+                "expected_value": target,
+                "file_hint": "*.py",
+                "description": "Target has no independent positive predicate",
+            }
+        ],
+    )
+
+    assert assertions == ()
+
+
+@pytest.mark.parametrize("target", _ARBITRARY_CAUSAL_TARGETS)
+@pytest.mark.parametrize("target_present", [True, False], ids=["present", "absent"])
+def test_stale_unproven_causal_target_never_publishes_formal_pass(
+    tmp_path: Any,
+    target: str,
+    target_present: bool,
+) -> None:
+    ac_text = f"The class {target} to ensure errors must not remain"
+    assertion = SpecAssertion(
+        ac_index=0,
+        ac_text=ac_text,
+        tier="t2_structural",
+        pattern=rf"class\s+{target}",
+        expected_value=target,
+        file_hint="*.py",
+        evidence_targets=(target,),
+        evidence_polarity=EvidencePolarity.REQUIRED,
+        input_binding_required=True,
+    )
+    content = f"class {target}:\n    pass\n" if target_present else "class Unrelated:\n    pass\n"
+    (tmp_path / "main.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all((assertion,))
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].results[0].verified is False
+    assert formal.final_approved is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "target",
+    _ARBITRARY_CAUSAL_TARGETS,
+)
+@pytest.mark.parametrize(
+    ("content", "approved"),
+    [("class CameraProvider:\n    pass\n", True), ("class Unrelated:\n    pass\n", False)],
+    ids=["target-present", "target-absent"],
+)
+async def test_explicit_positive_predicate_proves_arbitrary_causal_target(
+    tmp_path: Any,
+    target: str,
+    content: str,
+    approved: bool,
+) -> None:
+    ac_text = f"MUST define a {target} class to ensure errors must not remain"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": rf"class\s+{target}",
+                "expected_value": target,
+                "file_hint": "*.py",
+                "description": "Explicit predicate requires the target",
+            }
+        ],
+    )
+    (tmp_path / "main.py").write_text(content.replace("CameraProvider", target))
 
     verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
     formal = _formal_verdict(ac_text, verification)
@@ -497,51 +622,33 @@ async def test_disjoint_causal_effect_subject_remains_required(
     assert formal.final_approved is approved
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "effect_class",
-    _EFFECT_CLASS_CASES,
+    "ac_text",
+    [
+        "The CameraProvider class to ensure errors must not remain",
+        "A CameraProvider class is required for failures that must not remain",
+    ],
+    ids=["bare-declarative", "implicit-required"],
 )
-@pytest.mark.parametrize("target_present", [True, False], ids=["present", "absent"])
-def test_stale_required_effect_target_cross_product_never_publishes_formal_pass(
-    tmp_path: Any,
-    effect_class: frozenset[str],
-    target_present: bool,
+async def test_implicit_positive_causal_prose_accepts_conservative_false_negative(
+    ac_text: str,
 ) -> None:
-    for subject in sorted(effect_class):
-        for alias in sorted(effect_class):
-            for target in _effect_target_shapes(alias):
-                ac_text = f"The class {target} to ensure {subject} must not remain"
-                assertion = SpecAssertion(
-                    ac_index=0,
-                    ac_text=ac_text,
-                    tier="t2_structural",
-                    pattern=rf"class\s+{target}",
-                    expected_value=target,
-                    file_hint="*.py",
-                    evidence_targets=(target,),
-                    evidence_polarity=EvidencePolarity.REQUIRED,
-                    input_binding_required=True,
-                )
-                content = (
-                    f"class {target}:\n    pass\n"
-                    if target_present
-                    else "class Unrelated:\n    pass\n"
-                )
-                (tmp_path / "main.py").write_text(content)
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"class\s+CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": "*.py",
+                "description": "Implicit prose is not a bounded positive proof",
+            }
+        ],
+    )
 
-                verification = SpecVerifier(str(tmp_path)).verify_all((assertion,))
-                formal = _formal_verdict(ac_text, verification)
-                result = verification.reports[0].results[0]
-
-                assert result.verified is False, (subject, target, target_present)
-                assert any(
-                    message in result.detail
-                    for message in (
-                        "polarity is ambiguous or stale",
-                        "No criterion-bound target is available",
-                    )
-                ), (subject, target, target_present, result.detail)
-                assert formal.final_approved is False, (subject, target, target_present)
+    assert assertions == ()
 
 
 _UNKNOWN_PREFIX_NEGATIONS = (
