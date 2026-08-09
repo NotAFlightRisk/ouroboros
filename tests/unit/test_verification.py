@@ -23,6 +23,7 @@ from ouroboros.verification.models import (
     SpecVerificationSummary,
     VerificationTier,
 )
+import ouroboros.verification.verifier as verifier_module
 from ouroboros.verification.verifier import SpecVerifier
 
 # -- Model Tests --
@@ -1786,6 +1787,41 @@ class TestSpecVerifier:
 
         assert summary.verified_count == 1
         assert summary.reports[0].results[0].evidence_target == "CameraProvider"
+
+    def test_dense_target_files_build_one_cached_lexical_map(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Multiple assertions and spans must not trigger whole-file rescans."""
+        calls = 0
+        original = verifier_module.classify_source
+
+        def counted(text: str):  # type: ignore[no-untyped-def]
+            nonlocal calls
+            calls += 1
+            return original(text)
+
+        monkeypatch.setattr(verifier_module, "classify_source", counted)
+        decoys = "".join(f"const decoy_{index} = /CameraProvider/;\n" for index in range(200))
+        project = self._create_project({"main.py": decoys + "class CameraProvider {}\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"CameraProvider",
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+            input_binding_required=True,
+        )
+        verifier = SpecVerifier(project_dir=project)
+
+        summary = verifier.verify_all((assertion, assertion))
+
+        assert summary.reports[0].verified_pass is True
+        assert calls == 1
+        assert len(verifier._source_map_cache) == 1
+        assert len(verifier._file_content_cache) == 1
 
     @pytest.mark.parametrize(
         ("pattern", "content"),
