@@ -216,6 +216,34 @@ class TestSpecVerifier:
                 "CameraProvider",
             ),
             (
+                VerificationTier.T2_STRUCTURAL,
+                "main.py",
+                'message = f"class CameraProvider"\n',
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "main.py",
+                'message = rf"class CameraProvider"\n',
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "main.py",
+                'message = f"{prefix} class CameraProvider"\n',
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "main.py",
+                'message = f"""\nclass CameraProvider\n"""\n',
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
                 VerificationTier.T1_CONSTANT,
                 "settings.py",
                 'HELP = "RETRIES = 10"\n',
@@ -339,6 +367,10 @@ class TestSpecVerifier:
             "lua-structure-comment",
             "sql-constant-comment",
             "python-structure-string",
+            "python-fstring",
+            "python-raw-fstring",
+            "python-interpolated-fstring",
+            "python-multiline-fstring",
             "python-constant-string",
             "rust-nested-comment",
             "haskell-nested-comment",
@@ -400,6 +432,26 @@ class TestSpecVerifier:
             pattern=r"class\s+CameraProvider",
             expected_value="CameraProvider",
             file_hint="*.lua",
+            evidence_targets=("CameraProvider",),
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.reports[0].verified_pass is True
+        assert summary.reports[0].results[0].evidence_source == "file_content"
+
+    def test_fstring_mask_preserves_following_executable_evidence(self) -> None:
+        """F-string text is hidden without erasing a later declaration."""
+        project = self._create_project(
+            {"main.py": 'message = f"class Unrelated"\nclass CameraProvider:\n    pass\n'}
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+CameraProvider",
+            expected_value="CameraProvider",
+            file_hint="*.py",
             evidence_targets=("CameraProvider",),
         )
 

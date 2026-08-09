@@ -74,8 +74,12 @@ def _python_noncode_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
         return None
 
     ranges: list[tuple[int, int]] = []
+    fstring_middle = getattr(tokenize, "FSTRING_MIDDLE", None)
+    noncode_types = {tokenize.COMMENT, tokenize.STRING}
+    if fstring_middle is not None:
+        noncode_types.add(fstring_middle)
     for token in tokens:
-        if token.type not in {tokenize.COMMENT, tokenize.STRING}:
+        if token.type not in noncode_types:
             continue
         start_line, start_column = token.start
         end_line, end_column = token.end
@@ -91,6 +95,10 @@ def _python_noncode_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
                 return None
             start += min(quote_offsets) + 1
             end -= 1
+        # Python 3.12+ tokenizes f-string literal segments separately
+        # from their expressions. The whole FSTRING_MIDDLE span is
+        # non-executable text (#1835 R120); interpolation tokens remain
+        # available to the ordinary source scan.
         ranges.append((start, end))
     return tuple(ranges)
 
