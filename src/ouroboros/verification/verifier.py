@@ -7,7 +7,7 @@ by scanning project files with regex patterns. T3/T4 are skipped.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import glob
 from itertools import chain
 import logging
@@ -36,6 +36,7 @@ from ouroboros.verification.models import (
     VerificationTier,
 )
 from ouroboros.verification.regex_safety import pattern_has_bounded_execution
+from ouroboros.verification.source_lexing import SourceLexicalMap, classify_source
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ _MAX_PARSE_DEPTH = 40
 # A safe regex is still executed under deterministic evidence-work budgets.
 _MAX_TARGET_SPANS_PER_SUBJECT = 256
 _MAX_BOUND_MATCHES_PER_SUBJECT = 1024
+_MAX_DECLARATION_CONTEXT = 512
 
 # Consumes at least one character, so a sequence containing one cannot be empty.
 _CONSUMING = frozenset({"LITERAL", "NOT_LITERAL", "IN", "ANY", "RANGE", "CATEGORY"})
@@ -583,138 +585,6 @@ def _pattern_is_zero_width(pattern: str, flags: int) -> bool:
     return maximum == 0
 
 
-_PAIRED_LITERAL_DELIMITERS = {"(": ")", "[": "]", "{": "}", "<": ">"}
-_HEREDOC_OPENER = re.compile(
-    r"(?:<<<|<<[-~]?)[ \t]*(?:(['\"`])([A-Za-z_][A-Za-z0-9_]*)\1|"
-    r"([A-Za-z_][A-Za-z0-9_]*))"
-)
-
-
-def _paired_literal_end(text: str, index: int) -> int | None:
-    """Return the end of a Perl/Ruby-style regex literal, if one starts here."""
-    prefix_length = 2 if text.startswith(("qr", "%r"), index) else 0
-    if not prefix_length or index + prefix_length >= len(text):
-        return None
-    opening = text[index + prefix_length]
-    closing = _PAIRED_LITERAL_DELIMITERS.get(opening)
-    if closing is None:
-        return None
-    depth = 1
-    cursor = index + prefix_length + 1
-    while cursor < len(text):
-        if text[cursor] == "\\":
-            cursor += 2
-            continue
-        if text[cursor] == opening:
-            depth += 1
-        elif text[cursor] == closing:
-            depth -= 1
-            if depth == 0:
-                return cursor + 1
-        cursor += 1
-    return len(text)
-
-
-def _heredoc_region(text: str, index: int) -> tuple[int, int] | None:
-    """Return body bounds for a recognised shell/Perl/PHP heredoc opener."""
-    match = _HEREDOC_OPENER.match(text, index)
-    if match is None:
-        return None
-    delimiter = match.group(2) or match.group(3)
-    boundary = _LOGICAL_LINE_BOUNDARY.search(text, match.end())
-    if boundary is None:
-        return match.end(), len(text)
-    body_start = boundary.end()
-    cursor = body_start
-    for line in text[body_start:].splitlines(keepends=True):
-        logical = _LOGICAL_LINE_BOUNDARY.sub("", line).strip()
-        if logical.rstrip(";") == delimiter:
-            return body_start, cursor
-        cursor += len(line)
-    return body_start, len(text)
-
-
-def _target_is_inside_noncode_region(text: str, target_start: int) -> bool:
-    """Track comment and source-string state up to one target occurrence."""
-    index = 0
-    quote = ""
-    regex_class = False
-    while index < target_start:
-        if quote:
-            if quote == "/":
-                if text[index] in "\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029":
-                    quote = ""
-                    regex_class = False
-                    index += 1
-                    continue
-                if text[index] == "[":
-                    regex_class = True
-                elif text[index] == "]":
-                    regex_class = False
-                elif text[index] == "/" and not regex_class:
-                    quote = ""
-                    index += 1
-                    while index < len(text) and text[index].isalpha():
-                        index += 1
-                    continue
-            if quote != "/" and text.startswith(quote, index):
-                index += len(quote)
-                quote = ""
-                continue
-            if text[index] == "\\":
-                index += min(2, len(text) - index)
-                continue
-            index += 1
-            continue
-
-        if text.startswith("/*", index):
-            closing = text.find("*/", index + 2)
-            if closing < 0 or closing >= target_start:
-                return True
-            index = closing + 2
-            continue
-        if text.startswith("<!--", index):
-            closing = text.find("-->", index + 4)
-            if closing < 0 or closing >= target_start:
-                return True
-            index = closing + 3
-            continue
-        if text[index] == "#" or text.startswith("//", index):
-            boundary = _LOGICAL_LINE_BOUNDARY.search(text, index)
-            if boundary is None or boundary.start() >= target_start:
-                return True
-            index = boundary.end()
-            continue
-        heredoc = _heredoc_region(text, index)
-        if heredoc is not None:
-            body_start, body_end = heredoc
-            if body_start <= target_start < body_end:
-                return True
-            index = max(index + 1, body_end)
-            continue
-        paired_end = _paired_literal_end(text, index)
-        if paired_end is not None:
-            if paired_end > target_start:
-                return True
-            index = paired_end
-            continue
-        if text.startswith('"""', index) or text.startswith("'''", index):
-            quote = text[index : index + 3]
-            index += 3
-            continue
-        if text[index] in {'"', "'", chr(96)}:
-            quote = text[index]
-            index += 1
-            continue
-        if text[index] == "/":
-            quote = "/"
-            regex_class = False
-            index += 1
-            continue
-        index += 1
-    return bool(quote)
-
-
 _TYPE_DECLARATION_PREFIX = re.compile(
     r"(?:^|[^\w$])(?:class|interface|struct|trait|enum|record|type)\s+$"
 )
@@ -744,6 +614,7 @@ def _target_has_structural_declaration(
     text: str,
     target_span: tuple[int, int],
     kind: str,
+    line_bounds: tuple[int, int],
 ) -> bool:
     """Whether a live target span is an actual declaration of the AC kind."""
     if kind == "path":
@@ -751,12 +622,9 @@ def _target_has_structural_declaration(
     if kind == "literal":
         return True
     start, end = target_span
-    previous = tuple(_LOGICAL_LINE_BOUNDARY.finditer(text, 0, start))
-    line_start = previous[-1].end() if previous else 0
-    boundary = _LOGICAL_LINE_BOUNDARY.search(text, end)
-    line_end = boundary.start() if boundary is not None else len(text)
-    prefix = text[line_start:start]
-    suffix = text[end:line_end]
+    line_start, line_end = line_bounds
+    prefix = text[max(line_start, start - _MAX_DECLARATION_CONTEXT) : start]
+    suffix = text[end : min(line_end, end + _MAX_DECLARATION_CONTEXT)]
     type_declaration = bool(
         _TYPE_DECLARATION_PREFIX.search(prefix) or _TYPE_ASSIGNMENT_SUFFIX.match(suffix)
     )
@@ -778,18 +646,12 @@ def _target_has_scalar_assignment(text: str, target_span: tuple[int, int]) -> bo
 
 def _match_binds_target_span(
     match: re.Match,
-    text: str,
     target_span: tuple[int, int],
+    line_bounds: tuple[int, int],
 ) -> bool:
     """Whether one match proves the target occurrence's local construct."""
     start, end = target_span
-    line_start = 0
-    for boundary in _LOGICAL_LINE_BOUNDARY.finditer(text, 0, start):
-        line_start = boundary.end()
-    next_boundary = _LOGICAL_LINE_BOUNDARY.search(text, end)
-    line_end = next_boundary.start() if next_boundary is not None else len(text)
-    if _target_is_inside_noncode_region(text, start):
-        return False
+    line_start, line_end = line_bounds
     if match.start() == match.end():
         return start <= match.start() <= end
     if not (start < match.end() and end > match.start()):
@@ -1049,6 +911,24 @@ class SpecVerifier:
     """
 
     project_dir: str
+    _source_map_cache: dict[str, SourceLexicalMap] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _file_content_cache: dict[str, str | None] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+
+    def _source_map(self, text: str) -> SourceLexicalMap:
+        """Classify each distinct file body at most once per verification run."""
+        source_map = self._source_map_cache.get(text)
+        if source_map is None:
+            source_map = classify_source(text)
+            self._source_map_cache[text] = source_map
+        return source_map
 
     def verify_all(
         self,
@@ -1290,30 +1170,31 @@ class SpecVerifier:
                 yield match, target_spans[0][0]
             return
 
-        code_spans = (
-            target_spans
-            if source_kind == "filename"
-            else [
-                (target, span)
+        if source_kind == "filename":
+            code_spans = [(target, span, (0, len(searched_text))) for target, span in target_spans]
+        else:
+            source_map = self._source_map(searched_text)
+            code_spans = [
+                (target, span, source_map.line_bounds(span[0]))
                 for target, span in target_spans
-                if not _target_is_inside_noncode_region(searched_text, span[0])
+                if not source_map.is_noncode(span[0])
             ]
-        )
         if assertion.tier == VerificationTier.T2_STRUCTURAL and source_kind == "content":
             structural_kind = _structural_evidence_kind(assertion.ac_text)
             code_spans = [
-                (target, span)
-                for target, span in code_spans
+                (target, span, line_bounds)
+                for target, span, line_bounds in code_spans
                 if _target_has_structural_declaration(
                     searched_text,
                     span,
                     structural_kind,
+                    line_bounds,
                 )
             ]
         elif assertion.tier == VerificationTier.T1_CONSTANT and source_kind == "content":
             code_spans = [
-                (target, span)
-                for target, span in code_spans
+                (target, span, line_bounds)
+                for target, span, line_bounds in code_spans
                 if _target_has_scalar_assignment(searched_text, span)
             ]
         if not code_spans:
@@ -1324,21 +1205,25 @@ class SpecVerifier:
         # asking `finditer` to retry the assertion at every preceding byte.
         if _pattern_is_zero_width(pattern.pattern, pattern.flags):
             attempts = 0
-            for target, span in code_spans:
+            for target, span, line_bounds in code_spans:
                 for position in range(span[0], span[1] + 1):
                     if attempts >= _MAX_BOUND_MATCHES_PER_SUBJECT:
                         return
                     attempts += 1
                     match = pattern.match(searched_text, position)
-                    if match is not None and _match_binds_target_span(match, searched_text, span):
+                    if match is not None and _match_binds_target_span(
+                        match,
+                        span,
+                        line_bounds,
+                    ):
                         yield match, target
             return
 
         for index, match in enumerate(pattern.finditer(searched_text)):
             if index >= _MAX_BOUND_MATCHES_PER_SUBJECT:
                 return
-            for target, span in code_spans:
-                if _match_binds_target_span(match, searched_text, span):
+            for target, span, line_bounds in code_spans:
+                if _match_binds_target_span(match, span, line_bounds):
                     yield match, target
                     break
 
@@ -1874,14 +1759,19 @@ class SpecVerifier:
 
     def _read_file(self, file_path: str) -> str | None:
         """Read a file, respecting size limits."""
+        if file_path in self._file_content_cache:
+            return self._file_content_cache[file_path]
         try:
             size = os.path.getsize(file_path)
             if size > MAX_FILE_SIZE:
-                return None
-            with open(file_path, encoding="utf-8", errors="replace") as f:
-                return f.read()
+                content = None
+            else:
+                with open(file_path, encoding="utf-8", errors="replace") as f:
+                    content = f.read()
         except (OSError, PermissionError):
-            return None
+            content = None
+        self._file_content_cache[file_path] = content
+        return content
 
     def _extract_value_after_match(self, content: str, match: re.Match) -> str:
         """Extract the value immediately following a regex match.
