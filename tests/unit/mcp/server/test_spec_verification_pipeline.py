@@ -229,7 +229,9 @@ async def test_forbidden_scan_ignores_model_predicate_and_scope(
         "because errors must not remain",
         "so failures must never remain",
         "for failures that must not remain",
+        "for transient failures that must not remain",
         "to ensure errors must not remain",
+        "to ensure runtime errors must not remain",
         "in order to ensure errors must not remain",
     ],
     ids=[
@@ -238,7 +240,9 @@ async def test_forbidden_scan_ignores_model_predicate_and_scope(
         "because-reason",
         "so-reason",
         "for-reason",
+        "for-modified-effect-reason",
         "to-purpose-subject",
+        "to-modified-effect-subject",
         "in-order-purpose",
     ],
 )
@@ -330,6 +334,10 @@ _UNKNOWN_SUFFIX_NEGATIONS = (
     "The CameraProvider class for the target class that must not remain",
     "The CameraProvider class for the CameraProvider class that must not remain",
     "The CameraProvider class to ensure its class must not remain",
+    "The CameraProvider class to ensure the provider must not remain",
+    "The CameraProvider class for the provider that must not remain",
+    "The CameraProvider class to ensure said class must not remain",
+    "The CameraProvider class for the referenced component that must not remain",
 )
 
 
@@ -348,6 +356,10 @@ _UNKNOWN_SUFFIX_NEGATIONS = (
         "for-purpose-explicit-target",
         "for-purpose-named-target",
         "to-purpose-possessive-target",
+        "to-purpose-provider-referent",
+        "for-purpose-provider-referent",
+        "to-purpose-said-class-referent",
+        "for-purpose-referenced-component",
     ],
 )
 async def test_unknown_noncausal_postfix_modifier_fails_closed(ac_text: str) -> None:
@@ -382,6 +394,10 @@ async def test_unknown_noncausal_postfix_modifier_fails_closed(ac_text: str) -> 
         "for-purpose-explicit-target",
         "for-purpose-named-target",
         "to-purpose-possessive-target",
+        "to-purpose-provider-referent",
+        "for-purpose-provider-referent",
+        "to-purpose-said-class-referent",
+        "for-purpose-referenced-component",
     ],
 )
 @pytest.mark.parametrize(
