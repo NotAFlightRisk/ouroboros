@@ -337,6 +337,75 @@ async def test_unknown_noncausal_postfix_modifier_fails_closed() -> None:
     assert assertions == ()
 
 
+_UNKNOWN_PREFIX_NEGATIONS = (
+    "MUST avoid ever defining a CameraProvider class",
+    "MUST prevent accidental creation of a CameraProvider class",
+    "MUST omit any use of a CameraProvider class",
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ac_text",
+    _UNKNOWN_PREFIX_NEGATIONS,
+    ids=["avoid-ever", "prevent-accidental", "omit-any-use"],
+)
+async def test_unknown_target_prefix_negation_fails_closed_before_verifier(
+    ac_text: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": "*.py",
+                "description": "Unknown target-prefix negation grammar",
+            }
+        ],
+    )
+
+    assert assertions == ()
+
+
+@pytest.mark.parametrize(
+    "ac_text",
+    _UNKNOWN_PREFIX_NEGATIONS,
+    ids=["avoid-ever", "prevent-accidental", "omit-any-use"],
+)
+@pytest.mark.parametrize(
+    "content",
+    ["class CameraProvider:\n    pass\n", "class Unrelated:\n    pass\n"],
+    ids=["target-present", "target-absent"],
+)
+def test_unknown_target_prefix_never_publishes_a_direct_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    content: str,
+) -> None:
+    assertion = SpecAssertion(
+        ac_index=0,
+        ac_text=ac_text,
+        tier="t2_structural",
+        pattern=r"CameraProvider",
+        expected_value="CameraProvider",
+        file_hint="*.py",
+        evidence_targets=("CameraProvider",),
+        evidence_polarity=EvidencePolarity.REQUIRED,
+        input_binding_required=True,
+    )
+    (tmp_path / "main.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all((assertion,))
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].results[0].verified is False
+    assert "polarity is ambiguous or stale" in verification.reports[0].results[0].detail
+    assert formal.final_approved is False
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "ac_text",
