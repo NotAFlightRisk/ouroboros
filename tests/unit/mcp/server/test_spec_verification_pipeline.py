@@ -489,6 +489,10 @@ _VALUE_TRAILING_CONTRADICTIONS = (
     "MUST set RETRIES=10 so the setting must not exist",
     "MUST set RETRIES=10 plus it must not exist",
     "MUST set RETRIES=10 although it must not exist",
+    "MUST set RETRIES=10 despite it must not exist",
+    "MUST set RETRIES=10 nevertheless it must not exist",
+    "MUST set RETRIES=10 where it must not exist",
+    "MUST set RETRIES=10 ~ it must not exist",
 )
 
 
