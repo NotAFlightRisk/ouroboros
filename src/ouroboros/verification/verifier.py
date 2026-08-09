@@ -35,6 +35,7 @@ from ouroboros.verification.models import (
     SpecVerificationSummary,
     VerificationTier,
 )
+from ouroboros.verification.regex_safety import pattern_has_bounded_execution
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ MAX_FILES_PER_HINT = 100
 MAX_PATTERN_LENGTH = 200  # Limit LLM-generated regex length to reduce ReDoS risk
 MAX_SCALAR_LENGTH = 4096
 _NOISE_DIRECTORY_NAMES = frozenset({"__pycache__", ".git", "node_modules", ".venv", ".tox"})
+_LOGICAL_LINE_BOUNDARY = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
 
 # Whether a pattern can match the empty string is decided by *reading* it, never
 # by running it. Running it is what a hostile pattern is waiting for: `(?:)
@@ -56,6 +58,10 @@ _NOISE_DIRECTORY_NAMES = frozenset({"__pycache__", ".git", "node_modules", ".ven
 # is a number that is read rather than a number of steps that are taken. So the
 # analysis is linear in the pattern no matter what the pattern says.
 _MAX_PARSE_DEPTH = 40
+
+# A safe regex is still executed under deterministic evidence-work budgets.
+_MAX_TARGET_SPANS_PER_SUBJECT = 256
+_MAX_BOUND_MATCHES_PER_SUBJECT = 1024
 
 # Consumes at least one character, so a sequence containing one cannot be empty.
 _CONSUMING = frozenset({"LITERAL", "NOT_LITERAL", "IN", "ANY", "RANGE", "CATEGORY"})
@@ -483,6 +489,167 @@ def _matches_the_empty_string(pattern: str, flags: int = 0) -> bool:
     return _can_match_nothing(parsed) is not False
 
 
+def _sequence_requires_target_literal(
+    sequence: object,
+    target: str,
+    ignore_case: bool,
+    depth: int = 0,
+) -> bool:
+    """Whether every successful path through a regex requires the target.
+
+    This is the deterministic counterpart of replacing the target and running
+    the regex again. Re-executing a model pattern on a failing counterfactual
+    would create a fresh catastrophic-backtracking path, so the parsed regex is
+    read instead. A target literal is authoritative only when it is mandatory
+    in the sequence, every alternation arm, or a positive assertion.
+    """
+    if depth > _MAX_PARSE_DEPTH:
+        return False
+    try:
+        items = list(sequence)  # type: ignore[call-overload]
+    except TypeError:
+        return False
+
+    literal_run: list[str] = []
+
+    def run_requires_target() -> bool:
+        if not literal_run:
+            return False
+        run = "".join(literal_run)
+        literal_run.clear()
+        if ignore_case:
+            return literal_is_bound(run.casefold(), target.casefold())
+        return literal_is_bound(run, target)
+
+    for opcode, argument in items:
+        name = getattr(opcode, "name", str(opcode))
+        if name == "LITERAL":
+            literal_run.append(chr(argument))
+            continue
+        if run_requires_target():
+            return True
+        if name == "SUBPATTERN":
+            if _sequence_requires_target_literal(argument[-1], target, ignore_case, depth + 1):
+                return True
+        elif name in _REPEATS:
+            minimum, _maximum, item = argument
+            if minimum > 0 and _sequence_requires_target_literal(
+                item, target, ignore_case, depth + 1
+            ):
+                return True
+        elif name == "ATOMIC_GROUP":
+            if _sequence_requires_target_literal(argument, target, ignore_case, depth + 1):
+                return True
+        elif name == "ASSERT":
+            if _sequence_requires_target_literal(argument[1], target, ignore_case, depth + 1):
+                return True
+        elif name == "BRANCH":
+            branches = argument[1]
+            if branches and all(
+                _sequence_requires_target_literal(branch, target, ignore_case, depth + 1)
+                for branch in branches
+            ):
+                return True
+        elif name == "GROUPREF_EXISTS":
+            _reference, yes_arm, no_arm = argument
+            if (
+                no_arm is not None
+                and _sequence_requires_target_literal(yes_arm, target, ignore_case, depth + 1)
+                and _sequence_requires_target_literal(no_arm, target, ignore_case, depth + 1)
+            ):
+                return True
+    return run_requires_target()
+
+
+def _pattern_requires_target_literal(pattern: str, flags: int, target: str) -> bool:
+    """Read, without executing, whether every regex path names the target."""
+    try:
+        parsed = regex_parser.parse(pattern, flags)
+    except Exception:  # pragma: no cover - compilation already validated the pattern
+        return False
+    return _sequence_requires_target_literal(
+        parsed,
+        target,
+        bool(flags & re.IGNORECASE),
+    )
+
+
+def _pattern_is_zero_width(pattern: str, flags: int) -> bool:
+    """Whether every successful match consumes zero subject characters."""
+    try:
+        _minimum, maximum = regex_parser.parse(pattern, flags).getwidth()
+    except Exception:  # pragma: no cover - safe compilation already parsed it
+        return False
+    return maximum == 0
+
+
+def _target_is_inside_noncode_region(text: str, target_start: int) -> bool:
+    """Track comment and source-string state up to one target occurrence."""
+    index = 0
+    quote = ""
+    while index < target_start:
+        if quote:
+            if text.startswith(quote, index):
+                index += len(quote)
+                quote = ""
+                continue
+            if text[index] == "\\":
+                index += min(2, len(text) - index)
+                continue
+            index += 1
+            continue
+
+        if text.startswith("/*", index):
+            closing = text.find("*/", index + 2)
+            if closing < 0 or closing >= target_start:
+                return True
+            index = closing + 2
+            continue
+        if text.startswith("<!--", index):
+            closing = text.find("-->", index + 4)
+            if closing < 0 or closing >= target_start:
+                return True
+            index = closing + 3
+            continue
+        if text[index] == "#" or text.startswith("//", index):
+            boundary = _LOGICAL_LINE_BOUNDARY.search(text, index)
+            if boundary is None or boundary.start() >= target_start:
+                return True
+            index = boundary.end()
+            continue
+        if text.startswith('"""', index) or text.startswith("'''", index):
+            quote = text[index : index + 3]
+            index += 3
+            continue
+        if text[index] in {'"', "'", chr(96)}:
+            quote = text[index]
+            index += 1
+            continue
+        index += 1
+    return bool(quote)
+
+
+def _match_binds_target_span(
+    match: re.Match,
+    text: str,
+    target_span: tuple[int, int],
+) -> bool:
+    """Whether one match proves the target occurrence's local construct."""
+    start, end = target_span
+    line_start = 0
+    for boundary in _LOGICAL_LINE_BOUNDARY.finditer(text, 0, start):
+        line_start = boundary.end()
+    next_boundary = _LOGICAL_LINE_BOUNDARY.search(text, end)
+    line_end = next_boundary.start() if next_boundary is not None else len(text)
+    if _target_is_inside_noncode_region(text, start):
+        return False
+    if match.start() == match.end():
+        return start <= match.start() <= end
+    if not (start < match.end() and end > match.start()):
+        return False
+    return match.start() >= line_start and match.end() <= line_end
+
+
 # Whitespace is the one thing a file can hold that no acceptance criterion is
 # about, so it is the one thing a pattern may consume and still be read as a
 # claim that the file holds nothing. `\s` is exactly this class; a literal space,
@@ -822,8 +989,17 @@ class SpecVerifier:
         flags: int = 0,
         file_hint: str | None = None,
         candidates: list[str] | None = None,
+        *,
+        target_directed: bool = False,
     ) -> re.Pattern | None:
         """Compile a model-supplied regex, refusing one that cannot be evidence."""
+        if not pattern_has_bounded_execution(
+            pattern,
+            flags,
+            target_directed=target_directed,
+        ):
+            logger.warning("Regex pattern has unsafe backtracking shape, skipping: %r", pattern)
+            return None
         compiled = self._compile_or_none(pattern, flags)
         if compiled is None:
             return None
@@ -905,9 +1081,10 @@ class SpecVerifier:
         """Find a regex match that is grounded in the acceptance-criterion input.
 
         A compiling, non-nullable regex is still model output. It becomes
-        evidence only when the subject it matched contains a literal target from
-        the caller's actual AC. For consuming matches the target must overlap
-        the matched span. Zero-width lookarounds are preserved by requiring the
+        evidence only when every regex path names a literal target from the
+        caller's actual AC and the actual match binds that target's local source
+        construct. Consuming matches must stay on the target's line and overlap
+        its span. Zero-width lookarounds are preserved by requiring the
         target in their asserted subject; this keeps discriminating lookaheads
         valid while ``\\b`` and ``(?=m)`` cannot verify an unrelated filename.
 
@@ -935,21 +1112,69 @@ class SpecVerifier:
     ) -> Iterator[tuple[re.Match, str]]:
         """Return all criterion-bound matches in deterministic search order."""
         if not assertion.input_binding_required:
-            yield from ((match, "") for match in pattern.finditer(searched_text))
+            for index, match in enumerate(pattern.finditer(searched_text)):
+                if index >= _MAX_BOUND_MATCHES_PER_SUBJECT:
+                    return
+                yield match, ""
             return
         targets = self._evidence_targets(assertion)
         if not targets:
             return
         bound_subject = searched_text if binding_text is None else binding_text
-        for match in pattern.finditer(searched_text):
-            for target in targets:
-                spans = literal_spans(bound_subject, target)
-                if not spans:
-                    continue
-                if binding_text is not None or match.start() == match.end():
-                    yield match, target
-                    break
-                if any(start < match.end() and end > match.start() for start, end in spans):
+        required_targets = (
+            targets
+            if binding_text is not None
+            else tuple(
+                target
+                for target in targets
+                if _pattern_requires_target_literal(pattern.pattern, pattern.flags, target)
+            )
+        )
+        if not required_targets:
+            return
+        target_spans = [
+            (target, span)
+            for target in required_targets
+            for span in literal_spans(bound_subject, target)
+        ]
+        if not target_spans or len(target_spans) > _MAX_TARGET_SPANS_PER_SUBJECT:
+            return
+
+        if binding_text is not None:
+            for index, match in enumerate(pattern.finditer(searched_text)):
+                if index >= _MAX_BOUND_MATCHES_PER_SUBJECT:
+                    return
+                yield match, target_spans[0][0]
+            return
+
+        code_spans = [
+            (target, span)
+            for target, span in target_spans
+            if not _target_is_inside_noncode_region(searched_text, span[0])
+        ]
+        if not code_spans:
+            return
+
+        # A repeated lookaround is admitted only for a criterion-bound,
+        # zero-width pattern.  Execute it at the target span itself instead of
+        # asking `finditer` to retry the assertion at every preceding byte.
+        if _pattern_is_zero_width(pattern.pattern, pattern.flags):
+            attempts = 0
+            for target, span in code_spans:
+                for position in range(span[0], span[1] + 1):
+                    if attempts >= _MAX_BOUND_MATCHES_PER_SUBJECT:
+                        return
+                    attempts += 1
+                    match = pattern.match(searched_text, position)
+                    if match is not None and _match_binds_target_span(match, searched_text, span):
+                        yield match, target
+            return
+
+        for index, match in enumerate(pattern.finditer(searched_text)):
+            if index >= _MAX_BOUND_MATCHES_PER_SUBJECT:
+                return
+            for target, span in code_spans:
+                if _match_binds_target_span(match, searched_text, span):
                     yield match, target
                     break
 
@@ -1199,14 +1424,20 @@ class SpecVerifier:
             )
 
         pattern = self._safe_compile(
-            assertion.pattern, file_hint=assertion.file_hint, candidates=files
+            assertion.pattern,
+            file_hint=assertion.file_hint,
+            candidates=files,
+            target_directed=assertion.input_binding_required,
         )
         if pattern is None:
             return SpecVerificationResult(
                 assertion=assertion,
                 verified=False,
                 discrepancy=True,
-                detail="Unusable regex pattern: invalid, too long, or able to match a file with no content",
+                detail=(
+                    "Unusable regex pattern: invalid, unsafe, too long, or able to match "
+                    "a file with no content"
+                ),
             )
 
         for file_path in files:
@@ -1227,7 +1458,19 @@ class SpecVerifier:
                 bounds = chain((first_bound,), bounds)
             for match, evidence_target in bounds:
                 # Extract the value after the pattern
-                actual = self._extract_value_after_match(content, match)
+                value_index = match.end()
+                if match.start() == match.end() and evidence_target:
+                    target_span = next(
+                        (
+                            span
+                            for span in literal_spans(content, evidence_target)
+                            if span[0] <= match.start() <= span[1]
+                        ),
+                        None,
+                    )
+                    if target_span is not None:
+                        value_index = target_span[1]
+                actual = _extract_following_scalar(content, value_index)
                 if assertion.expected_value:
                     verified = assertion.expected_value.strip() == actual.strip()
                     return SpecVerificationResult(
@@ -1325,7 +1568,11 @@ class SpecVerifier:
         blank_subject_contract = _matches_only_a_blank_subject(assertion.pattern)
 
         # First check: does the pattern match any filename?
-        name_pattern = self._safe_compile(assertion.pattern, re.IGNORECASE)
+        name_pattern = self._safe_compile(
+            assertion.pattern,
+            re.IGNORECASE,
+            target_directed=assertion.input_binding_required,
+        )
 
         if name_pattern:
             for file_path in files:
@@ -1369,14 +1616,20 @@ class SpecVerifier:
 
         # Second check: search file contents for class/function/interface
         content_pattern = self._safe_compile(
-            assertion.pattern, file_hint=assertion.file_hint, candidates=files
+            assertion.pattern,
+            file_hint=assertion.file_hint,
+            candidates=files,
+            target_directed=assertion.input_binding_required,
         )
         if content_pattern is None:
             return SpecVerificationResult(
                 assertion=assertion,
                 verified=False,
                 discrepancy=True,
-                detail="Unusable regex pattern: invalid, too long, or able to match a file with no content",
+                detail=(
+                    "Unusable regex pattern: invalid, unsafe, too long, or able to match "
+                    "a file with no content"
+                ),
             )
 
         for file_path in files:

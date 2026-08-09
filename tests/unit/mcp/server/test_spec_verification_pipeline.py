@@ -71,7 +71,7 @@ async def test_positive_structure_survives_extractor_verifier_and_formal_adapter
             {
                 "ac_index": 0,
                 "tier": "t2_structural",
-                "pattern": r"class\s+\w+",
+                "pattern": r"class\s+CameraProvider",
                 "expected_value": "CameraProvider",
                 "file_hint": "*.py",
                 "description": "CameraProvider exists",
@@ -87,6 +87,383 @@ async def test_positive_structure_survives_extractor_verifier_and_formal_adapter
     assert verification.reports[0].verified_pass is True
     assert formal.final_approved is True
     assert formal.ac_results[0].final_verdict == "pass"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "tier", "pattern", "expected", "content"),
+    [
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"(?=class)",
+            "CameraProvider",
+            "class Unrelated:\n    pass\n# CameraProvider\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"(?=10)",
+            "10",
+            "# RETRIES is not assigned\n10\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"[\s\S]+",
+            "CameraProvider",
+            "class Unrelated:\n    pass\n# CameraProvider\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"(?:CameraProvider|[\s\S]+)",
+            "CameraProvider",
+            "class Unrelated:\n    pass\n# CameraProvider\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"[\s\S]*CameraProvider",
+            "CameraProvider",
+            "class Unrelated:\n    pass\n# CameraProvider\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"(?=[\s\S]*CameraProvider)(?=class)",
+            "CameraProvider",
+            "class Unrelated:\n    pass\n# CameraProvider\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"[\s\S]*RETRIES is not assigned\n(?=10)",
+            "10",
+            "# RETRIES is not assigned\n10\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "# CameraProvider is mentioned only\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES\s*=\s*",
+            "10",
+            "# RETRIES = 10\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "// CameraProvider is mentioned only\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "/* CameraProvider is mentioned only */\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            'value = "CameraProvider"\n',
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            '"""\nCameraProvider\n"""\n',
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES\s*=\s*",
+            "10",
+            '"""\nRETRIES = 10\n"""\n',
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES\s*=\s*",
+            "10",
+            'value = "RETRIES = 10"\n',
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            "const note = \x60CameraProvider\x60;\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            'value = r"CameraProvider"\n',
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            'value = f"""CameraProvider"""\n',
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            'value = "escaped \\" CameraProvider"\n',
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"CameraProvider",
+            "CameraProvider",
+            'value = "unclosed\nCameraProvider\n',
+        ),
+    ],
+    ids=[
+        "t2-zero-width",
+        "t1-zero-width",
+        "t2-broad-consuming",
+        "t2-unused-target-branch",
+        "t2-multiline-target-comment",
+        "t2-zero-width-away-from-target",
+        "t1-broad-consuming",
+        "t2-python-comment",
+        "t1-python-comment",
+        "t2-slash-comment",
+        "t2-block-comment",
+        "t2-quoted-string",
+        "t2-docstring",
+        "t1-docstring",
+        "t1-quoted-string",
+        "t2-template-string",
+        "t2-raw-string",
+        "t2-prefixed-docstring",
+        "t2-escaped-quote-string",
+        "t2-unclosed-string",
+    ],
+)
+async def test_unrelated_regex_and_target_cannot_formally_approve_by_file_copresence(
+    tmp_path: Any,
+    ac_text: str,
+    tier: str,
+    pattern: str,
+    expected: str,
+    content: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": tier,
+                "pattern": pattern,
+                "expected_value": expected,
+                "file_hint": "*.py",
+                "description": "Regex and target must prove the same construct",
+            }
+        ],
+    )
+    (tmp_path / "main.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert len(assertions) == 1
+    assert verification.reports[0].verified_pass is False
+    assert verification.reports[0].results[0].evidence_target == ""
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "separator",
+    ["\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"],
+    ids=["vt", "ff", "fs", "gs", "rs", "nel", "ls", "ps"],
+)
+@pytest.mark.parametrize("tier", ["t2_structural", "t1_constant"], ids=["t2", "t1"])
+async def test_unicode_logical_lines_cannot_join_unrelated_target_evidence(
+    tmp_path: Any,
+    separator: str,
+    tier: str,
+) -> None:
+    structural = tier == "t2_structural"
+    ac_text = "MUST define a CameraProvider class" if structural else "MUST set RETRIES=10"
+    pattern = (
+        r"[\s\S]*CameraProvider"
+        if structural
+        else rf"[\s\S]*RETRIES is not assigned{separator}(?=10)"
+    )
+    expected = "CameraProvider" if structural else "10"
+    content = (
+        f"class Unrelated:{separator}# CameraProvider\n"
+        if structural
+        else f"# RETRIES is not assigned{separator}10\n"
+    )
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": tier,
+                "pattern": pattern,
+                "expected_value": expected,
+                "file_hint": "*.py",
+                "description": "Unicode logical lines keep constructs separate",
+            }
+        ],
+    )
+    (tmp_path / "main.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tier", "pattern", "expected", "content"),
+    [
+        (
+            "t2_structural",
+            r"(?=CameraProvider)",
+            "CameraProvider",
+            "class CameraProvider:\n    pass\n",
+        ),
+        (
+            "t1_constant",
+            r"(?=RETRIES\s*=\s*10)",
+            "10",
+            "RETRIES = 10\n",
+        ),
+    ],
+    ids=["t2-target-lookahead", "t1-target-lookahead"],
+)
+async def test_target_bound_zero_width_evidence_preserves_formal_controls(
+    tmp_path: Any,
+    tier: str,
+    pattern: str,
+    expected: str,
+    content: str,
+) -> None:
+    ac_text = (
+        "MUST define a CameraProvider class" if tier == "t2_structural" else "MUST set RETRIES=10"
+    )
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": tier,
+                "pattern": pattern,
+                "expected_value": expected,
+                "file_hint": "*.py",
+                "description": "Target-bound zero-width control",
+            }
+        ],
+    )
+    (tmp_path / "main.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is True
+    assert formal.final_approved is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "tier", "pattern", "expected", "content"),
+    [
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"class\s+CameraProvider",
+            "CameraProvider",
+            'note = "CameraProvider"\nclass CameraProvider:\n    pass\n',
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES\s*=\s*",
+            "10",
+            'note = "RETRIES = 10"\nRETRIES = 10\n',
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"class\s+CameraProvider",
+            "CameraProvider",
+            'note = "# // /*"; class CameraProvider:\n    pass\n',
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"class\s+CameraProvider",
+            "CameraProvider",
+            '# "unterminated\nclass CameraProvider:\n    pass\n',
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"class\s+CameraProvider",
+            "CameraProvider",
+            '/* " */ class CameraProvider:\n    pass\n',
+        ),
+    ],
+    ids=[
+        "t2-real-after-string",
+        "t1-real-after-string",
+        "t2-comment-markers-inside-string",
+        "t2-quote-inside-comment",
+        "t2-quote-inside-closed-block",
+    ],
+)
+async def test_real_construct_after_quoted_decoy_remains_formal_evidence(
+    tmp_path: Any,
+    ac_text: str,
+    tier: str,
+    pattern: str,
+    expected: str,
+    content: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": tier,
+                "pattern": pattern,
+                "expected_value": expected,
+                "file_hint": "*.py",
+                "description": "Quoted decoy precedes a real construct",
+            }
+        ],
+    )
+    (tmp_path / "main.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is True
+    assert formal.final_approved is True
 
 
 @pytest.mark.asyncio
@@ -264,7 +641,7 @@ async def test_negative_purpose_words_after_target_do_not_flip_positive_polarity
             {
                 "ac_index": 0,
                 "tier": "t2_structural",
-                "pattern": r"class\s+\w+",
+                "pattern": r"class\s+CameraProvider",
                 "expected_value": "CameraProvider",
                 "file_hint": "*.py",
                 "description": "CameraProvider is required",

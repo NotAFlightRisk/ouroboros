@@ -1609,11 +1609,11 @@ class TestSpecVerifier:
         assert result.evidence_target == ""
         assert "criterion-bound" in result.detail
 
-    @pytest.mark.parametrize("pattern", [r"(?=CameraProvider)", r"class\s+\w+"])
-    def test_target_bound_zero_width_and_generic_patterns_remain_real_evidence(
+    @pytest.mark.parametrize("pattern", [r"(?=CameraProvider)", r"class\s+CameraProvider"])
+    def test_target_specific_zero_width_and_consuming_patterns_remain_real_evidence(
         self, pattern: str
     ) -> None:
-        """The gate binds evidence to input; it does not require a consuming regex span."""
+        """Both match shapes must name and bind the caller-authored target."""
         project = self._create_project({"main.py": "class CameraProvider:\n    pass\n"})
         assertion = SpecAssertion(
             ac_index=0,
@@ -1633,6 +1633,186 @@ class TestSpecVerifier:
         assert result.evidence_source == "file_content"
         assert result.evidence_target == "CameraProvider"
         assert result.file_path.endswith("main.py")
+
+    def test_rejected_target_branch_never_executes_pathological_model_regex(self) -> None:
+        """Static target proof must return before model regex execution."""
+        script = textwrap.dedent(
+            """
+            import tempfile
+            from pathlib import Path
+
+            from ouroboros.verification.models import SpecAssertion, VerificationTier
+            from ouroboros.verification.verifier import SpecVerifier
+
+            with tempfile.TemporaryDirectory() as directory:
+                Path(directory, "main.py").write_text("A" * 32 + "!\\n# CameraProvider\\n")
+                assertion = SpecAssertion(
+                    ac_index=0,
+                    ac_text="MUST define a CameraProvider class",
+                    tier=VerificationTier.T2_STRUCTURAL,
+                    pattern=r"(?:CameraProvider|(A+)+$)",
+                    expected_value="CameraProvider",
+                    file_hint="*.py",
+                    evidence_targets=("CameraProvider",),
+                    input_binding_required=True,
+                )
+                summary = SpecVerifier(directory).verify_all((assertion,))
+                assert summary.verified_count == 0
+            """
+        )
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail("rejected target branch executed the pathological regex")
+
+        assert completed.returncode == 0, completed.stderr
+
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            r"CameraProvider(A+)+$",
+            r"CameraProvider(?:A|AA)+$",
+            r"CameraProvider(?:A?)+$",
+            r"CameraProviderA*A*$",
+            r"CameraProvider(A*)A*$",
+            r"CameraProvider(A*)(A*)$",
+            r"(?i)CameraProviderİ*I*$",
+            r"CameraProvider(?i:A*)A*$",
+            r"(?=CameraProvider(A+)+$)",
+            r"CameraProvider(A+)\1+$",
+            r"CameraProvider(A+)\1$",
+            r"CameraProviderA{999999999}$",
+        ],
+        ids=[
+            "nested-repeat",
+            "overlapping-branch-repeat",
+            "nullable-nested-repeat",
+            "adjacent-overlapping-repeats",
+            "wrapped-adjacent-repeat",
+            "two-wrapped-adjacent-repeats",
+            "unicode-ignorecase-overlap",
+            "scoped-ignorecase-overlap",
+            "nested-repeat-in-lookahead",
+            "repeated-backreference",
+            "backreference",
+            "oversized-finite-repeat",
+        ],
+    )
+    def test_target_bound_redos_families_are_rejected_before_execution(self, pattern: str) -> None:
+        """Naming the AC target never grants an unsafe regex permission to run."""
+        project = self._create_project({"main.py": "CameraProvider" + "A" * 28 + "X\n"})
+        script = textwrap.dedent(
+            f"""
+            from ouroboros.verification.models import SpecAssertion, VerificationTier
+            from ouroboros.verification.verifier import SpecVerifier
+
+            assertion = SpecAssertion(
+                ac_index=0,
+                ac_text="MUST define a CameraProvider class",
+                tier=VerificationTier.T2_STRUCTURAL,
+                pattern={pattern!r},
+                expected_value="CameraProvider",
+                file_hint="*.py",
+                evidence_targets=("CameraProvider",),
+                input_binding_required=True,
+            )
+            summary = SpecVerifier(project_dir={project!r}).verify_all((assertion,))
+            result = summary.reports[0].results[0]
+            assert result.verified is False
+            assert summary.override_approval is False
+            assert "Unusable regex pattern" in result.detail
+            """
+        )
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail("target-bound unsafe regex reached the backtracking engine")
+
+        assert completed.returncode == 0, completed.stderr
+
+    @pytest.mark.parametrize(
+        "pattern",
+        [r"(?=[\s\S]*CameraProvider)", r"(?m)^(?=[\s\S]*CameraProvider)"],
+        ids=["unanchored", "multiline-anchor"],
+    )
+    def test_unanchored_repeated_lookahead_requires_target_directed_budget(
+        self, pattern: str
+    ) -> None:
+        """A whole-file retry loop cannot execute without criterion target binding."""
+        project = self._create_project({"main.py": "A" * 50_000})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="main.py MUST contain a provider declaration",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            file_hint="main.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        result = summary.reports[0].results[0]
+        assert result.verified is False
+        assert "Unusable regex pattern" in result.detail
+
+    def test_target_directed_lookahead_does_not_scan_every_prefix(self) -> None:
+        """Zero-width target proof executes only at its bounded target span."""
+        project = self._create_project({"main.py": "x" * 49_000 + "\nclass CameraProvider:\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"(?=[\s\S]*CameraProvider)",
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.verified_count == 1
+        assert summary.reports[0].results[0].evidence_target == "CameraProvider"
+
+    @pytest.mark.parametrize(
+        ("pattern", "content"),
+        [
+            (r"CameraProvider[ ]+$", "CameraProvider   \n"),
+            (r"(?:AB)+\s+CameraProvider", "ABAB CameraProvider\n"),
+            (r"(?=.*CameraProvider)", "class CameraProvider:\n"),
+        ],
+        ids=["single-repeat", "fixed-width-repeat-body", "target-lookahead"],
+    )
+    def test_bounded_target_regex_features_remain_supported(
+        self, pattern: str, content: str
+    ) -> None:
+        project = self._create_project({"main.py": content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.verified_count == 1
+        assert summary.reports[0].results[0].evidence_target == "CameraProvider"
 
     @pytest.mark.parametrize(
         "content",
@@ -1784,7 +1964,7 @@ class TestSpecVerifier:
             ac_index=0,
             ac_text="CLI accepts --verbose flag",
             tier=VerificationTier.T2_STRUCTURAL,
-            pattern=r".+",
+            pattern=re.escape("--verbose"),
             expected_value="--verbose",
             file_hint="*.txt",
             evidence_targets=("--verbose",),
@@ -1828,7 +2008,7 @@ class TestSpecVerifier:
             ac_index=0,
             ac_text=f"MUST expose `{target}`",
             tier=VerificationTier.T2_STRUCTURAL,
-            pattern=r".+",
+            pattern=re.escape(target),
             expected_value=target,
             file_hint="*.txt",
             evidence_targets=(target,),
@@ -1865,7 +2045,7 @@ class TestSpecVerifier:
             ac_index=0,
             ac_text="MUST create file pkg/CameraProvider.py",
             tier=VerificationTier.T2_STRUCTURAL,
-            pattern=r".+CameraProvider\.py",
+            pattern=re.escape("pkg/CameraProvider.py"),
             expected_value="pkg/CameraProvider.py",
             file_hint="**/*",
             evidence_targets=("pkg/CameraProvider.py",),
