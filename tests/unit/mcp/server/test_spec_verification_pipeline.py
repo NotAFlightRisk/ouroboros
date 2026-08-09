@@ -167,8 +167,22 @@ async def test_negative_structure_polarity_reaches_formal_verdict(
             ".config/settings.py",
             "RETRIES: int = 10\n",
         ),
+        (
+            "MUST NOT set RETRIES=10",
+            "t1_constant",
+            r"RETRIES\s*=\s*5",
+            "10",
+            ".github/settings.py",
+            "RETRIES = 10\n",
+        ),
     ],
-    ids=["hidden-structure", "hidden-constant", "dotfile-structure", "typed-dotdir-constant"],
+    ids=[
+        "hidden-structure",
+        "hidden-constant",
+        "dotfile-structure",
+        "typed-dotdir-constant",
+        "dot-github-is-not-git",
+    ],
 )
 async def test_forbidden_scan_ignores_model_predicate_and_scope(
     tmp_path: Any,
@@ -239,6 +253,40 @@ async def test_negative_purpose_words_after_target_do_not_flip_positive_polarity
     formal = _formal_verdict(ac_text, verification)
 
     assert assertions[0].evidence_polarity is EvidencePolarity.REQUIRED
+    assert formal.final_approved is approved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "approved"),
+    [("class CameraProvider:\n    pass\n", False), ("class Unrelated:\n    pass\n", True)],
+    ids=["forbidden-present", "forbidden-absent"],
+)
+async def test_postfix_modal_negation_controls_the_target_clause(
+    tmp_path: Any,
+    content: str,
+    approved: bool,
+) -> None:
+    ac_text = "The CameraProvider class must not exist"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"class\s+\w+",
+                "expected_value": "CameraProvider",
+                "file_hint": "*.py",
+                "description": "CameraProvider must not exist",
+            }
+        ],
+    )
+    (tmp_path / "main.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert assertions[0].evidence_polarity is EvidencePolarity.FORBIDDEN
     assert formal.final_approved is approved
 
 

@@ -42,6 +42,7 @@ MAX_FILE_SIZE = 50 * 1024  # 50KB per file
 MAX_FILES_PER_HINT = 100
 MAX_PATTERN_LENGTH = 200  # Limit LLM-generated regex length to reduce ReDoS risk
 MAX_SCALAR_LENGTH = 4096
+_NOISE_DIRECTORY_NAMES = frozenset({"__pycache__", ".git", "node_modules", ".venv", ".tox"})
 
 # Whether a pattern can match the empty string is decided by *reading* it, never
 # by running it. Running it is what a hostile pattern is waiting for: `(?:)
@@ -726,6 +727,12 @@ def _extract_following_scalar(content: str, index: int) -> str:
     return value if _has_complete_scalar_terminator(content, end, operator) else ""
 
 
+def _has_noise_directory(file_path: str, project_dir: str) -> bool:
+    """Whether a path has an exact excluded directory component."""
+    relative = os.path.relpath(file_path, project_dir)
+    return any(component in _NOISE_DIRECTORY_NAMES for component in relative.split(os.sep)[:-1])
+
+
 @dataclass
 class SpecVerifier:
     """Verifies spec assertions against actual project files.
@@ -1016,9 +1023,7 @@ class SpecVerifier:
             for path in candidates
             if os.path.isfile(path)
             and os.path.realpath(path).startswith(real_project + os.sep)
-            and not any(
-                skip in path for skip in ("__pycache__", ".git", "node_modules", ".venv", ".tox")
-            )
+            and not _has_noise_directory(path, self.project_dir)
         ]
         if len(files) > MAX_FILES_PER_HINT:
             return (), (
@@ -1439,9 +1444,7 @@ class SpecVerifier:
             f
             for f in files
             if os.path.realpath(f).startswith(real_project + os.sep)
-            and not any(
-                skip in f for skip in ("__pycache__", ".git", "node_modules", ".venv", ".tox")
-            )
+            and not _has_noise_directory(f, self.project_dir)
         ]
 
         return filtered[:MAX_FILES_PER_HINT]
