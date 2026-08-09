@@ -7,7 +7,7 @@ doc_metadata:
 
 > English: [codex.md](./codex.md)
 >
-> **번역 진행 상황**: 이 문서는 설치까지(사전 조건 · Codex CLI 설치 · Ouroboros 설치 · 플랫폼 · 설정 · 빠른 시작)를 옮긴 1부입니다. 그 뒤 절(Command Surface, How It Works, CLI 옵션, 문제 해결, 비용, Active Conductor)은 아직 영문입니다 — [codex.md](./codex.md)를 보세요. 진행은 [#1988](https://github.com/Q00/ouroboros/issues/1988)에서 추적합니다.
+> **번역 진행 상황**: 이 문서는 설치까지(시작하기 · 독립 설치 · Codex CLI 설치 · 플랫폼 · 설정 · 빠른 시작)를 옮긴 1부입니다. 그 뒤 절(Command Surface, How It Works, CLI 옵션, 문제 해결, 비용, Active Conductor)은 아직 영문입니다 — [codex.md](./codex.md)를 보세요. 진행은 [#1988](https://github.com/Q00/ouroboros/issues/1988)에서 추적합니다.
 
 > 설치와 첫 실행 흐름 전체는 [Getting Started](../getting-started.md)(영문)를 보세요.
 
@@ -17,15 +17,45 @@ Ouroboros는 **OpenAI Codex**를 런타임 백엔드로 쓸 수 있습니다. [C
 
 > **모델 권장**: Codex의 현재 기본 모델로 시작하세요. Ouroboros는 호출마다 역할별 추론 강도를 적용합니다. 특정 단계에 모델을 의도적으로 고정해야 할 때만 Ouroboros 설정에서 모델을 지정하세요.
 
-## 사전 조건
+## 시작하기 (권장 경로)
+
+Codex 플러그인으로 시작하는 게 가장 짧습니다.
+
+**터미널:**
+
+```bash
+codex plugin marketplace add Q00/ouroboros
+codex plugin add ouroboros@ouroboros
+```
+
+새 Codex 세션을 열고 `ooo`를 입력하세요. setup이 아직 안 돌았다면, Ouroboros가 **무언가를 바꾸기 전에 먼저 런타임을 준비할지 물어봅니다.** 준비가 끝나면 Codex의 현재 기본 모델을 자동으로 씁니다. **Directly configure models**는 특정 파이프라인 단계의 모델을 고르거나 고정하고 싶을 때만 선택하세요 — Codex에서는 임시 `localhost` 주소로 브라우저에 로컬 설정 화면이 열립니다.
+
+### 사전 조건 (권장 경로)
 
 - **Codex CLI**가 설치돼 있고 `PATH`에 있을 것. 또는 macOS ChatGPT 앱에 딸린 실행 파일([설치 절차](#codex-cli-설치) 참고)
 - 로그인된 **Codex CLI** 계정. API 키 인증도 됩니다: `printenv OPENAI_API_KEY | codex login --with-api-key`. 파일 기반 키 관리는 [`credentials.yaml`](../config-reference.md#credentialsyaml) 참고
+
+**Python 요구사항은 아래 독립 설치 경로에만 해당합니다.**
+
+## 독립 설치 (플러그인 없이)
+
+플러그인 없이 Codex CLI를 직접 붙이려면 한 번만 준비하면 됩니다.
+
+**터미널:**
+
+```bash
+ouroboros setup --runtime codex
+```
+
+### 사전 조건 (독립 설치 경로)
+
+- 위 권장 경로의 사전 조건 두 가지
 - **Python >= 3.12**
+- Ouroboros 설치 — 기본 `ouroboros-ai` 패키지에 Codex CLI 런타임 어댑터가 들어 있습니다. extras는 필요 없습니다. 설치 방법 전체(pip, 한 줄 설치, 소스)는 [Getting Started](../getting-started.md)(영문) 참고
 
 ## Codex CLI 설치
 
-Codex CLI는 npm 패키지로 배포됩니다. 전역으로 설치하세요.
+Codex CLI 자체는 npm 패키지로 배포됩니다. 전역으로 설치하세요.
 
 ```bash
 npm install -g @openai/codex
@@ -38,11 +68,6 @@ codex --version
 ```
 
 다른 설치 방법과 셸 자동완성은 [Codex CLI README](https://github.com/openai/codex#readme)를 보세요.
-
-## Ouroboros 설치
-
-> 설치 방법 전체(pip, 한 줄 설치, 소스에서 빌드)와 첫 실행 안내는 **[Getting Started](../getting-started.md)**(영문)를 보세요.
-> 기본 `ouroboros-ai` 패키지에 Codex CLI 런타임 어댑터가 들어 있습니다. extras는 필요 없습니다.
 
 ## 플랫폼
 
