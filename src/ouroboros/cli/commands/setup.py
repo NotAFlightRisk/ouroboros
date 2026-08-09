@@ -4762,19 +4762,22 @@ def setup(
         if not claude_path:
             print_error("Claude Code CLI not found in PATH.")
             raise typer.Exit(1)
-        _setup_claude(claude_path)
+        if not _setup_claude(claude_path):
+            raise typer.Exit(1)
     elif selected in ("claude-cli", "claude_mcp"):
         claude_path = available.get("claude")
         if not claude_path:
             print_error("Claude Code CLI not found in PATH.")
             raise typer.Exit(1)
-        _setup_claude_cli(claude_path)
+        if not _setup_claude_cli(claude_path):
+            raise typer.Exit(1)
     elif selected in ("claude-sdk", "claude_sdk"):
         claude_path = available.get("claude")
         if not claude_path:
             print_error("Claude Code CLI not found in PATH.")
             raise typer.Exit(1)
-        _setup_claude_sdk(claude_path)
+        if not _setup_claude_sdk(claude_path):
+            raise typer.Exit(1)
     elif selected in ("codex", "codex_cli"):
         codex_path = available.get("codex")
         if not codex_path:

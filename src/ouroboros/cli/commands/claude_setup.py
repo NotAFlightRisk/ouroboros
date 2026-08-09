@@ -1,10 +1,10 @@
 """Claude CLI/SDK profile activation for ``ouroboros setup``."""
 
 from pathlib import Path
+from typing import Literal
 
 from rich.markup import escape
 import typer
-import yaml
 
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.package_profiles import (
@@ -13,36 +13,26 @@ from ouroboros.package_profiles import (
 )
 
 
-def _write_claude_runtime_config(claude_path: str, *, runtime_backend: str) -> Path:
-    """Persist one Claude transport choice without touching host MCP config."""
-    from ouroboros.config.loader import create_default_config, ensure_config_dir
+def _activate_claude_runtime_config(
+    claude_path: str,
+    *,
+    runtime_backend: Literal["claude", "claude_mcp"],
+) -> Path | None:
+    """Atomically persist one Claude transport without touching host MCP config."""
+    from ouroboros.cli.runtime_activation import activate_claude_runtime
 
-    config_dir = ensure_config_dir()
-    config_path = config_dir / "config.yaml"
-    if config_path.exists():
-        config_dict = yaml.safe_load(config_path.read_text()) or {}
-    else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text()) or {}
-
-    config_dict.setdefault("orchestrator", {})
-    config_dict["orchestrator"]["runtime_backend"] = runtime_backend
-    config_dict["orchestrator"]["cli_path"] = claude_path
-    config_dict.setdefault("llm", {})
-    config_dict["llm"]["backend"] = "claude"
-
-    with config_path.open("w") as file:
-        yaml.dump(config_dict, file, default_flow_style=False, sort_keys=False)
-    return config_path
+    return activate_claude_runtime(claude_path, runtime_backend=runtime_backend)
 
 
-def _setup_claude_sdk_profile(claude_path: str, *, profile: str) -> None:
+def _setup_claude_sdk_profile(claude_path: str, *, profile: str) -> bool:
     """Configure one public spelling of the isolated Agent SDK profile."""
     if has_unsupported_claude_sdk_mcp_mix():
         print_error(escape(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE))
         raise typer.Exit(1)
 
-    config_path = _write_claude_runtime_config(claude_path, runtime_backend="claude")
+    config_path = _activate_claude_runtime_config(claude_path, runtime_backend="claude")
+    if config_path is None:
+        return False
     print_warning(
         escape(
             "Claude SDK uses MCP 1.x in this environment. The Ouroboros MCP 2 server "
@@ -52,24 +42,28 @@ def _setup_claude_sdk_profile(claude_path: str, *, profile: str) -> None:
     print_success(f"Configured Claude SDK runtime (CLI: {claude_path})")
     print_info(escape(f"Package profile: ouroboros-ai[{profile}] (SDK/MCP 1.x)"))
     print_info(f"Config saved to: {config_path}")
+    return True
 
 
-def setup_claude(claude_path: str) -> None:
+def setup_claude(claude_path: str) -> bool:
     """Configure the default isolated Claude Agent SDK package profile."""
-    _setup_claude_sdk_profile(claude_path, profile="claude")
+    return _setup_claude_sdk_profile(claude_path, profile="claude")
 
 
-def setup_claude_sdk(claude_path: str) -> None:
+def setup_claude_sdk(claude_path: str) -> bool:
     """Configure the explicit alias for the Claude Agent SDK profile."""
-    _setup_claude_sdk_profile(claude_path, profile="claude-sdk")
+    return _setup_claude_sdk_profile(claude_path, profile="claude-sdk")
 
 
-def setup_claude_cli(claude_path: str) -> None:
+def setup_claude_cli(claude_path: str) -> bool:
     """Configure the dependency-free CLI worker used with an MCP 2 server."""
-    config_path = _write_claude_runtime_config(claude_path, runtime_backend="claude_mcp")
+    config_path = _activate_claude_runtime_config(claude_path, runtime_backend="claude_mcp")
+    if config_path is None:
+        return False
     print_success(f"Configured Claude CLI runtime (CLI: {claude_path})")
     print_info(escape("Package profile: ouroboros-ai[claude-cli] (MCP 2 compatible)"))
     print_info(f"Config saved to: {config_path}")
+    return True
 
 
 __all__ = ["setup_claude", "setup_claude_cli", "setup_claude_sdk"]
