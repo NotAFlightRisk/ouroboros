@@ -19,7 +19,10 @@ _CONSTANT_BINDING_SUFFIX = re.compile(
     re.IGNORECASE,
 )
 _TOKEN_PUNCTUATION = frozenset("._/:-+@#?&=%~")
-_CLAUSE_BOUNDARY = re.compile(r"\b(?:and|but|while|whereas)\b|[;,]", re.IGNORECASE)
+_CLAUSE_BOUNDARY = re.compile(
+    r"\b(?:in\s+order\s+to|because|so|to|for|and|but|while|whereas)\b|[;,]",
+    re.IGNORECASE,
+)
 _FORBIDDEN_COMMAND_PREFIX = re.compile(
     r"(?:\b(?:must|shall|should|may|can)\s+(?:not|never)\b|\b(?:do|does|did)\s+not\b)",
     re.IGNORECASE,
@@ -33,14 +36,18 @@ _FORBIDDEN_TARGET_PREFIX = re.compile(
     re.IGNORECASE,
 )
 _FORBIDDEN_TARGET_SUFFIX = re.compile(
-    r"^\s*(?:(?:class|interface|struct|trait|function|file|directory|flag|constant|"
-    r"value|setting|assignment|definition|declaration)\s+){0,2}(?:"
+    r"^\s*(?:(?:\w+\s+){0,2}(?:class|interface|struct|trait|function|file|directory|"
+    r"flag|constant|value|setting|assignment|definition|declaration)\s+)?(?:"
     r"(?:is|are|must\s+be|should\s+be|shall\s+be)\s+"
     r"(?:forbidden|prohibited|disallowed|absent|excluded)\b"
     r"|(?:must|shall|should)\s+(?:not|never)\s+"
     r"(?:exist|appear|remain|be\s+(?:present|defined|created|included|used))\b"
     r"|(?:do|does)\s+not\s+exist\b"
     r")",
+    re.IGNORECASE,
+)
+_UNBOUND_TARGET_SUFFIX_NEGATION = re.compile(
+    r"\b(?:(?:must|shall|should)\s+(?:not|never)|(?:do|does)\s+not)\b",
     re.IGNORECASE,
 )
 
@@ -249,13 +256,16 @@ def acceptance_polarity(
             )
             target_prefix = ac_text[clause_start:start]
             target_suffix = ac_text[end:clause_end]
-            target_polarities.add(
-                EvidencePolarity.FORBIDDEN
-                if _FORBIDDEN_COMMAND_PREFIX.search(target_prefix)
+            if (
+                _FORBIDDEN_COMMAND_PREFIX.search(target_prefix)
                 or _FORBIDDEN_TARGET_PREFIX.search(target_prefix)
                 or _FORBIDDEN_TARGET_SUFFIX.search(target_suffix)
-                else EvidencePolarity.REQUIRED
-            )
+            ):
+                target_polarities.add(EvidencePolarity.FORBIDDEN)
+            elif _UNBOUND_TARGET_SUFFIX_NEGATION.search(target_suffix):
+                return None
+            else:
+                target_polarities.add(EvidencePolarity.REQUIRED)
         if len(target_polarities) != 1:
             return None
         polarities.append(next(iter(target_polarities)))
