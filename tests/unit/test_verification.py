@@ -222,12 +222,76 @@ class TestSpecVerifier:
                 r"RETRIES\s*=\s*",
                 "10",
             ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "main.rs",
+                "/* outer /* inner */ class CameraProvider */\n",
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "main.hs",
+                "{- outer {- inner -} class CameraProvider -}\n",
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "main.lua",
+                "--[=[\nclass CameraProvider\n]=]\n",
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "README.md",
+                "class CameraProvider should be implemented later\n",
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "README.txt",
+                "class CameraProvider should be implemented later\n",
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "manifest.json",
+                '{"todo": "class CameraProvider"}\n',
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "config.yaml",
+                "todo: class CameraProvider\n",
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "main.js",
+                "const declaration = /class CameraProvider/;\n",
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
         ],
         ids=[
             "lua-structure-comment",
             "sql-constant-comment",
             "python-structure-string",
             "python-constant-string",
+            "rust-nested-comment",
+            "haskell-nested-comment",
+            "lua-extended-comment",
+            "markdown-prose",
+            "plain-text-prose",
+            "json-string",
+            "yaml-scalar",
+            "javascript-regex-literal",
         ],
     )
     def test_comment_only_source_cannot_verify_positive_evidence(
@@ -254,6 +318,7 @@ class TestSpecVerifier:
             expected_value=expected,
             file_hint=f"*{os.path.splitext(filename)[1]}",
             evidence_targets=(target,),
+            input_binding_required=True,
         )
 
         summary = SpecVerifier(project_dir=project).verify_all((assertion,))
@@ -271,6 +336,55 @@ class TestSpecVerifier:
             pattern=r"class\s+CameraProvider",
             expected_value="CameraProvider",
             file_hint="*.lua",
+            evidence_targets=("CameraProvider",),
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.reports[0].verified_pass is True
+        assert summary.reports[0].results[0].evidence_source == "file_content"
+
+    def test_configuration_constant_remains_valid_t1_evidence(self) -> None:
+        project = self._create_project({"config.yaml": "RETRIES: 10\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST set RETRIES=10",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"RETRIES\s*:\s*",
+            expected_value="10",
+            file_hint="*.yaml",
+            evidence_targets=("RETRIES",),
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.reports[0].verified_pass is True
+        assert summary.reports[0].results[0].actual_value == "10"
+
+    @pytest.mark.parametrize(
+        ("filename", "content"),
+        [
+            ("main.rs", "/* outer /* inner */ ignored */\nclass CameraProvider {}\n"),
+            ("main.hs", "{- outer {- inner -} ignored -}\nclass CameraProvider a where\n"),
+            ("main.lua", "--[=[ ignored ]=]\nclass CameraProvider\n"),
+            (
+                "main.js",
+                "const ignored = /class CameraProvider/;\nclass CameraProvider {}\n",
+            ),
+        ],
+        ids=["rust", "haskell", "lua", "javascript"],
+    )
+    def test_complex_noncode_mask_preserves_following_executable_evidence(
+        self, filename: str, content: str
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+CameraProvider",
+            expected_value="CameraProvider",
+            file_hint=f"*{os.path.splitext(filename)[1]}",
             evidence_targets=("CameraProvider",),
         )
 

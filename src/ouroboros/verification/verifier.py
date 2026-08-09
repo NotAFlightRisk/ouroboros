@@ -1517,7 +1517,17 @@ class SpecVerifier:
             content = self._read_file(file_path)
             if content is None:
                 continue
-            evidence_content = mask_non_executable_source(content, file_path)
+            evidence_content = mask_non_executable_source(
+                content,
+                file_path,
+                allow_configuration=True,
+                allow_plain_text=(
+                    not assertion.input_binding_required
+                    or all(
+                        not target.isidentifier() for target in self._evidence_targets(assertion)
+                    )
+                ),
+            )
             if evidence_content is None:
                 continue
 
@@ -1699,7 +1709,16 @@ class SpecVerifier:
             content = self._read_file(file_path)
             if content is None:
                 continue
-            evidence_content = mask_non_executable_source(content, file_path)
+            evidence_content = mask_non_executable_source(
+                content,
+                file_path,
+                allow_plain_text=(
+                    not assertion.input_binding_required
+                    or all(
+                        not target.isidentifier() for target in self._evidence_targets(assertion)
+                    )
+                ),
+            )
             if evidence_content is None:
                 continue
             bound = self._find_bound_match(content_pattern, evidence_content, assertion)
