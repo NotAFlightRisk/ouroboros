@@ -31,7 +31,7 @@ _CLAUSE_BOUNDARY = re.compile(
     re.IGNORECASE,
 )
 _FOLLOWING_SENTENCE_CONTENT = re.compile(
-    r"(?:[!?！？]+|…+|[\r\n]+)\s*(?=[^\s!?！？.。．｡…])"
+    r"(?:[!?！？]+|…+|[\r\n\u0085\u2028\u2029]+)\s*(?=[^\s!?！？.。．｡…])"
     r"|[.。．｡]+(?:\s+(?=\S)|(?=[^\s\d!?！？.。．｡…]))"
 )
 _UNRECOGNIZED_CLAUSE_SEPARATOR = re.compile(
@@ -40,14 +40,24 @@ _UNRECOGNIZED_CLAUSE_SEPARATOR = re.compile(
     # prose slashes/pipes are not grammar: content after one can be a hidden
     # second predicate and therefore makes polarity unknowable.
     r"(?:"
-    r"(?:(?<=\s)-(?=\s|\w))"
+    r"(?:(?<=\s)-{1,3}(?=\s|\w)|(?<=\w)-{2,3}(?=\w))"
     r"|[\u058a\u05be\u1400\u1806\u2010-\u2015\u2e17\u2e1a\u2e3a-\u2e3b\u2e40\u301c\u3030\ufe31-\ufe32\ufe58\ufe63\uff0d]"
-    r"|[()\[\]{}（）［］｛｝]"
+    r"|[()\[\]{}<>（）［］｛｝〈〉《》]"
     r"|(?<=\s)[/|\\](?=\s|\w)"
     r"|(?<=\S)[:：]\s*(?=\S)"
     r"|(?:=>|->|[→⇒⟶])"
+    r"|[·•‧∙⋅]"
     r"|[\"'`“”‘’«»‹›]\s*(?=\w)"
     r")\s*(?=\S)"
+)
+_FOLLOWING_AMBIGUOUS_CLAUSE = re.compile(
+    r"(?:[,;，；]|\b(?:but|nor|or|while|whereas|yet)\b)\s*(?=\S)",
+    re.IGNORECASE,
+)
+_FOLLOWING_CONJUNCTIVE_PREDICATE = re.compile(
+    r"\band\b\s+(?:(?:\w+\s+){0,4})"
+    r"(?:must|shall|should|may|can|is|are|was|were|be|becomes?|do|does|did)\b",
+    re.IGNORECASE,
 )
 _FORBIDDEN_COMMAND_PREFIX = re.compile(
     r"(?:\b(?:must|shall|should|may|can)\s+(?:not|never)\b|\b(?:do|does|did)\s+not\b)",
@@ -104,10 +114,79 @@ _EXPLICIT_REQUIRED_CLI_FLAG_SUFFIX = re.compile(
     r"^\s+flag\s*[.!?]?\s*$",
     re.IGNORECASE,
 )
-_EXPLICIT_REQUIRED_VALUE_SUFFIX = re.compile(
-    r"^\s*(?:(?:=|:)|(?:must|shall|should)\s+be\s+(?!not\b|never\b))",
+_EXPLICIT_REQUIRED_STRUCTURAL_SUFFIX = re.compile(
+    r"^(?:(?:[\w-]+\s+){0,2})?(?:class|interface|struct|trait|function|file|directory|"
+    r"flag|constant|value|setting|assignment|definition|declaration)\b",
     re.IGNORECASE,
 )
+_EXPLICIT_REQUIRED_CAUSAL_SUFFIX = re.compile(
+    r"^(?:to\s+(?:avoid|ensure|omit|prevent)|in\s+order\s+to\s+ensure|because|for|so)\b",
+    re.IGNORECASE,
+)
+_TARGET_REFERENT_WORDS = frozenset(
+    {
+        "class",
+        "component",
+        "definition",
+        "interface",
+        "it",
+        "its",
+        "provider",
+        "referenced",
+        "said",
+        "same",
+        "struct",
+        "target",
+        "this",
+        "trait",
+    }
+)
+_MODAL_OR_NEGATION = re.compile(
+    r"\b(?:must|shall|should|may|can|is|are|was|were|be|becomes?|do|does|did|not|never)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_REQUIRED_VALUE_SUFFIX = re.compile(
+    r"^\s*(?:(?:=|:)|\b(?:to|of|is)\b\s+(?!not\b|never\b)"
+    r"|(?:must|shall|should)\s+be\s+(?!not\b|never\b))",
+    re.IGNORECASE,
+)
+
+
+def _strip_terminal_target_marks(target_suffix: str) -> str:
+    """Remove only closing quotes and terminal sentence marks from a suffix."""
+    suffix = target_suffix.rstrip()
+    while suffix and suffix[-1] in "`'\".!?！？。．｡…":
+        suffix = suffix[:-1].rstrip()
+    return suffix
+
+
+def _required_target_suffix_is_bounded(target: str, target_suffix: str) -> bool:
+    """Accept only known structural, qualifier, or distinct-cause suffixes.
+
+    The positive command before a target is not authority over arbitrary prose
+    after it.  Unknown trailing words can introduce a second predicate without
+    punctuation (``plus it must not exist``), so positive fallback is allowed
+    only when the entire suffix belongs to this bounded grammar.
+    """
+    suffix = _strip_terminal_target_marks(target_suffix).strip()
+    if not suffix:
+        return True
+
+    structural = _EXPLICIT_REQUIRED_STRUCTURAL_SUFFIX.match(suffix)
+    if structural is not None:
+        suffix = suffix[structural.end() :].strip()
+        if not suffix:
+            return True
+
+    if suffix.casefold().startswith("in "):
+        return _MODAL_OR_NEGATION.search(suffix) is None
+
+    causal = _EXPLICIT_REQUIRED_CAUSAL_SUFFIX.match(suffix)
+    if causal is None:
+        return False
+    causal_words = set(re.findall(r"\w+", suffix[causal.end() :].casefold()))
+    target_words = set(re.findall(r"\w+", target.casefold()))
+    return not causal_words.intersection(_TARGET_REFERENT_WORDS | target_words)
 
 
 def _has_explicit_required_target(
@@ -117,7 +196,7 @@ def _has_explicit_required_target(
 ) -> bool:
     """Whether the AC starts with a bounded command that requires this target."""
     if _EXPLICIT_REQUIRED_TARGET_PREFIX.search(ac_prefix):
-        return True
+        return _required_target_suffix_is_bounded(target, target_suffix)
     if _EXPLICIT_REQUIRED_HAS_TARGET_PREFIX.fullmatch(ac_prefix):
         return not target_suffix.strip()
     return bool(
@@ -377,6 +456,10 @@ def acceptance_polarity(
             if _FOLLOWING_SENTENCE_CONTENT.search(ac_text[end:]):
                 return None
             if _UNRECOGNIZED_CLAUSE_SEPARATOR.search(ac_text[end:]):
+                return None
+            if _FOLLOWING_AMBIGUOUS_CLAUSE.search(ac_text[end:]):
+                return None
+            if _FOLLOWING_CONJUNCTIVE_PREDICATE.search(ac_text[end:]):
                 return None
             if (
                 _FORBIDDEN_COMMAND_PREFIX.search(target_prefix)
