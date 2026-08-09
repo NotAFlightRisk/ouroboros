@@ -333,8 +333,15 @@ _SENTENCE_BOUNDARY_CONTRADICTIONS = (
     "MUST define a CameraProvider class!The deeply referenced target class must not exist",
     "MUST define a CameraProvider class?The class does not exist",
     "MUST define a CameraProvider class.The class must not exist",
+    "MUST define a CameraProvider class.the class must not exist",
+    "MUST define a CameraProvider class (required).the class must not exist",
+    "MUST define a CameraProvider class。the class must not exist",
+    "MUST define a CameraProvider class！the class must not exist",
+    "MUST define a CameraProvider class？the class must not exist",
+    "MUST define a CameraProvider class…the class must not exist",
     "MUST define a CameraProvider class\r\nThe class must not exist",
     "MUST NOT define a CameraProvider class! The class must exist",
+    "MUST NOT define a CameraProvider class.the class must exist",
 )
 
 
@@ -388,7 +395,10 @@ async def test_sentence_boundary_contradiction_never_mints_formal_evidence(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("terminator", ["!", "?", ".", "...", "?!", "\n"])
+@pytest.mark.parametrize(
+    "terminator",
+    ["!", "?", ".", "...", "?!", "\n", "！", "？", "。", "…"],
+)
 async def test_terminal_sentence_punctuation_preserves_one_positive_requirement(
     tmp_path: Any,
     terminator: str,
@@ -409,6 +419,33 @@ async def test_terminal_sentence_punctuation_preserves_one_positive_requirement(
         ],
     )
     (tmp_path / "main.py").write_text("class CameraProvider:\n    pass\n")
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert assertions[0].evidence_polarity is EvidencePolarity.REQUIRED
+    assert verification.reports[0].results[0].verified is True
+    assert formal.final_approved is True
+
+
+@pytest.mark.asyncio
+async def test_decimal_constant_does_not_look_like_a_second_sentence(tmp_path: Any) -> None:
+    """A numeric dot inside one scalar value is not prose punctuation."""
+    ac_text = "MUST set RATIO = 3.14"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t1_constant",
+                "pattern": r"RATIO\s*=\s*",
+                "expected_value": "3.14",
+                "file_hint": "*.py",
+                "description": "The ratio has one decimal value",
+            }
+        ],
+    )
+    (tmp_path / "config.py").write_text("RATIO = 3.14\n")
 
     verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
     formal = _formal_verdict(ac_text, verification)

@@ -24,7 +24,10 @@ _CLAUSE_BOUNDARY = re.compile(
     r"\b(?:in\s+order\s+to|because|so|and|but|while|whereas)\b|[;,]|" + _SENTENCE_BOUNDARY,
     re.IGNORECASE,
 )
-_FOLLOWING_SENTENCE_CONTENT = re.compile(r"(?:[!?]+(?=[^!?])|\.+(?=\s|[A-Z])|[\r\n]+)\s*\S")
+_FOLLOWING_SENTENCE_CONTENT = re.compile(
+    r"(?:[!?！？]+|…+|[\r\n]+)\s*(?=[^\s!?！？.。．｡…])"
+    r"|[.。．｡]+(?:\s+(?=\S)|(?=[^\s\d!?！？.。．｡…]))"
+)
 _FORBIDDEN_COMMAND_PREFIX = re.compile(
     r"(?:\b(?:must|shall|should|may|can)\s+(?:not|never)\b|\b(?:do|does|did)\s+not\b)",
     re.IGNORECASE,
