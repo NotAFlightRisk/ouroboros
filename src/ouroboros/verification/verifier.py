@@ -1004,7 +1004,13 @@ class SpecVerifier:
     def _trusted_project_inventory(self) -> tuple[tuple[tuple[str, str], ...], str]:
         """Read a complete bounded project inventory without model scope input."""
         real_project = os.path.realpath(self.project_dir)
-        candidates = sorted(glob.glob(os.path.join(self.project_dir, "**/*"), recursive=True))
+        candidates = sorted(
+            glob.glob(
+                os.path.join(self.project_dir, "**/*"),
+                recursive=True,
+                include_hidden=True,
+            )
+        )
         files = [
             path
             for path in candidates
@@ -1044,7 +1050,23 @@ class SpecVerifier:
         expected = assertion.expected_value.strip()
         for file_path, content in inventory:
             for _start, end in literal_spans(content, target):
-                actual = _extract_following_scalar(content, end).strip()
+                remainder = content[end : end + MAX_SCALAR_LENGTH]
+                annotation = re.match(r"\s*:\s*[^=\n]{1,256}\s*=\s*", remainder)
+                value_start = end + annotation.end() if annotation is not None else end
+                actual = _extract_following_scalar(content, value_start).strip()
+                if not actual:
+                    return SpecVerificationResult(
+                        assertion=assertion,
+                        verified=False,
+                        file_path=file_path,
+                        discrepancy=True,
+                        evidence_source="trusted_project_scan",
+                        evidence_target=target,
+                        detail=(
+                            f"Trusted scan could not parse criterion target '{target}' in "
+                            f"{self._relative_file(file_path)}; absence cannot be proven"
+                        ),
+                    )
                 if actual == expected:
                     return SpecVerificationResult(
                         assertion=assertion,

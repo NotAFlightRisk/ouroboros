@@ -133,13 +133,14 @@ async def test_negative_structure_polarity_reaches_formal_verdict(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("ac_text", "tier", "pattern", "expected", "hidden_content"),
+    ("ac_text", "tier", "pattern", "expected", "hidden_path", "hidden_content"),
     [
         (
             "MUST NOT define a CameraProvider class",
             "t2_structural",
             r"interface\s+\w+",
             "CameraProvider",
+            "hidden.py",
             "class CameraProvider:\n    pass\n",
         ),
         (
@@ -147,10 +148,27 @@ async def test_negative_structure_polarity_reaches_formal_verdict(
             "t1_constant",
             r"RETRIES\s*=\s*5",
             "10",
+            "hidden.py",
             "RETRIES = 10\n",
         ),
+        (
+            "MUST NOT define a CameraProvider class",
+            "t2_structural",
+            r"interface\s+\w+",
+            "CameraProvider",
+            ".hidden.py",
+            "class CameraProvider:\n    pass\n",
+        ),
+        (
+            "MUST NOT set RETRIES=10",
+            "t1_constant",
+            r"RETRIES\s*=\s*5",
+            "10",
+            ".config/settings.py",
+            "RETRIES: int = 10\n",
+        ),
     ],
-    ids=["hidden-structure", "hidden-constant"],
+    ids=["hidden-structure", "hidden-constant", "dotfile-structure", "typed-dotdir-constant"],
 )
 async def test_forbidden_scan_ignores_model_predicate_and_scope(
     tmp_path: Any,
@@ -158,6 +176,7 @@ async def test_forbidden_scan_ignores_model_predicate_and_scope(
     tier: str,
     pattern: str,
     expected: str,
+    hidden_path: str,
     hidden_content: str,
 ) -> None:
     assertions = await _extract(
@@ -174,7 +193,9 @@ async def test_forbidden_scan_ignores_model_predicate_and_scope(
         ],
     )
     (tmp_path / "safe.py").write_text("# safe\n")
-    (tmp_path / "hidden.py").write_text(hidden_content)
+    hidden_file = tmp_path / hidden_path
+    hidden_file.parent.mkdir(parents=True, exist_ok=True)
+    hidden_file.write_text(hidden_content)
 
     verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
     formal = _formal_verdict(ac_text, verification)
@@ -186,10 +207,55 @@ async def test_forbidden_scan_ignores_model_predicate_and_scope(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("purpose", ["prevent outages", "omit decorator boilerplate"])
+@pytest.mark.parametrize(
+    ("content", "approved"),
+    [("class CameraProvider:\n    pass\n", True), ("class Unrelated:\n    pass\n", False)],
+    ids=["required-present", "required-absent"],
+)
+async def test_negative_purpose_words_after_target_do_not_flip_positive_polarity(
+    tmp_path: Any,
+    purpose: str,
+    content: str,
+    approved: bool,
+) -> None:
+    ac_text = f"MUST define a CameraProvider class to {purpose}"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"class\s+\w+",
+                "expected_value": "CameraProvider",
+                "file_hint": "*.py",
+                "description": "CameraProvider is required",
+            }
+        ],
+    )
+    (tmp_path / "main.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert assertions[0].evidence_polarity is EvidencePolarity.REQUIRED
+    assert formal.final_approved is approved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ac_text",
+    [
+        "MUST avoid defining a CameraProvider class",
+        "MUST prevent defining a CameraProvider class",
+        "MUST omit a CameraProvider class",
+    ],
+    ids=["avoid", "prevent", "omit"],
+)
 async def test_avoid_wording_is_forbidden_instead_of_defaulting_to_required(
     tmp_path: Any,
+    ac_text: str,
 ) -> None:
-    ac_text = "MUST avoid defining a CameraProvider class"
     assertions = await _extract(
         ac_text,
         [
