@@ -55,7 +55,7 @@ _FOLLOWING_AMBIGUOUS_CLAUSE = re.compile(
     re.IGNORECASE,
 )
 _FOLLOWING_CONJUNCTIVE_PREDICATE = re.compile(
-    r"\band\b\s+(?:(?:\w+\s+){0,4})"
+    r"\band\b[\s\S]*\b"
     r"(?:must|shall|should|may|can|is|are|was|were|be|becomes?|do|does|did)\b",
     re.IGNORECASE,
 )
@@ -127,22 +127,62 @@ _TARGET_REFERENT_WORDS = frozenset(
     {
         "class",
         "component",
+        "constant",
+        "declaration",
         "definition",
+        "directory",
+        "entity",
+        "file",
+        "flag",
+        "function",
+        "implementation",
+        "instance",
         "interface",
         "it",
         "its",
+        "object",
         "provider",
         "referenced",
         "said",
         "same",
+        "service",
+        "setting",
         "struct",
+        "symbol",
         "target",
+        "thing",
         "this",
         "trait",
+        "value",
+        "widget",
+    }
+)
+_DISTINCT_CAUSAL_EFFECT_WORDS = frozenset(
+    {
+        "boilerplate",
+        "chain",
+        "chains",
+        "cycle",
+        "cycles",
+        "defect",
+        "defects",
+        "error",
+        "errors",
+        "failure",
+        "failures",
+        "loop",
+        "loops",
+        "outage",
+        "outages",
+        "retries",
+        "retry",
+        "state",
+        "states",
     }
 )
 _MODAL_OR_NEGATION = re.compile(
-    r"\b(?:must|shall|should|may|can|is|are|was|were|be|becomes?|do|does|did|not|never)\b",
+    r"\b(?:must|shall|should|may|can|is|are|was|were|be|becomes?|do|does|did|not|never|"
+    r"no|without|absent|forbidden|prohibited|excluded)\b",
     re.IGNORECASE,
 )
 _EXPLICIT_REQUIRED_VALUE_SUFFIX = re.compile(
@@ -178,15 +218,15 @@ def _required_target_suffix_is_bounded(target: str, target_suffix: str) -> bool:
         if not suffix:
             return True
 
-    if suffix.casefold().startswith("in "):
-        return _MODAL_OR_NEGATION.search(suffix) is None
-
     causal = _EXPLICIT_REQUIRED_CAUSAL_SUFFIX.match(suffix)
-    if causal is None:
-        return False
-    causal_words = set(re.findall(r"\w+", suffix[causal.end() :].casefold()))
-    target_words = set(re.findall(r"\w+", target.casefold()))
-    return not causal_words.intersection(_TARGET_REFERENT_WORDS | target_words)
+    if causal is not None:
+        causal_words = set(re.findall(r"\w+", suffix[causal.end() :].casefold()))
+        target_words = set(re.findall(r"\w+", target.casefold()))
+        return bool(causal_words.intersection(_DISTINCT_CAUSAL_EFFECT_WORDS)) and not (
+            causal_words.intersection(_TARGET_REFERENT_WORDS | target_words)
+        )
+
+    return suffix.casefold().startswith("in ") and _MODAL_OR_NEGATION.search(suffix) is None
 
 
 def _has_explicit_required_target(
@@ -471,7 +511,7 @@ def acceptance_polarity(
                 target_polarities.add(EvidencePolarity.REQUIRED)
             elif _TARGET_RELATIVE_PREDICATE.search(ac_text[end:]):
                 return None
-            elif _has_explicit_required_target(ac_text[:start], target, target_suffix):
+            elif _has_explicit_required_target(ac_text[:start], target, ac_text[end:]):
                 target_polarities.add(EvidencePolarity.REQUIRED)
             else:
                 # Only an explicit, bounded positive grammar can mint REQUIRED
