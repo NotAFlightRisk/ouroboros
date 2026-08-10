@@ -852,6 +852,78 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
             "def CameraProvider():\n",
             r"def\s+CameraProvider",
         ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.py",
+            "class CameraProvider:\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
+            "class CameraProvider\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.js",
+            "class CameraProvider\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.rb",
+            "class CameraProvider\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.cs",
+            "class CameraProvider\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.swift",
+            "class CameraProvider\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.ts",
+            "class CameraProvider\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.cpp",
+            "class CameraProvider {\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.hs",
+            "class CameraProvider a\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.go",
+            "func CameraProvider() {\n",
+            r"func\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.java",
+            "public void CameraProvider() {\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.rs",
+            "fn CameraProvider() {\n",
+            r"fn\s+CameraProvider",
+        ),
     ],
     ids=[
         "enum-class",
@@ -872,6 +944,18 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         "java-constructor",
         "kotlin-expect-class",
         "python-incomplete-function",
+        "python-incomplete-class",
+        "java-incomplete-class",
+        "javascript-incomplete-class",
+        "ruby-incomplete-class",
+        "csharp-incomplete-class",
+        "swift-incomplete-class",
+        "typescript-incomplete-class",
+        "cpp-unclosed-class",
+        "haskell-incomplete-class",
+        "go-unclosed-function",
+        "java-unclosed-function",
+        "rust-unclosed-function",
     ],
 )
 async def test_type_declaration_cannot_reach_formal_pass(
@@ -902,6 +986,63 @@ async def test_type_declaration_cannot_reach_formal_pass(
     assert verification.reports[0].verified_pass is False
     assert formal.final_approved is False
     assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("provider.py", "class CameraProvider:\n    pass\n"),
+        ("Provider.java", "class CameraProvider {}\n"),
+        ("provider.js", "class CameraProvider {}\n"),
+        ("provider.rb", "class CameraProvider\nend\n"),
+        ("Provider.cs", "class CameraProvider {}\n"),
+        ("provider.kt", "class CameraProvider\n"),
+        ("provider.swift", "class CameraProvider {}\n"),
+        ("provider.ts", "class CameraProvider {}\n"),
+        ("provider.cpp", "class CameraProvider {};\n"),
+        ("Provider.hs", "class CameraProvider a where\n"),
+    ],
+    ids=[
+        "python",
+        "java",
+        "javascript",
+        "ruby",
+        "csharp",
+        "kotlin-bodyless",
+        "swift",
+        "typescript",
+        "cpp",
+        "haskell",
+    ],
+)
+async def test_complete_class_definitions_can_reach_formal_pass(
+    tmp_path: Any,
+    filename: str,
+    content: str,
+) -> None:
+    ac_text = "MUST define a CameraProvider class"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"class\s+CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Complete language-specific class definition",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is True
+    assert formal.final_approved is True
+    assert formal.ac_results[0].final_verdict == "pass"
 
 
 @pytest.mark.asyncio

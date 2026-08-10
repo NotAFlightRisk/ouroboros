@@ -38,8 +38,54 @@ _INTERFACE_SUFFIXES = frozenset({".cs", ".java", ".kt", ".kts"})
 _STRUCT_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cs", ".h", ".hpp", ".mm", ".rs", ".swift"})
 _C_LIKE_FUNCTION_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cs", ".h", ".hpp", ".java", ".mm"})
 _CPP_SUFFIXES = frozenset({".cc", ".cpp", ".h", ".hpp", ".mm"})
-_BRACED_TYPE_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".h", ".hpp", ".mm"})
-_BRACED_FUNCTION_SUFFIXES = frozenset({".go", ".js", ".jsx", ".pl", ".rs", ".ts", ".tsx"})
+_BRACED_TYPE_SUFFIXES = {
+    "class": frozenset(
+        {
+            ".cc",
+            ".cpp",
+            ".cs",
+            ".h",
+            ".hpp",
+            ".java",
+            ".js",
+            ".jsx",
+            ".kt",
+            ".kts",
+            ".mm",
+            ".swift",
+            ".ts",
+            ".tsx",
+        }
+    ),
+    "interface": frozenset({".cs", ".go", ".java", ".kt", ".kts"}),
+    "struct": frozenset({".c", ".cc", ".cpp", ".cs", ".go", ".h", ".hpp", ".mm", ".rs", ".swift"}),
+    "trait": frozenset({".rs"}),
+}
+_BRACED_FUNCTION_SUFFIXES = frozenset(
+    {
+        ".bash",
+        ".c",
+        ".cc",
+        ".cpp",
+        ".cs",
+        ".go",
+        ".h",
+        ".hpp",
+        ".java",
+        ".js",
+        ".jsx",
+        ".kt",
+        ".kts",
+        ".mm",
+        ".pl",
+        ".rs",
+        ".sh",
+        ".swift",
+        ".ts",
+        ".tsx",
+        ".zsh",
+    }
+)
 _FUNCTION_KEYWORDS = {
     ".go": "func",
     ".js": "function",
@@ -114,6 +160,251 @@ _C_LIKE_DECLARATION_MODIFIERS = frozenset(
         "virtual",
     }
 )
+
+_DECLARATION_HEADER_LIMIT = 4096
+_NESTED_DECLARATION = re.compile(
+    r"\b(?:class|interface|struct|trait)\s+[A-Za-z_]\w*"
+    r"|\b(?:def|fn|func|function|sub)\s+[A-Za-z_]\w*"
+    r"|(?m:^[ \t]*(?!(?:extends|implements|where)\b)"
+    r"(?:[A-Za-z_]\w*[ \t]+){0,8}[A-Za-z_]\w*[ \t]*\()"
+)
+
+
+def _matching_delimiter(
+    source: str,
+    opening_position: int,
+    opening: str,
+    closing: str,
+) -> int | None:
+    """Return the matching delimiter in already-masked source, if complete."""
+    if opening_position < 0 or source[opening_position : opening_position + 1] != opening:
+        return None
+    depth = 0
+    for position in range(opening_position, len(source)):
+        character = source[position]
+        if character == opening:
+            depth += 1
+        elif character == closing:
+            depth -= 1
+            if depth == 0:
+                return position
+            if depth < 0:
+                return None
+    return None
+
+
+def _complete_braced_body(source: str, header_start: int) -> bool:
+    """Require one bounded declaration header and its complete braced body."""
+    search_end = min(len(source), header_start + _DECLARATION_HEADER_LIMIT)
+    body_start = source.find("{", header_start, search_end)
+    if body_start < 0:
+        return False
+    header = source[header_start:body_start]
+    if ";" in header or "}" in header or _NESTED_DECLARATION.search(header):
+        return False
+    if _matching_delimiter(source, body_start, "{", "}") is None:
+        return False
+    return all(
+        _all_delimiters_balanced(source, opening, closing)
+        for opening, closing in (("{", "}"), ("(", ")"), ("[", "]"))
+    )
+
+
+def _all_delimiters_balanced(source: str, opening: str, closing: str) -> bool:
+    """Fail a masked source closed when a basic delimiter is unbalanced."""
+    depth = 0
+    for character in source:
+        if character == opening:
+            depth += 1
+        elif character == closing:
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _complete_ruby_block(source: str, declaration_start: int) -> bool:
+    """Conservatively balance a Ruby class or method block through its ``end``."""
+    depth = 0
+    for token in re.finditer(
+        r"\b(?:begin|case|class|def|do|for|if|module|unless|until|while|end)\b",
+        source[declaration_start:],
+    ):
+        if token.group() == "end":
+            depth -= 1
+            if depth == 0:
+                return True
+            if depth < 0:
+                return False
+        else:
+            depth += 1
+    return False
+
+
+def _complete_lua_function(source: str, declaration_start: int) -> bool:
+    """Conservatively balance a Lua function and nested block terminators."""
+    stack: list[str] = []
+    for token in re.finditer(
+        r"\b(?:do|function|if|repeat|end|until)\b",
+        source[declaration_start:],
+    ):
+        word = token.group()
+        if word == "repeat":
+            stack.append("until")
+        elif word in {"do", "function", "if"}:
+            stack.append("end")
+        elif not stack or stack[-1] != word:
+            return False
+        else:
+            stack.pop()
+            if not stack:
+                return True
+    return False
+
+
+def _complete_haskell_class(source: str, target_end: int) -> bool:
+    """Require the bounded core of a Haskell typeclass declaration."""
+    tail = source[target_end : target_end + _DECLARATION_HEADER_LIMIT]
+    return (
+        re.match(
+            r"[ \t]+[a-z_]\w*(?:[ \t]+[a-z_]\w*)*[ \t]+where[ \t]*(?:\r?\n|$)",
+            tail,
+        )
+        is not None
+    )
+
+
+def _complete_parameter_list(source: str, target_end: int) -> int | None:
+    """Return the closing parenthesis for a bounded function header."""
+    search_end = min(len(source), target_end + _DECLARATION_HEADER_LIMIT)
+    parameters_start = source.find("(", target_end, search_end)
+    if parameters_start < 0:
+        return None
+    header = source[target_end:parameters_start]
+    if any(marker in header for marker in ";{}") or _NESTED_DECLARATION.search(header):
+        return None
+    return _matching_delimiter(source, parameters_start, "(", ")")
+
+
+def _complete_type_definition(
+    source: str,
+    original_source: str,
+    match: re.Match[str],
+    kind: str,
+    suffix: str,
+) -> bool:
+    """Require a complete definition for every admitted structural type grammar."""
+    if kind == "class" and suffix == ".py":
+        try:
+            ast.parse(original_source)
+        except (SyntaxError, ValueError):
+            return False
+        return True
+    if kind == "class" and suffix == ".rb":
+        return _complete_ruby_block(source, match.start())
+    if kind == "class" and suffix == ".hs":
+        return _complete_haskell_class(source, match.end("target"))
+    if kind in {"class", "interface"} and suffix in {".kt", ".kts"}:
+        line_end = source.find("\n", match.end("target"))
+        if line_end < 0:
+            line_end = len(source)
+        if not source[match.end("target") : line_end].strip():
+            return all(
+                _all_delimiters_balanced(source, opening, closing)
+                for opening, closing in (("{", "}"), ("(", ")"), ("[", "]"))
+            )
+    if suffix in _BRACED_TYPE_SUFFIXES.get(kind, ()):
+        return _complete_braced_body(source, match.end("target"))
+    return False
+
+
+def _complete_ruby_function(source: str, match: re.Match[str]) -> bool:
+    line_end = source.find("\n", match.end("target"))
+    if line_end < 0:
+        line_end = len(source)
+    parameters_start = source.find("(", match.end("target"), line_end)
+    if parameters_start >= 0:
+        parameters_end = _matching_delimiter(source, parameters_start, "(", ")")
+        if parameters_end is None or parameters_end > line_end:
+            return False
+    return _complete_ruby_block(source, match.start())
+
+
+def _complete_expression_function(source: str, match: re.Match[str]) -> bool:
+    """Validate an R function expression with either a body block or expression."""
+    parameters_end = _complete_parameter_list(source, match.end("target"))
+    if parameters_end is None:
+        return False
+    line_end = source.find("\n", parameters_end)
+    if line_end < 0:
+        line_end = len(source)
+    implementation = source[parameters_end + 1 : line_end]
+    body_offset = implementation.find("{")
+    if body_offset >= 0:
+        return (
+            _matching_delimiter(
+                source,
+                parameters_end + 1 + body_offset,
+                "{",
+                "}",
+            )
+            is not None
+        )
+    return bool(implementation.strip())
+
+
+def _complete_function_definition(
+    source: str,
+    original_source: str,
+    match: re.Match[str],
+    suffix: str,
+) -> bool:
+    """Require a complete implementation for every admitted function grammar."""
+    if suffix == ".py":
+        try:
+            ast.parse(original_source)
+        except (SyntaxError, ValueError):
+            return False
+        return True
+    if suffix == ".pyi":
+        return False
+    if suffix == ".rb":
+        return _complete_ruby_function(source, match)
+    if suffix == ".lua":
+        return _complete_parameter_list(
+            source, match.end("target")
+        ) is not None and _complete_lua_function(source, match.start())
+    if suffix == ".r":
+        return _complete_expression_function(source, match)
+    if suffix in {".kt", ".kts"}:
+        parameters_end = _complete_parameter_list(source, match.end("target"))
+        if parameters_end is None:
+            return False
+        line_end = source.find("\n", parameters_end)
+        if line_end < 0:
+            line_end = len(source)
+        implementation = source[parameters_end + 1 : line_end]
+        body_offset = implementation.find("{")
+        if body_offset >= 0:
+            return (
+                _matching_delimiter(
+                    source,
+                    parameters_end + 1 + body_offset,
+                    "{",
+                    "}",
+                )
+                is not None
+            )
+        expression_offset = implementation.find("=")
+        return expression_offset >= 0 and bool(implementation[expression_offset + 1 :].strip())
+    if suffix in _BRACED_FUNCTION_SUFFIXES:
+        if suffix in {".go", ".js", ".jsx", ".rs", ".swift", ".ts", ".tsx"}:
+            parameters_end = _complete_parameter_list(source, match.end("target"))
+            if parameters_end is None:
+                return False
+            return _complete_braced_body(source, parameters_end + 1)
+        return _complete_braced_body(source, match.end("target"))
+    return False
 
 
 def _inside_cpp_template_parameter_list(source: str, position: int) -> bool:
@@ -235,11 +526,6 @@ def _source_span_has_declaration_kind(
 ) -> bool:
     escaped = re.escape(target)
     suffix = os.path.splitext(file_path)[1].casefold()
-    if kind == "function" and suffix == ".py":
-        try:
-            ast.parse(original_source)
-        except (SyntaxError, ValueError):
-            return False
     for template in _declaration_patterns(file_path, kind):
         for match in re.finditer(template.format(target=escaped), source):
             if match.span("target") != target_span:
@@ -256,12 +542,6 @@ def _source_span_has_declaration_kind(
                 and _inside_cpp_template_parameter_list(source, match.start())
             ):
                 continue
-            if kind in {"class", "struct"} and suffix in _BRACED_TYPE_SUFFIXES:
-                declaration_tail = source[match.end("target") : match.end("target") + 512]
-                body_start = declaration_tail.find("{")
-                declaration_end = declaration_tail.find(";")
-                if body_start < 0 or (declaration_end >= 0 and declaration_end < body_start):
-                    continue
             target_start = match.start("target")
             declaration_boundary = max(source.rfind(marker, 0, target_start) for marker in ";{}")
             target_prefix = source[declaration_boundary + 1 : target_start]
@@ -286,12 +566,6 @@ def _source_span_has_declaration_kind(
                     original_source[parameters_start + 1 : parameters_end],
                 ):
                     continue
-            if kind == "function" and suffix in _BRACED_FUNCTION_SUFFIXES:
-                declaration_tail = source[match.end("target") : match.end("target") + 512]
-                body_start = declaration_tail.find("{")
-                declaration_end = declaration_tail.find(";")
-                if body_start < 0 or (declaration_end >= 0 and declaration_end < body_start):
-                    continue
             if kind == "function" and suffix in {".kt", ".kts", ".swift"}:
                 line_start = source.rfind("\n", 0, match.start()) + 1
                 declaration_prefix = source[line_start : match.start()]
@@ -300,22 +574,6 @@ def _source_span_has_declaration_kind(
                     declaration_prefix,
                 ):
                     continue
-                line_end = source.find("\n", match.end())
-                if line_end < 0:
-                    line_end = len(source)
-                declaration_tail = source[match.end("target") : line_end]
-                parameters_start = declaration_tail.find("(")
-                parameters_end = declaration_tail.rfind(")")
-                implementation_tail = (
-                    ""
-                    if parameters_start < 0 or parameters_end < parameters_start
-                    else declaration_tail[parameters_end + 1 :]
-                )
-                has_body = "{" in implementation_tail
-                if suffix in {".kt", ".kts"}:
-                    has_body = has_body or "=" in implementation_tail
-                if not has_body:
-                    continue
             if kind in {"class", "interface"} and suffix in {".kt", ".kts"}:
                 line_start = source.rfind("\n", 0, match.start()) + 1
                 if re.search(
@@ -323,9 +581,21 @@ def _source_span_has_declaration_kind(
                     source[line_start : match.start()],
                 ):
                     continue
-            if kind == "function" and suffix in {".lua", ".rb"}:
-                if re.search(r"\bend\b", source[match.end("target") :]) is None:
-                    continue
+            if kind in {"class", "interface", "struct", "trait"} and not _complete_type_definition(
+                source,
+                original_source,
+                match,
+                kind,
+                suffix,
+            ):
+                continue
+            if kind == "function" and not _complete_function_definition(
+                source,
+                original_source,
+                match,
+                suffix,
+            ):
+                continue
             return True
     return False
 

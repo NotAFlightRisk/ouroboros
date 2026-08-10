@@ -1515,6 +1515,78 @@ class TestSpecVerifier:
                 "function CameraProvider()\n",
                 r"function\s+CameraProvider",
             ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.py",
+                "class CameraProvider:\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "class CameraProvider\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.js",
+                "class CameraProvider\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.rb",
+                "class CameraProvider\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.cs",
+                "class CameraProvider\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.swift",
+                "class CameraProvider\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.ts",
+                "class CameraProvider\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.cpp",
+                "class CameraProvider {\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.hs",
+                "class CameraProvider a\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.go",
+                "func CameraProvider() {\n",
+                r"func\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.java",
+                "public void CameraProvider() {\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.rs",
+                "fn CameraProvider() {\n",
+                r"fn\s+CameraProvider",
+            ),
         ],
         ids=[
             "enum-class",
@@ -1543,6 +1615,18 @@ class TestSpecVerifier:
             "python-incomplete-function",
             "ruby-incomplete-function",
             "lua-incomplete-function",
+            "python-incomplete-class",
+            "java-incomplete-class",
+            "javascript-incomplete-class",
+            "ruby-incomplete-class",
+            "csharp-incomplete-class",
+            "swift-incomplete-class",
+            "typescript-incomplete-class",
+            "cpp-unclosed-class",
+            "haskell-incomplete-class",
+            "go-unclosed-function",
+            "java-unclosed-function",
+            "rust-unclosed-function",
         ],
     )
     def test_t2_declaration_kind_rejects_type_declarations(
@@ -1567,6 +1651,54 @@ class TestSpecVerifier:
 
         assert result.verified is False
         assert result.evidence_source == ""
+
+    @pytest.mark.parametrize(
+        ("filename", "content"),
+        [
+            ("provider.py", "class CameraProvider:\n    pass\n"),
+            ("Provider.java", "class CameraProvider {}\n"),
+            ("provider.js", "class CameraProvider {}\n"),
+            ("provider.rb", "class CameraProvider\nend\n"),
+            ("Provider.cs", "class CameraProvider {}\n"),
+            ("provider.kt", "class CameraProvider\n"),
+            ("provider.swift", "class CameraProvider {}\n"),
+            ("provider.ts", "class CameraProvider {}\n"),
+            ("provider.cpp", "class CameraProvider {};\n"),
+            ("Provider.hs", "class CameraProvider a where\n"),
+        ],
+        ids=[
+            "python",
+            "java",
+            "javascript",
+            "ruby",
+            "csharp",
+            "kotlin-bodyless",
+            "swift",
+            "typescript",
+            "cpp",
+            "haskell",
+        ],
+    )
+    def test_t2_complete_class_definitions_remain_valid(
+        self,
+        filename: str,
+        content: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+CameraProvider",
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is True
+        assert result.evidence_source == "file_content"
 
     def test_cpp_template_class_declaration_remains_valid(self) -> None:
         project = self._create_project(
