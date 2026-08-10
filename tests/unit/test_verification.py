@@ -1752,6 +1752,18 @@ class TestSpecVerifier:
             ),
             (
                 "MUST define a CameraProvider class",
+                "Provider.java",
+                "private class CameraProvider {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.cs",
+                "private class CameraProvider {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
                 "provider.js",
                 "if (true) class CameraProvider {}\n",
                 r"class\s+CameraProvider",
@@ -1895,6 +1907,8 @@ class TestSpecVerifier:
             "java-invalid-class-clause-order",
             "java-interface-implements-clause",
             "typescript-invalid-class-clause-order",
+            "java-illegal-top-level-modifier",
+            "csharp-illegal-top-level-modifier",
             "javascript-conditional-class-prefix",
             "java-multiline-conditional-class",
             "csharp-multiline-conditional-class",
@@ -2170,6 +2184,44 @@ class TestSpecVerifier:
 
         assert result.verified is False
         assert result.evidence_source == "trusted_project_scan"
+
+    @pytest.mark.parametrize(
+        ("ac_text", "content", "pattern"),
+        [
+            (
+                "MUST define a CameraProvider class",
+                "class CameraProvider { void start() {} }\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "class Provider {\n    public void CameraProvider(String value) {}\n}\n",
+                r"void\s+CameraProvider",
+            ),
+        ],
+        ids=["nonempty-class-body", "reference-typed-method-parameter"],
+    )
+    def test_unclassified_valid_declaration_shape_is_unverifiable(
+        self,
+        ac_text: str,
+        content: str,
+        pattern: str,
+    ) -> None:
+        project = self._create_project({"Provider.java": content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint="*.java",
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+        assert result.discrepancy is False
 
     def test_cpp_template_class_declaration_remains_valid(self) -> None:
         project = self._create_project(

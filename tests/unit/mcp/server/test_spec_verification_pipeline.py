@@ -14,7 +14,12 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.server.adapter import _evaluation_summary_from_spec_verification
 from ouroboros.providers.base import CompletionResponse
 from ouroboros.verification.extractor import AssertionExtractor
-from ouroboros.verification.models import EvidencePolarity, SpecAssertion, VerificationTier
+from ouroboros.verification.models import (
+    EvidencePolarity,
+    SpecAssertion,
+    VerificationOutcome,
+    VerificationTier,
+)
 from ouroboros.verification.verifier import SpecVerifier
 
 
@@ -1088,6 +1093,18 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         ),
         (
             "MUST define a CameraProvider class",
+            "Provider.java",
+            "private class CameraProvider {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.cs",
+            "private class CameraProvider {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
             "provider.js",
             "if (true) class CameraProvider {}\n",
             r"class\s+CameraProvider",
@@ -1223,6 +1240,8 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         "java-invalid-class-clause-order",
         "java-interface-implements-clause",
         "typescript-invalid-class-clause-order",
+        "java-illegal-top-level-modifier",
+        "csharp-illegal-top-level-modifier",
         "javascript-conditional-class-prefix",
         "java-multiline-conditional-class",
         "csharp-multiline-conditional-class",
@@ -1523,6 +1542,53 @@ async def test_forbidden_type_finds_bounded_nonempty_definition(
     assert verification.reports[0].verified_pass is False
     assert formal.final_approved is False
     assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "content", "pattern"),
+    [
+        (
+            "MUST define a CameraProvider class",
+            "class CameraProvider { void start() {} }\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "class Provider {\n    public void CameraProvider(String value) {}\n}\n",
+            r"void\s+CameraProvider",
+        ),
+    ],
+    ids=["nonempty-class-body", "reference-typed-method-parameter"],
+)
+async def test_unclassified_valid_declaration_shape_is_not_a_formal_discrepancy(
+    tmp_path: Any,
+    ac_text: str,
+    content: str,
+    pattern: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": pattern,
+                "expected_value": "CameraProvider",
+                "file_hint": "*.java",
+                "description": "Valid declaration outside the parser-free subset",
+            }
+        ],
+    )
+    (tmp_path / "Provider.java").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions, agent_results={0: True})
+    formal = _formal_verdict(ac_text, verification, agent_reported_pass=True)
+
+    assert verification.reports[0].results[0].outcome is VerificationOutcome.UNVERIFIABLE
+    assert formal.final_approved is False
+    assert formal.ac_results[0].ac_verdict_state == "not_evaluated"
+    assert formal.ac_results[0].rendered_verdict == "NOT_EVALUATED"
 
 
 @pytest.mark.asyncio

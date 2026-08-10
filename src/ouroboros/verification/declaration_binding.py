@@ -171,8 +171,6 @@ _TYPE_PREFIX_MODIFIERS = {
             "file",
             "internal",
             "partial",
-            "private",
-            "protected",
             "public",
             "sealed",
             "static",
@@ -186,11 +184,8 @@ _TYPE_PREFIX_MODIFIERS = {
             "abstract",
             "final",
             "non-sealed",
-            "private",
-            "protected",
             "public",
             "sealed",
-            "static",
             "strictfp",
         }
     ),
@@ -1290,6 +1285,20 @@ def matches_criterion(
     return kind is None or (
         source_has_declaration_kind(source, original_source, target, kind, file_path)
         or _source_has_declaration_shape(source, target, kind, file_path)
+    )
+
+
+def matches_any(
+    source: str,
+    original_source: str,
+    targets: tuple[str, ...],
+    assertion: SpecAssertion,
+    file_path: str,
+) -> bool:
+    """Whether any criterion target has a requested declaration shape."""
+    return any(
+        matches_criterion(source, original_source, target, assertion, file_path)
+        for target in targets
     )
 
 

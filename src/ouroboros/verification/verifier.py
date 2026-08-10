@@ -1858,7 +1858,6 @@ class SpecVerifier:
                 detail="No exact project-relative path matched the criterion target",
             )
 
-        # Second check: search file contents for class/function/interface
         content_pattern = self._safe_compile(
             assertion.pattern,
             file_hint=assertion.file_hint,
@@ -1871,7 +1870,7 @@ class SpecVerifier:
                 detail="Unusable regex pattern: invalid, too long, or able to match a file with no content",
             )
 
-        readable_files = 0
+        readable_files, unclassified = 0, False
         for file_path in files:
             if strict_qualified_paths and not any(
                 self._relative_file(file_path) == target for target in strict_qualified_paths
@@ -1913,7 +1912,6 @@ class SpecVerifier:
                 ),
                 None,
             )
-            # Preserve #1837: blank content binds through the exact filename.
             if bound is None and blank_subject_contract:
                 bound = self._find_bound_match(
                     content_pattern,
@@ -1938,6 +1936,9 @@ class SpecVerifier:
                         )
                     ),
                 )
+            unclassified |= decl.matches_any(
+                evidence_content, content, evidence_targets, assertion, file_path
+            )
 
         if files and readable_files == 0:
             return SpecVerificationResult(
@@ -1948,7 +1949,7 @@ class SpecVerifier:
 
         return SpecVerificationResult(
             assertion=assertion,
-            outcome=VerificationOutcome.DISCREPANCY,
+            outcome=VerificationOutcome("unverifiable" if unclassified else "discrepancy"),
             detail=f"No criterion-bound structure evidence found in {len(files)} files",
         )
 
@@ -1964,7 +1965,6 @@ class SpecVerifier:
         pattern = os.path.join(self.project_dir, file_hint)
         files = glob.glob(pattern, recursive=True)
 
-        # Canonicalize project_dir for path traversal check
         real_project = os.path.realpath(self.project_dir)
 
         # Filter: must be within project_dir + exclude noise directories
