@@ -1922,6 +1922,114 @@ async def test_invalid_language_tokens_cannot_reach_formal_pass(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("ac_text", "filename", "content", "pattern"),
+    [
+        (
+            "MUST define a CameraProvider function",
+            "provider.c",
+            "void CameraProvider(void) { return 1; }\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.cpp",
+            "void CameraProvider() { return 1; }\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.cpp",
+            "int CameraProvider() { return nullptr; }\n",
+            r"int\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.cpp",
+            "int *CameraProvider() { return 1; }\n",
+            r"CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
+            "class CameraProvider extends String {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
+            "class CameraProvider implements Object {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
+            "class CameraProvider extends Enum {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.js",
+            "class CameraProvider extends true {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider struct",
+            "provider.rs",
+            "struct CameraProvider { type: type, }\n",
+            r"struct\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider struct",
+            "provider.rs",
+            "struct CameraProvider { fn: fn, }\n",
+            r"struct\s+CameraProvider",
+        ),
+    ],
+    ids=[
+        "c-void-return-value",
+        "cpp-void-return-value",
+        "cpp-nonpointer-nullptr-return",
+        "cpp-pointer-nonzero-return",
+        "java-final-class-base",
+        "java-class-as-interface",
+        "java-special-nonextendable-base",
+        "javascript-primitive-base",
+        "rust-keyword-field-and-type",
+        "rust-function-keyword-field-and-type",
+    ],
+)
+async def test_intrinsically_invalid_declarations_cannot_reach_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    filename: str,
+    content: str,
+    pattern: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": pattern,
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Intrinsic declaration semantics must be valid",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("filename", "content"),
     [
         ("provider.py", "class CameraProvider:\n    pass\n"),

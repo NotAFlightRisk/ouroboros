@@ -177,6 +177,50 @@ _JAVA_KEYWORD = (
     r"this|throw|throws|to|transient|transitive|true|try|uses|var|void|volatile|"
     r"when|while|with|yield"
 )
+_JAVA_FINAL_CLASS_NAMES = frozenset(
+    {
+        "Boolean",
+        "Byte",
+        "Character",
+        "Class",
+        "Double",
+        "Float",
+        "Integer",
+        "Long",
+        "Math",
+        "Optional",
+        "Short",
+        "String",
+        "StringBuffer",
+        "StringBuilder",
+        "System",
+    }
+)
+_JAVA_NON_EXTENDABLE_CLASS_NAMES = _JAVA_FINAL_CLASS_NAMES.union({"Enum", "Record"})
+_JAVA_KNOWN_CLASS_NAMES = _JAVA_FINAL_CLASS_NAMES.union(
+    {"Enum", "Exception", "Number", "Object", "Record", "RuntimeException", "Thread", "Throwable"}
+)
+_JAVASCRIPT_NON_CONSTRUCTOR_BASES = frozenset(
+    {
+        "Atomics",
+        "BigInt",
+        "Infinity",
+        "JSON",
+        "Math",
+        "NaN",
+        "Reflect",
+        "Symbol",
+        "false",
+        "true",
+        "undefined",
+    }
+)
+_RUST_KEYWORD = (
+    r"_|abstract|as|async|await|become|box|break|const|continue|crate|do|dyn|else|"
+    r"enum|extern|false|final|fn|for|gen|if|impl|in|let|loop|macro|match|mod|move|"
+    r"mut|override|priv|pub|ref|return|safe|self|Self|static|struct|super|trait|true|"
+    r"try|type|typeof|union|unsafe|unsized|use|virtual|where|while|yield"
+)
 _CPP_EXPRESSION_WORDS = frozenset(
     {
         "and",
@@ -906,15 +950,29 @@ def _type_body_header_is_valid(
                 return False
             relationships[relationship.group("kind")] = type_names
         direct_supertypes = relationships.get("extends", ()) + relationships.get("implements", ())
+        extends_names = relationships.get("extends", ())
+        implements_names = relationships.get("implements", ())
+        if _JAVA_NON_EXTENDABLE_CLASS_NAMES.intersection(
+            name.rsplit(".", 1)[-1] for name in extends_names
+        ):
+            return False
+        if _JAVA_KNOWN_CLASS_NAMES.intersection(
+            name.rsplit(".", 1)[-1]
+            for name in (implements_names if kind == "class" else extends_names)
+        ):
+            return False
         return len(set(direct_supertypes)) == len(direct_supertypes)
     if suffix in {".js", ".jsx"}:
         match = re.fullmatch(
             r"\s*(?:extends\s+(?P<base>[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*))?\s*",
             header,
         )
-        return match is not None and (
-            match.group("base") is None
-            or match.group("base").rsplit(".", 1)[-1] != declaration_name
+        if match is None:
+            return False
+        base = match.group("base")
+        return base is None or (
+            base.rsplit(".", 1)[-1] != declaration_name
+            and ("." in base or base not in _JAVASCRIPT_NON_CONSTRUCTOR_BASES)
         )
     if suffix in {".ts", ".tsx"}:
         if kind != "class":
@@ -1108,7 +1166,12 @@ def _function_body_header_is_valid(header: str, suffix: str) -> bool:
     return False
 
 
-def _declaration_body_is_valid(body: str, declaration_kind: str, suffix: str) -> bool:
+def _declaration_body_is_valid(
+    body: str,
+    declaration_kind: str,
+    suffix: str,
+    function_prefix: str = "",
+) -> bool:
     """Admit only body syntax the verifier can prove without a language parser."""
     stripped = body.strip()
     if not stripped:
@@ -1125,23 +1188,43 @@ def _declaration_body_is_valid(body: str, declaration_kind: str, suffix: str) ->
                 is not None
             )
         if suffix == ".rs" and declaration_kind == "struct":
+            identifier = rf"(?!(?:{_RUST_KEYWORD})\b)[A-Za-z_]\w*"
             return (
                 re.fullmatch(
-                    r"[A-Za-z_]\w*\s*:\s*[A-Za-z_]\w*"
-                    r"(?:::[A-Za-z_]\w*)*\s*,",
+                    rf"{identifier}\s*:\s*{identifier}"
+                    rf"(?:::{identifier})*\s*,",
                     stripped,
                 )
                 is not None
             )
         return False
     if suffix in {".c", ".cc", ".cpp", ".h", ".hpp", ".mm"}:
-        return (
-            re.fullmatch(
-                r"return\s+(?:[A-Za-z_]\w*|[-+]?\d+|false|nullptr|true)\s*;",
-                stripped,
-            )
-            is not None
+        return_statement = re.fullmatch(
+            r"return\s+(?P<value>[A-Za-z_]\w*|[-+]?\d+|false|nullptr|true)\s*;",
+            stripped,
         )
+        return_words = re.findall(r"\b[A-Za-z_]\w*\b", function_prefix)
+        is_pointer = "*" in function_prefix
+        if (
+            return_statement is None
+            or not return_words
+            or (return_words[-1] == "void" and not is_pointer)
+        ):
+            return False
+        value = return_statement.group("value")
+        if is_pointer:
+            if value == "nullptr":
+                return suffix in _CPP_SUFFIXES
+            if re.fullmatch(r"[-+]?\d+", value):
+                return int(value) == 0
+            return value not in {"false", "true"}
+        if value == "nullptr":
+            return False
+        if re.fullmatch(r"[-+]?\d+|false|true", value):
+            return return_words[-1] == "auto" or return_words[
+                -1
+            ] in _CPP_BUILTIN_PARAMETER_TYPES - {"void"}
+        return True
     return False
 
 
@@ -1152,6 +1235,7 @@ def _complete_braced_body(
     suffix: str,
     declaration_name: str = "",
     declaration_modifiers: frozenset[str] = frozenset(),
+    function_prefix: str = "",
 ) -> bool:
     """Require one bounded declaration header and its complete braced body."""
     search_end = min(len(source), header_start + _DECLARATION_HEADER_LIMIT)
@@ -1179,6 +1263,7 @@ def _complete_braced_body(
         source[body_start + 1 : body_end],
         declaration_kind,
         suffix,
+        function_prefix,
     ):
         return False
     return all(
@@ -1506,6 +1591,11 @@ def _complete_function_definition(
             header_start,
             "function",
             suffix,
+            function_prefix=(
+                source[match.start() : match.start("target")]
+                if suffix in _C_LIKE_FUNCTION_SUFFIXES
+                else ""
+            ),
         )
     return False
 

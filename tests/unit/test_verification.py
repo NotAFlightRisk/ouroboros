@@ -2617,6 +2617,156 @@ class TestSpecVerifier:
         assert result.evidence_source == "file_content"
 
     @pytest.mark.parametrize(
+        ("ac_text", "filename", "content", "pattern"),
+        [
+            (
+                "MUST define a CameraProvider function",
+                "provider.c",
+                "void CameraProvider(void) { return 1; }\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.cpp",
+                "void CameraProvider() { return 1; }\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.cpp",
+                "int CameraProvider() { return nullptr; }\n",
+                r"int\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.cpp",
+                "int *CameraProvider() { return 1; }\n",
+                r"CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "class CameraProvider extends String {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "class CameraProvider implements Object {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "class CameraProvider extends Enum {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.js",
+                "class CameraProvider extends true {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider struct",
+                "provider.rs",
+                "struct CameraProvider { type: type, }\n",
+                r"struct\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider struct",
+                "provider.rs",
+                "struct CameraProvider { fn: fn, }\n",
+                r"struct\s+CameraProvider",
+            ),
+        ],
+        ids=[
+            "c-void-return-value",
+            "cpp-void-return-value",
+            "cpp-nonpointer-nullptr-return",
+            "cpp-pointer-nonzero-return",
+            "java-final-class-base",
+            "java-class-as-interface",
+            "java-special-nonextendable-base",
+            "javascript-primitive-base",
+            "rust-keyword-field-and-type",
+            "rust-function-keyword-field-and-type",
+        ],
+    )
+    def test_t2_intrinsically_invalid_declarations_are_rejected(
+        self,
+        ac_text: str,
+        filename: str,
+        content: str,
+        pattern: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is False
+        assert result.evidence_source == ""
+
+    @pytest.mark.parametrize(
+        ("filename", "content", "pattern"),
+        [
+            ("provider.cpp", "int *CameraProvider() { return nullptr; }\n", r"CameraProvider"),
+            ("provider.cpp", "void *CameraProvider() { return nullptr; }\n", r"CameraProvider"),
+            (
+                "Provider.java",
+                "class CameraProvider extends Object implements Runnable {}\n",
+                r"class\s+CameraProvider",
+            ),
+            ("provider.js", "class CameraProvider extends Base {}\n", r"class\s+CameraProvider"),
+            (
+                "provider.rs",
+                "struct CameraProvider { value: i32, }\n",
+                r"struct\s+CameraProvider",
+            ),
+        ],
+        ids=[
+            "cpp-pointer-nullptr",
+            "cpp-void-pointer-nullptr",
+            "java-known-valid-bases",
+            "javascript-base",
+            "rust-field",
+        ],
+    )
+    def test_t2_intrinsic_semantics_positive_controls_remain_valid(
+        self,
+        filename: str,
+        content: str,
+        pattern: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        kind = "struct" if filename.endswith(".rs") else "class"
+        if filename.endswith(".cpp"):
+            kind = "function"
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text=f"MUST define a CameraProvider {kind}",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is True
+        assert result.evidence_source == "file_content"
+
+    @pytest.mark.parametrize(
         ("filename", "content"),
         [
             ("provider.py", "class CameraProvider:\n    pass\n"),
