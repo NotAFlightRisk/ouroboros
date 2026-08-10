@@ -596,34 +596,22 @@ def _function_body_header_is_valid(header: str, suffix: str) -> bool:
     if suffix in {".bash", ".js", ".jsx", ".pl", ".r", ".sh", ".zsh"}:
         return not header.strip()
     if suffix in {".ts", ".tsx"}:
-        return re.fullmatch(r"\s*(?::\s*[^=;{}@]+)?\s*", header) is not None
+        return re.fullmatch(r"\s*(?::\s*void)?\s*", header) is not None
     if suffix == ".go":
-        return re.fullmatch(r"[\sA-Za-z0-9_.*\[\],()<>{}|~:/+-]*", header) is not None
+        return not header.strip()
     if suffix == ".rs":
-        return (
-            re.fullmatch(
-                r"\s*(?:->\s*[^=;{}@]+)?(?:\s+where\s+[^=;{}@]+)?\s*",
-                header,
-            )
-            is not None
-        )
+        return re.fullmatch(r"\s*(?:->\s*\(\s*\))?\s*", header) is not None
     if suffix == ".swift":
         return (
             re.fullmatch(
-                r"\s*(?:(?:async|rethrows|throws)\s+)*(?:->\s*[^=;{}@]+)?"
-                r"(?:\s+where\s+[^=;{}@]+)?\s*",
+                r"\s*(?:async\s+)?(?:(?:rethrows|throws)\s+)?"
+                r"(?:->\s*(?:Void|\(\s*\)))?\s*",
                 header,
             )
             is not None
         )
     if suffix in {".kt", ".kts"}:
-        return (
-            re.fullmatch(
-                r"\s*(?::\s*[^=;{}@]+)?(?:\s+where\s+[^=;{}@]+)?\s*",
-                header,
-            )
-            is not None
-        )
+        return re.fullmatch(r"\s*(?::\s*Unit)?\s*", header) is not None
     if suffix == ".java":
         return (
             re.fullmatch(
@@ -634,16 +622,9 @@ def _function_body_header_is_valid(header: str, suffix: str) -> bool:
             is not None
         )
     if suffix == ".cs":
-        return re.fullmatch(r"\s*(?:where\s+[^=;{}@]+)?\s*", header) is not None
+        return not header.strip()
     if suffix in {".c", ".cc", ".cpp", ".h", ".hpp", ".mm"}:
-        return (
-            re.fullmatch(
-                r"\s*(?:(?:const|constexpr|final|noexcept|override|volatile)\s*)*"
-                r"(?:->\s*[^=;{}@]+)?(?:requires\s+[^=;{}@]+)?\s*",
-                header,
-            )
-            is not None
-        )
+        return re.fullmatch(r"\s*(?:->\s*void)?\s*", header) is not None
     return False
 
 
