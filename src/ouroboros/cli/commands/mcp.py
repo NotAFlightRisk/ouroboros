@@ -353,7 +353,8 @@ def _ensure_shell_env(*, timeout: float = 10.0) -> None:
 
 
 # Process-tree wrappers that sit between the real MCP client and this server.
-# The shipped install path (`uvx --from ouroboros-ai ... ouroboros mcp serve`)
+# The shipped install path
+# (`uvx --isolated --python >=3.12 --from ouroboros-ai[mcp] ouroboros mcp serve`)
 # interposes a uv wrapper that blocks on waitpid() and survives the client's
 # death, so the *direct* parent is not the process whose lifetime matters.
 _WRAPPER_BASENAMES = frozenset(
@@ -1042,7 +1043,8 @@ def serve(
         _stderr_console.print(Text(f"MCP dependencies not installed: {e}", style="red"))
         _stderr_console.print(
             "[blue]Run MCP 2 in an isolated profile:\n"
-            "  uvx --python '>=3.12' --from 'ouroboros-ai\\[mcp]' ouroboros mcp serve "
+            "  uvx --isolated --python '>=3.12' --from 'ouroboros-ai\\[mcp]' "
+            "ouroboros mcp serve "
             "--runtime claude-cli\n"
             "or:\n"
             "  pipx run --spec 'ouroboros-ai\\[mcp]' ouroboros mcp serve "

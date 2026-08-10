@@ -213,6 +213,9 @@ def test_shipped_mcp_launchers_use_the_isolated_mcp_profile() -> None:
     codex_entry = tomllib.loads((root / ".codex" / "config.toml").read_text(encoding="utf-8"))[
         "mcp_servers"
     ]["ouroboros"]
+    codex_plugin_entry = json.loads((root / ".mcp.codex.json").read_text(encoding="utf-8"))[
+        "mcpServers"
+    ]["ouroboros"]
 
     claude_args = [
         *expected_args,
@@ -225,40 +228,51 @@ def test_shipped_mcp_launchers_use_the_isolated_mcp_profile() -> None:
         assert entry["command"] == "uvx"
         assert entry["args"] == claude_args
 
-    assert codex_entry["command"] == "uvx"
-    assert codex_entry["args"] == [
-        *expected_args,
-        "--runtime",
-        "codex",
-        "--llm-backend",
-        "codex",
-    ]
+    for entry in (codex_entry, codex_plugin_entry):
+        assert entry["command"] == "uvx"
+        assert entry["args"] == [
+            *expected_args,
+            "--runtime",
+            "codex",
+            "--llm-backend",
+            "codex",
+        ]
 
 
 def test_runtime_guides_require_isolated_mcp_host_launchers() -> None:
     """Host guides must match setup's fail-closed uvx/pipx contract."""
     root = Path(__file__).parent.parent.parent
     guides = {
-        runtime: (root / "docs" / "runtime-guides" / f"{runtime}.md").read_text(encoding="utf-8")
-        for runtime in ("kiro", "copilot", "hermes")
+        "kiro": tuple(
+            (root / "docs" / "runtime-guides" / filename).read_text(encoding="utf-8")
+            for filename in ("kiro.md", "kiro.ko.md")
+        ),
+        "copilot": tuple(
+            (root / "docs" / "runtime-guides" / filename).read_text(encoding="utf-8")
+            for filename in ("copilot.md", "copilot.ko.md")
+        ),
+        "hermes": ((root / "docs" / "runtime-guides" / "hermes.md").read_text(encoding="utf-8"),),
     }
 
     exact_launcher_contracts = {
         "kiro": (
             '"command": "uvx"',
-            '"args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]',
+            '"args": ["--isolated", "--python", ">=3.12", "--from", '
+            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]',
             '"command": "pipx"',
             '"args": ["run", "--spec", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]',
         ),
         "copilot": (
             '"command": "uvx"',
-            '"args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]',
+            '"args": ["--isolated", "--python", ">=3.12", "--from", '
+            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]',
             '"command": "pipx"',
             '"args": ["run", "--spec", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]',
         ),
         "hermes": (
             "command: uvx",
-            'args: [--from, "ouroboros-ai[mcp]", ouroboros, mcp, serve]',
+            'args: [--isolated, --python, ">=3.12", --from, "ouroboros-ai[mcp]", '
+            "ouroboros, mcp, serve]",
             "command: pipx",
             'args: [run, --spec, "ouroboros-ai[mcp]", ouroboros, mcp, serve]',
         ),
@@ -273,19 +287,20 @@ def test_runtime_guides_require_isolated_mcp_host_launchers() -> None:
         "command: python3",
     )
 
-    for runtime, content in guides.items():
-        assert "pipx install 'ouroboros-ai[mcp]'" in content
-        assert "uv tool install 'ouroboros-ai[mcp]'" in content
-        for snippet in exact_launcher_contracts[runtime]:
-            assert snippet in content
-        for forbidden in forbidden_host_commands:
-            assert forbidden not in content
+    for runtime, translations in guides.items():
+        for content in translations:
+            assert "pipx install 'ouroboros-ai[mcp]'" in content
+            assert "uv tool install 'ouroboros-ai[mcp]'" in content
+            for snippet in exact_launcher_contracts[runtime]:
+                assert snippet in content
+            for forbidden in forbidden_host_commands:
+                assert forbidden not in content
 
-    assert "from the venv that owns" not in guides["kiro"]
-    assert "`uv tool install` / `pip install`" not in guides["copilot"]
-    assert "plain `pip install`" in guides["copilot"]
-    assert "setup fails closed" in guides["copilot"]
-    assert "never falls back to a direct `ouroboros` binary" in guides["hermes"]
+    assert "from the venv that owns" not in guides["kiro"][0]
+    assert "`uv tool install` / `pip install`" not in guides["copilot"][0]
+    assert "plain `pip install`" in guides["copilot"][0]
+    assert "setup fails closed" in guides["copilot"][0]
+    assert "never falls back to a direct `ouroboros` binary" in guides["hermes"][0]
 
 
 @pytest.mark.parametrize(
@@ -400,6 +415,9 @@ def test_cli_reference_isolated_mcp_launchers_have_bootable_runtime_contract() -
         {
             "command": "uvx",
             "args": [
+                "--isolated",
+                "--python",
+                ">=3.12",
                 "--from",
                 "ouroboros-ai[mcp]",
                 "ouroboros",
