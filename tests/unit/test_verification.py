@@ -2675,12 +2675,24 @@ class TestSpecVerifier:
                 "provider.go",
                 "package provider\n\ntype CameraProvider struct {}\n",
             ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "package provider;\nimport java.util.List;\nclass CameraProvider {}\n",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.cs",
+                "using System.Text;\nnamespace Provider;\npublic class CameraProvider {}\n",
+            ),
         ],
         ids=[
             "c-canonical-builtin-return-type",
             "csharp-single-file-scoped-namespace",
             "go-packaged-function",
             "go-packaged-struct",
+            "java-package-and-import",
+            "csharp-namespace-and-using",
         ],
     )
     def test_t2_compilation_unit_positive_controls_remain_valid(
@@ -2733,6 +2745,41 @@ class TestSpecVerifier:
                 "provider.go",
                 "package first\npackage second\nfunc CameraProvider() {}\n",
             ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.go",
+                "package provider\nvar broken bool = 1\nfunc CameraProvider() {}\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.go",
+                "package provider\nvar broken = 1\nvar broken = 2\nfunc CameraProvider() {}\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.go",
+                "package provider\nconst broken string = 1\nfunc CameraProvider() {}\n",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "package class;\nclass CameraProvider {}\n",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "package provider;\nimport class.Value;\nclass CameraProvider {}\n",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.cs",
+                "namespace class;\npublic class CameraProvider {}\n",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.cs",
+                "using class.Value;\npublic class CameraProvider {}\n",
+            ),
         ],
         ids=[
             "csharp-protected-struct-method",
@@ -2740,6 +2787,13 @@ class TestSpecVerifier:
             "go-package-less-struct",
             "go-invalid-top-level-prefix",
             "go-duplicate-package-clause",
+            "go-incompatible-bool-declaration",
+            "go-duplicate-variable-declaration",
+            "go-incompatible-string-declaration",
+            "java-keyword-package",
+            "java-keyword-import",
+            "csharp-keyword-namespace",
+            "csharp-keyword-using",
         ],
     )
     def test_t2_invalid_compilation_unit_semantics_are_rejected(

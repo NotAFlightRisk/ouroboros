@@ -2013,6 +2013,41 @@ async def test_invalid_language_tokens_cannot_reach_formal_pass(
             "provider.go",
             "package first\npackage second\nfunc CameraProvider() {}\n",
         ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.go",
+            "package provider\nvar broken bool = 1\nfunc CameraProvider() {}\n",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.go",
+            "package provider\nvar broken = 1\nvar broken = 2\nfunc CameraProvider() {}\n",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.go",
+            "package provider\nconst broken string = 1\nfunc CameraProvider() {}\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
+            "package class;\nclass CameraProvider {}\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
+            "package provider;\nimport class.Value;\nclass CameraProvider {}\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.cs",
+            "namespace class;\npublic class CameraProvider {}\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.cs",
+            "using class.Value;\npublic class CameraProvider {}\n",
+        ),
     ],
     ids=[
         "csharp-protected-struct-method",
@@ -2020,6 +2055,13 @@ async def test_invalid_language_tokens_cannot_reach_formal_pass(
         "go-package-less-struct",
         "go-invalid-top-level-prefix",
         "go-duplicate-package-clause",
+        "go-incompatible-bool-declaration",
+        "go-duplicate-variable-declaration",
+        "go-incompatible-string-declaration",
+        "java-keyword-package",
+        "java-keyword-import",
+        "csharp-keyword-namespace",
+        "csharp-keyword-using",
     ],
 )
 async def test_invalid_compilation_unit_semantics_cannot_reach_formal_pass(
@@ -2053,26 +2095,46 @@ async def test_invalid_compilation_unit_semantics_cannot_reach_formal_pass(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("ac_text", "content"),
+    ("ac_text", "filename", "content"),
     [
         (
             "MUST define a CameraProvider function",
+            "provider.go",
             "package provider\n\nfunc CameraProvider() {}\n",
         ),
         (
             "MUST define a CameraProvider struct",
+            "provider.go",
             "package provider\n\ntype CameraProvider struct {}\n",
         ),
         (
             "MUST define a CameraProvider function",
+            "provider.go",
             "package provider\nvar decoy = `ends with \\`\nfunc CameraProvider() {}\n",
         ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
+            "package provider;\nimport java.util.List;\nclass CameraProvider {}\n",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.cs",
+            "using System.Text;\nnamespace Provider;\npublic class CameraProvider {}\n",
+        ),
     ],
-    ids=["go-packaged-function", "go-packaged-struct", "go-prior-raw-string-variable"],
+    ids=[
+        "go-packaged-function",
+        "go-packaged-struct",
+        "go-prior-raw-string-variable",
+        "java-package-and-import",
+        "csharp-namespace-and-using",
+    ],
 )
-async def test_go_compilation_unit_positive_controls_reach_formal_pass(
+async def test_compilation_unit_positive_controls_reach_formal_pass(
     tmp_path: Any,
     ac_text: str,
+    filename: str,
     content: str,
 ) -> None:
     assertions = await _extract(
@@ -2083,12 +2145,12 @@ async def test_go_compilation_unit_positive_controls_reach_formal_pass(
                 "tier": "t2_structural",
                 "pattern": r"CameraProvider",
                 "expected_value": "CameraProvider",
-                "file_hint": "provider.go",
-                "description": "Packaged Go declaration exists",
+                "file_hint": filename,
+                "description": "Valid compilation-unit declaration exists",
             }
         ],
     )
-    (tmp_path / "provider.go").write_text(content)
+    (tmp_path / filename).write_text(content)
 
     verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
     formal = _formal_verdict(ac_text, verification)

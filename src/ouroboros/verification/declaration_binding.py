@@ -146,6 +146,15 @@ _JAVA_KEYWORD = (
     r"this|throw|throws|to|transient|transitive|true|try|uses|var|void|volatile|"
     r"when|while|with|yield"
 )
+_CSHARP_RESERVED_KEYWORD = (
+    r"abstract|as|base|bool|break|byte|case|catch|char|checked|class|const|continue|"
+    r"decimal|default|delegate|do|double|else|enum|event|explicit|extern|false|finally|"
+    r"fixed|float|for|foreach|goto|if|implicit|in|int|interface|internal|is|lock|long|"
+    r"namespace|new|null|object|operator|out|override|params|private|protected|public|"
+    r"readonly|ref|return|sbyte|sealed|short|sizeof|stackalloc|static|string|struct|"
+    r"switch|this|throw|true|try|typeof|uint|ulong|unchecked|unsafe|ushort|using|virtual|"
+    r"void|volatile|while"
+)
 _JAVA_FINAL_CLASS_NAMES = frozenset(
     {
         "Boolean",
@@ -652,8 +661,9 @@ def _enclosing_braces(source: str, position: int) -> tuple[int, ...] | None:
 
 def _compilation_unit_prefix_is_valid(prefix: str, suffix: str) -> bool:
     """Admit only a provable top-level context before a declaration."""
-    qualified_name = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
     if suffix == ".java":
+        identifier = rf"(?!(?:{_JAVA_KEYWORD})\b)[A-Za-z_]\w*"
+        qualified_name = rf"{identifier}(?:\.{identifier})*"
         return (
             re.fullmatch(
                 rf"\s*(?:package\s+{qualified_name}\s*;\s*)?"
@@ -663,7 +673,9 @@ def _compilation_unit_prefix_is_valid(prefix: str, suffix: str) -> bool:
             is not None
         )
     if suffix == ".cs":
-        extern_alias = r"extern\s+alias\s+[A-Za-z_]\w*\s*;\s*"
+        identifier = rf"(?!(?:{_CSHARP_RESERVED_KEYWORD})\b)[A-Za-z_]\w*"
+        qualified_name = rf"{identifier}(?:\.{identifier})*"
+        extern_alias = rf"extern\s+alias\s+{identifier}\s*;\s*"
         global_using = rf"global\s+using\s+(?:static\s+)?{qualified_name}\s*;\s*"
         local_using = rf"using\s+(?:static\s+)?{qualified_name}\s*;\s*"
         outer_directives = rf"(?:{extern_alias})*(?:{global_using})*(?:{local_using})*"
@@ -694,13 +706,16 @@ def _go_compilation_unit_prefix_is_valid(prefix: str, original_prefix: str) -> b
     rune_literal = r"'(?:\\.|[^'\\\r\n])'"
     scalar_literal = r"(?:[-+]?\d+(?:\.\d+)?|false|nil|true)"
     declaration = (
-        rf"(?:var|const)[ \t]+{identifier}(?:[ \t]+{identifier})?[ \t]*=[ \t]*"
+        rf"(?:var|const)[ \t]+(?P<name>{identifier})[ \t]*=[ \t]*"
         rf"(?:{string_literal}|{rune_literal}|{scalar_literal})[ \t]*;?[ \t]*(?:\r?\n|$)"
     )
     grammar = rf"{package_clause}\s*(?:{declaration}\s*)*"
+    grammar_match = re.fullmatch(grammar, original_prefix)
+    names = tuple(match.group("name") for match in re.finditer(declaration, original_prefix))
     return (
         len(prefix) == len(original_prefix)
-        and re.fullmatch(grammar, original_prefix) is not None
+        and grammar_match is not None
+        and len(set(names)) == len(names)
         and re.fullmatch(
             rf"{package_clause}\s*(?:(?:var|const)[^\r\n]*(?:\r?\n|$)\s*)*",
             prefix,
