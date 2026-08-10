@@ -784,6 +784,12 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
             "struct Widget { explicit Widget(int); }; Widget CameraProvider(42);\n",
             r"Widget\s+CameraProvider",
         ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.cpp",
+            "Widget CameraProvider(foo.value);\n",
+            r"Widget\s+CameraProvider",
+        ),
     ],
     ids=[
         "enum-class",
@@ -794,6 +800,7 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         "csharp-multiline-delegate",
         "cpp-template-parameter",
         "cpp-direct-initializer",
+        "cpp-member-direct-initializer",
     ],
 )
 async def test_type_declaration_cannot_reach_formal_pass(
@@ -850,6 +857,79 @@ async def test_cpp_template_class_declaration_can_reach_formal_pass(tmp_path: An
     assert verification.reports[0].verified_pass is True
     assert formal.final_approved is True
     assert formal.ac_results[0].final_verdict == "pass"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "filename", "content", "pattern"),
+    [
+        (
+            "MUST define a CameraProvider class",
+            "provider.pyi",
+            "class CameraProvider: ...\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.d.ts",
+            "declare class CameraProvider {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.d.ts",
+            "declare function CameraProvider(): void;\n",
+            r"function\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.ts",
+            "declare class CameraProvider {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider interface",
+            "provider.ts",
+            "interface CameraProvider {}\n",
+            r"interface\s+CameraProvider",
+        ),
+    ],
+    ids=[
+        "python-stub",
+        "typescript-stub-class",
+        "typescript-stub-function",
+        "ambient",
+        "erased-interface",
+    ],
+)
+async def test_declaration_only_sources_cannot_reach_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    filename: str,
+    content: str,
+    pattern: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": pattern,
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Declaration-only source is not executable evidence",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
 
 
 @pytest.mark.asyncio

@@ -1411,6 +1411,12 @@ class TestSpecVerifier:
                 'Widget CameraProvider("value");\n',
                 r"Widget\s+CameraProvider",
             ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.cpp",
+                "Widget CameraProvider(foo.value);\n",
+                r"Widget\s+CameraProvider",
+            ),
         ],
         ids=[
             "enum-class",
@@ -1423,6 +1429,7 @@ class TestSpecVerifier:
             "cpp-numeric-direct-initializer",
             "cpp-identifier-direct-initializer",
             "cpp-string-direct-initializer",
+            "cpp-member-direct-initializer",
         ],
     )
     def test_t2_declaration_kind_rejects_type_declarations(
@@ -1466,6 +1473,71 @@ class TestSpecVerifier:
 
         assert result.verified is True
         assert result.evidence_source == "file_content"
+
+    @pytest.mark.parametrize(
+        ("ac_text", "filename", "content", "pattern"),
+        [
+            (
+                "MUST define a CameraProvider class",
+                "provider.pyi",
+                "class CameraProvider: ...\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.d.ts",
+                "declare class CameraProvider {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.d.ts",
+                "declare function CameraProvider(): void;\n",
+                r"function\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.ts",
+                "declare class CameraProvider {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider interface",
+                "provider.ts",
+                "interface CameraProvider {}\n",
+                r"interface\s+CameraProvider",
+            ),
+        ],
+        ids=[
+            "python-stub",
+            "typescript-stub-class",
+            "typescript-stub-function",
+            "ambient",
+            "erased-interface",
+        ],
+    )
+    def test_declaration_only_sources_fail_closed(
+        self,
+        ac_text: str,
+        filename: str,
+        content: str,
+        pattern: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is False
+        assert result.evidence_source == ""
 
     @pytest.mark.parametrize(
         "filename",

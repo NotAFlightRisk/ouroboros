@@ -33,7 +33,7 @@ _CLASS_SUFFIXES = frozenset(
         ".tsx",
     }
 )
-_INTERFACE_SUFFIXES = frozenset({".cs", ".java", ".kt", ".kts", ".ts", ".tsx"})
+_INTERFACE_SUFFIXES = frozenset({".cs", ".java", ".kt", ".kts"})
 _STRUCT_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cs", ".h", ".hpp", ".mm", ".rs", ".swift"})
 _C_LIKE_FUNCTION_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cs", ".h", ".hpp", ".java", ".mm"})
 _CPP_SUFFIXES = frozenset({".cc", ".cpp", ".h", ".hpp", ".mm"})
@@ -57,7 +57,7 @@ _SHELL_SUFFIXES = frozenset({".bash", ".sh", ".zsh"})
 _C_LIKE_FUNCTION = (
     r"(?m)^[ \t]*(?!(?:return|if|for|while|switch|catch|throw|new|sizeof)\b)"
     r"(?:[A-Za-z_]\w*\s+){{1,8}}[*&\s]*(?P<target>{target})[ \t]*"
-    r"\([^;{{}}\r\n]*\)[ \t]*(?:throws\s+[^;{{\r\n]+)?(?:\{{|;)"
+    r"\([^;{{}}\r\n]*\)[ \t]*(?:throws\s+[^;{{\r\n]+)?\{{"
 )
 
 _CPP_BUILTIN_PARAMETER_TYPES = frozenset(
@@ -76,6 +76,21 @@ _CPP_BUILTIN_PARAMETER_TYPES = frozenset(
         "unsigned",
         "void",
         "wchar_t",
+    }
+)
+_CPP_EXPRESSION_WORDS = frozenset(
+    {
+        "and",
+        "and_eq",
+        "bitand",
+        "bitor",
+        "compl",
+        "not",
+        "not_eq",
+        "or",
+        "or_eq",
+        "xor",
+        "xor_eq",
     }
 )
 
@@ -127,17 +142,16 @@ def _cpp_parameters_are_declarations(masked: str, original: str) -> bool:
         if re.search(r"[+/%!?|^~]", declaration) or "&&" in declaration:
             return False
         identifiers = re.findall(r"\b[A-Za-z_]\w*\b", declaration)
+        if any(identifier in _CPP_EXPRESSION_WORDS for identifier in identifiers):
+            return False
         if any(identifier in _CPP_BUILTIN_PARAMETER_TYPES for identifier in identifiers):
             continue
-        if (
-            "::" in declaration
-            and len(identifiers) == 2
-            and re.search(r"[*&]+\s*$", declaration) is None
-        ):
+        if re.search(r"(?:->|::)|[.*&<>:-]", declaration):
             return False
-        if len(identifiers) >= 2:
-            continue
-        if len(identifiers) == 1 and re.search(r"\b[A-Za-z_]\w*\s*[*&]+\s*$", declaration):
+        if len(identifiers) >= 2 and re.fullmatch(
+            r"[A-Za-z_]\w*(?:\s+[A-Za-z_]\w*)+",
+            declaration,
+        ):
             continue
         return False
     return True

@@ -681,7 +681,10 @@ def mask_non_executable_source(
     an explicit observable-output contract; arbitrary prose is not source.
     """
     suffix = os.path.splitext(file_path)[1].casefold()
-    if suffix in {".py", ".pyi"}:
+    basename = os.path.basename(file_path).casefold()
+    if suffix == ".pyi" or basename.endswith(".d.ts"):
+        return None
+    if suffix == ".py":
         ranges = _python_noncode_ranges(text)
         return None if ranges is None else _mask_ranges(text, ranges)
     if suffix in _C_STYLE_SUFFIXES:
@@ -696,6 +699,8 @@ def mask_non_executable_source(
         if ranges is None:
             return None
         masked = _mask_ranges(text, ranges)
+        if suffix in {".ts", ".tsx"} and re.search(r"\bdeclare\b", masked):
+            return None
         # JSX text and attribute expression boundaries require a JSX parser.
         if suffix in {".jsx", ".tsx"} and re.search(r"<(?:[A-Za-z]|\s*>)", masked):
             return None

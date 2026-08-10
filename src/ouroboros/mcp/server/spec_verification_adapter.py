@@ -19,7 +19,7 @@ def _trusted_ac_content_sources(
     mechanical: Any,
     seed_criteria: tuple[Any, ...],
 ) -> dict[int, tuple[tuple[str, str], ...]]:
-    """Collect every caller-owned criterion label for each report index."""
+    """Collect AC-level identities, using derived task text only as fallback."""
     sources: dict[int, list[tuple[str, str]]] = {}
 
     def add(ac_index: int, source: str, content: Any) -> None:
@@ -33,11 +33,13 @@ def _trusted_ac_content_sources(
             add(ac_index, "seed", getattr(criterion, "description", None))
     for result in mechanical.ac_results:
         add(result.ac_index, "mechanical AC", result.ac_content)
+    authoritative_indices = set(sources)
     for task in mechanical.task_results:
         source_ac_index = task.source_ac_index
         if source_ac_index is None:
             source_ac_index = task.task_index
-        add(source_ac_index, "mechanical task", task.task_content)
+        if source_ac_index not in authoritative_indices:
+            add(source_ac_index, "mechanical task", task.task_content)
     return {ac_index: tuple(values) for ac_index, values in sources.items()}
 
 

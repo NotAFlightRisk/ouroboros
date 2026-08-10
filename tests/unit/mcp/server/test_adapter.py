@@ -1829,6 +1829,65 @@ Parallel Execution Verification Report
         assert "seed" in summary.ac_results[0].evidence
         assert summary.run_verdict == "FAIL"
 
+    def test_seedless_adapter_prefers_ac_identity_over_derived_task_text(self) -> None:
+        """A decomposed task label cannot override an authoritative ACResult label."""
+        ac_text = "MUST define a CameraProvider class"
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+CameraProvider",
+            expected_value="CameraProvider",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text=ac_text,
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            verified=True,
+                            detail="Found class CameraProvider",
+                        ),
+                    ),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content=ac_text,
+                    passed=True,
+                    score=1.0,
+                    evidence="Agent reported PASS",
+                ),
+            ),
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Implement provider module",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.final_approved is True
+        assert summary.ac_results[0].ac_content == ac_text
+        assert summary.ac_results[0].final_verdict == "pass"
+
     def test_stale_result_identity_cannot_hide_behind_a_trusted_report_label(self) -> None:
         """Every promoted result must share the report's exact index and AC text."""
         trusted_text = "MUST define a CameraProvider interface"
