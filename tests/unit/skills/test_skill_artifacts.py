@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 
@@ -127,6 +130,123 @@ _CLAUDE_RESERVED_SKILL_NAMES = frozenset(
     }
 )
 _SKILL_ALIAS_FIELDS = ("alias", "aliases", "command_aliases", "skill_aliases", "commands")
+_PYTHON_SKILL_PATHS = tuple(
+    Path(root) / skill / "SKILL.md"
+    for root in ("skills", ".claude-plugin/skills")
+    for skill in ("welcome", "setup", "seed")
+)
+_PYTHON_RESOLVER_START = "<!-- ouroboros-python-resolver:start -->"
+_PYTHON_RESOLVER_END = "<!-- ouroboros-python-resolver:end -->"
+_PYTHON_PATH_SHAPING_ENV = (
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONPLATLIBDIR",
+    "PYTHONEXECUTABLE",
+    "__PYVENV_LAUNCHER__",
+)
+
+
+def _python_resolver_code(skill_path: Path | None = None) -> str:
+    """Extract the executable resolver contract from one packaged skill."""
+    if skill_path is None:
+        skill_path = Path(__file__).resolve().parents[3] / _PYTHON_SKILL_PATHS[0]
+    contents = skill_path.read_text(encoding="utf-8")
+    start = contents.index(_PYTHON_RESOLVER_START) + len(_PYTHON_RESOLVER_START)
+    end = contents.index(_PYTHON_RESOLVER_END, start)
+    fenced = contents[start:end].strip()
+    assert fenced.startswith("```bash\n") and fenced.endswith("\n```")
+    return fenced.removeprefix("```bash\n").removesuffix("\n```")
+
+
+def _bash_block_containing(skill_path: Path, needle: str) -> str:
+    contents = skill_path.read_text(encoding="utf-8")
+    needle_at = contents.index(needle)
+    start = contents.rfind("```bash\n", 0, needle_at)
+    assert start >= 0
+    start += len("```bash\n")
+    closing_fence = re.search(r"\n[ \t]*```(?:\n|$)", contents[needle_at:])
+    assert closing_fence is not None
+    end = needle_at + closing_fence.start()
+    return contents[start:end]
+
+
+def _write_executable(path: Path, contents: str) -> None:
+    path.write_text(contents, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _install_direct_python(path: Path, label: str) -> None:
+    _write_executable(
+        path,
+        f'#!/bin/sh\nprintf \'%s\\n\' \'{label}\' >> "$CALL_LOG"\nexec "$REAL_PYTHON" "$@"\n',
+    )
+
+
+def _install_old_python(path: Path, label: str) -> None:
+    _write_executable(
+        path,
+        f"#!/bin/sh\nprintf '%s\\n' '{label}' >> \"$CALL_LOG\"\nexit 1\n",
+    )
+
+
+def _install_uv_fallback(path: Path) -> None:
+    _write_executable(
+        path,
+        """#!/bin/sh
+printf '%s\n' "$@" >> "$UV_LOG"
+[ "$1" = run ] || exit 91
+[ "$2" = --no-project ] || exit 92
+[ "$3" = --quiet ] || exit 93
+[ "$4" = --python ] || exit 94
+[ "$5" = '>=3.12' ] || exit 95
+[ "$6" = python ] || exit 96
+shift 6
+exec "$REAL_PYTHON" "$@"
+""",
+    )
+
+
+def _run_resolver(
+    script: str,
+    *,
+    path: Path,
+    extra_env: dict[str, str] | None = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    env = {
+        "HOME": str(path.parent),
+        "PATH": str(path),
+        "REAL_PYTHON": sys.executable,
+        "CALL_LOG": str(path.parent / "python-calls.log"),
+        "UV_LOG": str(path.parent / "uv-calls.log"),
+    }
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        ["/bin/bash", "-c", f"{_python_resolver_code()}\n{script}"],
+        check=check,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def _poisoned_python_env(tmp_path: Path) -> dict[str, str]:
+    """Return inherited values that each make a real CPython child unusable."""
+    stale_stdlib = tmp_path / "python3.11-stdlib"
+    encodings = stale_stdlib / "encodings"
+    encodings.mkdir(parents=True, exist_ok=True)
+    (encodings / "__init__.py").write_text(
+        "raise RuntimeError('stale Python 3.11 stdlib loaded')\n",
+        encoding="utf-8",
+    )
+    return {
+        "PYTHONHOME": str(tmp_path / "missing-python-home"),
+        "PYTHONPATH": str(stale_stdlib),
+        "PYTHONPLATLIBDIR": "lib64",
+        "PYTHONEXECUTABLE": str(tmp_path / "poison-python-executable"),
+        "__PYVENV_LAUNCHER__": str(tmp_path / "poison-venv-launcher"),
+    }
 
 
 def _skill_frontmatter(skill_path: Path) -> dict[str, object]:
@@ -328,17 +448,24 @@ def _run_setup_gate(
     extra_env: dict[str, str] | None = None,
 ) -> str:
     """Run the packaged setup gate exactly as a host executes its Markdown snippet."""
+    python_bin = home / ".test-python-bin"
+    python_bin.mkdir(exist_ok=True)
+    python3 = python_bin / "python3"
+    if not python3.exists():
+        python3.symlink_to(sys.executable)
     env = {
         "HOME": str(home),
-        "OUROBOROS_WELCOME_PYTHON": sys.executable,
+        "PATH": str(python_bin),
         "OUROBOROS_CODEX_APP_CLI_PATH": str(home / "missing-app-codex"),
     }
     if codex_home is not None:
         env["CODEX_HOME"] = str(codex_home)
     if extra_env is not None:
+        if "PATH" in extra_env:
+            extra_env = {**extra_env, "PATH": f"{python_bin}:{extra_env['PATH']}"}
         env.update(extra_env)
     return subprocess.run(
-        ["/bin/bash", "-c", script],
+        ["/bin/bash", "-c", f"{_python_resolver_code()}\n{script}"],
         check=True,
         capture_output=True,
         text=True,
@@ -601,14 +728,320 @@ def test_codex_setup_gate_rejects_blank_mcp_endpoint_values(tmp_path: Path) -> N
         assert _run_setup_gate(gate, home=tmp_path, codex_home=codex_home) == "CODEX_SETUP_REQUIRED"
 
 
-def test_codex_welcome_python_fallback_uses_uv_no_project() -> None:
+def test_python_resolver_contract_is_identical_in_all_six_packaged_skill_sources() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
+    contracts = {
+        relative_path: _python_resolver_code(repo_root / relative_path)
+        for relative_path in _PYTHON_SKILL_PATHS
+    }
 
-    assert 'OUROBOROS_WELCOME_PYTHON="uv run --no-project --quiet python"' in skill
-    assert 'OUROBOROS_WELCOME_PYTHON="uv run --quiet python"' not in skill
-    assert "\nPY\n```" in skill
-    assert "\n  PY\n```" not in skill
+    assert len(set(contracts.values())) == 1, contracts
+    contract = next(iter(contracts.values()))
+    assert "sys.version_info < (3, 12)" in contract
+    assert 'command python3 "$@"' in contract
+    assert 'command python "$@"' in contract
+    assert "uv run --no-project --quiet --python '>=3.12' python \"$@\"" in contract
+    clean_env = "unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__"
+    assert contract.count(clean_env) == 5
+    assert f"({clean_env}; command python3 -c" in contract
+    assert f'({clean_env}; command python3 "$@")' in contract
+    assert f"({clean_env}; command python -c" in contract
+    assert f'({clean_env}; command python "$@")' in contract
+    assert f"({clean_env}; command uv run" in contract
+    assert "PYTHONUSERBASE" not in contract
+
+    for relative_path in _PYTHON_SKILL_PATHS:
+        contents = (repo_root / relative_path).read_text(encoding="utf-8")
+        without_contract = contents.replace(
+            f"{_PYTHON_RESOLVER_START}\n```bash\n{contract}\n```\n{_PYTHON_RESOLVER_END}",
+            "",
+        )
+        assert "OUROBOROS_WELCOME_PYTHON" not in contents
+        assert not re.search(r"(?m)^\s*(?:if\s+)?python3(?:\s|$)", without_contract), (
+            f"{relative_path}: direct python3 invocation bypasses the shared resolver"
+        )
+
+    plugin_manifest = json.loads((repo_root / ".claude-plugin" / "plugin.json").read_text())
+    assert plugin_manifest["skills"] == "./skills/"
+    pyproject = (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+    assert '"skills" = "ouroboros/skills"' in pyproject
+
+
+def test_python_resolver_prefers_compatible_python3_and_preserves_arguments_and_stdin(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _install_direct_python(bin_dir / "python3", "python3")
+    _install_direct_python(bin_dir / "python", "python")
+    _install_uv_fallback(bin_dir / "uv")
+
+    result = _run_resolver(
+        """ouroboros_python -c 'import json, sys; print(json.dumps({"argv": sys.argv[1:], "stdin": sys.stdin.read()}))' 'argument with spaces' 'quote"value' '*' <<'DATA'
+stdin payload
+DATA
+""",
+        path=bin_dir,
+    )
+
+    assert json.loads(result.stdout) == {
+        "argv": ["argument with spaces", 'quote"value', "*"],
+        "stdin": "stdin payload\n",
+    }
+    assert (tmp_path / "python-calls.log").read_text().splitlines() == ["python3", "python3"]
+    assert not (tmp_path / "uv-calls.log").exists()
+
+
+@pytest.mark.parametrize(
+    ("selected_runtime", "expected_calls"),
+    [
+        ("python3", ["python3", "python3"]),
+        ("python", ["old-python3", "python", "python"]),
+        ("uv", ["old-python3", "old-python"]),
+    ],
+)
+def test_python_resolver_sanitizes_path_shaping_env_for_every_runtime_path(
+    tmp_path: Path,
+    selected_runtime: str,
+    expected_calls: list[str],
+) -> None:
+    """Probes and children are isolated while the caller keeps its environment."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    if selected_runtime == "python3":
+        _install_direct_python(bin_dir / "python3", "python3")
+    elif selected_runtime == "python":
+        _install_old_python(bin_dir / "python3", "old-python3")
+        _install_direct_python(bin_dir / "python", "python")
+    else:
+        _install_old_python(bin_dir / "python3", "old-python3")
+        _install_old_python(bin_dir / "python", "old-python")
+        _install_uv_fallback(bin_dir / "uv")
+
+    poisoned_env = _poisoned_python_env(tmp_path)
+
+    result = _run_resolver(
+        """ouroboros_python -c 'import json, os; print(json.dumps({key: os.environ.get(key) for key in ("PYTHONHOME", "PYTHONPATH", "PYTHONPLATLIBDIR", "PYTHONEXECUTABLE", "__PYVENV_LAUNCHER__")}))'
+printf 'caller-pythonhome=%s\n' "$PYTHONHOME"
+printf 'caller-pythonpath=%s\n' "$PYTHONPATH"
+printf 'caller-pythonplatlibdir=%s\n' "$PYTHONPLATLIBDIR"
+printf 'caller-pythonexecutable=%s\n' "$PYTHONEXECUTABLE"
+printf 'caller-pyvenv-launcher=%s\n' "$__PYVENV_LAUNCHER__"
+""",
+        path=bin_dir,
+        extra_env=poisoned_env,
+    )
+
+    output_lines = result.stdout.splitlines()
+    assert json.loads(output_lines[0]) == dict.fromkeys(_PYTHON_PATH_SHAPING_ENV)
+    assert output_lines[1:] == [
+        f"caller-pythonhome={poisoned_env['PYTHONHOME']}",
+        f"caller-pythonpath={poisoned_env['PYTHONPATH']}",
+        f"caller-pythonplatlibdir={poisoned_env['PYTHONPLATLIBDIR']}",
+        f"caller-pythonexecutable={poisoned_env['PYTHONEXECUTABLE']}",
+        f"caller-pyvenv-launcher={poisoned_env['__PYVENV_LAUNCHER__']}",
+    ]
+    assert (tmp_path / "python-calls.log").read_text().splitlines() == expected_calls
+    if selected_runtime == "uv":
+        assert "--python\n>=3.12\npython" in (tmp_path / "uv-calls.log").read_text()
+    else:
+        assert not (tmp_path / "uv-calls.log").exists()
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONPLATLIBDIR",
+        pytest.param(
+            "PYTHONEXECUTABLE",
+            marks=pytest.mark.skipif(sys.platform != "darwin", reason="macOS CPython variable"),
+        ),
+        pytest.param(
+            "__PYVENV_LAUNCHER__",
+            marks=pytest.mark.skipif(sys.platform != "darwin", reason="macOS CPython variable"),
+        ),
+    ],
+)
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv not available")
+def test_path_shaping_poison_really_breaks_an_unsanitized_python(
+    tmp_path: Path,
+    variable: str,
+) -> None:
+    """Guard the regression matrix against harmless placeholder poison values."""
+    poison = _poisoned_python_env(tmp_path)
+    env = os.environ.copy()
+    for key in _PYTHON_PATH_SHAPING_ENV:
+        env.pop(key, None)
+    env[variable] = poison[variable]
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "--no-project",
+            "--quiet",
+            "--python",
+            ">=3.12",
+            "python",
+            "-c",
+            "print('unexpected-success')",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0, f"{variable} poison no longer exercises CPython startup"
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv not available")
+def test_python_resolver_real_uv_path_survives_all_path_shaping_poison(tmp_path: Path) -> None:
+    """Exercise uv's managed interpreter, not the lightweight test double."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    uv = shutil.which("uv")
+    assert uv is not None
+    (bin_dir / "uv").symlink_to(uv)
+
+    result = _run_resolver(
+        """ouroboros_python -c 'import json, os, sys; print(json.dumps({"env": {key: os.environ.get(key) for key in ("PYTHONHOME", "PYTHONPATH", "PYTHONPLATLIBDIR", "PYTHONEXECUTABLE", "__PYVENV_LAUNCHER__")}, "version": list(sys.version_info[:2])}))'""",
+        path=bin_dir,
+        extra_env=_poisoned_python_env(tmp_path),
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["env"] == dict.fromkeys(_PYTHON_PATH_SHAPING_ENV)
+    assert tuple(payload["version"]) >= (3, 12)
+
+
+def test_python_resolver_uses_compatible_python_when_python3_is_old(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _install_old_python(bin_dir / "python3", "old-python3")
+    _install_direct_python(bin_dir / "python", "python")
+    _install_uv_fallback(bin_dir / "uv")
+
+    result = _run_resolver(
+        "ouroboros_python -c 'import sys; print(sys.version_info[:2])'",
+        path=bin_dir,
+        extra_env={"PYTHONHOME": str(tmp_path / "missing-python-home")},
+    )
+
+    assert result.stdout.strip().startswith("(3, ")
+    assert (tmp_path / "python-calls.log").read_text().splitlines() == [
+        "old-python3",
+        "python",
+        "python",
+    ]
+    assert not (tmp_path / "uv-calls.log").exists()
+
+
+def test_python_resolver_uses_uv_on_a_host_without_global_python(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _install_uv_fallback(bin_dir / "uv")
+
+    result = _run_resolver(
+        """ouroboros_python - 'space value' <<'PY'
+import json, os, sys
+print(json.dumps({"argv": sys.argv[1:], "pythonhome": os.environ.get("PYTHONHOME"), "value": "from-heredoc"}))
+PY
+""",
+        path=bin_dir,
+        extra_env={"PYTHONHOME": str(tmp_path / "missing-python-home")},
+    )
+
+    assert json.loads(result.stdout) == {
+        "argv": ["space value"],
+        "pythonhome": None,
+        "value": "from-heredoc",
+    }
+    assert (tmp_path / "uv-calls.log").read_text().splitlines() == [
+        "run",
+        "--no-project",
+        "--quiet",
+        "--python",
+        ">=3.12",
+        "python",
+        "-",
+        "space value",
+    ]
+
+
+def test_python_resolver_rejects_old_global_interpreters_before_uv_fallback(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _install_old_python(bin_dir / "python3", "old-python3")
+    _install_old_python(bin_dir / "python", "old-python")
+    _install_uv_fallback(bin_dir / "uv")
+
+    result = _run_resolver(
+        "ouroboros_python -c 'import os; print(os.environ.get(\"PYTHONHOME\") is None)'",
+        path=bin_dir,
+        extra_env={"PYTHONHOME": str(tmp_path / "missing-python-home")},
+    )
+
+    assert result.stdout.strip() == "True"
+    assert (tmp_path / "python-calls.log").read_text().splitlines() == [
+        "old-python3",
+        "old-python",
+    ]
+    assert "--python\n>=3.12\npython" in (tmp_path / "uv-calls.log").read_text()
+
+
+def test_python_resolver_fails_cleanly_without_python_or_uv(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    result = _run_resolver(
+        "ouroboros_python -c 'print(1)'",
+        path=bin_dir,
+        extra_env={"PYTHONHOME": str(tmp_path / "missing-python-home")},
+        check=False,
+    )
+
+    assert result.returncode == 127
+    assert result.stdout == ""
+    assert "require Python >= 3.12 or uv on PATH" in result.stderr
+    assert "Fatal Python error" not in result.stderr
+
+
+@pytest.mark.parametrize("relative_path", _PYTHON_SKILL_PATHS)
+def test_first_run_preference_write_works_through_uv_only_path(
+    tmp_path: Path, relative_path: Path
+) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    skill_path = repo_root / relative_path
+    needle = (
+        "    'welcomeShown': True,"
+        if relative_path.parts[-2] == "welcome"
+        else "prefs['star_asked'] = True"
+    )
+    snippet = _bash_block_containing(skill_path, needle)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _install_uv_fallback(bin_dir / "uv")
+
+    _run_resolver(
+        snippet,
+        path=bin_dir,
+        extra_env={
+            "HOME": str(tmp_path),
+            "PYTHONHOME": str(tmp_path / "missing-python-home"),
+        },
+    )
+
+    prefs = json.loads((tmp_path / ".ouroboros" / "prefs.json").read_text(encoding="utf-8"))
+    if relative_path.parts[-2] == "welcome":
+        assert prefs["welcomeShown"] is True
+        assert prefs["welcomeCompleted"]
+        assert prefs["welcomeVersion"]
+    else:
+        assert prefs["star_asked"] is True
 
 
 def test_codex_legacy_gpt5_migration_gate_targets_legacy_and_partial_migration(
@@ -624,9 +1057,7 @@ def test_codex_legacy_gpt5_migration_gate_targets_legacy_and_partial_migration(
     )
     skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
     migration_start = skill.index("### Legacy Codex Model Migration")
-    start = skill.index(
-        'if $OUROBOROS_WELCOME_PYTHON - "$HOME/.ouroboros/config.yaml"', migration_start
-    )
+    start = skill.index('if ouroboros_python - "$HOME/.ouroboros/config.yaml"', migration_start)
     gate = skill[start : skill.index("\n```", start)]
 
     assert (
@@ -685,7 +1116,7 @@ def test_claude_setup_gate_accepts_default_sdk_without_host_mcp_file(tmp_path: P
         encoding="utf-8"
     )
     setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index('if python3 - "$HOME/.ouroboros/config.yaml"', setup_gate_start)
+    start = skill.index('if ouroboros_python - "$HOME/.ouroboros/config.yaml"', setup_gate_start)
     gate = skill[start : skill.index("\n```", start)]
 
     assert _run_setup_gate(gate, home=tmp_path) == "SETUP_READY"
@@ -707,7 +1138,7 @@ def test_claude_setup_gate_accepts_yaml_flow_mappings_without_host_mcp_file(
         encoding="utf-8"
     )
     setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index('if python3 - "$HOME/.ouroboros/config.yaml"', setup_gate_start)
+    start = skill.index('if ouroboros_python - "$HOME/.ouroboros/config.yaml"', setup_gate_start)
     gate = skill[start : skill.index("\n```", start)]
 
     assert _run_setup_gate(gate, home=tmp_path) == "SETUP_READY"
@@ -731,7 +1162,7 @@ def test_claude_completed_welcome_precheck_is_idempotent_without_host_mcp_file(
         encoding="utf-8"
     )
     precheck_context = skill.index("Before honoring that completion marker")
-    start = skill.index('if python3 - "$HOME/.ouroboros/config.yaml"', precheck_context)
+    start = skill.index('if ouroboros_python - "$HOME/.ouroboros/config.yaml"', precheck_context)
     gate = skill[start : skill.index("\n```", start)] + '\nprintf "%s" "${SETUP_READY:-}"\n'
 
     assert _run_setup_gate(gate, home=tmp_path) == "true"
@@ -755,7 +1186,7 @@ def test_claude_setup_gate_rejects_incomplete_runtime_config(tmp_path: Path, con
         encoding="utf-8"
     )
     setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index('if python3 - "$HOME/.ouroboros/config.yaml"', setup_gate_start)
+    start = skill.index('if ouroboros_python - "$HOME/.ouroboros/config.yaml"', setup_gate_start)
     gate = skill[start : skill.index("\n```", start)]
 
     assert _run_setup_gate(gate, home=tmp_path) == "SETUP_REQUIRED"
