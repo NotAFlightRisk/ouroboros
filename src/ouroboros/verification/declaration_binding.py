@@ -237,9 +237,13 @@ _TYPE_PREFIX_MODIFIERS = {
     ".tsx": frozenset({"abstract", "default", "declare", "export"}),
 }
 _TYPE_KIND_PREFIX_MODIFIERS = {
+    (".cs", "enum"): frozenset({"file", "internal", "public"}),
     (".cs", "interface"): frozenset({"file", "internal", "partial", "public"}),
+    (".cs", "record"): frozenset({"abstract", "file", "internal", "partial", "public", "sealed"}),
     (".cs", "struct"): frozenset({"file", "internal", "partial", "public"}),
+    (".java", "enum"): frozenset({"public", "strictfp"}),
     (".java", "interface"): frozenset({"abstract", "non-sealed", "public", "sealed", "strictfp"}),
+    (".java", "record"): frozenset({"public", "strictfp"}),
     (".kt", "class"): frozenset(
         {
             "abstract",
@@ -503,8 +507,26 @@ def _csharp_function_context_is_valid(source: str, match: re.Match[str]) -> bool
         r"\b[A-Za-z_]\w*\b",
         source[match.start() : match.start("target")],
     )
-    return (
-        bool(words) and words[-1] == "void" and not {"abstract", "extern"}.intersection(words[:-1])
+    if not words or words[-1] != "void":
+        return False
+    modifiers = frozenset(words[:-1])
+    if {"abstract", "extern", "override", "sealed"}.intersection(modifiers):
+        return False
+    if "static" in modifiers and "virtual" in modifiers:
+        return False
+    if "private" in modifiers and "virtual" in modifiers:
+        return False
+    braces = _enclosing_braces(source, match.start())
+    if braces is None or len(braces) != 1:
+        return False
+    enclosing = _enclosing_type_context(source, braces[0], ".cs")
+    if enclosing is None:
+        return False
+    enclosing_kind, enclosing_modifiers = enclosing
+    if "static" in enclosing_modifiers and "static" not in modifiers:
+        return False
+    return "virtual" not in modifiers or (
+        enclosing_kind != "struct" and not {"sealed", "static"}.intersection(enclosing_modifiers)
     )
 
 
@@ -568,7 +590,11 @@ def _type_placement_is_valid(source: str, match: re.Match[str], suffix: str) -> 
     return body_end is not None and not source[body_end + 1 :].strip()
 
 
-def _enclosing_type_kind(source: str, opening_brace: int, suffix: str) -> str | None:
+def _enclosing_type_context(
+    source: str,
+    opening_brace: int,
+    suffix: str,
+) -> tuple[str, frozenset[str]] | None:
     """Classify one complete canonical type header owning an opening brace."""
     boundary = max(
         source.rfind(";", 0, opening_brace),
@@ -584,14 +610,22 @@ def _enclosing_type_kind(source: str, opening_brace: int, suffix: str) -> str | 
     if declaration is None:
         return None
     kind = declaration.group("kind")
-    if not _declaration_prefix_is_valid(declaration, suffix, "class"):
+    if not _declaration_prefix_is_valid(declaration, suffix, kind):
         return None
     if not _compilation_unit_prefix_is_valid(source[: boundary + 1], suffix):
         return None
     body_end = _matching_delimiter(source, opening_brace, "{", "}")
     if body_end is None or source[body_end + 1 :].strip():
         return None
-    return kind
+    prefix = declaration.group("prefix")
+    modifiers = frozenset(_modifier_base(token) for token in re.findall(_PREFIX_TOKEN, prefix))
+    return kind, modifiers
+
+
+def _enclosing_type_kind(source: str, opening_brace: int, suffix: str) -> str | None:
+    """Return the validated kind of a canonical enclosing type."""
+    context = _enclosing_type_context(source, opening_brace, suffix)
+    return None if context is None else context[0]
 
 
 def _function_placement_is_valid(source: str, match: re.Match[str], suffix: str) -> bool:
