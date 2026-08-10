@@ -478,6 +478,123 @@ class TestSpecVerifier:
         assert summary.reports[0].results[0].actual_value == "10"
 
     @pytest.mark.parametrize(
+        ("filename", "content", "pattern"),
+        [
+            ("config.ini", "RETRIES = 10\n", r"RETRIES\s*=\s*"),
+            ("config.toml", "RETRIES = 10\n", r"RETRIES\s*=\s*"),
+        ],
+    )
+    def test_flat_configuration_constants_remain_valid_t1_evidence(
+        self, filename: str, content: str, pattern: str
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST set RETRIES=10",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=pattern,
+            expected_value="10",
+            file_hint=filename,
+            evidence_targets=("RETRIES",),
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.reports[0].verified_pass is True
+        assert summary.reports[0].results[0].actual_value == "10"
+
+    @pytest.mark.parametrize(
+        ("tier", "filename", "content", "pattern", "expected", "target"),
+        [
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "build.sh",
+                "cat <<'EOF'\nclass CameraProvider:\n    pass\nEOF\n",
+                r"class\s+CameraProvider",
+                "CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T1_CONSTANT,
+                "config.yaml",
+                "notes: |\n  RETRIES=10\n",
+                r"RETRIES\s*=\s*",
+                "10",
+                "RETRIES",
+            ),
+            (
+                VerificationTier.T1_CONSTANT,
+                "config.ini",
+                "notes = decoy\n  RETRIES=10\n",
+                r"RETRIES\s*=\s*",
+                "10",
+                "RETRIES",
+            ),
+            (
+                VerificationTier.T1_CONSTANT,
+                "config.toml",
+                'notes = """\nRETRIES=10\n"""\n',
+                r"RETRIES\s*=\s*",
+                "10",
+                "RETRIES",
+            ),
+        ],
+        ids=["shell-heredoc", "yaml-block-scalar", "ini-continuation", "toml-multiline"],
+    )
+    def test_multiline_container_bodies_fail_the_entire_file_closed(
+        self,
+        tier: VerificationTier,
+        filename: str,
+        content: str,
+        pattern: str,
+        expected: str,
+        target: str,
+    ) -> None:
+        ac_text = (
+            "MUST define a CameraProvider class"
+            if tier is VerificationTier.T2_STRUCTURAL
+            else "MUST set RETRIES=10"
+        )
+        project = self._create_project({filename: content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=pattern,
+            expected_value=expected,
+            file_hint=filename,
+            evidence_targets=(target,),
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.reports[0].verified_pass is False
+        assert summary.reports[0].results[0].verified is False
+
+    def test_mixed_criterion_text_under_one_index_rejects_the_whole_group(self) -> None:
+        project = self._create_project({"main.py": "class Unrelated:\n    pass\n"})
+        trusted = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T3_BEHAVIORAL,
+        )
+        conflicting = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define class Unrelated",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+Unrelated",
+            expected_value="Unrelated",
+            file_hint="main.py",
+            evidence_targets=("Unrelated",),
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((trusted, conflicting))
+
+        assert summary.reports[0].verified_pass is False
+        assert summary.reports[0].results[0].verified is False
+        assert "Conflicting criterion text" in summary.reports[0].results[0].detail
+
+    @pytest.mark.parametrize(
         ("filename", "content"),
         [
             ("main.rs", "/* outer /* inner */ ignored */\nclass CameraProvider {}\n"),

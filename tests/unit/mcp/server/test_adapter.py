@@ -969,6 +969,58 @@ Parallel Execution Verification Report
         assert "seed" in summary.ac_results[0].evidence
         assert summary.run_verdict == "FAIL"
 
+    def test_stale_result_identity_cannot_hide_behind_a_trusted_report_label(self) -> None:
+        """Every promoted result must share the report's exact index and AC text."""
+        trusted_text = "MUST define a CameraProvider interface"
+        stale_assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define an Unrelated interface",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="Unrelated",
+            expected_value="Unrelated",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text=trusted_text,
+                    results=(
+                        SpecVerificationResult(
+                            assertion=stale_assertion,
+                            verified=True,
+                            detail="Found structure 'Unrelated'",
+                        ),
+                    ),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=trusted_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.ac_results[0].passed is False
+        assert "result criterion" in summary.ac_results[0].evidence
+        assert "does not match report criterion" in summary.ac_results[0].evidence
+
     def test_spec_verification_promotes_checked_reports_to_formal_ac_results(self) -> None:
         """Verifier-checked reports become formal AC verdicts without synthetic drift."""
         mechanical = EvaluationSummary(

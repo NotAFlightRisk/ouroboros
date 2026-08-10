@@ -51,6 +51,17 @@ def _verification_provenance_mismatch(
 ) -> str | None:
     """Explain why a verifier report is not bound to the trusted AC input."""
     report_text = getattr(report, "ac_text", None)
+    report_index = getattr(report, "ac_index", None)
+    for result in tuple(getattr(report, "results", ()) or ()):
+        assertion = getattr(result, "assertion", None)
+        assertion_index = getattr(assertion, "ac_index", None)
+        assertion_text = getattr(assertion, "ac_text", None)
+        if assertion_index != report_index or assertion_text != report_text:
+            return (
+                "Spec verification provenance mismatch: result criterion "
+                f"({assertion_index}, {assertion_text!r}) does not match report criterion "
+                f"({report_index}, {report_text!r})."
+            )
     if not trusted_sources:
         return (
             f"Spec verification provenance mismatch: report criterion {report_text!r} "

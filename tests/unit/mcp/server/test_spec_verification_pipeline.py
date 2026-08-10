@@ -13,7 +13,7 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.server.adapter import _evaluation_summary_from_spec_verification
 from ouroboros.providers.base import CompletionResponse
 from ouroboros.verification.extractor import AssertionExtractor
-from ouroboros.verification.models import EvidencePolarity, SpecAssertion
+from ouroboros.verification.models import EvidencePolarity, SpecAssertion, VerificationTier
 from ouroboros.verification.verifier import SpecVerifier
 
 
@@ -281,6 +281,106 @@ async def test_comment_only_evidence_cannot_reach_formal_pass(
 
     assert assertions[0].input_binding_required is True
     assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "tier", "pattern", "expected", "filename", "content"),
+    [
+        (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"class\s+CameraProvider",
+            "CameraProvider",
+            "build.sh",
+            "cat <<'EOF'\nclass CameraProvider:\n    pass\nEOF\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES\s*=\s*",
+            "10",
+            "config.yaml",
+            "notes: |\n  RETRIES=10\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES\s*=\s*",
+            "10",
+            "config.ini",
+            "notes = decoy\n  RETRIES=10\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES\s*=\s*",
+            "10",
+            "config.toml",
+            'notes = """\nRETRIES=10\n"""\n',
+        ),
+    ],
+    ids=["shell-heredoc", "yaml-block-scalar", "ini-continuation", "toml-multiline"],
+)
+async def test_container_body_evidence_cannot_reach_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    tier: str,
+    pattern: str,
+    expected: str,
+    filename: str,
+    content: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": tier,
+                "pattern": pattern,
+                "expected_value": expected,
+                "file_hint": filename,
+                "description": "Container body is not executable evidence",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
+def test_mixed_criterion_text_cannot_borrow_a_report_identity_for_formal_pass(
+    tmp_path: Any,
+) -> None:
+    ac_text = "MUST define a CameraProvider class"
+    trusted = SpecAssertion(
+        ac_index=0,
+        ac_text=ac_text,
+        tier=VerificationTier.T3_BEHAVIORAL,
+    )
+    conflicting = SpecAssertion(
+        ac_index=0,
+        ac_text="MUST define class Unrelated",
+        tier=VerificationTier.T2_STRUCTURAL,
+        pattern=r"class\s+Unrelated",
+        expected_value="Unrelated",
+        file_hint="main.py",
+        evidence_targets=("Unrelated",),
+    )
+    (tmp_path / "main.py").write_text("class Unrelated:\n    pass\n")
+
+    verification = SpecVerifier(str(tmp_path)).verify_all((trusted, conflicting))
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert "Conflicting criterion text" in verification.reports[0].results[0].detail
     assert formal.final_approved is False
     assert formal.ac_results[0].final_verdict == "fail"
 

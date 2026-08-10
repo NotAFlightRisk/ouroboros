@@ -1007,6 +1007,31 @@ class SpecVerifier:
             ac_text = ac_assertions[0].ac_text if ac_assertions else ""
             agent_pass = agent_results.get(ac_idx, True)
 
+            # One AC index has exactly one caller-authored criterion identity.
+            # Mixing assertion text under that index lets evidence for a second
+            # criterion inherit the first report label, so reject the whole
+            # group before any assertion can contribute positive evidence.
+            if any(assertion.ac_text != ac_text for assertion in ac_assertions):
+                conflicting = sorted({assertion.ac_text for assertion in ac_assertions})
+                result = SpecVerificationResult(
+                    assertion=ac_assertions[0],
+                    verified=False,
+                    discrepancy=agent_pass,
+                    detail=(
+                        f"Conflicting criterion text for AC {ac_idx}: "
+                        + "; ".join(repr(text) for text in conflicting)
+                    ),
+                )
+                reports.append(
+                    ACVerificationReport(
+                        ac_index=ac_idx,
+                        ac_text=ac_text,
+                        results=(result,),
+                        agent_reported_pass=agent_pass,
+                    )
+                )
+                continue
+
             results: list[SpecVerificationResult] = []
             for assertion in ac_assertions:
                 result = self._verify_one(assertion)

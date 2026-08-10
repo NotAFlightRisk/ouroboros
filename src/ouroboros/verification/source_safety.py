@@ -48,6 +48,31 @@ _NON_SOURCE_SUFFIXES = frozenset({".csv", ".json", ".lock", ".md"})
 _MARKUP_SUFFIXES = frozenset({".htm", ".html", ".svg", ".xml"})
 
 
+def _has_unsupported_shell_container(text: str) -> bool:
+    """Whether shell-like source contains a heredoc body we cannot mask safely."""
+    return bool(
+        re.search(
+            r"(?m)(?:^|[\s;&|()])\d*<<[-~]?[ \t]*(?:\\)?"
+            r"(?:['\"]?[A-Za-z_][A-Za-z0-9_]*['\"]?)",
+            text,
+        )
+    )
+
+
+def _has_unsupported_config_container(text: str, suffix: str) -> bool:
+    """Fail closed for multiline values in otherwise admitted config syntax."""
+    if suffix in {".yaml", ".yml"}:
+        # Literal/folded block scalars can contain arbitrary source-shaped text.
+        return bool(re.search(r"(?m):[ \t]*[|>][1-9+\-]*[ \t]*(?:#.*)?$", text))
+    if suffix == ".toml":
+        # TOML basic and literal multiline strings.
+        return '"""' in text or "'''" in text
+    # INI continuations are indented physical lines. ``.cfg`` and ``.conf``
+    # are intentionally treated as the same conservative grammar because the
+    # verifier cannot establish which configuration dialect a file uses.
+    return bool(re.search(r"(?m)^[ \t]+(?![#;])[^\r\n]+$", text))
+
+
 def _mask_ranges(text: str, ranges: Iterable[tuple[int, int]]) -> str:
     chars = list(text)
     for start, end in ranges:
@@ -543,12 +568,21 @@ def mask_non_executable_source(
         )
         return None if ranges is None else _mask_ranges(text, (*raw_ranges, *ranges))
     if suffix in _HASH_STYLE_SUFFIXES:
+        if _has_unsupported_shell_container(text):
+            return None
         ranges = _delimited_noncode_ranges(text, line_markers=("#",), block_markers=())
         return None if ranges is None else _mask_ranges(text, ranges)
     if suffix in _CONFIG_SUFFIXES:
         if not allow_configuration:
             return None
-        ranges = _delimited_noncode_ranges(text, line_markers=("#",), block_markers=())
+        if _has_unsupported_config_container(text, suffix):
+            return None
+        line_markers = ("#", ";") if suffix in {".cfg", ".conf", ".ini"} else ("#",)
+        ranges = _delimited_noncode_ranges(
+            text,
+            line_markers=line_markers,
+            block_markers=(),
+        )
         return None if ranges is None else _mask_ranges(text, ranges)
     if suffix == ".lua":
         ranges = _lua_noncode_ranges(text)
