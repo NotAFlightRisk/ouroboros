@@ -12,6 +12,7 @@ import tempfile
 import textwrap
 from unittest.mock import AsyncMock
 
+from pydantic import ValidationError
 import pytest
 
 from ouroboros.core.types import Result
@@ -21,6 +22,7 @@ from ouroboros.verification.models import (
     ACVerificationReport,
     SpecVerificationResult,
     SpecVerificationSummary,
+    VerificationOutcome,
     VerificationTier,
 )
 from ouroboros.verification.models import (
@@ -53,6 +55,58 @@ class TestVerificationModels:
         with pytest.raises(Exception):
             a.ac_index = 1  # type: ignore[misc]
 
+    @pytest.mark.parametrize("invalid_index", [True, False, "0", "1", 0.0, 1.0, 1.5, -1])
+    def test_spec_assertion_requires_raw_non_negative_integer_index(
+        self,
+        invalid_index: object,
+    ) -> None:
+        with pytest.raises(ValidationError):
+            _SpecAssertion.model_validate(
+                {
+                    "ac_index": invalid_index,
+                    "ac_text": "Create config",
+                    "tier": "t2_structural",
+                }
+            )
+
+    @pytest.mark.parametrize("invalid_index", [True, False, "0", "1", 0.0, 1.0, 1.5, -1])
+    def test_ac_report_requires_raw_non_negative_integer_index(
+        self,
+        invalid_index: object,
+    ) -> None:
+        with pytest.raises(ValidationError):
+            ACVerificationReport.model_validate(
+                {
+                    "ac_index": invalid_index,
+                    "ac_text": "Create config",
+                    "results": [],
+                }
+            )
+
+    def test_zero_index_remains_valid_for_assertion_and_report(self) -> None:
+        assertion = _SpecAssertion.model_validate(
+            {
+                "ac_index": 0,
+                "ac_text": "Create config",
+                "tier": "t2_structural",
+            }
+        )
+        report = ACVerificationReport.model_validate(
+            {
+                "ac_index": 0,
+                "ac_text": "Create config",
+                "results": [
+                    {
+                        "assertion": assertion.model_dump(mode="json"),
+                        "outcome": "verified",
+                    }
+                ],
+            }
+        )
+
+        assert report.ac_index == 0
+        assert report.verified_pass is True
+
     def test_verification_result_discrepancy(self) -> None:
         assertion = _SpecAssertion(
             ac_index=0,
@@ -67,6 +121,185 @@ class TestVerificationModels:
         )
         assert r.discrepancy
         assert not r.verified
+        assert r.outcome is VerificationOutcome.DISCREPANCY
+
+    def test_verification_result_preserves_legacy_json_and_round_trips_outcome(self) -> None:
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="test",
+            tier=VerificationTier.T1_CONSTANT,
+        )
+        legacy = SpecVerificationResult.model_validate(
+            {"assertion": assertion.model_dump(mode="json"), "verified": True}
+        )
+        assert legacy.outcome is VerificationOutcome.VERIFIED
+        assert legacy.verified is True
+        assert legacy.discrepancy is False
+        assert legacy.unverifiable is False
+        assert legacy.skipped is False
+
+        legacy_false = SpecVerificationResult.model_validate(
+            {
+                "assertion": assertion.model_dump(mode="json"),
+                "verified": False,
+                "discrepancy": False,
+            }
+        )
+        assert legacy_false.outcome is VerificationOutcome.DISCREPANCY
+        assert legacy_false.verified is False
+        assert legacy_false.discrepancy is True
+        assert legacy_false.unverifiable is False
+        assert legacy_false.skipped is False
+        assert (
+            SpecVerificationResult.model_validate(legacy_false.model_dump(mode="json"))
+            == legacy_false
+        )
+
+        contradictory = SpecVerificationResult.model_validate(
+            {
+                "assertion": assertion.model_dump(mode="json"),
+                "verified": True,
+                "discrepancy": True,
+                "unverifiable": True,
+                "skipped": True,
+            }
+        )
+        assert contradictory.outcome is VerificationOutcome.DISCREPANCY
+        assert (
+            contradictory.verified,
+            contradictory.discrepancy,
+            contradictory.unverifiable,
+            contradictory.skipped,
+        ) == (False, True, False, False)
+
+        result = SpecVerificationResult(
+            assertion=assertion,
+            outcome=VerificationOutcome.UNVERIFIABLE,
+            detail="No files matched hint: *.rs",
+        )
+        payload = result.model_dump(mode="json")
+        assert payload["outcome"] == "unverifiable"
+        assert payload["verified"] is False
+        assert payload["discrepancy"] is False
+        assert payload["unverifiable"] is True
+        assert payload["skipped"] is False
+        assert SpecVerificationResult.model_validate(payload) == result
+
+    def test_compact_outcome_summary_replay_preserves_zero_confirmed_discrepancies(
+        self,
+    ) -> None:
+        """Outcome-aware compact JSON cannot revive a legacy discrepancy override."""
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="test",
+            tier=VerificationTier.T1_CONSTANT,
+        )
+        result = SpecVerificationResult(
+            assertion=assertion,
+            outcome=VerificationOutcome.UNVERIFIABLE,
+        )
+        summary = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="test",
+                    results=(result,),
+                    agent_reported_pass=True,
+                ),
+            ),
+            strict=False,
+        )
+
+        assert summary.discrepancy_count == 1
+        assert summary.confirmed_discrepancy_count == 0
+        assert summary.override_approval is None
+        payload = summary.model_dump(mode="json", exclude_defaults=True)
+        assert "confirmed_discrepancy_count" not in payload
+
+        replayed = SpecVerificationSummary.model_validate(payload)
+        assert replayed.confirmed_discrepancy_count == 0
+        assert replayed.override_approval is None
+
+    def test_outcome_reports_canonicalize_contradictory_persisted_counts(self) -> None:
+        """Public summary authority is derived from reports, never stale counters."""
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="test",
+            tier=VerificationTier.T1_CONSTANT,
+        )
+        summary = SpecVerificationSummary.model_validate(
+            {
+                "reports": [
+                    {
+                        "ac_index": 0,
+                        "ac_text": "test",
+                        "agent_reported_pass": True,
+                        "results": [
+                            {
+                                "assertion": assertion.model_dump(mode="json"),
+                                "outcome": "discrepancy",
+                            }
+                        ],
+                    }
+                ],
+                "total_assertions": 0,
+                "verified_count": 99,
+                "failed_count": 0,
+                "unverifiable_count": 99,
+                "skipped_count": 99,
+                "discrepancy_count": 0,
+                "confirmed_discrepancy_count": 0,
+                "strict": False,
+            }
+        )
+
+        assert summary.total_assertions == 1
+        assert summary.verified_count == 0
+        assert summary.failed_count == 1
+        assert summary.unverifiable_count == 0
+        assert summary.skipped_count == 0
+        assert summary.discrepancy_count == 1
+        assert summary.confirmed_discrepancy_count == 1
+        assert summary.has_confirmed_discrepancies is True
+        assert summary.override_approval is False
+        assert summary.model_dump(mode="json")["confirmed_discrepancy_count"] == 1
+
+    @pytest.mark.parametrize(
+        ("outcome", "flags"),
+        [
+            (VerificationOutcome.VERIFIED, (True, False, False, False)),
+            (VerificationOutcome.DISCREPANCY, (False, True, False, False)),
+            (VerificationOutcome.UNVERIFIABLE, (False, False, True, False)),
+            (VerificationOutcome.SKIPPED, (False, False, False, True)),
+        ],
+    )
+    def test_explicit_outcome_normalizes_contradictory_legacy_booleans(
+        self,
+        outcome: VerificationOutcome,
+        flags: tuple[bool, bool, bool, bool],
+    ) -> None:
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="test",
+            tier=VerificationTier.T1_CONSTANT,
+        )
+        result = SpecVerificationResult(
+            assertion=assertion,
+            outcome=outcome,
+            verified=not flags[0],
+            discrepancy=not flags[1],
+            unverifiable=not flags[2],
+            skipped=not flags[3],
+        )
+
+        assert (result.verified, result.discrepancy, result.unverifiable, result.skipped) == flags
+        payload = result.model_dump(mode="json")
+        assert (
+            payload["verified"],
+            payload["discrepancy"],
+            payload["unverifiable"],
+            payload["skipped"],
+        ) == flags
 
     def test_ac_report_verified_pass_all_pass(self) -> None:
         assertion = SpecAssertion(ac_index=0, ac_text="test", tier=VerificationTier.T1_CONSTANT)
@@ -107,19 +340,32 @@ class TestVerificationModels:
         assert not report.has_discrepancy
 
     def test_summary_from_reports(self) -> None:
-        assertion = SpecAssertion(ac_index=0, ac_text="test", tier=VerificationTier.T1_CONSTANT)
+        first_assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="test1",
+            tier=VerificationTier.T1_CONSTANT,
+        )
+        second_assertion = SpecAssertion(
+            ac_index=1,
+            ac_text="test2",
+            tier=VerificationTier.T1_CONSTANT,
+        )
         reports = (
             ACVerificationReport(
                 ac_index=0,
                 ac_text="test1",
-                results=(SpecVerificationResult(assertion=assertion, verified=True),),
+                results=(SpecVerificationResult(assertion=first_assertion, verified=True),),
                 agent_reported_pass=True,
             ),
             ACVerificationReport(
                 ac_index=1,
                 ac_text="test2",
                 results=(
-                    SpecVerificationResult(assertion=assertion, verified=False, discrepancy=True),
+                    SpecVerificationResult(
+                        assertion=second_assertion,
+                        verified=False,
+                        discrepancy=True,
+                    ),
                 ),
                 agent_reported_pass=True,
             ),
@@ -139,6 +385,120 @@ class TestVerificationModels:
         assert summary.has_discrepancies
         assert summary.override_approval is False
 
+    @pytest.mark.parametrize(
+        "ordered_outcomes",
+        [
+            ("discrepancy", "verified"),
+            ("verified", "discrepancy"),
+        ],
+    )
+    def test_serialized_duplicate_report_order_is_rejected(
+        self,
+        ordered_outcomes: tuple[str, str],
+    ) -> None:
+        """Replay ordering cannot select authority for a duplicate AC report."""
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+        ).model_dump(mode="json")
+        reports = [
+            {
+                "ac_index": 0,
+                "ac_text": "Create config",
+                "results": [{"assertion": assertion, "outcome": outcome}],
+            }
+            for outcome in ordered_outcomes
+        ]
+
+        with pytest.raises(ValidationError, match="duplicate report ac_index"):
+            SpecVerificationSummary.model_validate({"reports": reports})
+
+    @pytest.mark.parametrize(
+        ("assertion_index", "assertion_text", "error"),
+        [
+            (7, "Create config", "assertion ac_index"),
+            (0, "Unrelated criterion", "assertion text"),
+        ],
+    )
+    def test_serialized_report_rejects_mismatched_nested_identity(
+        self,
+        assertion_index: int,
+        assertion_text: str,
+        error: str,
+    ) -> None:
+        """Nested evidence must identify the same AC as its parent report."""
+        payload = {
+            "ac_index": 0,
+            "ac_text": "Create config",
+            "results": [
+                {
+                    "assertion": {
+                        "ac_index": assertion_index,
+                        "ac_text": assertion_text,
+                        "tier": "t2_structural",
+                    },
+                    "outcome": "verified",
+                }
+            ],
+        }
+
+        with pytest.raises(ValidationError, match=error):
+            ACVerificationReport.model_validate(payload)
+
+    def test_serialized_mixed_outcomes_retain_conservative_authority(self) -> None:
+        """A VERIFIED result cannot erase a sibling discrepancy on replay."""
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+        ).model_dump(mode="json")
+        summary = SpecVerificationSummary.model_validate(
+            {
+                "reports": [
+                    {
+                        "ac_index": 0,
+                        "ac_text": "Create config",
+                        "results": [
+                            {"assertion": assertion, "outcome": "verified"},
+                            {"assertion": assertion, "outcome": "discrepancy"},
+                        ],
+                    }
+                ],
+                "confirmed_discrepancy_count": 0,
+            }
+        )
+
+        assert summary.verified_count == 1
+        assert summary.confirmed_discrepancy_count == 1
+        assert summary.reports[0].verified_pass is False
+        assert summary.override_approval is False
+
+    def test_identity_consistent_legacy_report_payload_remains_readable(self) -> None:
+        """Legacy boolean results remain compatible when their identity is sound."""
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+        ).model_dump(mode="json")
+        summary = SpecVerificationSummary.model_validate(
+            {
+                "reports": [
+                    {
+                        "ac_index": 0,
+                        "ac_text": "Create config",
+                        "results": [{"assertion": assertion, "verified": True}],
+                    }
+                ],
+                "verified_count": 0,
+            }
+        )
+
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.VERIFIED
+        assert summary.verified_count == 1
+        assert SpecVerificationSummary.model_validate(summary.model_dump(mode="json")) == summary
+
     def test_summary_no_discrepancies(self) -> None:
         assertion = SpecAssertion(ac_index=0, ac_text="test", tier=VerificationTier.T1_CONSTANT)
         reports = (
@@ -152,6 +512,45 @@ class TestVerificationModels:
         summary = SpecVerificationSummary.from_reports(reports)
         assert not summary.has_discrepancies
         assert summary.override_approval is None
+
+    def test_strict_policy_blocks_incomplete_evidence_without_minting_discrepancy(self) -> None:
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="test",
+            tier=VerificationTier.T1_CONSTANT,
+        )
+        report = ACVerificationReport(
+            ac_index=0,
+            ac_text="test",
+            results=(
+                SpecVerificationResult(
+                    assertion=assertion,
+                    outcome=VerificationOutcome.UNVERIFIABLE,
+                    detail="No pattern to verify",
+                ),
+            ),
+            agent_reported_pass=True,
+        )
+
+        strict = SpecVerificationSummary.from_reports((report,), strict=True)
+        exploratory = SpecVerificationSummary.from_reports((report,), strict=False)
+
+        assert strict.unverifiable_count == 1
+        assert strict.confirmed_discrepancy_count == 0
+        assert strict.override_approval is False
+        assert exploratory.override_approval is None
+        assert exploratory.reports[0].verified_pass is False
+
+    def test_legacy_summary_payload_keeps_fail_closed_override(self) -> None:
+        summary = SpecVerificationSummary.model_validate(
+            {
+                "project_dir": "/tmp/project",
+                "discrepancy_count": 1,
+            }
+        )
+
+        assert summary.confirmed_discrepancy_count == 1
+        assert summary.override_approval is False
 
 
 # -- Verifier Tests --
@@ -1014,7 +1413,7 @@ class TestSpecVerifier:
         assert summary.discrepancy_count == 1
 
     def test_t3_t4_skipped(self) -> None:
-        """T3 and T4 assertions are skipped (no results)."""
+        """T3 and T4 assertions stay visible as explicit skipped outcomes."""
         project = self._create_project({"main.py": ""})
         verifier = SpecVerifier(project_dir=project)
         assertions = (
@@ -1022,25 +1421,77 @@ class TestSpecVerifier:
             SpecAssertion(ac_index=1, ac_text="subjective", tier=VerificationTier.T4_UNVERIFIABLE),
         )
         summary = verifier.verify_all(assertions)
-        assert summary.total_assertions == 0
+        assert summary.total_assertions == 2
         assert summary.skipped_count == 2
+        assert all(report.results for report in summary.reports)
+        assert {result.outcome for report in summary.reports for result in report.results} == {
+            VerificationOutcome.SKIPPED
+        }
+        assert summary.verified_count == 0
+        assert summary.override_approval is False
 
-    def test_no_files_match_hint(self) -> None:
-        """File hint matches nothing → verification fails closed."""
+    @pytest.mark.parametrize("tier", [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL])
+    def test_no_files_match_hint_is_unverifiable_for_every_scanned_tier(
+        self, tier: VerificationTier
+    ) -> None:
+        """No candidate source is missing evidence, not a contradicted assertion."""
         project = self._create_project({"main.py": ""})
         verifier = SpecVerifier(project_dir=project)
         assertion = SpecAssertion(
             ac_index=0,
             ac_text="test",
-            tier=VerificationTier.T1_CONSTANT,
+            tier=tier,
             pattern=r"FOO",
-            expected_value="bar",
+            expected_value="bar" if tier is VerificationTier.T1_CONSTANT else "",
             file_hint="*.rs",
         )
         summary = verifier.verify_all((assertion,), agent_results={0: True})
         assert summary.verified_count == 0
         assert summary.failed_count == 1
+        assert summary.unverifiable_count == 1
         assert summary.discrepancy_count == 1
+        assert summary.confirmed_discrepancy_count == 0
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+        assert result.unverifiable is True
+        assert result.discrepancy is False
+        assert result.detail == "No files matched hint: *.rs"
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL])
+    @pytest.mark.parametrize(
+        ("pattern", "detail"),
+        [("", "No pattern to verify"), ("(", "Unusable regex pattern")],
+        ids=["empty", "invalid"],
+    )
+    def test_unusable_pattern_is_unverifiable_not_a_false_pass_or_discrepancy(
+        self,
+        tier: VerificationTier,
+        pattern: str,
+        detail: str,
+    ) -> None:
+        project = self._create_project({"main.py": "VALUE = 1\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="test",
+            tier=tier,
+            pattern=pattern,
+            expected_value="1" if tier is VerificationTier.T1_CONSTANT else "",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        result = summary.reports[0].results[0]
+
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+        assert result.verified is False
+        assert result.discrepancy is False
+        assert detail in result.detail
+        assert summary.verified_count == 0
+        assert summary.unverifiable_count == 1
+        assert summary.confirmed_discrepancy_count == 0
+        assert summary.override_approval is False
 
     def test_multiple_assertions_per_ac(self) -> None:
         """Multiple assertions for one AC — all must pass."""
@@ -3067,8 +3518,7 @@ class TestAssertionExtractor:
 
         result = await extractor.extract("seed_unbound_expected", ("MAX_RETRIES must be seven",))
 
-        assert result.is_ok
-        assert result.value == ()
+        assert result.is_err
 
     @pytest.mark.asyncio
     async def test_t1_assertion_requires_expected_value_before_verifier(self) -> None:
@@ -3086,15 +3536,7 @@ class TestAssertionExtractor:
             ]
         )
         result = await extractor.extract("seed_empty_expected", ("WARMUP_FRAMES should be 10",))
-        assert result.is_ok
-        assert result.value == ()
-
-        project = TestSpecVerifier()._create_project({"config.py": "WARMUP_FRAMES = 999\n"})
-        summary = SpecVerifier(project_dir=project).verify_all(
-            result.value, agent_results={0: True}
-        )
-        assert summary.total_assertions == 0
-        assert summary.verified_count == 0
+        assert result.is_err
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("expected_value", ["", "interface", "Python", "cameraprovider"])
@@ -3120,8 +3562,7 @@ class TestAssertionExtractor:
             ("MUST define a CameraProvider interface in a Python project",),
         )
 
-        assert result.is_ok
-        assert result.value == ()
+        assert result.is_err
 
     @pytest.mark.asyncio
     async def test_t1_target_is_bound_to_the_expected_value_clause(self) -> None:
@@ -3181,8 +3622,7 @@ class TestAssertionExtractor:
 
         result = await extractor.extract(f"vague_{pattern}", (ac_text,))
 
-        assert result.is_ok
-        assert result.value == ()
+        assert result.is_err
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("redirect", ["named", "shall"])
@@ -3209,8 +3649,7 @@ class TestAssertionExtractor:
 
         result = await extractor.extract(f"t2_scaffold_{redirect}", (ac_text,))
 
-        assert result.is_ok
-        assert result.value == ()
+        assert result.is_err
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -3278,8 +3717,7 @@ class TestAssertionExtractor:
 
         result = await extractor.extract("leading_dot", ("MUST create file `.env`",))
 
-        assert result.is_ok
-        assert result.value == ()
+        assert result.is_err
 
     @pytest.mark.asyncio
     async def test_flag_expected_value_must_preserve_the_exact_cli_literal(self) -> None:
@@ -3298,8 +3736,7 @@ class TestAssertionExtractor:
 
         result = await extractor.extract("flag_redirect", ("CLI accepts --verbose flag",))
 
-        assert result.is_ok
-        assert result.value == ()
+        assert result.is_err
 
     @pytest.mark.asyncio
     async def test_multiple_constants_bind_to_their_nearest_symbols(self) -> None:
@@ -3378,8 +3815,7 @@ class TestAssertionExtractor:
 
         result = await extractor.extract("seed_invalid_regex", ("MAX_RETRIES should be 5",))
 
-        assert result.is_ok
-        assert result.value == ()
+        assert result.is_err
 
     @pytest.mark.asyncio
     async def test_overflowing_regex_assertion_rejected_before_verifier(self) -> None:
@@ -3400,8 +3836,7 @@ class TestAssertionExtractor:
 
         result = await extractor.extract("seed_overflow_regex", ("constant is five",))
 
-        assert result.is_ok
-        assert result.value == ()
+        assert result.is_err
 
     def test_overflowing_regex_fails_closed_in_verifier(self) -> None:
         """Direct verifier callers cannot crash it with a regex overflow."""
@@ -3545,8 +3980,7 @@ class TestAssertionExtractor:
         extractor = self._make_extractor_sequence(unreadable, _GOOD_EXTRACTION, _GOOD_EXTRACTION)
 
         first = await extractor.extract("seed_unreadable", ("Has class Foo",))
-        assert first.is_ok
-        assert first.value == ()
+        assert first.is_err
 
         second = await extractor.extract("seed_unreadable", ("Has class Foo",))
         assert second.is_ok
@@ -3588,8 +4022,7 @@ class TestAssertionExtractor:
         extractor = self._make_extractor_sequence(wrong_schema, _GOOD_EXTRACTION, _GOOD_EXTRACTION)
 
         first = await extractor.extract("seed_wrong_schema", ("Has class Foo",))
-        assert first.is_ok
-        assert first.value == ()
+        assert first.is_err
 
         second = await extractor.extract("seed_wrong_schema", ("Has class Foo",))
         assert second.is_ok
@@ -3600,36 +4033,56 @@ class TestAssertionExtractor:
         assert extractor.llm_adapter.complete.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_an_array_only_partly_rejected_is_remembered_as_what_survived(self) -> None:
-        """One good entry among bad ones is still an extraction that was read.
-
-        The rule is about a reply in which *nothing* arrived, not about every
-        entry being perfect. If one assertion survives, the model answered in
-        this schema and the seed should not pay for a second extraction.
-        """
+    async def test_same_ac_mixed_valid_and_invalid_assertions_are_retried_atomically(
+        self,
+    ) -> None:
+        """A rejected assertion cannot disappear behind a valid sibling in one AC."""
+        valid_marker_extraction = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t2_structural",
+                    "pattern": "marker\\.txt",
+                    "expected_value": "marker.txt",
+                    "file_hint": "marker.txt",
+                    "description": "",
+                }
+            ]
+        )
         extractor = self._make_extractor_sequence(
             json.dumps(
                 [
-                    {"ac_index": 0},
                     {
                         "ac_index": 0,
                         "tier": "t2_structural",
-                        "pattern": "class Foo",
-                        "expected_value": "Foo",
-                        "file_hint": "*.py",
+                        "pattern": "marker",
+                        "expected_value": "marker.txt",
+                        "file_hint": "marker.txt",
                         "description": "",
                     },
-                    {"ac_index": 99, "tier": "t2_structural", "pattern": "class Bar"},
+                    {
+                        "ac_index": 0,
+                        "tier": "t2_structural",
+                        "pattern": "(",
+                        "expected_value": "docs.md",
+                        "file_hint": "docs.md",
+                        "description": "",
+                    },
                 ]
-            )
+            ),
+            valid_marker_extraction,
+            valid_marker_extraction,
         )
 
-        first = await extractor.extract("seed_partly_rejected", ("Has class Foo",))
-        second = await extractor.extract("seed_partly_rejected", ("Has class Foo",))
+        criterion = "MUST create file marker.txt"
+        first = await extractor.extract("seed_partly_rejected", (criterion,))
+        second = await extractor.extract("seed_partly_rejected", (criterion,))
+        third = await extractor.extract("seed_partly_rejected", (criterion,))
 
-        assert first.is_ok and len(first.value) == 1
-        assert second.value is first.value
-        extractor.llm_adapter.complete.assert_called_once()
+        assert first.is_err
+        assert second.is_ok and len(second.value) == 1
+        assert third.value is second.value
+        assert extractor.llm_adapter.complete.await_count == 2
 
     @pytest.mark.asyncio
     async def test_a_readable_empty_extraction_is_still_remembered(self) -> None:
@@ -3667,8 +4120,8 @@ class TestAssertionExtractor:
         assert result.value == ()
 
     @pytest.mark.asyncio
-    async def test_invalid_json_returns_empty(self) -> None:
-        """Malformed LLM response → empty assertions, no crash."""
+    async def test_invalid_json_returns_error(self) -> None:
+        """Malformed LLM response remains retryable and cannot bypass the gate."""
         mock_adapter = AsyncMock()
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(
@@ -3681,8 +4134,7 @@ class TestAssertionExtractor:
         )
         extractor = AssertionExtractor(llm_adapter=mock_adapter)
         result = await extractor.extract("seed_bad", ("test",))
-        assert result.is_ok
-        assert result.value == ()
+        assert result.is_err
 
     @pytest.mark.asyncio
     async def test_invalid_tier_is_rejected(self) -> None:
@@ -3700,5 +4152,4 @@ class TestAssertionExtractor:
             ]
         )
         result = await extractor.extract("seed_tier", ("test",))
-        assert result.is_ok
-        assert result.value == ()
+        assert result.is_err

@@ -43,10 +43,15 @@ from ouroboros.mcp.server.project_dir import (  # noqa: F401
 from ouroboros.mcp.server.protocol import PromptHandler, ResourceHandler, ToolHandler
 from ouroboros.mcp.server.security import AuthConfig, AuthMethod, RateLimitConfig, SecurityLayer
 
-# Re-exported for evaluation tests and legacy internal callers.
-from ouroboros.mcp.server.spec_evaluation import (  # noqa: F401
-    _agent_results_from_execution_summary,
-    _evaluation_summary_from_spec_verification,
+# Re-exported: kept here for existing adapter-level tests and callers.
+from ouroboros.mcp.server.spec_verification_adapter import (
+    agent_results_from_execution_summary as _agent_results_from_execution_summary,
+)
+from ouroboros.mcp.server.spec_verification_adapter import (
+    evaluation_summary_for_unavailable_spec_verification as _evaluation_summary_for_unavailable_spec_verification,
+)
+from ouroboros.mcp.server.spec_verification_adapter import (
+    evaluation_summary_from_spec_verification as _evaluation_summary_from_spec_verification,
 )
 from ouroboros.mcp.types import (
     MCPCapabilities,
@@ -562,17 +567,36 @@ def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None
     from ouroboros.core.lineage import EvaluationSummary, TaskResult
 
     task_line_matches = re.findall(
-        r"### (?:Task|AC) (\d+): \[(COMPLETED|FAILED|PASS|FAIL)\]\s*(.*)", artifact
+        r"### (?:Task|AC) (-?\d+): \[(COMPLETED|FAILED|PASS|FAIL)\]\s*(.*)", artifact
     )
     if not task_line_matches:
         return None
 
     seed_acs = getattr(seed, "acceptance_criteria", None) or ()
     feedback_metadata = _extract_feedback_metadata_from_artifact(artifact)
+    task_numbers = [int(task_number) for task_number, _, _ in task_line_matches]
+    invalid_task_numbers = sorted({number for number in task_numbers if number < 1})
+    if invalid_task_numbers:
+        rendered_numbers = ", ".join(str(number) for number in invalid_task_numbers)
+        return EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=1,
+            score=0.0,
+            drift_score=None,
+            failure_reason=(
+                f"invalid one-based task number(s): {rendered_numbers}; "
+                "formal AC evaluation not run"
+            ),
+            ac_results=(),
+            task_results=(),
+            feedback_metadata=feedback_metadata,
+            execution_completion_status="failed",
+            approval_status="not_evaluated",
+        )
 
     task_results: list[TaskResult] = []
-    for ac_num_str, status, description in task_line_matches:
-        task_idx = int(ac_num_str) - 1
+    for task_number, (_, status, description) in zip(task_numbers, task_line_matches, strict=True):
+        task_idx = task_number - 1
         task_content = (
             ac_text(seed_acs[task_idx]) if task_idx < len(seed_acs) else description.strip()
         )
@@ -590,12 +614,31 @@ def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None
         )
 
     total = len(task_results)
-    completed_count = sum(1 for result in task_results if result.completed)
-    score = completed_count / total if total > 0 else 0.0
+    reported_indices = [result.task_index for result in task_results]
+    reported_index_set = set(reported_indices)
+    if seed_acs:
+        expected_indices = set(range(len(seed_acs)))
+    else:
+        # Without a Seed, the report's highest one-based task number is the
+        # only available coverage boundary. Requiring the complete contiguous
+        # range keeps ``Task 2`` alone from masquerading as a complete run.
+        expected_indices = set(range(max(reported_indices, default=-1) + 1))
 
-    total_expected_tasks = len(seed_acs) if seed_acs else total
-    all_expected_tasks_reported = total >= total_expected_tasks
-    all_tasks_completed = completed_count == total and all_expected_tasks_reported
+    indices_are_unique = len(reported_indices) == len(reported_index_set)
+    exact_expected_coverage = reported_index_set == expected_indices
+    completed_expected_indices = {
+        result.task_index
+        for result in task_results
+        if result.completed and result.task_index in expected_indices
+    }
+    total_expected_tasks = len(expected_indices)
+    completed_count = len(completed_expected_indices)
+    score = completed_count / total_expected_tasks if total_expected_tasks > 0 else 0.0
+    all_tasks_completed = (
+        indices_are_unique
+        and exact_expected_coverage
+        and all(result.completed for result in task_results)
+    )
 
     failed_indices = [result.task_index + 1 for result in task_results if not result.completed]
     failure_reason = None
@@ -604,6 +647,26 @@ def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None
             failure_reason = (
                 f"{len(failed_indices)}/{total} tasks failed "
                 f"(Task {', '.join(str(i) for i in failed_indices)})"
+            )
+        elif not indices_are_unique:
+            failure_reason = (
+                "duplicate task indices in execution report; formal AC evaluation not run"
+            )
+        elif not exact_expected_coverage:
+            missing_indices = sorted(expected_indices - reported_index_set)
+            unexpected_indices = sorted(reported_index_set - expected_indices)
+            coverage_parts = []
+            if missing_indices:
+                coverage_parts.append(
+                    "missing Task " + ", ".join(str(index + 1) for index in missing_indices)
+                )
+            if unexpected_indices:
+                coverage_parts.append(
+                    "unexpected Task " + ", ".join(str(index + 1) for index in unexpected_indices)
+                )
+            failure_reason = (
+                "incomplete task coverage (" + "; ".join(coverage_parts) + "); "
+                "formal AC evaluation not run"
             )
         else:
             failure_reason = (
@@ -1847,12 +1910,18 @@ def create_ouroboros_server(
     ) -> EvaluationSummary | None:
         """Run spec verification and override mechanical results if discrepancies found.
 
-        Returns a corrected EvaluationSummary if discrepancies are detected,
-        or None if no override is needed (verification passed or unavailable).
+        Returns a formal EvaluationSummary whenever Seed AC verification can
+        be evaluated. Missing project context, extraction failure, and empty
+        extraction are explicit rejected summaries rather than mechanical-pass
+        fallbacks.
         """
         project_dir = _extract_project_dir(artifact, seed=seed)
         if not project_dir:
-            return None
+            return _evaluation_summary_for_unavailable_spec_verification(
+                mechanical,
+                seed,
+                "Spec verification unavailable: project directory could not be resolved.",
+            )
 
         seed_acs = getattr(seed, "acceptance_criteria", None) or ()
         if not seed_acs:
@@ -1860,26 +1929,43 @@ def create_ouroboros_server(
 
         seed_id = getattr(getattr(seed, "metadata", None), "seed_id", None)
         if not seed_id:
-            return None
+            return _evaluation_summary_for_unavailable_spec_verification(
+                mechanical,
+                seed,
+                "Spec verification unavailable: Seed identifier is missing.",
+            )
 
         extract_result = await spec_extractor.extract(seed_id, ac_texts(seed_acs))
         if extract_result.is_err:
             log.warning("spec_verification.extraction_failed", error=str(extract_result.error))
-            return None
+            return _evaluation_summary_for_unavailable_spec_verification(
+                mechanical,
+                seed,
+                f"Spec assertion extraction failed: {extract_result.error}",
+            )
 
         assertions = extract_result.value
         if not assertions:
-            return None
+            return _evaluation_summary_for_unavailable_spec_verification(
+                mechanical,
+                seed,
+                "Spec assertion extraction produced no independently usable assertions.",
+            )
 
         agent_results = _agent_results_from_execution_summary(mechanical)
 
-        verifier = SpecVerifier(project_dir=project_dir)
+        # The evolutionary self-improvement loop is an evidence gate, not an
+        # exploratory report: unavailable/skipped outcomes must block approval.
+        verifier = SpecVerifier(project_dir=project_dir, strict=True)
         summary = verifier.verify_all(assertions, agent_results)
 
-        if summary.has_discrepancies:
+        if summary.has_confirmed_discrepancies:
+            override_count = sum(
+                1 for report in summary.reports if report.has_confirmed_discrepancy
+            )
             log.warning(
                 "spec_verification.discrepancies_found",
-                count=summary.discrepancy_count,
+                count=override_count,
                 project_dir=project_dir,
             )
 

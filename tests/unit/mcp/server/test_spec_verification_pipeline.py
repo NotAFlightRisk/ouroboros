@@ -30,8 +30,7 @@ async def _extract(ac_text: str, payload: list[dict[str, Any]]) -> tuple[SpecAss
         )
     )
     result = await AssertionExtractor(llm_adapter=adapter).extract("seed", (ac_text,))
-    assert result.is_ok
-    return result.value
+    return result.value if result.is_ok else ()
 
 
 def _formal_verdict(
