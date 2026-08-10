@@ -2585,6 +2585,16 @@ class TestSpecVerifier:
         ("filename", "content", "pattern"),
         [
             (
+                "provider.c",
+                "banana CameraProvider(void) {}\n",
+                r"CameraProvider",
+            ),
+            (
+                "Provider.cs",
+                "namespace A;\nnamespace B;\npublic class CameraProvider {}\n",
+                r"CameraProvider",
+            ),
+            (
                 "provider.cpp",
                 "signed unsigned void CameraProvider() {}\n",
                 r"void\s+CameraProvider",
@@ -2606,6 +2616,8 @@ class TestSpecVerifier:
             ),
         ],
         ids=[
+            "c-arbitrary-return-type",
+            "csharp-repeated-file-scoped-namespace",
             "cpp-conflicting-sign-specifiers",
             "cpp-conflicting-width-specifiers",
             "cpp-conflicting-scalar-specifiers",
@@ -2619,7 +2631,7 @@ class TestSpecVerifier:
         pattern: str,
     ) -> None:
         project = self._create_project({filename: content})
-        kind = "class" if filename.endswith(".java") else "function"
+        kind = "class" if filename.endswith((".cs", ".java")) else "function"
         assertion = _SpecAssertion(
             ac_index=0,
             ac_text=f"MUST define a CameraProvider {kind}",
@@ -2634,6 +2646,44 @@ class TestSpecVerifier:
 
         assert result.verified is False
         assert result.evidence_source == ""
+
+    @pytest.mark.parametrize(
+        ("ac_text", "filename", "content"),
+        [
+            (
+                "MUST define a CameraProvider function",
+                "provider.c",
+                "unsigned long int CameraProvider(void) { return 0; }\n",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.cs",
+                "namespace A;\npublic class CameraProvider {}\n",
+            ),
+        ],
+        ids=["c-canonical-builtin-return-type", "csharp-single-file-scoped-namespace"],
+    )
+    def test_t2_compilation_unit_positive_controls_remain_valid(
+        self,
+        ac_text: str,
+        filename: str,
+        content: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"CameraProvider",
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is True
+        assert result.evidence_source == "file_content"
 
     @pytest.mark.parametrize(
         "content",

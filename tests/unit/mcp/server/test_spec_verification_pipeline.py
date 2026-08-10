@@ -1905,6 +1905,18 @@ async def test_invalid_modifier_syntax_cannot_reach_formal_pass(
     [
         (
             "MUST define a CameraProvider function",
+            "provider.c",
+            "banana CameraProvider(void) {}\n",
+            r"CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.cs",
+            "namespace A;\nnamespace B;\npublic class CameraProvider {}\n",
+            r"CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
             "provider.cpp",
             "signed unsigned void CameraProvider() {}\n",
             r"void\s+CameraProvider",
@@ -1929,6 +1941,8 @@ async def test_invalid_modifier_syntax_cannot_reach_formal_pass(
         ),
     ],
     ids=[
+        "c-arbitrary-return-type",
+        "csharp-repeated-file-scoped-namespace",
         "cpp-conflicting-sign-specifiers",
         "cpp-conflicting-width-specifiers",
         "cpp-conflicting-scalar-specifiers",

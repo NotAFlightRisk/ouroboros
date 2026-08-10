@@ -117,6 +117,26 @@ _C_LIKE_FUNCTION = (
 )
 
 _CPP_FUNCTION_MODIFIERS = frozenset({"extern", "inline", "static"})
+_C_BUILTIN_TYPE_WORDS = frozenset(
+    {
+        "_Bool",
+        "bool",
+        "char",
+        "double",
+        "float",
+        "int",
+        "long",
+        "short",
+        "signed",
+        "unsigned",
+        "void",
+    }
+)
+_C_BUILTIN_TYPE_SEQUENCES = frozenset(
+    sequence
+    for sequence in CPP_BUILTIN_TYPE_SEQUENCES
+    if all(word in _C_BUILTIN_TYPE_WORDS for word in sequence)
+).union({("_Bool",)})
 _JAVA_KEYWORD = (
     r"_|abstract|assert|boolean|break|byte|case|catch|char|class|const|continue|"
     r"default|do|double|else|enum|exports|extends|false|final|finally|float|for|"
@@ -496,6 +516,18 @@ def _c_like_function_prefix_is_valid(
         return len(type_specifiers) == 1 and (
             type_specifiers[0] == "auto" or type_specifiers[0][:1].isupper()
         )
+    if suffix == ".c":
+        modifier_end = 0
+        while modifier_end < len(words) and words[modifier_end] in _CPP_FUNCTION_MODIFIERS:
+            modifier_end += 1
+        c_modifiers = tuple(words[:modifier_end])
+        type_specifiers = tuple(words[modifier_end:])
+        return (
+            type_specifiers in _C_BUILTIN_TYPE_SEQUENCES
+            and not any(word in _CPP_FUNCTION_MODIFIERS for word in type_specifiers)
+            and len(set(c_modifiers)) == len(c_modifiers)
+            and not {"extern", "static"}.issubset(c_modifiers)
+        )
     if suffix == ".java":
         allowed = frozenset(
             {
@@ -526,18 +558,9 @@ def _c_like_function_prefix_is_valid(
                 "virtual",
             }
         )
-    elif suffix == ".c":
-        # Function definitions may use extern or static storage, but not both;
-        # register is only valid for object/parameter declarations.
-        allowed = frozenset({"extern", "inline", "static"})
     else:
         allowed = _CPP_FUNCTION_MODIFIERS
     if any(word not in allowed for word in modifiers) or len(set(modifiers)) != len(modifiers):
-        return False
-    if suffix == ".c" and {
-        "extern",
-        "static",
-    }.issubset(modifiers):
         return False
     return len(_ACCESS_MODIFIERS.intersection(modifiers)) <= 1
 
@@ -634,12 +657,19 @@ def _compilation_unit_prefix_is_valid(prefix: str, suffix: str) -> bool:
             is not None
         )
     if suffix == ".cs":
-        directive = (
-            rf"extern\s+alias\s+[A-Za-z_]\w*"
-            rf"|(?:global\s+)?using\s+(?:static\s+)?{qualified_name}"
-            rf"|namespace\s+{qualified_name}"
+        extern_alias = r"extern\s+alias\s+[A-Za-z_]\w*\s*;\s*"
+        global_using = rf"global\s+using\s+(?:static\s+)?{qualified_name}\s*;\s*"
+        local_using = rf"using\s+(?:static\s+)?{qualified_name}\s*;\s*"
+        outer_directives = rf"(?:{extern_alias})*(?:{global_using})*(?:{local_using})*"
+        inner_directives = rf"(?:{extern_alias})*(?:{local_using})*"
+        file_namespace = rf"namespace\s+{qualified_name}\s*;\s*{inner_directives}"
+        return (
+            re.fullmatch(
+                rf"\s*{outer_directives}(?:{file_namespace})?",
+                prefix,
+            )
+            is not None
         )
-        return re.fullmatch(rf"\s*(?:(?:{directive})\s*;\s*)*", prefix) is not None
 
     boundary = max(prefix.rfind(";"), prefix.rfind("{"), prefix.rfind("}"))
     context = prefix[boundary + 1 :]
