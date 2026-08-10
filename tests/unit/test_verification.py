@@ -460,6 +460,25 @@ class TestSpecVerifier:
         assert summary.reports[0].verified_pass is True
         assert summary.reports[0].results[0].evidence_source == "file_content"
 
+    def test_shell_here_string_preserves_following_executable_evidence(self) -> None:
+        project = self._create_project(
+            {"build.sh": ('read -r message <<< "class Unrelated"\nclass CameraProvider\n')}
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+CameraProvider",
+            expected_value="CameraProvider",
+            file_hint="*.sh",
+            evidence_targets=("CameraProvider",),
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.reports[0].verified_pass is True
+        assert summary.reports[0].results[0].evidence_source == "file_content"
+
     def test_configuration_constant_remains_valid_t1_evidence(self) -> None:
         project = self._create_project({"config.yaml": "RETRIES: 10\n"})
         assertion = SpecAssertion(
@@ -515,9 +534,25 @@ class TestSpecVerifier:
                 "CameraProvider",
             ),
             (
+                VerificationTier.T2_STRUCTURAL,
+                "build.sh",
+                "cat <<'123'\nclass CameraProvider:\n    pass\n123\n",
+                r"class\s+CameraProvider",
+                "CameraProvider",
+                "CameraProvider",
+            ),
+            (
                 VerificationTier.T1_CONSTANT,
                 "config.yaml",
                 "notes: |\n  RETRIES=10\n",
+                r"RETRIES\s*=\s*",
+                "10",
+                "RETRIES",
+            ),
+            (
+                VerificationTier.T1_CONSTANT,
+                "config.yaml",
+                "- |\n  RETRIES=10\n",
                 r"RETRIES\s*=\s*",
                 "10",
                 "RETRIES",
@@ -539,7 +574,14 @@ class TestSpecVerifier:
                 "RETRIES",
             ),
         ],
-        ids=["shell-heredoc", "yaml-block-scalar", "ini-continuation", "toml-multiline"],
+        ids=[
+            "shell-heredoc",
+            "numeric-shell-heredoc",
+            "yaml-block-scalar",
+            "yaml-sequence-block-scalar",
+            "ini-continuation",
+            "toml-multiline",
+        ],
     )
     def test_multiline_container_bodies_fail_the_entire_file_closed(
         self,

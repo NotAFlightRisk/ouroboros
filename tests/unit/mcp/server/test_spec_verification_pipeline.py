@@ -298,12 +298,28 @@ async def test_comment_only_evidence_cannot_reach_formal_pass(
             "cat <<'EOF'\nclass CameraProvider:\n    pass\nEOF\n",
         ),
         (
+            "MUST define a CameraProvider class",
+            "t2_structural",
+            r"class\s+CameraProvider",
+            "CameraProvider",
+            "build.sh",
+            "cat <<'123'\nclass CameraProvider:\n    pass\n123\n",
+        ),
+        (
             "MUST set RETRIES=10",
             "t1_constant",
             r"RETRIES\s*=\s*",
             "10",
             "config.yaml",
             "notes: |\n  RETRIES=10\n",
+        ),
+        (
+            "MUST set RETRIES=10",
+            "t1_constant",
+            r"RETRIES\s*=\s*",
+            "10",
+            "config.yaml",
+            "- |\n  RETRIES=10\n",
         ),
         (
             "MUST set RETRIES=10",
@@ -322,7 +338,14 @@ async def test_comment_only_evidence_cannot_reach_formal_pass(
             'notes = """\nRETRIES=10\n"""\n',
         ),
     ],
-    ids=["shell-heredoc", "yaml-block-scalar", "ini-continuation", "toml-multiline"],
+    ids=[
+        "shell-heredoc",
+        "numeric-shell-heredoc",
+        "yaml-block-scalar",
+        "yaml-sequence-block-scalar",
+        "ini-continuation",
+        "toml-multiline",
+    ],
 )
 async def test_container_body_evidence_cannot_reach_formal_pass(
     tmp_path: Any,
@@ -498,6 +521,135 @@ async def test_negative_structure_polarity_reaches_formal_verdict(
     assert verification.reports[0].verified_pass is approved
     assert formal.final_approved is approved
     assert formal.ac_results[0].final_verdict == ("pass" if approved else "fail")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    [
+        "# class CameraProvider:\nclass Unrelated:\n    pass\n",
+        'message = "class CameraProvider"\nclass Unrelated:\n    pass\n',
+    ],
+    ids=["comment", "string"],
+)
+async def test_forbidden_structure_ignores_non_executable_source(
+    tmp_path: Any,
+    content: str,
+) -> None:
+    ac_text = "MUST NOT define a CameraProvider class"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"class\s+CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": "*.py",
+                "description": "CameraProvider is forbidden",
+            }
+        ],
+    )
+    (tmp_path / "main.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is True
+    assert formal.final_approved is True
+    assert formal.ac_results[0].final_verdict == "pass"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    [
+        "# RETRIES=10\nRETRIES = 5\n",
+        'message = "RETRIES=10"\nRETRIES = 5\n',
+    ],
+    ids=["comment", "string"],
+)
+async def test_forbidden_constant_ignores_non_executable_source(
+    tmp_path: Any,
+    content: str,
+) -> None:
+    ac_text = "MUST NOT set RETRIES=10"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t1_constant",
+                "pattern": r"RETRIES\s*=\s*",
+                "expected_value": "10",
+                "file_hint": "*.py",
+                "description": "Retries must not equal ten",
+            }
+        ],
+    )
+    (tmp_path / "config.py").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is True
+    assert formal.final_approved is True
+    assert formal.ac_results[0].final_verdict == "pass"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "tier", "expected", "filename", "content"),
+    [
+        (
+            "MUST NOT define a CameraProvider class",
+            "t2_structural",
+            "CameraProvider",
+            "build.sh",
+            "cat <<'123'\nsafe text\n123\n",
+        ),
+        (
+            "MUST NOT set RETRIES=10",
+            "t1_constant",
+            "10",
+            "config.yaml",
+            "- |\n  safe text\n",
+        ),
+    ],
+    ids=["shell-heredoc", "yaml-sequence-block-scalar"],
+)
+async def test_forbidden_absence_fails_closed_for_unsupported_containers(
+    tmp_path: Any,
+    ac_text: str,
+    tier: str,
+    expected: str,
+    filename: str,
+    content: str,
+) -> None:
+    target = "CameraProvider" if tier == "t2_structural" else "RETRIES"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": tier,
+                "pattern": target,
+                "expected_value": expected,
+                "file_hint": filename,
+                "description": "Forbidden target must be absent",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    result = verification.reports[0].results[0]
+    assert result.verified is False
+    assert "could not classify" in result.detail
+    assert "absence cannot be proven" in result.detail
+    assert formal.final_approved is False
 
 
 @pytest.mark.asyncio

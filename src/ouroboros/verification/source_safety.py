@@ -48,22 +48,39 @@ _NON_SOURCE_SUFFIXES = frozenset({".csv", ".json", ".lock", ".md"})
 _MARKUP_SUFFIXES = frozenset({".htm", ".html", ".svg", ".xml"})
 
 
+def is_known_non_evidence_format(
+    file_path: str,
+    *,
+    allow_configuration: bool = False,
+) -> bool:
+    """Whether a path is deliberately outside the searchable source contract."""
+    suffix = os.path.splitext(file_path)[1].casefold()
+    return (
+        suffix in _NON_SOURCE_SUFFIXES
+        or suffix == ".txt"
+        or (suffix in _CONFIG_SUFFIXES and not allow_configuration)
+    )
+
+
 def _has_unsupported_shell_container(text: str) -> bool:
     """Whether shell-like source contains a heredoc body we cannot mask safely."""
-    return bool(
-        re.search(
-            r"(?m)(?:^|[\s;&|()])\d*<<[-~]?[ \t]*(?:\\)?"
-            r"(?:['\"]?[A-Za-z_][A-Za-z0-9_]*['\"]?)",
-            text,
-        )
-    )
+    # Delimiters can be numeric, quoted, escaped, or punctuation-rich.
+    # A full shell lexer is required to distinguish every heredoc from a shift,
+    # so any non-here-string operator fails the file closed.
+    return any(len(match.group()) != 3 for match in re.finditer(r"<{2,}", text))
 
 
 def _has_unsupported_config_container(text: str, suffix: str) -> bool:
     """Fail closed for multiline values in otherwise admitted config syntax."""
     if suffix in {".yaml", ".yml"}:
         # Literal/folded block scalars can contain arbitrary source-shaped text.
-        return bool(re.search(r"(?m):[ \t]*[|>][1-9+\-]*[ \t]*(?:#.*)?$", text))
+        return bool(
+            re.search(
+                r"(?m)^[ \t]*(?:-[ \t]+|[^#\r\n]*:[ \t]*)"
+                r"[|>][1-9+\-]*[ \t]*(?:#.*)?$",
+                text,
+            )
+        )
     if suffix == ".toml":
         # TOML basic and literal multiline strings.
         return '"""' in text or "'''" in text

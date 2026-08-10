@@ -36,7 +36,10 @@ from ouroboros.verification.models import (
     VerificationTier,
 )
 from ouroboros.verification.regex_safety import pattern_has_bounded_execution
-from ouroboros.verification.source_safety import mask_non_executable_source
+from ouroboros.verification.source_safety import (
+    is_known_non_evidence_format,
+    mask_non_executable_source,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1338,8 +1341,12 @@ class SpecVerifier:
     def _relative_file(self, file_path: str) -> str:
         return os.path.relpath(file_path, self.project_dir).replace(os.sep, "/")
 
-    def _trusted_project_inventory(self) -> tuple[tuple[tuple[str, str], ...], str]:
-        """Read a complete bounded project inventory without model scope input."""
+    def _trusted_project_inventory(
+        self,
+        *,
+        allow_configuration: bool,
+    ) -> tuple[tuple[tuple[str, str, str], ...], str]:
+        """Read a complete source-aware inventory without model scope input."""
         real_project = os.path.realpath(self.project_dir)
         candidates = sorted(
             glob.glob(
@@ -1360,7 +1367,7 @@ class SpecVerifier:
                 f"Trusted forbidden-evidence inventory exceeds {MAX_FILES_PER_HINT} files; "
                 "absence cannot be proven"
             )
-        inventory: list[tuple[str, str]] = []
+        inventory: list[tuple[str, str, str]] = []
         for file_path in files:
             content = self._read_file(file_path)
             if content is None:
@@ -1368,12 +1375,27 @@ class SpecVerifier:
                     f"Trusted forbidden-evidence inventory could not read "
                     f"{self._relative_file(file_path)}; absence cannot be proven"
                 )
-            inventory.append((file_path, content))
+            evidence_content = mask_non_executable_source(
+                content,
+                file_path,
+                allow_configuration=allow_configuration,
+            )
+            if evidence_content is None:
+                if is_known_non_evidence_format(
+                    file_path,
+                    allow_configuration=allow_configuration,
+                ):
+                    continue
+                return (), (
+                    "Trusted forbidden-evidence inventory could not classify "
+                    f"{self._relative_file(file_path)}; absence cannot be proven"
+                )
+            inventory.append((file_path, content, evidence_content))
         return tuple(inventory), ""
 
     def _verify_forbidden_constant(self, assertion: SpecAssertion) -> SpecVerificationResult:
         """Verify a forbidden scalar from trusted target/value and complete scope."""
-        inventory, error = self._trusted_project_inventory()
+        inventory, error = self._trusted_project_inventory(allow_configuration=True)
         if error:
             return SpecVerificationResult(
                 assertion=assertion,
@@ -1383,8 +1405,8 @@ class SpecVerifier:
             )
         target = self._evidence_targets(assertion)[0]
         expected = assertion.expected_value.strip()
-        for file_path, content in inventory:
-            for _start, end in literal_spans(content, target):
+        for file_path, content, evidence_content in inventory:
+            for _start, end in literal_spans(evidence_content, target):
                 remainder = content[end : end + MAX_SCALAR_LENGTH]
                 annotation = re.match(r"\s*:\s*[^=\n]{1,256}\s*=\s*", remainder)
                 value_start = end + annotation.end() if annotation is not None else end
@@ -1427,7 +1449,7 @@ class SpecVerifier:
 
     def _verify_forbidden_structural(self, assertion: SpecAssertion) -> SpecVerificationResult:
         """Verify forbidden target absence without model regex or file-hint scope."""
-        inventory, error = self._trusted_project_inventory()
+        inventory, error = self._trusted_project_inventory(allow_configuration=False)
         if error:
             return SpecVerificationResult(
                 assertion=assertion,
@@ -1436,10 +1458,10 @@ class SpecVerifier:
                 detail=error,
             )
         target = self._evidence_targets(assertion)[0]
-        for file_path, content in inventory:
+        for file_path, _content, evidence_content in inventory:
             relative_file = self._relative_file(file_path)
             source = "filename" if literal_is_bound(relative_file, target) else "file_content"
-            if source == "filename" or literal_is_bound(content, target):
+            if source == "filename" or literal_is_bound(evidence_content, target):
                 return SpecVerificationResult(
                     assertion=assertion,
                     verified=False,
