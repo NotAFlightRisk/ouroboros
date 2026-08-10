@@ -290,6 +290,33 @@ def _csharp_literal_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
     return tuple(ranges)
 
 
+def _c_preprocessor_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
+    """Return directive lines, rejecting conditional-compilation regions."""
+    directive = re.compile(r"(?m)^[ \t]*#[ \t]*[A-Za-z_]\w*")
+    conditional = re.compile(
+        r"(?m)^[ \t]*#[ \t]*(?:if|ifdef|ifndef|elif|elifdef|elifndef|else|endif)\b"
+    )
+    if conditional.search(text):
+        # Whether a conditional body is executable depends on build flags and
+        # prior macro state that the verifier cannot establish statically.
+        return None
+
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    while match := directive.search(text, cursor):
+        start = match.start()
+        line_start = start
+        end = text.find("\n", match.end())
+        end = len(text) if end < 0 else end
+        while end < len(text) and text[line_start:end].rstrip("\r").endswith("\\"):
+            line_start = end + 1
+            next_end = text.find("\n", line_start)
+            end = len(text) if next_end < 0 else next_end
+        ranges.append((start, end))
+        cursor = max(end, match.end())
+    return tuple(ranges)
+
+
 def _swift_extended_string_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
     """Return Swift extended raw strings and multiline raw strings."""
     opener = re.compile(r'(?<![\w#])(?P<hashes>#+)(?P<quotes>"{1,3})')
@@ -337,7 +364,8 @@ def _c_style_noncode_ranges(text: str, suffix: str) -> tuple[tuple[int, int], ..
     # the file ineligible rather than exposing a possible regex body.
     if suffix == ".swift" and "/" in _mask_ranges(text, combined):
         return None
-    return combined
+    preprocessor = _c_preprocessor_ranges(_mask_ranges(text, combined))
+    return None if preprocessor is None else (*combined, *preprocessor)
 
 
 def _rust_raw_string_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
@@ -574,7 +602,7 @@ def mask_non_executable_source(
             or re.search(r"\b(?:q|qq|qw|qx|qr|m|s|tr|y)\s*[^\w\s]", masked)
             or re.search(
                 r"(?m)^=(?:pod|head\d|over|item|back|begin|for|encoding)\b"
-                r"|^__(?:DATA|END)__\s*$|^[ \t]*format\b[^\r\n=]*=",
+                r"|^__(?:DATA|END)__\s*$|^[ \t]*format\b",
                 masked,
             )
         ):

@@ -660,6 +660,11 @@ class TestSpecVerifier:
             ("main.pl", "format STDOUT =\nclass CameraProvider\n.\n"),
             ("main.pl", "format =\nclass CameraProvider\n.\n"),
             ("main.pl", "format Foo::Bar =\nclass CameraProvider\n.\n"),
+            ("main.pl", "format\nSTDOUT =\nclass CameraProvider\n.\nwrite;\n"),
+            ("main.pl", "format Foo::Bar\n=\nclass CameraProvider\n.\n"),
+            ("main.cpp", "#if 0\nclass CameraProvider {};\n#endif\n"),
+            ("main.cpp", "#define UNUSED_DECL class CameraProvider\n"),
+            ("main.cpp", "#define UNUSED_DECL \\\nclass CameraProvider\n"),
         ],
         ids=[
             "swift-bare-regex",
@@ -688,6 +693,11 @@ class TestSpecVerifier:
             "perl-format",
             "perl-anonymous-format",
             "perl-package-format",
+            "perl-multiline-format",
+            "perl-package-multiline-format",
+            "cpp-disabled-preprocessor-region",
+            "cpp-macro-replacement-list",
+            "cpp-continued-macro-replacement-list",
         ],
     )
     def test_unclassified_language_literals_fail_the_entire_file_closed(
@@ -748,11 +758,15 @@ class TestSpecVerifier:
                 "class CameraProvider {};\n",
             ),
             (
+                "main.cpp",
+                "#define UNUSED_DECL class Unrelated\nclass CameraProvider {};\n",
+            ),
+            (
                 "Main.java",
                 'String ignored = """\nfoo " class Unrelated\n""";\nclass CameraProvider {}\n',
             ),
         ],
-        ids=["rust", "haskell", "lua", "javascript", "cpp", "java"],
+        ids=["rust", "haskell", "lua", "javascript", "cpp", "cpp-directive", "java"],
     )
     def test_complex_noncode_mask_preserves_following_executable_evidence(
         self, filename: str, content: str
