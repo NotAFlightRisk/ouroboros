@@ -574,7 +574,7 @@ def mask_non_executable_source(
             or re.search(r"\b(?:q|qq|qw|qx|qr|m|s|tr|y)\s*[^\w\s]", masked)
             or re.search(
                 r"(?m)^=(?:pod|head\d|over|item|back|begin|for|encoding)\b"
-                r"|^__(?:DATA|END)__\s*$|^format\s+\w+\s*=",
+                r"|^__(?:DATA|END)__\s*$|^[ \t]*format\b[^\r\n=]*=",
                 masked,
             )
         ):

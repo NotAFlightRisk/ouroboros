@@ -658,6 +658,8 @@ class TestSpecVerifier:
             ("main.jsx", "const view = <div>class CameraProvider</div>;\n"),
             ("main.tsx", "const view = <>class CameraProvider</>;\n"),
             ("main.pl", "format STDOUT =\nclass CameraProvider\n.\n"),
+            ("main.pl", "format =\nclass CameraProvider\n.\n"),
+            ("main.pl", "format Foo::Bar =\nclass CameraProvider\n.\n"),
         ],
         ids=[
             "swift-bare-regex",
@@ -684,6 +686,8 @@ class TestSpecVerifier:
             "jsx-text",
             "tsx-fragment-text",
             "perl-format",
+            "perl-anonymous-format",
+            "perl-package-format",
         ],
     )
     def test_unclassified_language_literals_fail_the_entire_file_closed(
