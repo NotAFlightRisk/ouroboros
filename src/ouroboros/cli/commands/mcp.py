@@ -22,6 +22,7 @@ from rich.text import Text
 import structlog
 import typer
 
+from ouroboros import telemetry as usage_telemetry
 from ouroboros.backends import resolve_runtime_backend_name
 from ouroboros.cli.commands.mcp_doctor import register_doctor_command
 from ouroboros.cli.formatters.panels import print_info, print_success
@@ -665,6 +666,12 @@ async def _run_mcp_server(
         )
 
         tool_count = len(server.info.tools)
+
+        # One event per host session attach (Claude/Codex spawn `mcp serve`
+        # per session) — the denominator for agent-side usage ratios.
+        usage_telemetry.capture(
+            "mcp_serve_started", {"transport": transport, "tool_count": tool_count}
+        )
 
         # Detect Codex seatbelt sandbox and warn about network restrictions.
         _sandbox_network_disabled = os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1"

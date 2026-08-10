@@ -90,6 +90,708 @@ _prompt() {
   printf '%b' "${BOLD}$1${RESET}"
 }
 
+# --- Anonymous install telemetry (PostHog) ---------------------------------
+# Same privacy contract as the CLI (see TELEMETRY.md): random UUID, no PII,
+# no code/paths. Disable with DO_NOT_TRACK=1, OUROBOROS_TELEMETRY=0, or
+# telemetry.enabled: false in ~/.ouroboros/config.yaml.
+# The API key is a public write-only PostHog project key.
+
+# TELEMETRY.md declares ~/.ouroboros/.env a trusted persistent control
+# source; the application loader applies it at import via python-dotenv's
+# dotenv_values(), which resolves a key repeated in the file to its LAST
+# occurrence. This standalone installer must honor the same telemetry keys
+# before any notice or capture, so a persisted opt-out or destination
+# override there holds during install -- including matching that same
+# last-wins resolution for an internally-duplicated key, so the two loaders
+# never disagree about a single file's meaning. Only the four allowlisted
+# telemetry keys are read, and an already-set real process environment
+# value always wins over the file, no matter how many times a key repeats
+# in it (mirrors config/loader.py).
+#
+# Grammar covered exactly like dotenv_values(): bare/export-prefixed
+# bindings, single- and double-quoted values (with an inline `# comment`
+# after a closing quote), one layer of matching quotes around the KEY
+# itself, and last-wins on duplicate keys. Grammar this single-line shell
+# reader genuinely cannot follow -- a physically MULTILINE quoted value, or
+# an ESCAPE sequence inside a double-quoted value -- is never guessed at:
+# `_TELEMETRY_USER_ENV_AMBIGUOUS` is set instead, and `_telemetry_enabled`
+# treats that as an unconditional opt-out. A real parse error dotenv itself
+# also rejects (trailing garbage after a legitimate closing quote) stays a
+# plain skip -- both loaders already agree there's nothing to trust there.
+_telemetry_load_user_env() {
+  local f="$HOME/.ouroboros/.env" line key value rest after trailing
+  local preset_var parsed_var
+  local preset_DO_NOT_TRACK preset_OUROBOROS_TELEMETRY
+  local preset_OUROBOROS_POSTHOG_API_KEY preset_OUROBOROS_POSTHOG_HOST
+  local parsed_DO_NOT_TRACK="" parsed_OUROBOROS_TELEMETRY=""
+  local parsed_OUROBOROS_POSTHOG_API_KEY="" parsed_OUROBOROS_POSTHOG_HOST=""
+  { [ -f "$f" ] && [ -r "$f" ]; } || return 0
+
+  # Phase 1: snapshot which of the four allowlisted keys are already set in
+  # the REAL process environment, before the trusted file is consulted at
+  # all -- this is the one precedence check that must survive unchanged.
+  for key in DO_NOT_TRACK OUROBOROS_TELEMETRY OUROBOROS_POSTHOG_API_KEY OUROBOROS_POSTHOG_HOST; do
+    if eval "[ -n \"\${$key+x}\" ]"; then
+      printf -v "preset_$key" '%s' true
+    else
+      printf -v "preset_$key" '%s' false
+    fi
+  done
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in
+      export[[:space:]]*)
+        line="${line#export}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        ;;
+    esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"
+    key="${key%"${key##*[![:space:]]}"}"
+    # python-dotenv also accepts a key wrapped in one layer of matching
+    # quotes (`'OUROBOROS_TELEMETRY'=0`, `"DO_NOT_TRACK"=1`) -- strip it
+    # before the allowlist check so those parse identically to the bare
+    # form. A key that only has ONE side quoted (no matching closing quote)
+    # falls through unchanged and correctly misses the allowlist below,
+    # same as today.
+    case "$key" in
+      \"*\")
+        key="${key#\"}"
+        key="${key%\"}"
+        ;;
+      \'*\')
+        key="${key#\'}"
+        key="${key%\'}"
+        ;;
+    esac
+    case "$key" in
+      DO_NOT_TRACK|OUROBOROS_TELEMETRY|OUROBOROS_POSTHOG_API_KEY|OUROBOROS_POSTHOG_HOST) ;;
+      *) continue ;;
+    esac
+    value="${line#*=}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    case "$value" in
+      \"*)
+        # A quoted value's content runs to the FIRST matching quote; only
+        # trailing whitespace and/or a `# comment` may follow it (matches
+        # python-dotenv). This is what makes a normal persisted opt-out like
+        # `OUROBOROS_TELEMETRY="0" # persisted opt-out` parse to "0" instead
+        # of falling into the unquoted branch below and keeping its quotes.
+        # A missing closing quote and trailing garbage after a real closing
+        # quote are NOT the same situation in dotenv, even though both look
+        # like "unparseable" to a single-line shell reader:
+        #   - trailing garbage after a legitimate closing quote (e.g.
+        #     `OUROBOROS_TELEMETRY="0"x`) IS a parse error in python-dotenv
+        #     too -- both sides skip the binding, no disagreement possible.
+        #   - a MISSING closing quote is not an error to dotenv at all: it
+        #     is the start of a value that continues reading subsequent
+        #     PHYSICAL LINES until a closing quote is found (a genuinely
+        #     multiline value), which this single-line reader cannot
+        #     follow. Silently skipping here left telemetry ON while the
+        #     application resolved a real (stripped) value -- fail closed
+        #     instead, same posture as the escape-bearing case below.
+        rest="${value#\"}"
+        case "$rest" in
+          *\"*) ;;
+          *) _TELEMETRY_USER_ENV_AMBIGUOUS=1; continue ;;
+        esac
+        after="${rest#*\"}"
+        trailing="${after#"${after%%[![:space:]]*}"}"
+        case "$trailing" in
+          ''|'#'*) ;;
+          *) continue ;;
+        esac
+        value="${rest%%\"*}"
+        # dotenv_values() decodes backslash escapes inside a double-quoted
+        # value (e.g. the two source characters `\n` become an actual
+        # newline); this shell parser copies them literally. A hand-rolled
+        # parser will never chase python-dotenv's full escape grammar
+        # (`\"` alone would need real state tracking), so rather than guess
+        # and risk agreeing with neither interpretation, refuse to trust
+        # THIS occurrence's value at all and force telemetry off for the
+        # whole run: under-collecting on an ambiguous value is always safe,
+        # over-collecting is the actual privacy violation. This is
+        # deliberately asymmetric -- an ambiguous value that LOOKS like an
+        # enable (e.g. `"1\n"`) also disables the installer run, diverging
+        # from the application only in the safe direction.
+        case "$value" in
+          *\\*) _TELEMETRY_USER_ENV_AMBIGUOUS=1; continue ;;
+        esac
+        ;;
+      \'*)
+        # Single-quoted values are literal (no escape decoding, matching
+        # today's handling already), but a missing closing quote has the
+        # SAME multiline-continuation meaning in dotenv as the double-quote
+        # case above -- fail closed for the same reason, not a plain skip.
+        rest="${value#\'}"
+        case "$rest" in
+          *\'*) ;;
+          *) _TELEMETRY_USER_ENV_AMBIGUOUS=1; continue ;;
+        esac
+        after="${rest#*\'}"
+        trailing="${after#"${after%%[![:space:]]*}"}"
+        case "$trailing" in
+          ''|'#'*) ;;
+          *) continue ;;
+        esac
+        value="${rest%%\'*}"
+        ;;
+      *)
+        # Unquoted values follow dotenv grammar: an inline ` # comment` is
+        # not part of the value. Dropping it here matters for opt-outs --
+        # `OUROBOROS_TELEMETRY=0 # off` must parse as "0", not fail the
+        # flag match and silently keep collection on.
+        value="${value%%[[:space:]]#*}"
+        value="${value%"${value##*[![:space:]]}"}"
+        ;;
+    esac
+    [ -n "$value" ] || continue
+    # Phase 2: accumulate into a per-key holding variable rather than
+    # exporting immediately -- overwriting on every valid occurrence gives
+    # LAST-wins semantics for a key duplicated WITHIN the trusted file,
+    # matching dotenv_values(). The old per-line "export, then skip if
+    # already set" approach silently flipped this to first-wins: once the
+    # first occurrence exported the variable, the same `${key+x}` guard
+    # would already be true for every later occurrence in THIS SAME file
+    # too, blocking them even though none of them are the real process env
+    # this guard exists to protect.
+    printf -v "parsed_$key" '%s' "$value"
+  done < "$f"
+
+  # Phase 3: export each key's last-parsed-from-file value, but ONLY if it
+  # was not already present in the real process environment (phase 1) --
+  # preserving real process-env precedence while now resolving duplicates
+  # inside the file itself with last-wins instead of first-wins. An empty
+  # `parsed_*` here means no occurrence in the file ever produced a value
+  # worth keeping (every occurrence, if any, failed to parse or was empty).
+  for key in DO_NOT_TRACK OUROBOROS_TELEMETRY OUROBOROS_POSTHOG_API_KEY OUROBOROS_POSTHOG_HOST; do
+    preset_var="preset_$key"
+    parsed_var="parsed_$key"
+    if [ "${!preset_var}" = false ] && [ -n "${!parsed_var}" ]; then
+      export "$key=${!parsed_var}"
+    fi
+  done
+}
+_telemetry_load_user_env
+
+PH_API_KEY="${OUROBOROS_POSTHOG_API_KEY:-phc_mSoetD4ExLDDCi3vNua635NhwRTgHfRaCG9WYNKmrvv5}"
+PH_HOST="${OUROBOROS_POSTHOG_HOST:-https://us.i.posthog.com}"
+
+_telemetry_config_allows() {
+  local f="$HOME/.ouroboros/config.yaml" script_dir source_root=""
+  local python_candidate ouroboros_cmd shebang status
+  # `-e` is false for a dangling symlink. That is invalid persisted state,
+  # not a genuinely absent config, so keep it on the fail-closed path.
+  [ -e "$f" ] || [ -L "$f" ] || return 0
+  [ -r "$f" ] || return 1
+
+  # Match the application resolver: parse the complete YAML document and
+  # validate every known field before trusting telemetry.enabled. A partial
+  # text parser can accept telemetry.enabled=true while overlooking malformed
+  # YAML or an invalid unrelated field. Existing configuration therefore
+  # requires a Python environment with Ouroboros' real schema available;
+  # otherwise collection fails closed. A genuinely absent config retains the
+  # documented default-on behavior after the notice below.
+  script_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd) || true
+  if [ -n "$script_dir" ] && [ -f "$script_dir/../src/ouroboros/config/models.py" ]; then
+    source_root=$(CDPATH='' cd -- "$script_dir/../src" 2>/dev/null && pwd) || true
+  fi
+
+  _telemetry_validate_config_with_python() {
+    local interpreter="$1"
+    "$interpreter" -I - "$f" "$source_root" <<'PY'
+import sys
+
+config_path, source_root = sys.argv[1:]
+if source_root:
+    sys.path.insert(0, source_root)
+
+try:
+    import yaml
+    from ouroboros.config.models import OuroborosConfig
+except Exception:
+    raise SystemExit(2)
+
+try:
+    with open(config_path, encoding="utf-8") as config_file:
+        raw = yaml.safe_load(config_file)
+    config = OuroborosConfig.model_validate({} if raw is None else raw)
+except Exception:
+    raise SystemExit(1)
+
+raise SystemExit(0 if config.telemetry.enabled is True else 1)
+PY
+  }
+
+  for python_candidate in python3 python; do
+    python_candidate=$(command -v "$python_candidate" 2>/dev/null || true)
+    [ -n "$python_candidate" ] || continue
+    if _telemetry_validate_config_with_python "$python_candidate"; then
+      unset -f _telemetry_validate_config_with_python
+      return 0
+    else
+      status=$?
+      if [ "$status" -ne 2 ]; then
+        unset -f _telemetry_validate_config_with_python
+        return 1
+      fi
+    fi
+  done
+
+  # uv/pipx entry points carry their environment's Python interpreter in the
+  # shebang. It may have the schema when the system Python does not.
+  ouroboros_cmd=$(command -v ouroboros 2>/dev/null || true)
+  if [ -n "$ouroboros_cmd" ] && [ -r "$ouroboros_cmd" ]; then
+    shebang=$(head -n 1 "$ouroboros_cmd" 2>/dev/null || true)
+    case "$shebang" in
+      '#!'/*)
+        python_candidate=${shebang#'#!'}
+        case "$python_candidate" in
+          *' '*) ;;
+          *)
+            if [ -x "$python_candidate" ]; then
+              if _telemetry_validate_config_with_python "$python_candidate"; then
+                unset -f _telemetry_validate_config_with_python
+                return 0
+              fi
+            fi
+            ;;
+        esac
+        ;;
+    esac
+  fi
+
+  unset -f _telemetry_validate_config_with_python
+  return 1
+}
+
+_telemetry_enabled() {
+  [ -n "$PH_API_KEY" ] || return 1
+  # Set by _telemetry_load_user_env when a trusted-file value couldn't be
+  # parsed unambiguously (an escape-bearing double-quoted value) -- an
+  # opt-out this installer cannot resolve is treated as an opt-out, not
+  # ignored. Any one disabling control wins, matching every other flag here.
+  [ -z "${_TELEMETRY_USER_ENV_AMBIGUOUS:-}" ] || return 1
+  local dnt oel
+  # Lowercase and trim each flag before matching so `OFF`, `Yes`, `TRUE`,
+  # or values with stray whitespace are recognized the same as their
+  # canonical lowercase forms (mirrors config/loader.py's `.strip().lower()`).
+  dnt=$(printf '%s' "${DO_NOT_TRACK:-}" | tr '[:upper:]' '[:lower:]')
+  dnt="${dnt#"${dnt%%[![:space:]]*}"}"
+  dnt="${dnt%"${dnt##*[![:space:]]}"}"
+  case "$dnt" in 1|true|on|yes) return 1 ;; esac
+  oel=$(printf '%s' "${OUROBOROS_TELEMETRY:-}" | tr '[:upper:]' '[:lower:]')
+  oel="${oel#"${oel%%[![:space:]]*}"}"
+  oel="${oel%"${oel##*[![:space:]]}"}"
+  case "$oel" in 0|false|off|no) return 1 ;; esac
+  # OUROBOROS_TELEMETRY=1 is never an override: persisted opt-out and
+  # malformed configuration stay authoritative (TELEMETRY.md: any one
+  # disabling control wins), matching the application resolver.
+  _telemetry_config_allows || return 1
+  command -v curl &>/dev/null || return 1
+  return 0
+}
+
+_telemetry_distinct_id() {
+  local f="$HOME/.ouroboros/telemetry.json" id="" winner_id="" tmp file_existed=false lockdir wait_i
+  local salvage_id=""
+  local uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+  # Four nested helpers, all `unset -f` below so extracting just this outer
+  # function's source -- e.g. for an isolated concurrency-test driver --
+  # carries them along automatically instead of leaving a dangling
+  # reference:
+  #
+  #   _telemetry_extract_uuid  -- LENIENT, TEXT-ONLY. Prints the id,
+  #   canonicalized to lowercase, whenever a sed match ANYWHERE in the raw
+  #   text looks UUID-shaped -- ignorant of JSON structure entirely. This is
+  #   only correct for genuinely unparseable text (telemetry.py salvages the
+  #   same way there, via a raw-text regex): once a document IS valid JSON,
+  #   a sed match found "anywhere" could be nested inside another object, or
+  #   the first of several duplicate top-level keys, and must NOT be trusted
+  #   -- see `_telemetry_read_state`.
+  #
+  #   _telemetry_read_state  -- the structural source of truth. Requires
+  #   python3 (a soft dependency elsewhere in this installer too). Parses
+  #   the file as JSON and looks at the TOP-LEVEL `distinct_id` field only
+  #   -- Python's own json.load naturally resolves duplicate keys to the
+  #   LAST occurrence, matching telemetry.py's loader exactly, and a value
+  #   nested inside another object is correctly invisible to a plain
+  #   `data.get(...)`. Prints one of: `CANONICAL:<id>` (top-level, pattern-
+  #   valid, already lowercase -- fully valid, no repair needed),
+  #   `REPAIR:<id>` (top-level, pattern-valid, wrong case -- a real identity
+  #   worth salvaging, canonicalized), `INVALID` (valid JSON, but no usable
+  #   top-level id -- missing, non-string, non-UUID, or only present nested
+  #   -- telemetry.py does NOT salvage from a valid-but-wrong-shaped
+  #   document, only from unparseable text, so this must NOT fall through to
+  #   the lenient text search), `MALFORMED` (not valid JSON at all -- the
+  #   lenient, text-only salvage path legitimately applies here), or
+  #   `NO_PYTHON3` when python3 isn't on PATH -- without a JSON parser, pure
+  #   shell cannot tell top-level from nested or resolve duplicate keys, so
+  #   this is a documented best-effort gap.
+  #
+  #   _telemetry_canonical_id  -- STRICT adopt-without-repair check ("has a
+  #   real repair already landed on disk"): CANONICAL only when python3 is
+  #   present; falls back to the old pattern+case-only sed check (no
+  #   structural awareness) when it is not.
+  #
+  #   _telemetry_salvage_candidate  -- the repair candidate getter: reuses a
+  #   REPAIR-state top-level id or a MALFORMED-text lenient match; withholds
+  #   entirely on INVALID (mirrors telemetry.py: no salvage from valid JSON
+  #   lacking a usable top-level id); falls back to the lenient text search
+  #   without python3.
+  _telemetry_extract_uuid() {
+    local r
+    r=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1)
+    if [[ "$r" =~ $uuid_re ]]; then
+      printf '%s' "$r" | tr '[:upper:]' '[:lower:]'
+    fi
+  }
+  _telemetry_read_state() {
+    local py
+    py=$(command -v python3 2>/dev/null || true)
+    if [ -z "$py" ]; then
+      printf 'NO_PYTHON3'
+      return 0
+    fi
+    "$py" -c '
+import json, re, sys
+
+uuid_re = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    print("MALFORMED")
+else:
+    value = data.get("distinct_id") if isinstance(data, dict) else None
+    if isinstance(value, str) and uuid_re.match(value):
+        lowered = value.lower()
+        print(("CANONICAL:" if lowered == value else "REPAIR:") + lowered)
+    else:
+        print("INVALID")
+' "$1" 2>/dev/null
+  }
+  _telemetry_canonical_id() {
+    local state r
+    state=$(_telemetry_read_state "$1")
+    case "$state" in
+      CANONICAL:*)
+        printf '%s' "${state#CANONICAL:}"
+        ;;
+      NO_PYTHON3)
+        r=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1)
+        [[ "$r" =~ $uuid_re ]] || return 0
+        [ "$r" = "$(printf '%s' "$r" | tr '[:upper:]' '[:lower:]')" ] || return 0
+        printf '%s' "$r"
+        ;;
+      *) ;; # REPAIR / INVALID / MALFORMED: not yet fully valid
+    esac
+  }
+  _telemetry_salvage_candidate() {
+    local state
+    state=$(_telemetry_read_state "$1")
+    case "$state" in
+      CANONICAL:*) printf '%s' "${state#CANONICAL:}" ;;
+      REPAIR:*) printf '%s' "${state#REPAIR:}" ;;
+      INVALID) ;; # valid JSON, no usable top-level id -- no salvage
+      *) _telemetry_extract_uuid "$1" ;; # MALFORMED or NO_PYTHON3
+    esac
+  }
+
+  if [ -f "$f" ]; then
+    file_existed=true
+    id=$(_telemetry_canonical_id "$f")
+    if [ -z "$id" ]; then
+      # Not already fully valid. Keep a real (top-level, or -- only for
+      # genuinely unparseable text -- lenient-text) id as a SALVAGE
+      # candidate rather than discarding it for a fresh mint; an id that
+      # isn't usable at all (no field, a non-UUID value, or only nested
+      # inside otherwise-valid JSON) leaves `salvage_id` empty and is
+      # treated as fully corrupt below.
+      salvage_id=$(_telemetry_salvage_candidate "$f")
+    fi
+  fi
+
+  if [ -z "$id" ]; then
+    if [ -n "$salvage_id" ]; then
+      id="$salvage_id"
+    elif command -v uuidgen &>/dev/null; then
+      id=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    elif command -v python3 &>/dev/null; then
+      id=$(python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null || true)
+    fi
+    if [ -z "$id" ]; then
+      unset -f _telemetry_extract_uuid _telemetry_read_state _telemetry_canonical_id _telemetry_salvage_candidate
+      return 1
+    fi
+    if ! mkdir -p "$HOME/.ouroboros" 2>/dev/null; then
+      unset -f _telemetry_extract_uuid _telemetry_read_state _telemetry_canonical_id _telemetry_salvage_candidate
+      return 1
+    fi
+    # Publish the (fresh or salvaged) identity via a same-directory temp
+    # file, then re-read whatever actually landed on disk instead of
+    # trusting our own candidate:
+    #   - `$f` absent: publish with `ln` (hard link) — atomic
+    #     create-if-not-exists, it fails if a concurrently-starting process
+    #     (e.g. `ouroboros setup` in step 4, or another MCP session) already
+    #     won, so nothing here is ever clobbered.
+    #   - `$f` present but invalid (unparseable, no distinct_id, a non-UUID
+    #     value, mismatched case, or malformed JSON around an otherwise
+    #     salvageable id): `ln`/an unconditional `mv` are not enough here —
+    #     every racing process would each mint or salvage independently and
+    #     the last `mv` would silently win, so processes that already
+    #     emitted events under their own reading would disagree with what
+    #     ends up persisted. Exactly one process must own the repair.
+    #     `$f.repair.lock` is the SAME lock name telemetry.py's
+    #     `_repair_state` uses (it creates the path with `O_CREAT|O_EXCL` as
+    #     a file; here `mkdir` is the atomic create-if-not-exists primitive).
+    #     Both primitives only check whether *something* already exists at
+    #     that path, regardless of type, so a shell `mkdir` and a Python
+    #     `O_EXCL` file open correctly exclude each other at the same path
+    #     (verified on macOS: whichever side creates the path first, the
+    #     other's create call fails with EEXIST).
+    # Either way, every process then adopts whichever valid, canonical
+    # distinct_id survives in `$f` (mirrors telemetry.py's
+    # `_publish_new_state` / `_repair_state`, which apply the same
+    # UUID-validate-canonicalize-and-salvage rules).
+    tmp="$f.$$.tmp"
+    # Grouped so an unwritable `$HOME/.ouroboros` (read-only dir, e.g.) is
+    # silent: a shell redirection's own open failure prints to the *current*
+    # stderr before the trailing `2>/dev/null` on this line ever takes
+    # effect, unlike an external command's (mv/ln/mkdir below) own error
+    # output, which a trailing `2>/dev/null` does catch.
+    { printf '{"distinct_id": "%s", "created_at": "%s", "notice_shown": false}\n' \
+      "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp"; } 2>/dev/null || true
+    if [ "$file_existed" = true ]; then
+      lockdir="$f.repair.lock"
+      if mkdir "$lockdir" 2>/dev/null; then
+        # WINNER: re-validate under the lock -- another process may have
+        # repaired the file (to a valid id) between our first read and
+        # acquiring it.
+        winner_id=$(_telemetry_canonical_id "$f")
+        [ -n "$winner_id" ] || mv "$tmp" "$f" 2>/dev/null || true
+        rmdir "$lockdir" 2>/dev/null || true
+      else
+        # LOSER: someone else owns the repair (or a stale lock). Wait,
+        # bounded, for a valid id to land.
+        winner_id=""
+        wait_i=0
+        while [ "$wait_i" -lt 10 ]; do
+          sleep 0.05
+          winner_id=$(_telemetry_canonical_id "$f")
+          [ -n "$winner_id" ] && break
+          wait_i=$((wait_i + 1))
+        done
+        if [ -z "$winner_id" ]; then
+          # Lock never cleared (stale, from a killed process) -- take over
+          # the replace ourselves rather than waiting forever, accepting
+          # the tiny remaining race.
+          mv "$tmp" "$f" 2>/dev/null || true
+          rmdir "$lockdir" 2>/dev/null || rm -f "$lockdir" 2>/dev/null || true
+        fi
+      fi
+    else
+      ln "$tmp" "$f" 2>/dev/null || true
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+    # Fail-closed reread: if neither our own publish/repair attempt nor
+    # anyone else's landed a usable id on disk (e.g. `$HOME/.ouroboros` is
+    # unwritable/read-only, so every `mv`/`ln` above silently failed),
+    # printing the local candidate would emit under an ephemeral,
+    # never-persisted identity that no other process -- or a later run of
+    # this same one -- could ever reproduce, permanently fragmenting
+    # identity instead of just skipping a run's telemetry. Drop instead
+    # (callers already treat a nonzero return as "skip telemetry"), matching
+    # telemetry.py's stable-identity contract. Deliberately
+    # `_telemetry_salvage_candidate`, not the strict `_telemetry_canonical_id`:
+    # this is a "is there now a real, reusable identity at all" check, not a
+    # "was it perfectly repaired" check -- a top-level id already sitting in
+    # a file we couldn't write to is still a stable value every future read
+    # of that same file will keep finding, so it's the best available
+    # anchor, not a reason to go fully ephemeral. It still withholds on a
+    # valid-JSON `INVALID` state (no usable top-level id) exactly as the
+    # top-of-function salvage check does, so this reread can never resurrect
+    # a nested-only or otherwise-unusable value that was correctly rejected
+    # earlier in this same call.
+    winner_id=$(_telemetry_salvage_candidate "$f")
+    if [ -z "$winner_id" ]; then
+      unset -f _telemetry_extract_uuid _telemetry_read_state _telemetry_canonical_id _telemetry_salvage_candidate
+      return 1
+    fi
+    id="$winner_id"
+  fi
+  unset -f _telemetry_extract_uuid _telemetry_read_state _telemetry_canonical_id _telemetry_salvage_candidate
+  printf '%s' "$id"
+}
+
+_telemetry_notice() {
+  _telemetry_enabled || return 0
+  local f="$HOME/.ouroboros/telemetry.json" tmp id py already_shown
+
+  # Skip only when the persisted state is valid JSON, a dict, and its
+  # TOP-LEVEL `notice_shown` is the literal boolean `true` -- mirrors the
+  # identity reader's structural approach above (and telemetry.py's own
+  # check). Fail toward disclosure: missing, nested-only (e.g. a
+  # `{"wrapper": {"notice_shown": true}}` sibling object), a string
+  # "true"/"false", any other non-bool, or malformed JSON must all still
+  # show the notice -- a duplicate notice is harmless, a suppressed one
+  # breaks the privacy contract. Without python3 on PATH we cannot parse
+  # JSON structure in pure shell, so this falls back to the old raw-text
+  # grep (documented best-effort gap, matches the identity reader's
+  # NO_PYTHON3 fallback).
+  py=$(command -v python3 2>/dev/null || true)
+  already_shown=false
+  if [ -f "$f" ]; then
+    if [ -n "$py" ]; then
+      if "$py" -c '
+import json, sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(data, dict) and data.get("notice_shown") is True else 1)
+' "$f" 2>/dev/null; then
+        already_shown=true
+      fi
+    elif grep -q '"notice_shown"[[:space:]]*:[[:space:]]*true' "$f" 2>/dev/null; then
+      already_shown=true
+    fi
+  fi
+  [ "$already_shown" = false ] || return 0
+
+  _blank
+  _say "${BOLD}Anonymous usage stats help improve Ouroboros.${RESET}"
+  _info "Collects commands, versions, and success rates — never code, prompts, or paths."
+  _info "Opt out: export OUROBOROS_TELEMETRY=0  |  details: https://github.com/Q00/ouroboros/blob/main/TELEMETRY.md"
+
+  # Persist the one-time notice before the first collection attempt. Failure
+  # is harmless: this run was disclosed and a later run will disclose again.
+  id=$(_telemetry_distinct_id) || return 0
+  [ -n "$id" ] || return 0
+  tmp="${f}.notice.$$"
+  if [ -n "$py" ]; then
+    # Structural set: parses the file, sets the TOP-LEVEL `notice_shown` to
+    # the literal boolean `true`, and preserves every other field as-is.
+    # Unlike the sed fallback below, this also covers a document whose
+    # top-level `notice_shown` never existed in the first place (e.g. an
+    # already-valid identity file that was never rewritten by the repair
+    # path above) -- a blind "replace false with true" text substitution
+    # has nothing to match there and would silently leave the field
+    # missing forever, so a later run would show the notice again.
+    if "$py" -c '
+import json, sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError("top-level JSON value is not an object")
+except Exception:
+    sys.exit(1)
+data["notice_shown"] = True
+with open(sys.argv[2], "w", encoding="utf-8") as fh:
+    json.dump(data, fh)
+    fh.write("\n")
+' "$f" "$tmp" 2>/dev/null; then
+      mv "$tmp" "$f" 2>/dev/null || true
+    fi
+  elif sed 's/"notice_shown"[[:space:]]*:[[:space:]]*false/"notice_shown": true/' "$f" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$f" 2>/dev/null || true
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+# _telemetry_ping <event> [key=value ...] — fire-and-forget, never fails.
+_telemetry_ping() {
+  _telemetry_enabled || return 0
+  local event="$1" id os arch py body kv k v props api_key_safe event_safe id_safe
+  shift
+  id=$(_telemetry_distinct_id) || return 0
+
+  # Token-constrain os/arch at the source: a hostile executable earlier on
+  # PATH (or a nonstandard uname) can emit anything, including embedded
+  # quotes that would otherwise mutate the JSON structure below -- neither
+  # os nor arch legitimately needs more than this charset (darwin, linux,
+  # arm64, x86_64, ...), so anything that doesn't fullmatch is discarded
+  # outright rather than partially trusted.
+  os=$(uname -s | tr '[:upper:]' '[:lower:]')
+  [[ "$os" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || os="unknown"
+  arch=$(uname -m)
+  [[ "$arch" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || arch="unknown"
+
+  py=$(command -v python3 2>/dev/null || true)
+  body=""
+  if [ -n "$py" ]; then
+    # Structural encoding: every value is JSON-escaped by python3's real
+    # encoder and passed in via argv -- never interpolated into the -c code
+    # string itself -- so a hostile value (embedded quotes, backslashes,
+    # control characters, an attempted `","injected":"...` payload) can
+    # only ever become the STRING CONTENTS of its own declared property; it
+    # can never alter the payload's structure or add an undeclared key.
+    # Keys are call-site literals already, but are still whitelisted to
+    # `[A-Za-z0-9_]+` defensively -- a key that fails that check is
+    # dropped, never stringified into a place it could do damage.
+    body=$("$py" -c '
+import json, re, sys
+
+event, distinct_id, api_key, os_name, arch = sys.argv[1:6]
+props = {"source": "install_sh", "os": os_name, "arch": arch}
+key_re = re.compile(r"^[A-Za-z0-9_]+$")
+for kv in sys.argv[6:]:
+    key, sep, value = kv.partition("=")
+    if sep and key_re.match(key):
+        props[key] = value
+print(json.dumps(
+    {
+        "api_key": api_key,
+        "event": event,
+        "distinct_id": distinct_id,
+        "properties": props,
+    },
+    separators=(",", ":"),
+))
+' "$event" "$id" "$PH_API_KEY" "$os" "$arch" "$@" 2>/dev/null)
+  fi
+
+  if [ -z "$body" ]; then
+    # No python3 (or the structural encoder failed): sanitize every value
+    # through a strict safe-token filter before string concatenation, so no
+    # quote/backslash/control character can ever survive to mutate the JSON
+    # structure. Every legitimate installer value (version numbers,
+    # method/runtime names, yes/no flags, a canonical-lowercase distinct_id,
+    # the os/arch tokens above) fits this charset losslessly; anything that
+    # doesn't is stripped down to it (then length-capped) or falls back to
+    # `unknown` -- best-effort, consistent with the identity/notice
+    # readers' own NO_PYTHON3 fallback posture elsewhere in this file.
+    props='"source":"install_sh","os":"'"$os"'","arch":"'"$arch"'"'
+    for kv in "$@"; do
+      k=$(printf '%s' "${kv%%=*}" | tr -cd 'A-Za-z0-9_')
+      [ -n "$k" ] || continue
+      v=$(printf '%s' "${kv#*=}" | tr -cd 'A-Za-z0-9._-')
+      v="${v:0:64}"
+      [ -n "$v" ] || v="unknown"
+      props="$props,\"$k\":\"$v\""
+    done
+    api_key_safe=$(printf '%s' "$PH_API_KEY" | tr -cd 'A-Za-z0-9._-')
+    event_safe=$(printf '%s' "$event" | tr -cd 'A-Za-z0-9._-')
+    id_safe=$(printf '%s' "$id" | tr -cd 'A-Za-z0-9._-')
+    body='{"api_key":"'"$api_key_safe"'","event":"'"$event_safe"'","distinct_id":"'"$id_safe"'","properties":{'"$props"'}}'
+  fi
+
+  curl -fsS -m 4 -X POST "$PH_HOST/capture/" -H 'Content-Type: application/json' \
+    -d "$body" \
+    >/dev/null 2>&1 &
+  return 0
+}
+# ---------------------------------------------------------------------------
+
 # Parse simple flags: --reconfigure, --runtime <name>
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -134,6 +836,9 @@ if [ "$IS_LOCAL" = false ] && command -v curl &>/dev/null; then
 fi
 
 _banner
+
+_telemetry_notice
+_telemetry_ping install_started "is_local=$IS_LOCAL" "pre=${PRE_FLAG:-no}" "version=${LATEST:-unknown}"
 
 # 1. Detect installer: uv > pipx > pip (determines Python requirement)
 HAS_UV=false
@@ -643,6 +1348,9 @@ if command -v claude &>/dev/null; then
   fi
 fi
 
+_telemetry_ping install_completed "method=${INSTALL_METHOD:-unknown}" "runtime=${RUNTIME:-none}" \
+  "detected_runtimes=${RUNTIME_COUNT:-0}" "version=${LATEST:-unknown}"
+
 _blank
 _say "${GREEN}${BOLD}Done! Ouroboros is ready.${RESET}"
 _blank
@@ -701,3 +1409,7 @@ if [ -t 0 ] && [ -z "${OUROBOROS_INSTALL_SKIP_CONFIG_GUI:-}" ]; then
       ;;
   esac
 fi
+
+_blank
+_say "${BOLD}Like Ouroboros?${RESET}"
+_info "Give the repo a star on GitHub: https://github.com/Q00/ouroboros"
