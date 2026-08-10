@@ -29,7 +29,8 @@ _DECLARATION_KIND_BEFORE_TARGET = re.compile(
     re.IGNORECASE,
 )
 _DECLARATION_KIND_AFTER_TARGET = re.compile(
-    r"^\s+(?P<kind>class|function|interface|struct|trait)\b",
+    r"^\s+(?:(?:implementation|service)\s+)?"
+    r"(?P<kind>class|function|interface|struct|trait)\b",
     re.IGNORECASE,
 )
 _CONSTANT_BINDING_SUFFIX = re.compile(

@@ -1305,6 +1305,79 @@ async def test_complete_class_definitions_can_reach_formal_pass(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "filename", "content", "pattern"),
+    [
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
+            "class CameraProvider<T> {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.ts",
+            "class CameraProvider<T> {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.kt",
+            "class CameraProvider<T> {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.swift",
+            "class CameraProvider<T> {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.cs",
+            "class CameraProvider<T> {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider trait",
+            "provider.rs",
+            "trait CameraProvider<T> {}\n",
+            r"trait\s+CameraProvider",
+        ),
+    ],
+    ids=["java", "typescript", "kotlin", "swift", "csharp", "rust"],
+)
+async def test_valid_generic_type_definitions_can_reach_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    filename: str,
+    content: str,
+    pattern: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": pattern,
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Complete generic type definition",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is True
+    assert formal.final_approved is True
+    assert formal.ac_results[0].final_verdict == "pass"
+
+
+@pytest.mark.asyncio
 async def test_cpp_template_class_declaration_can_reach_formal_pass(tmp_path: Any) -> None:
     ac_text = "MUST define a CameraProvider class"
     assertions = await _extract(
@@ -1471,9 +1544,11 @@ def test_mixed_criterion_text_cannot_borrow_a_report_identity_for_formal_pass(
     ("content", "approved"),
     [
         ("class CameraProvider:\n    pass\n", False),
+        ("def CameraProvider():\n    pass\n", True),
+        ("CameraProvider = object()\n", True),
         ("class Unrelated:\n    pass\n", True),
     ],
-    ids=["forbidden-present", "forbidden-absent"],
+    ids=["forbidden-present", "same-name-function", "same-name-variable", "forbidden-absent"],
 )
 async def test_negative_structure_polarity_reaches_formal_verdict(
     tmp_path: Any,

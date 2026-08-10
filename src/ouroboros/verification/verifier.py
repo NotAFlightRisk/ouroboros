@@ -19,13 +19,13 @@ import re
 from re import _parser as regex_parser
 from typing import NamedTuple
 
+from ouroboros.verification import declaration_binding as decl
 from ouroboros.verification.binding import (
     acceptance_polarity,
     acceptance_targets,
     literal_is_bound,
     literal_spans,
 )
-from ouroboros.verification.declaration_binding import match_has_bound_declaration_kind
 from ouroboros.verification.models import (
     ACVerificationReport,
     EvidencePolarity,
@@ -1551,9 +1551,9 @@ class SpecVerifier:
                 discrepancy=True,
                 detail=error,
             )
-        for file_path, _content, evidence_content in inventory:
+        for file_path, content, evidence_content in inventory:
             relative_file = self._relative_file(file_path)
-            if literal_is_bound(evidence_content, target):
+            if decl.matches_criterion(evidence_content, content, target, assertion, file_path):
                 return SpecVerificationResult(
                     assertion=assertion,
                     verified=False,
@@ -1901,7 +1901,7 @@ class SpecVerifier:
                         evidence_content,
                         assertion,
                     )
-                    if match_has_bound_declaration_kind(
+                    if decl.match_has_bound_declaration_kind(
                         content_pattern,
                         candidate[0],
                         (evidence_content, content),

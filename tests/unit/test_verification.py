@@ -20,6 +20,7 @@ from ouroboros.providers.base import CompletionResponse
 from ouroboros.verification.extractor import AssertionExtractor
 from ouroboros.verification.models import (
     ACVerificationReport,
+    EvidencePolarity,
     SpecVerificationResult,
     SpecVerificationSummary,
     VerificationOutcome,
@@ -1958,6 +1959,94 @@ class TestSpecVerifier:
 
         assert result.verified is True
         assert result.evidence_source == "file_content"
+
+    @pytest.mark.parametrize(
+        ("ac_text", "filename", "content", "pattern"),
+        [
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "class CameraProvider<T> {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.ts",
+                "class CameraProvider<T> {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.kt",
+                "class CameraProvider<T> {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.swift",
+                "class CameraProvider<T> {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.cs",
+                "class CameraProvider<T> {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider trait",
+                "provider.rs",
+                "trait CameraProvider<T> {}\n",
+                r"trait\s+CameraProvider",
+            ),
+        ],
+        ids=["java", "typescript", "kotlin", "swift", "csharp", "rust"],
+    )
+    def test_t2_valid_generic_type_definitions_remain_valid(
+        self,
+        ac_text: str,
+        filename: str,
+        content: str,
+        pattern: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is True
+        assert result.evidence_source == "file_content"
+
+    @pytest.mark.parametrize(
+        "content",
+        ["def CameraProvider():\n    pass\n", "CameraProvider = object()\n"],
+        ids=["function", "variable"],
+    )
+    def test_forbidden_class_ignores_same_named_non_class(self, content: str) -> None:
+        project = self._create_project({"provider.py": content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST NOT define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+CameraProvider",
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+            evidence_polarity=EvidencePolarity.FORBIDDEN,
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is True
+        assert result.evidence_source == "trusted_project_scan"
 
     def test_cpp_template_class_declaration_remains_valid(self) -> None:
         project = self._create_project(

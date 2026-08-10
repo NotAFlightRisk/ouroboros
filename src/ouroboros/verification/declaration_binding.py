@@ -8,6 +8,7 @@ import re
 
 from ouroboros.verification.binding import (
     acceptance_declaration_kind,
+    literal_is_bound,
     literal_spans,
 )
 from ouroboros.verification.models import SpecAssertion, VerificationTier
@@ -500,15 +501,19 @@ def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
         return re.fullmatch(rf"\s+{re.escape(kind)}\s*", header) is not None
     if not header.strip():
         return True
-    if any(token in header for token in ("=", ";", "{", "}", "@", "<", ">")):
+    if any(token in header for token in ("=", ";", "{", "}", "@")):
         return False
+    generic = r"<\s*[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s*>"
+    qualified = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+    qualified_generic = rf"{qualified}(?:\s*{generic})?"
     if suffix in _CPP_SUFFIXES:
+        cpp_type = rf"[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*(?:\s*{generic})?"
         return (
             re.fullmatch(
                 r"\s*(?:final\s*)?(?::\s*(?:[A-Za-z_]\w*\s+)*"
-                r"[A-Za-z_]\w*(?:::\w+)*(?:\s*<[^(){};=]+>)?"
+                rf"{cpp_type}"
                 r"(?:\s*,\s*(?:[A-Za-z_]\w*\s+)*[A-Za-z_]\w*"
-                r"(?:::\w+)*(?:\s*<[^(){};=]+>)?)*)?\s*",
+                rf"(?:::\w+)*(?:\s*{generic})?)*)?\s*",
                 header,
             )
             is not None
@@ -516,11 +521,9 @@ def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
     if suffix == ".java":
         return (
             re.fullmatch(
-                r"\s*(?:<[^(){};=@]+>\s*)?"
+                rf"\s*(?:{generic}\s*)?"
                 r"(?:(?:extends|implements|permits)\s+"
-                r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[^(){};=@]+>)?"
-                r"(?:\s*,\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
-                r"(?:\s*<[^(){};=@]+>)?)*\s*)*",
+                rf"{qualified_generic}(?:\s*,\s*{qualified_generic})*\s*)*",
                 header,
             )
             is not None
@@ -534,12 +537,13 @@ def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
             is not None
         )
     if suffix in {".ts", ".tsx"}:
+        ts_name = r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*"
+        ts_type = rf"{ts_name}(?:\s*{generic})?"
         return (
             re.fullmatch(
-                r"\s*(?:<[^(){};=@]+>\s*)?"
-                r"(?:(?:extends|implements)\s+[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*"
-                r"(?:\s*<[^(){};=@]+>)?(?:\s*,\s*[A-Za-z_$][\w$]*"
-                r"(?:\.[A-Za-z_$][\w$]*)*(?:\s*<[^(){};=@]+>)?)*\s*)*",
+                rf"\s*(?:{generic}\s*)?"
+                rf"(?:(?:extends|implements)\s+{ts_type}"
+                rf"(?:\s*,\s*{ts_type})*\s*)*",
                 header,
             )
             is not None
@@ -547,10 +551,8 @@ def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
     if suffix == ".cs":
         return (
             re.fullmatch(
-                r"\s*(?:<[^(){};=@]+>\s*)?(?::\s*[A-Za-z_]\w*"
-                r"(?:\.[A-Za-z_]\w*)*(?:\s*<[^(){};=@]+>)?"
-                r"(?:\s*,\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
-                r"(?:\s*<[^(){};=@]+>)?)*)?\s*",
+                rf"\s*(?:{generic}\s*)?(?::\s*{qualified_generic}"
+                rf"(?:\s*,\s*{qualified_generic})*)?\s*",
                 header,
             )
             is not None
@@ -558,34 +560,24 @@ def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
     if suffix == ".swift":
         return (
             re.fullmatch(
-                r"\s*(?:<[^(){};=@]+>\s*)?(?::\s*[A-Za-z_]\w*"
-                r"(?:\.[A-Za-z_]\w*)*(?:\s*,\s*[A-Za-z_]\w*"
-                r"(?:\.[A-Za-z_]\w*)*)*)?(?:\s+where\s+[^(){};=@]+)?\s*",
+                rf"\s*(?:{generic}\s*)?(?::\s*{qualified}"
+                rf"(?:\s*,\s*{qualified})*)?\s*",
                 header,
             )
             is not None
         )
     if suffix in {".kt", ".kts"}:
+        kotlin_parent = rf"{qualified_generic}(?:\(\s*\))?"
         return (
             re.fullmatch(
-                r"\s*(?:<[^{};=@]+>\s*)?(?:\([^{};=@]*\)\s*)?"
-                r"(?::\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
-                r"(?:\s*<[^{};=@]+>)?(?:\([^{};=@]*\))?"
-                r"(?:\s*,\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
-                r"(?:\s*<[^{};=@]+>)?(?:\([^{};=@]*\))?)*)?"
-                r"(?:\s+where\s+[^{};=@]+)?\s*",
+                rf"\s*(?:{generic}\s*)?(?:\(\s*\)\s*)?"
+                rf"(?::\s*{kotlin_parent}(?:\s*,\s*{kotlin_parent})*)?\s*",
                 header,
             )
             is not None
         )
     if suffix == ".rs":
-        return (
-            re.fullmatch(
-                r"\s*(?:<[^(){};=@]+>\s*)?(?:where\s+[^(){};=@]+)?\s*",
-                header,
-            )
-            is not None
-        )
+        return re.fullmatch(rf"\s*(?:{generic}\s*)?", header) is not None
     return False
 
 
@@ -1191,6 +1183,47 @@ def _source_span_has_declaration_kind(
                 continue
             return True
     return False
+
+
+def source_has_declaration_kind(
+    source: str,
+    original_source: str,
+    target: str,
+    kind: str,
+    file_path: str,
+) -> bool:
+    """Whether trusted source contains the requested complete declaration kind."""
+    return any(
+        _source_span_has_declaration_kind(
+            source,
+            original_source,
+            span,
+            target,
+            kind,
+            file_path,
+        )
+        for span in literal_spans(source, target)
+    )
+
+
+def matches_criterion(
+    source: str,
+    original_source: str,
+    target: str,
+    assertion: SpecAssertion,
+    file_path: str,
+) -> bool:
+    """Apply the caller-requested declaration kind to a trusted inventory scan."""
+    kind_required, kind = acceptance_declaration_kind(assertion.ac_text, target)
+    if not kind_required:
+        return literal_is_bound(source, target)
+    return kind is None or source_has_declaration_kind(
+        source,
+        original_source,
+        target,
+        kind,
+        file_path,
+    )
 
 
 def match_has_bound_declaration_kind(
