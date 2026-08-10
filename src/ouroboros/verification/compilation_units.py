@@ -29,10 +29,19 @@ _C_FAMILY_TYPE_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".h", ".hpp", ".mm"})
 _OPTIONAL_EMPTY_STATEMENT_SUFFIXES = frozenset(
     {".go", ".js", ".jsx", ".kt", ".kts", ".swift", ".ts", ".tsx"}
 )
+_HASH_LINE_COMMENT_SUFFIXES = frozenset({".r", ".rb"})
+_DASH_LINE_COMMENT_SUFFIXES = frozenset({".lua"})
 
 
 def source_without_comments(source: str, suffix: str) -> str:
     """Replace proven comment text with spaces while preserving line boundaries."""
+    if suffix in _HASH_LINE_COMMENT_SUFFIXES | _DASH_LINE_COMMENT_SUFFIXES:
+        marker = "#" if suffix in _HASH_LINE_COMMENT_SUFFIXES else "--"
+        return re.sub(
+            rf"{re.escape(marker)}[^\r\n]*",
+            lambda match: " " * len(match.group()),
+            source,
+        )
     if suffix not in _C_STYLE_COMMENT_SUFFIXES:
         return source
     characters = list(source)
@@ -142,6 +151,67 @@ def region_is_ignorable(source: str, suffix: str, *, allow_semicolon: bool = Fal
     normalized = source_without_comments(source, suffix)
     grammar = r"\s*;?\s*" if allow_semicolon else r"\s*"
     return re.fullmatch(grammar, normalized) is not None
+
+
+def complete_ruby_block(
+    source: str,
+    original_source: str,
+    declaration_start: int,
+) -> bool:
+    """Conservatively balance one Ruby block and require it to finish the unit."""
+    body_start = source.find("\n", declaration_start)
+    if body_start < 0:
+        return False
+    depth = 0
+    for token in re.finditer(
+        r"\b(?:begin|case|class|def|do|for|if|module|unless|until|while|end)\b",
+        source[declaration_start:],
+    ):
+        if token.group() == "end":
+            depth -= 1
+            if depth == 0:
+                token_start = declaration_start + token.start()
+                token_end = declaration_start + token.end()
+                return not source[body_start + 1 : token_start].strip() and region_is_ignorable(
+                    original_source[token_end:],
+                    ".rb",
+                )
+            if depth < 0:
+                return False
+        else:
+            depth += 1
+    return False
+
+
+def complete_lua_function(
+    source: str,
+    original_source: str,
+    declaration_start: int,
+    body_start: int,
+) -> bool:
+    """Balance one Lua function and require its terminator to finish the unit."""
+    stack: list[str] = []
+    for token in re.finditer(
+        r"\b(?:do|function|if|repeat|end|until)\b",
+        source[declaration_start:],
+    ):
+        word = token.group()
+        if word == "repeat":
+            stack.append("until")
+        elif word in {"do", "function", "if"}:
+            stack.append("end")
+        elif not stack or stack[-1] != word:
+            return False
+        else:
+            stack.pop()
+            if not stack:
+                token_start = declaration_start + token.start()
+                token_end = declaration_start + token.end()
+                return not source[body_start + 1 : token_start].strip() and region_is_ignorable(
+                    original_source[token_end:],
+                    ".lua",
+                )
+    return False
 
 
 def _matching_brace(source: str, opening: int) -> int | None:

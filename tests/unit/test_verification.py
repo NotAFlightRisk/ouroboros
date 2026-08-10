@@ -2770,6 +2770,31 @@ class TestSpecVerifier:
                 "class Provider {\n    public void CameraProvider() {}\n    banana banana;\n}\n",
             ),
             (
+                "MUST define a CameraProvider class",
+                "provider.rb",
+                "class CameraProvider\nend\nbanana\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.rb",
+                "def CameraProvider()\nend\nbanana\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.lua",
+                "function CameraProvider()\nend\nbanana\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.r",
+                "CameraProvider <- function() TRUE\nbanana\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.r",
+                "CameraProvider <- function() {}\nbanana\n",
+            ),
+            (
                 "MUST define a CameraProvider function",
                 "provider.js",
                 "function CameraProvider() {}\nbanana banana\n",
@@ -2886,6 +2911,11 @@ class TestSpecVerifier:
             "java-invalid-member-after-method",
             "csharp-invalid-member-before-method",
             "csharp-invalid-member-after-method",
+            "ruby-trailing-invalid-class-content",
+            "ruby-trailing-invalid-function-content",
+            "lua-trailing-invalid-function-content",
+            "r-trailing-invalid-expression-function-content",
+            "r-trailing-invalid-braced-function-content",
             "javascript-trailing-invalid-function-content",
             "go-trailing-invalid-function-content",
             "cpp-trailing-invalid-function-content",

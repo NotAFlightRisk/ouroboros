@@ -15,6 +15,12 @@ from ouroboros.verification.compilation_units import (
     compilation_unit_prefix_is_valid as _compilation_unit_prefix_is_valid,
 )
 from ouroboros.verification.compilation_units import (
+    complete_lua_function as _complete_lua_function,
+)
+from ouroboros.verification.compilation_units import (
+    complete_ruby_block as _complete_ruby_block,
+)
+from ouroboros.verification.compilation_units import (
     go_compilation_unit_prefix_is_valid as _go_compilation_unit_prefix_is_valid,
 )
 from ouroboros.verification.compilation_units import (
@@ -781,7 +787,7 @@ def _function_placement_is_valid(
     suffix: str,
 ) -> bool:
     """Require a canonical legal placement for parser-free function evidence."""
-    if suffix in {".py", ".pyi", ".rb", ".lua", ".r"}:
+    if suffix in {".py", ".pyi"}:
         return True
     braces = _enclosing_braces(source, match.start())
     if braces is None:
@@ -804,6 +810,15 @@ def _function_placement_is_valid(
             kind or "",
             _DECLARATION_HEADER_LIMIT,
             java_keyword=_JAVA_KEYWORD,
+        )
+    if suffix in {".rb", ".lua", ".r", ".kt", ".kts"}:
+        return not braces and _compilation_unit_prefix_is_valid(
+            source[: match.start()],
+            suffix,
+            original_source[: match.start()],
+            java_keyword=_JAVA_KEYWORD,
+            csharp_keyword=_CSHARP_RESERVED_KEYWORD,
+            cpp_suffixes=_CPP_SUFFIXES,
         )
     if suffix == ".go":
         prefix_is_valid = _go_compilation_unit_prefix_is_valid(
@@ -1342,54 +1357,6 @@ def _all_delimiters_balanced(source: str, opening: str, closing: str) -> bool:
     return depth == 0
 
 
-def _complete_ruby_block(source: str, declaration_start: int) -> bool:
-    """Conservatively balance a Ruby class or method block through its ``end``."""
-    body_start = source.find("\n", declaration_start)
-    if body_start < 0:
-        return False
-    depth = 0
-    for token in re.finditer(
-        r"\b(?:begin|case|class|def|do|for|if|module|unless|until|while|end)\b",
-        source[declaration_start:],
-    ):
-        if token.group() == "end":
-            depth -= 1
-            if depth == 0:
-                token_start = declaration_start + token.start()
-                return not source[body_start + 1 : token_start].strip()
-            if depth < 0:
-                return False
-        else:
-            depth += 1
-    return False
-
-
-def _complete_lua_function(
-    source: str,
-    declaration_start: int,
-    body_start: int,
-) -> bool:
-    """Conservatively balance a Lua function and nested block terminators."""
-    stack: list[str] = []
-    for token in re.finditer(
-        r"\b(?:do|function|if|repeat|end|until)\b",
-        source[declaration_start:],
-    ):
-        word = token.group()
-        if word == "repeat":
-            stack.append("until")
-        elif word in {"do", "function", "if"}:
-            stack.append("end")
-        elif not stack or stack[-1] != word:
-            return False
-        else:
-            stack.pop()
-            if not stack:
-                token_start = declaration_start + token.start()
-                return not source[body_start + 1 : token_start].strip()
-    return False
-
-
 def _complete_haskell_class(source: str, target_end: int) -> bool:
     """Require the bounded core of a Haskell typeclass declaration."""
     tail = source[target_end : target_end + _DECLARATION_HEADER_LIMIT]
@@ -1474,7 +1441,7 @@ def _complete_type_definition(
             is None
         ):
             return False
-        return _complete_ruby_block(source, match.start())
+        return _complete_ruby_block(source, original_source, match.start())
     if kind == "class" and suffix == ".hs":
         return _complete_haskell_class(source, match.end("target"))
     if kind in {"class", "interface"} and suffix in {".kt", ".kts"}:
@@ -1482,12 +1449,13 @@ def _complete_type_definition(
         if line_end < 0:
             line_end = len(source)
         if not source[match.end("target") : line_end].strip():
-            return (
-                all(
-                    _all_delimiters_balanced(source, opening, closing)
-                    for opening, closing in (("{", "}"), ("(", ")"), ("[", "]"))
-                )
-                and not source[line_end:].strip()
+            return all(
+                _all_delimiters_balanced(source, opening, closing)
+                for opening, closing in (("{", "}"), ("(", ")"), ("[", "]"))
+            ) and region_is_ignorable(
+                original_source[line_end:],
+                suffix,
+                allow_semicolon=True,
             )
     if suffix in _BRACED_TYPE_SUFFIXES.get(kind, ()):
         prefix = match.groupdict().get("prefix", "")
@@ -1528,10 +1496,14 @@ def _complete_ruby_function(
             return False
     elif source[match.end("target") : line_end].strip():
         return False
-    return _complete_ruby_block(source, match.start())
+    return _complete_ruby_block(source, original_source, match.start())
 
 
-def _complete_expression_function(source: str, match: re.Match[str]) -> bool:
+def _complete_expression_function(
+    source: str,
+    original_source: str,
+    match: re.Match[str],
+) -> bool:
     """Validate an R function expression with either a body block or expression."""
     parameters_end = _complete_parameter_list(source, match.end("target"))
     if parameters_end is None or not _function_parameters_are_valid(
@@ -1549,12 +1521,16 @@ def _complete_expression_function(source: str, match: re.Match[str]) -> bool:
     body_offset = implementation.find("{")
     if body_offset >= 0:
         return _complete_braced_body(
+            source, parameters_end + 1, "function", ".r"
+        ) and top_level_braced_declaration_is_final(
             source,
+            original_source,
             parameters_end + 1,
-            "function",
             ".r",
+            "function",
+            _DECLARATION_HEADER_LIMIT,
         )
-    return (
+    return region_is_ignorable(original_source[line_end:], ".r") and (
         re.fullmatch(
             r"(?:[A-Za-z_.]\w*|[-+]?\d+(?:\.\d+)?|FALSE|NULL|TRUE)",
             implementation.strip(),
@@ -1591,10 +1567,10 @@ def _complete_function_definition(
                 parameters_end,
                 suffix,
             )
-            and _complete_lua_function(source, match.start(), parameters_end)
+            and _complete_lua_function(source, original_source, match.start(), parameters_end)
         )
     if suffix == ".r":
-        return _complete_expression_function(source, match)
+        return _complete_expression_function(source, original_source, match)
     if suffix in {".kt", ".kts"}:
         parameters_end = _complete_parameter_list(source, match.end("target"))
         if parameters_end is None or not _function_parameters_are_valid(
@@ -1612,15 +1588,23 @@ def _complete_function_definition(
         body_offset = implementation.find("{")
         if body_offset >= 0:
             return _complete_braced_body(
+                source, parameters_end + 1, "function", suffix
+            ) and top_level_braced_declaration_is_final(
                 source,
+                original_source,
                 parameters_end + 1,
-                "function",
                 suffix,
+                "function",
+                _DECLARATION_HEADER_LIMIT,
             )
         expression_offset = implementation.find("=")
         if expression_offset < 0:
             return False
-        return (
+        return region_is_ignorable(
+            original_source[line_end:],
+            suffix,
+            allow_semicolon=True,
+        ) and (
             re.fullmatch(
                 r"(?:[A-Za-z_]\w*|[-+]?\d+(?:\.\d+)?|false|null|true|Unit)",
                 implementation[expression_offset + 1 :].strip(),
