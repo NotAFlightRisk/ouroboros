@@ -326,6 +326,7 @@ def _modifier_base(token: str) -> str:
 def _type_modifier_combination_is_valid(
     bases: tuple[str, ...],
     suffix: str,
+    kind: str,
 ) -> bool:
     """Reject language-invalid combinations among individually valid modifiers."""
     modifiers = frozenset(bases)
@@ -345,7 +346,16 @@ def _type_modifier_combination_is_valid(
         # these as independent allowlisted tokens admits non-compilable forms
         # such as ``sealed open class``.
         modality = frozenset({"abstract", "final", "open", "sealed"})
-        return len(modality.intersection(modifiers)) <= 1
+        special_class_kind = frozenset({"annotation", "enum"})
+        return (
+            len(modality.intersection(modifiers)) <= 1
+            and len(special_class_kind.intersection(modifiers)) <= 1
+            and not (
+                kind == "class"
+                and special_class_kind.intersection(modifiers)
+                and modality.intersection(modifiers)
+            )
+        )
     return True
 
 
@@ -374,8 +384,18 @@ def _declaration_prefix_is_valid(match: re.Match[str], suffix: str, kind: str) -
     )
     if any(conflict.issubset(bases) for conflict in conflicts):
         return False
-    if kind != "function" and not _type_modifier_combination_is_valid(bases, suffix):
+    if kind != "function" and not _type_modifier_combination_is_valid(bases, suffix, kind):
         return False
+    if suffix == ".rs":
+        if kind == "function":
+            order = {"pub": 0, "const": 1, "async": 1, "unsafe": 2, "extern": 3}
+            return not {"async", "const"}.issubset(bases) and bases == tuple(
+                sorted(bases, key=order.__getitem__)
+            )
+        if kind == "trait":
+            return bases in {(), ("pub",), ("unsafe",), ("pub", "unsafe")}
+        if kind == "struct":
+            return bases in {(), ("pub",)}
     if suffix in {".js", ".jsx"} and kind == "class":
         return bases in {(), ("export",), ("export", "default")}
     if suffix in {".js", ".jsx"} and kind == "function":
@@ -604,12 +624,19 @@ def _enclosing_type_context(
     header = source[boundary + 1 : opening_brace]
     declaration = re.fullmatch(
         rf"\s*(?P<prefix>(?:{_PREFIX_TOKEN}\s+)*)"
-        r"(?P<kind>class|enum|interface|record|struct)\s+[A-Za-z_]\w*\s*",
+        r"(?P<kind>class|enum|interface|record|struct)\s+[A-Za-z_]\w*"
+        r"(?P<header>[^{};\r\n]*)",
         header,
     )
     if declaration is None:
         return None
     kind = declaration.group("kind")
+    type_header = declaration.group("header")
+    if suffix == ".java" and kind == "record":
+        if re.fullmatch(r"\s*\(\s*\)\s*", type_header) is None:
+            return None
+    elif type_header.strip():
+        return None
     if not _declaration_prefix_is_valid(declaration, suffix, kind):
         return None
     if not _compilation_unit_prefix_is_valid(source[: boundary + 1], suffix):
@@ -617,6 +644,10 @@ def _enclosing_type_context(
     body_end = _matching_delimiter(source, opening_brace, "{", "}")
     if body_end is None or source[body_end + 1 :].strip():
         return None
+    if suffix == ".java" and kind == "enum":
+        enum_body = source[opening_brace + 1 : body_end]
+        if re.match(r"\s*(?:[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)?\s*;", enum_body) is None:
+            return None
     prefix = declaration.group("prefix")
     modifiers = frozenset(_modifier_base(token) for token in re.findall(_PREFIX_TOKEN, prefix))
     return kind, modifiers
@@ -885,7 +916,39 @@ def _type_body_header_is_valid(
         ):
             return False
         _, separator, base_list = header.partition(":")
-        return not separator or _relationship_type_names(base_list, declaration_name) is not None
+        if not separator:
+            return True
+        bases = _relationship_type_names(base_list, declaration_name)
+        swift_final_types = frozenset(
+            {
+                "Array",
+                "Bool",
+                "Character",
+                "Dictionary",
+                "Double",
+                "Float",
+                "Float16",
+                "Float80",
+                "Int",
+                "Int8",
+                "Int16",
+                "Int32",
+                "Int64",
+                "Never",
+                "Optional",
+                "Result",
+                "Set",
+                "String",
+                "UInt",
+                "UInt8",
+                "UInt16",
+                "UInt32",
+                "UInt64",
+            }
+        )
+        return bases is not None and not swift_final_types.intersection(
+            name.rsplit(".", 1)[-1] for name in bases
+        )
     if suffix in {".kt", ".kts"}:
         kotlin_parent = rf"{qualified_generic}(?:\(\s*\))?"
         if (
@@ -898,7 +961,43 @@ def _type_body_header_is_valid(
         ):
             return False
         _, separator, base_list = header.partition(":")
-        return not separator or _relationship_type_names(base_list, declaration_name) is not None
+        if not separator:
+            return True
+        bases = _relationship_type_names(base_list, declaration_name)
+        kotlin_final_types = frozenset(
+            {
+                "Boolean",
+                "BooleanArray",
+                "Byte",
+                "ByteArray",
+                "Char",
+                "CharArray",
+                "Double",
+                "DoubleArray",
+                "Float",
+                "FloatArray",
+                "Int",
+                "IntArray",
+                "Long",
+                "LongArray",
+                "Nothing",
+                "Short",
+                "ShortArray",
+                "String",
+                "UByte",
+                "UByteArray",
+                "UInt",
+                "UIntArray",
+                "ULong",
+                "ULongArray",
+                "UShort",
+                "UShortArray",
+                "Unit",
+            }
+        )
+        return bases is not None and not kotlin_final_types.intersection(
+            name.rsplit(".", 1)[-1] for name in bases
+        )
     if suffix == ".rs":
         return re.fullmatch(rf"\s*(?:{generic}\s*)?", header) is not None
     return False
