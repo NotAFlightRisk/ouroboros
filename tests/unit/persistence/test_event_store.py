@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import logging
 from pathlib import Path
 import shutil
+import sqlite3
 
 import pytest
 
@@ -14,8 +15,10 @@ from ouroboros.orchestrator.execution_runtime_scope import normalize_execution_s
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import (
     EventStore,
-    _await_sqlite_write_atomically,
     acceptance_generation_id_for_session,
+)
+from ouroboros.persistence.write_settlement import (
+    await_sqlite_write_atomically as _await_sqlite_write_atomically,
 )
 
 
@@ -83,6 +86,133 @@ class TestEventStoreInitialization:
         store = EventStore(f"sqlite+aiosqlite:///{db_path}")
         await store.initialize()
         await store.initialize()  # Should not raise
+        await store.close()
+
+    async def test_durable_append_interrupts_lock_and_returns_after_rollback(
+        self,
+        tmp_path: Path,
+        sample_event: BaseEvent,
+    ) -> None:
+        """The real SQLite path owns its deadline and cannot commit afterward."""
+        db_path = tmp_path / "durable-deadline.db"
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await store.initialize()
+        blocker = sqlite3.connect(db_path, isolation_level=None)
+        blocker.execute("BEGIN IMMEDIATE")
+        started_at = asyncio.get_running_loop().time()
+        try:
+            with pytest.raises(TimeoutError):
+                await store.append_durable(sample_event, timeout=0.08)
+        finally:
+            blocker.execute("ROLLBACK")
+            blocker.close()
+
+        assert asyncio.get_running_loop().time() - started_at < 0.2
+        await asyncio.sleep(0.05)
+        assert await store.replay(sample_event.aggregate_type, sample_event.aggregate_id) == []
+        await store.close()
+
+    async def test_durable_append_refuses_unbounded_lazy_initialization(
+        self,
+        tmp_path: Path,
+        sample_event: BaseEvent,
+    ) -> None:
+        """The hard append deadline never wraps cancellation-atomic schema setup."""
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'not-initialized.db'}")
+        started_at = asyncio.get_running_loop().time()
+        with pytest.raises(PersistenceError, match="requires an initialized EventStore"):
+            await store.append_durable(sample_event, timeout=0.01)
+        assert asyncio.get_running_loop().time() - started_at < 0.05
+
+    async def test_durable_append_keeps_committed_authority_when_cleanup_fails(
+        self,
+        tmp_path: Path,
+        sample_event: BaseEvent,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A post-commit driver cleanup error cannot report the append as absent."""
+        from aiosqlite import Connection
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'post-commit-cleanup.db'}")
+        await store.initialize()
+        original_set_progress_handler = Connection.set_progress_handler
+
+        async def fail_when_removing_progress_handler(
+            connection: Connection,
+            handler,
+            steps: int,
+        ) -> None:
+            if handler is None:
+                raise RuntimeError("simulated post-commit cleanup failure")
+            await original_set_progress_handler(connection, handler, steps)
+
+        monkeypatch.setattr(
+            Connection,
+            "set_progress_handler",
+            fail_when_removing_progress_handler,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            await store.append_durable(sample_event, timeout=1.0)
+
+        events = await store.replay(sample_event.aggregate_type, sample_event.aggregate_id)
+        assert [event.id for event in events] == [sample_event.id]
+        assert "event_store.append.post_commit_cleanup_failed" in caplog.text
+        await store.close()
+
+    async def test_durable_append_invalidates_connection_when_cleanup_is_cancelled(
+        self,
+        tmp_path: Path,
+        sample_event: BaseEvent,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A cleanup deadline after commit cannot return a poisoned driver to the pool."""
+        from aiosqlite import Connection
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'cleanup-timeout.db'}")
+        await store.initialize()
+        original_set_progress_handler = Connection.set_progress_handler
+        configured_drivers: list[Connection] = []
+        cleanup_started = asyncio.Event()
+
+        async def delay_progress_handler_removal(
+            connection: Connection,
+            handler,
+            steps: int,
+        ) -> None:
+            if handler is None:
+                cleanup_started.set()
+                await asyncio.sleep(1.0)
+            else:
+                configured_drivers.append(connection)
+            await original_set_progress_handler(connection, handler, steps)
+
+        monkeypatch.setattr(
+            Connection,
+            "set_progress_handler",
+            delay_progress_handler_removal,
+        )
+
+        await store.append_durable(sample_event, timeout=0.2)
+        assert cleanup_started.is_set()
+        assert len(configured_drivers) == 1
+
+        monkeypatch.setattr(Connection, "set_progress_handler", original_set_progress_handler)
+        events = await store.replay(sample_event.aggregate_type, sample_event.aggregate_id)
+        assert [event.id for event in events] == [sample_event.id]
+
+        engine = store._engine
+        assert engine is not None
+        async with engine.connect() as conn:
+            raw = await conn.get_raw_connection()
+            assert raw.driver_connection is not configured_drivers[0]
+            result = await conn.exec_driver_sql(
+                "WITH RECURSIVE count(x) AS ("
+                "SELECT 1 UNION ALL SELECT x + 1 FROM count WHERE x < 2000"
+                ") SELECT sum(x) FROM count"
+            )
+            assert result.scalar_one() == 2_001_000
         await store.close()
 
     async def test_repeated_initialize_settles_schema_transaction_before_cancellation(
