@@ -193,7 +193,165 @@ def _matching_delimiter(
     return None
 
 
-def _complete_braced_body(source: str, header_start: int) -> bool:
+def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
+    """Recognize a conservative executable subset of braced type headers."""
+    if suffix == ".go":
+        return re.fullmatch(rf"\s+{re.escape(kind)}\s*", header) is not None
+    if not header.strip():
+        return True
+    if any(token in header for token in ("=", ";", "{", "}", "@")):
+        return False
+    if suffix in _CPP_SUFFIXES:
+        return (
+            re.fullmatch(
+                r"\s*(?:final\s*)?(?::\s*(?:[A-Za-z_]\w*\s+)*"
+                r"[A-Za-z_]\w*(?:::\w+)*(?:\s*<[^(){};=]+>)?"
+                r"(?:\s*,\s*(?:[A-Za-z_]\w*\s+)*[A-Za-z_]\w*"
+                r"(?:::\w+)*(?:\s*<[^(){};=]+>)?)*)?\s*",
+                header,
+            )
+            is not None
+        )
+    if suffix == ".java":
+        return (
+            re.fullmatch(
+                r"\s*(?:<[^(){};=@]+>\s*)?"
+                r"(?:(?:extends|implements|permits)\s+"
+                r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*<[^(){};=@]+>)?"
+                r"(?:\s*,\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+                r"(?:\s*<[^(){};=@]+>)?)*\s*)*",
+                header,
+            )
+            is not None
+        )
+    if suffix in {".js", ".jsx"}:
+        return (
+            re.fullmatch(
+                r"\s*(?:extends\s+[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)?\s*",
+                header,
+            )
+            is not None
+        )
+    if suffix in {".ts", ".tsx"}:
+        return (
+            re.fullmatch(
+                r"\s*(?:<[^(){};=@]+>\s*)?"
+                r"(?:(?:extends|implements)\s+[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*"
+                r"(?:\s*<[^(){};=@]+>)?(?:\s*,\s*[A-Za-z_$][\w$]*"
+                r"(?:\.[A-Za-z_$][\w$]*)*(?:\s*<[^(){};=@]+>)?)*\s*)*",
+                header,
+            )
+            is not None
+        )
+    if suffix == ".cs":
+        return (
+            re.fullmatch(
+                r"\s*(?:<[^(){};=@]+>\s*)?(?::\s*[A-Za-z_]\w*"
+                r"(?:\.[A-Za-z_]\w*)*(?:\s*<[^(){};=@]+>)?"
+                r"(?:\s*,\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+                r"(?:\s*<[^(){};=@]+>)?)*)?\s*",
+                header,
+            )
+            is not None
+        )
+    if suffix == ".swift":
+        return (
+            re.fullmatch(
+                r"\s*(?:<[^(){};=@]+>\s*)?(?::\s*[A-Za-z_]\w*"
+                r"(?:\.[A-Za-z_]\w*)*(?:\s*,\s*[A-Za-z_]\w*"
+                r"(?:\.[A-Za-z_]\w*)*)*)?(?:\s+where\s+[^(){};=@]+)?\s*",
+                header,
+            )
+            is not None
+        )
+    if suffix in {".kt", ".kts"}:
+        return (
+            re.fullmatch(
+                r"\s*(?:<[^{};=@]+>\s*)?(?:\([^{};=@]*\)\s*)?"
+                r"(?::\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+                r"(?:\s*<[^{};=@]+>)?(?:\([^{};=@]*\))?"
+                r"(?:\s*,\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+                r"(?:\s*<[^{};=@]+>)?(?:\([^{};=@]*\))?)*)?"
+                r"(?:\s+where\s+[^{};=@]+)?\s*",
+                header,
+            )
+            is not None
+        )
+    if suffix == ".rs":
+        return (
+            re.fullmatch(
+                r"\s*(?:<[^(){};=@]+>\s*)?(?:where\s+[^(){};=@]+)?\s*",
+                header,
+            )
+            is not None
+        )
+    return False
+
+
+def _function_body_header_is_valid(header: str, suffix: str) -> bool:
+    """Recognize a conservative executable subset between parameters and body."""
+    if any(token in header for token in ("=", ";", "{", "}", "@")):
+        return False
+    if suffix in {".bash", ".js", ".jsx", ".pl", ".r", ".sh", ".zsh"}:
+        return not header.strip()
+    if suffix in {".ts", ".tsx"}:
+        return re.fullmatch(r"\s*(?::\s*[^=;{}@]+)?\s*", header) is not None
+    if suffix == ".go":
+        return re.fullmatch(r"[\sA-Za-z0-9_.*\[\],()<>{}|~:/+-]*", header) is not None
+    if suffix == ".rs":
+        return (
+            re.fullmatch(
+                r"\s*(?:->\s*[^=;{}@]+)?(?:\s+where\s+[^=;{}@]+)?\s*",
+                header,
+            )
+            is not None
+        )
+    if suffix == ".swift":
+        return (
+            re.fullmatch(
+                r"\s*(?:(?:async|rethrows|throws)\s+)*(?:->\s*[^=;{}@]+)?"
+                r"(?:\s+where\s+[^=;{}@]+)?\s*",
+                header,
+            )
+            is not None
+        )
+    if suffix in {".kt", ".kts"}:
+        return (
+            re.fullmatch(
+                r"\s*(?::\s*[^=;{}@]+)?(?:\s+where\s+[^=;{}@]+)?\s*",
+                header,
+            )
+            is not None
+        )
+    if suffix == ".java":
+        return (
+            re.fullmatch(
+                r"\s*(?:throws\s+[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+                r"(?:\s*,\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)*)?\s*",
+                header,
+            )
+            is not None
+        )
+    if suffix == ".cs":
+        return re.fullmatch(r"\s*(?:where\s+[^=;{}@]+)?\s*", header) is not None
+    if suffix in {".c", ".cc", ".cpp", ".h", ".hpp", ".mm"}:
+        return (
+            re.fullmatch(
+                r"\s*(?:(?:const|constexpr|final|noexcept|override|volatile)\s*)*"
+                r"(?:->\s*[^=;{}@]+)?(?:requires\s+[^=;{}@]+)?\s*",
+                header,
+            )
+            is not None
+        )
+    return False
+
+
+def _complete_braced_body(
+    source: str,
+    header_start: int,
+    declaration_kind: str,
+    suffix: str,
+) -> bool:
     """Require one bounded declaration header and its complete braced body."""
     search_end = min(len(source), header_start + _DECLARATION_HEADER_LIMIT)
     body_start = source.find("{", header_start, search_end)
@@ -201,6 +359,11 @@ def _complete_braced_body(source: str, header_start: int) -> bool:
         return False
     header = source[header_start:body_start]
     if ";" in header or "}" in header or _NESTED_DECLARATION.search(header):
+        return False
+    if declaration_kind == "function":
+        if not _function_body_header_is_valid(header, suffix):
+            return False
+    elif not _type_body_header_is_valid(header, declaration_kind, suffix):
         return False
     if _matching_delimiter(source, body_start, "{", "}") is None:
         return False
@@ -314,7 +477,12 @@ def _complete_type_definition(
                 for opening, closing in (("{", "}"), ("(", ")"), ("[", "]"))
             )
     if suffix in _BRACED_TYPE_SUFFIXES.get(kind, ()):
-        return _complete_braced_body(source, match.end("target"))
+        return _complete_braced_body(
+            source,
+            match.end("target"),
+            kind,
+            suffix,
+        )
     return False
 
 
@@ -341,14 +509,11 @@ def _complete_expression_function(source: str, match: re.Match[str]) -> bool:
     implementation = source[parameters_end + 1 : line_end]
     body_offset = implementation.find("{")
     if body_offset >= 0:
-        return (
-            _matching_delimiter(
-                source,
-                parameters_end + 1 + body_offset,
-                "{",
-                "}",
-            )
-            is not None
+        return _complete_braced_body(
+            source,
+            parameters_end + 1,
+            "function",
+            ".r",
         )
     return bool(implementation.strip())
 
@@ -386,24 +551,28 @@ def _complete_function_definition(
         implementation = source[parameters_end + 1 : line_end]
         body_offset = implementation.find("{")
         if body_offset >= 0:
-            return (
-                _matching_delimiter(
-                    source,
-                    parameters_end + 1 + body_offset,
-                    "{",
-                    "}",
-                )
-                is not None
+            return _complete_braced_body(
+                source,
+                parameters_end + 1,
+                "function",
+                suffix,
             )
         expression_offset = implementation.find("=")
         return expression_offset >= 0 and bool(implementation[expression_offset + 1 :].strip())
     if suffix in _BRACED_FUNCTION_SUFFIXES:
-        if suffix in {".go", ".js", ".jsx", ".rs", ".swift", ".ts", ".tsx"}:
-            parameters_end = _complete_parameter_list(source, match.end("target"))
-            if parameters_end is None:
+        parameters_end = _complete_parameter_list(source, match.end("target"))
+        if parameters_end is None:
+            if suffix != ".pl":
                 return False
-            return _complete_braced_body(source, parameters_end + 1)
-        return _complete_braced_body(source, match.end("target"))
+            header_start = match.end("target")
+        else:
+            header_start = parameters_end + 1
+        return _complete_braced_body(
+            source,
+            header_start,
+            "function",
+            suffix,
+        )
     return False
 
 
