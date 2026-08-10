@@ -567,7 +567,13 @@ def mask_non_executable_source(
         return None if ranges is None else _mask_ranges(text, ranges)
     if suffix in _JAVASCRIPT_SUFFIXES:
         ranges = _javascript_noncode_ranges(text)
-        return None if ranges is None else _mask_ranges(text, ranges)
+        if ranges is None:
+            return None
+        masked = _mask_ranges(text, ranges)
+        # JSX text and attribute expression boundaries require a JSX parser.
+        if suffix in {".jsx", ".tsx"} and re.search(r"<(?:[A-Za-z]|\s*>)", masked):
+            return None
+        return masked
     if suffix == ".rs":
         raw_ranges = _rust_raw_string_ranges(text)
         if raw_ranges is None:
@@ -582,6 +588,9 @@ def mask_non_executable_source(
     if suffix in _HASH_STYLE_SUFFIXES:
         if _has_unsupported_shell_container(text):
             return None
+        if suffix == ".r" and re.search(r'(?i)(?<!\w)r"[-]*[({\[]', text):
+            # R raw strings accept arbitrary delimiter dashes and bracket kinds.
+            return None
         ranges = _delimited_noncode_ranges(text, line_markers=("#",), block_markers=())
         if ranges is None:
             return None
@@ -591,7 +600,7 @@ def mask_non_executable_source(
             or re.search(r"\b(?:q|qq|qw|qx|qr|m|s|tr|y)\s*[^\w\s]", masked)
             or re.search(
                 r"(?m)^=(?:pod|head\d|over|item|back|begin|for|encoding)\b"
-                r"|^__(?:DATA|END)__\s*$",
+                r"|^__(?:DATA|END)__\s*$|^format\s+\w+\s*=",
                 masked,
             )
         ):

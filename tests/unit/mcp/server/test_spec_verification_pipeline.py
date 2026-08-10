@@ -374,6 +374,11 @@ async def test_container_body_evidence_cannot_reach_formal_pass(
         ("main.rb", "=begin\nclass CameraProvider\n=end\n"),
         ("main.rb", "__END__\nclass CameraProvider\n"),
         ("main.sql", "SELECT $tag$class CameraProvider$tag$;\n"),
+        ("main.r", 'pattern <- r"(foo " class CameraProvider)"\n'),
+        ("main.r", 'pattern <- r"---[foo " class CameraProvider]---"\n'),
+        ("main.jsx", "const view = <div>class CameraProvider</div>;\n"),
+        ("main.tsx", "const view = <>class CameraProvider</>;\n"),
+        ("main.pl", "format STDOUT =\nclass CameraProvider\n.\n"),
     ],
     ids=[
         "swift-bare-regex",
@@ -390,6 +395,11 @@ async def test_container_body_evidence_cannot_reach_formal_pass(
         "ruby-block-comment",
         "ruby-data",
         "sql-dollar-quote",
+        "r-raw-string",
+        "r-delimited-raw-string",
+        "jsx-text",
+        "tsx-fragment-text",
+        "perl-format",
     ],
 )
 async def test_unclassified_language_literals_cannot_reach_formal_pass(
