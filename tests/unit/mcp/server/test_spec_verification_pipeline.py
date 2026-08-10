@@ -431,8 +431,12 @@ async def test_container_body_evidence_cannot_reach_formal_pass(
         ("main.pl", "format\nSTDOUT =\nclass CameraProvider\n.\nwrite;\n"),
         ("main.pl", "format Foo::Bar\n=\nclass CameraProvider\n.\n"),
         ("main.cpp", "#if 0\nclass CameraProvider {};\n#endif\n"),
+        ("main.cpp", "#i\\\nf 0\nclass CameraProvider {};\n#e\\\nndif\n"),
         ("main.cpp", "#define UNUSED_DECL class CameraProvider\n"),
         ("main.cpp", "#define UNUSED_DECL \\\nclass CameraProvider\n"),
+        ("main.cpp", "#de\\\nfine UNUSED_DECL class CameraProvider\n"),
+        ("main.cpp", "// ignored \\\nclass CameraProvider {};\n"),
+        ("main.cpp", "/\\\n/ class CameraProvider {};\n"),
     ],
     ids=[
         "swift-bare-regex",
@@ -464,8 +468,12 @@ async def test_container_body_evidence_cannot_reach_formal_pass(
         "perl-multiline-format",
         "perl-package-multiline-format",
         "cpp-disabled-preprocessor-region",
+        "cpp-spliced-disabled-preprocessor-region",
         "cpp-macro-replacement-list",
         "cpp-continued-macro-replacement-list",
+        "cpp-spliced-macro-name",
+        "cpp-spliced-line-comment",
+        "cpp-splice-created-line-comment",
     ],
 )
 async def test_unclassified_language_literals_cannot_reach_formal_pass(

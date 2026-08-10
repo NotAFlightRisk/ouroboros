@@ -152,6 +152,7 @@ def _delimited_noncode_ranges(
     line_markers: tuple[str, ...],
     block_markers: tuple[tuple[str, str], ...],
     nested_blocks: bool = False,
+    splice_line_comments: bool = False,
 ) -> tuple[tuple[int, int], ...] | None:
     """Scan comments and strings without confusing their delimiters."""
     ranges: list[tuple[int, int]] = []
@@ -204,6 +205,15 @@ def _delimited_noncode_ranges(
         if marker is not None:
             end = text.find("\n", index + len(marker))
             end = len(text) if end < 0 else end
+            line_start = index
+            while (
+                splice_line_comments
+                and end < len(text)
+                and text[line_start:end].rstrip("\r").endswith("\\")
+            ):
+                line_start = end + 1
+                next_end = text.find("\n", line_start)
+                end = len(text) if next_end < 0 else next_end
             ranges.append((index, end))
             index = end
             continue
@@ -292,14 +302,17 @@ def _csharp_literal_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
 
 def _c_preprocessor_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
     """Return directive lines, rejecting conditional-compilation regions."""
-    directive = re.compile(r"(?m)^[ \t]*#[ \t]*[A-Za-z_]\w*")
-    conditional = re.compile(
-        r"(?m)^[ \t]*#[ \t]*(?:if|ifdef|ifndef|elif|elifdef|elifndef|else|endif)\b"
-    )
-    if conditional.search(text):
-        # Whether a conditional body is executable depends on build flags and
-        # prior macro state that the verifier cannot establish statically.
-        return None
+    directive = re.compile(r"(?m)^[ \t]*#")
+    conditional_keywords = {
+        "elif",
+        "elifdef",
+        "elifndef",
+        "else",
+        "endif",
+        "if",
+        "ifdef",
+        "ifndef",
+    }
 
     ranges: list[tuple[int, int]] = []
     cursor = 0
@@ -312,6 +325,12 @@ def _c_preprocessor_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
             line_start = end + 1
             next_end = text.find("\n", line_start)
             end = len(text) if next_end < 0 else next_end
+        logical_directive = re.sub(r"\\\r?\n", "", text[start:end])
+        keyword = re.match(r"^[ \t]*#[ \t]*(?P<keyword>[A-Za-z_]\w*)", logical_directive)
+        if keyword is not None and keyword.group("keyword") in conditional_keywords:
+            # Whether a conditional body is executable depends on build flags
+            # and macro state that the verifier cannot establish statically.
+            return None
         ranges.append((start, end))
         cursor = max(end, match.end())
     return tuple(ranges)
@@ -355,6 +374,7 @@ def _c_style_noncode_ranges(text: str, suffix: str) -> tuple[tuple[int, int], ..
         masked,
         line_markers=("//",),
         block_markers=(("/*", "*/"),),
+        splice_line_comments=True,
     )
     if ordinary is None:
         return None
@@ -365,7 +385,14 @@ def _c_style_noncode_ranges(text: str, suffix: str) -> tuple[tuple[int, int], ..
     if suffix == ".swift" and "/" in _mask_ranges(text, combined):
         return None
     preprocessor = _c_preprocessor_ranges(_mask_ranges(text, combined))
-    return None if preprocessor is None else (*combined, *preprocessor)
+    if preprocessor is None:
+        return None
+    all_ranges = (*combined, *preprocessor)
+    if re.search(r"\\\r?\n", _mask_ranges(text, all_ranges)):
+        # Translation-phase splicing can create tokens or comment delimiters
+        # that the physical-line scanner cannot classify safely.
+        return None
+    return all_ranges
 
 
 def _rust_raw_string_ranges(text: str) -> tuple[tuple[int, int], ...] | None:

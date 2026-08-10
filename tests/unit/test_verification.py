@@ -663,8 +663,12 @@ class TestSpecVerifier:
             ("main.pl", "format\nSTDOUT =\nclass CameraProvider\n.\nwrite;\n"),
             ("main.pl", "format Foo::Bar\n=\nclass CameraProvider\n.\n"),
             ("main.cpp", "#if 0\nclass CameraProvider {};\n#endif\n"),
+            ("main.cpp", "#i\\\nf 0\nclass CameraProvider {};\n#e\\\nndif\n"),
             ("main.cpp", "#define UNUSED_DECL class CameraProvider\n"),
             ("main.cpp", "#define UNUSED_DECL \\\nclass CameraProvider\n"),
+            ("main.cpp", "#de\\\nfine UNUSED_DECL class CameraProvider\n"),
+            ("main.cpp", "// ignored \\\nclass CameraProvider {};\n"),
+            ("main.cpp", "/\\\n/ class CameraProvider {};\n"),
         ],
         ids=[
             "swift-bare-regex",
@@ -696,8 +700,12 @@ class TestSpecVerifier:
             "perl-multiline-format",
             "perl-package-multiline-format",
             "cpp-disabled-preprocessor-region",
+            "cpp-spliced-disabled-preprocessor-region",
             "cpp-macro-replacement-list",
             "cpp-continued-macro-replacement-list",
+            "cpp-spliced-macro-name",
+            "cpp-spliced-line-comment",
+            "cpp-splice-created-line-comment",
         ],
     )
     def test_unclassified_language_literals_fail_the_entire_file_closed(
@@ -759,7 +767,7 @@ class TestSpecVerifier:
             ),
             (
                 "main.cpp",
-                "#define UNUSED_DECL class Unrelated\nclass CameraProvider {};\n",
+                "#define UNUSED_DECL \\\nclass Unrelated\nclass CameraProvider {};\n",
             ),
             (
                 "Main.java",
