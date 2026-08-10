@@ -5781,16 +5781,30 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
             stderr=subprocess.PIPE,
             text=True,
         )
+        second: subprocess.Popen[str] | None = None
         try:
-            for _ in range(500):
+            import time
+
+            startup_timeout = 30.0
+            deadlock_timeout = 30.0
+            startup_deadline = time.monotonic() + startup_timeout
+            while time.monotonic() < startup_deadline:
                 if marker.exists():
                     break
                 if first.poll() is not None:
                     break
-                import time
-
                 time.sleep(0.01)
-            assert marker.exists(), first.communicate(timeout=1)
+            if not marker.exists():
+                if first.poll() is None:
+                    first.kill()
+                first_stdout, first_stderr = first.communicate()
+                pytest.fail(
+                    "first setup subprocess did not reach the credentials publication "
+                    f"checkpoint within {startup_timeout:.0f} seconds "
+                    f"(returncode={first.returncode})\n"
+                    f"stdout:\n{first_stdout}\n"
+                    f"stderr:\n{first_stderr}"
+                )
             second = subprocess.Popen(
                 [sys.executable, "-c", second_script],
                 cwd=root,
@@ -5800,17 +5814,31 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
                 text=True,
             )
             # The second process must still be waiting on the activation lock.
-            import time
-
             time.sleep(0.1)
             assert second.poll() is None
             release.write_text("go", encoding="utf-8")
-            first_stdout, first_stderr = first.communicate(timeout=10)
-            second_stdout, second_stderr = second.communicate(timeout=10)
+            first_stdout, first_stderr = first.communicate(timeout=deadlock_timeout)
+            second_stdout, second_stderr = second.communicate(timeout=deadlock_timeout)
         finally:
-            if first.poll() is None:
-                first.kill()
-                first.wait()
+            primary_error = sys.exception()
+            cleanup_errors: list[tuple[str, Exception]] = []
+            for name, process in (("first", first), ("second", second)):
+                if process is None:
+                    continue
+                try:
+                    if process.poll() is None:
+                        process.kill()
+                    process.communicate()
+                except Exception as error:  # pragma: no cover - OS-level cleanup failure
+                    cleanup_errors.append((name, error))
+            if cleanup_errors:
+                details = "; ".join(
+                    f"{name} subprocess cleanup failed: {error!r}" for name, error in cleanup_errors
+                )
+                if primary_error is not None:
+                    primary_error.add_note(details)
+                else:
+                    raise AssertionError(details) from cleanup_errors[0][1]
 
         assert first.returncode == 0, first_stdout + first_stderr
         assert second.returncode == 0, second_stdout + second_stderr
