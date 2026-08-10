@@ -57,6 +57,7 @@ def is_known_non_evidence_format(
     suffix = os.path.splitext(file_path)[1].casefold()
     return (
         suffix in _NON_SOURCE_SUFFIXES
+        or suffix in _MARKUP_SUFFIXES
         or suffix == ".txt"
         or (suffix in _CONFIG_SUFFIXES and not allow_configuration)
     )
@@ -518,50 +519,6 @@ def _javascript_noncode_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
     return tuple(ranges)
 
 
-def _markup_noncode_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
-    """Keep markup syntax while masking comments, text nodes, and values."""
-    ranges: list[tuple[int, int]] = []
-    index = 0
-    while index < len(text):
-        start = text.find("<", index)
-        if start < 0:
-            ranges.append((index, len(text)))
-            break
-        ranges.append((index, start))
-        if text.startswith("<!--", start):
-            end = text.find("-->", start + 4)
-            end = len(text) if end < 0 else end + 3
-            ranges.append((start, end))
-            index = end
-            continue
-        if text.startswith("<![CDATA[", start):
-            end = text.find("]]>", start + 9)
-            end = len(text) if end < 0 else end + 3
-            ranges.append((start, end))
-            index = end
-            continue
-        cursor = start + 1
-        quote = ""
-        quote_start = 0
-        while cursor < len(text):
-            char = text[cursor]
-            if quote:
-                if char == quote:
-                    ranges.append((quote_start, cursor + 1))
-                    quote = ""
-            elif char in {"'", '"'}:
-                quote = char
-                quote_start = cursor
-            elif char == ">":
-                cursor += 1
-                break
-            cursor += 1
-        if cursor > len(text) or quote or (cursor == len(text) and text[-1:] != ">"):
-            return None
-        index = cursor
-    return tuple(ranges)
-
-
 def mask_non_executable_source(
     text: str,
     file_path: str,
@@ -677,8 +634,9 @@ def mask_non_executable_source(
             return None
         return masked
     if suffix in _MARKUP_SUFFIXES:
-        ranges = _markup_noncode_ranges(text)
-        return None if ranges is None else _mask_ranges(text, ranges)
+        # Markup syntax can prove a requested path, but not an executable T2
+        # declaration: tag and attribute names are caller-unrelated structure.
+        return None
     if suffix in _NON_SOURCE_SUFFIXES:
         return None
     if suffix == ".txt":
