@@ -1904,7 +1904,7 @@ class SpecVerifier:
                     if match_has_bound_declaration_kind(
                         content_pattern,
                         candidate[0],
-                        evidence_content,
+                        (evidence_content, content),
                         assertion,
                         candidate[1],
                         _finite_target_assertions(content_pattern, candidate[1]),

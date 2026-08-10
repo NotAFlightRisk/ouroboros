@@ -691,9 +691,15 @@ async def test_model_cannot_substitute_function_evidence_for_a_class_criterion(
         ),
         ("Provider.kt", "fun CameraProvider() {}\n", r"fun\s+CameraProvider", True),
         ("provider.c", "void CameraProvider(void) {}\n", r"void\s+CameraProvider", True),
+        (
+            "provider.cpp",
+            "int CameraProvider(int value) { return value; }\n",
+            r"int\s+CameraProvider",
+            True,
+        ),
         ("provider.go", "func CameraProvider() {}\n", r"func\s+CameraProvider", True),
     ],
-    ids=["invalid-java-def", "java", "kotlin", "c", "go"],
+    ids=["invalid-java-def", "java", "kotlin", "c", "cpp", "go"],
 )
 async def test_declaration_kind_is_bound_to_the_file_language_before_formal_promotion(
     tmp_path: Any,
@@ -766,6 +772,18 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
             "public delegate\nvoid CameraProvider();\n",
             r"void\s+CameraProvider",
         ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.cpp",
+            "template <class CameraProvider> void use(CameraProvider*);\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.cpp",
+            "struct Widget { explicit Widget(int); }; Widget CameraProvider(42);\n",
+            r"Widget\s+CameraProvider",
+        ),
     ],
     ids=[
         "enum-class",
@@ -774,6 +792,8 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         "c-multiline-typedef",
         "csharp-delegate",
         "csharp-multiline-delegate",
+        "cpp-template-parameter",
+        "cpp-direct-initializer",
     ],
 )
 async def test_type_declaration_cannot_reach_formal_pass(
@@ -804,6 +824,32 @@ async def test_type_declaration_cannot_reach_formal_pass(
     assert verification.reports[0].verified_pass is False
     assert formal.final_approved is False
     assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+async def test_cpp_template_class_declaration_can_reach_formal_pass(tmp_path: Any) -> None:
+    ac_text = "MUST define a CameraProvider class"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"class\s+CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": "provider.cpp",
+                "description": "Class template declaration",
+            }
+        ],
+    )
+    (tmp_path / "provider.cpp").write_text("template <class T>\nclass CameraProvider {};\n")
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is True
+    assert formal.final_approved is True
+    assert formal.ac_results[0].final_verdict == "pass"
 
 
 @pytest.mark.asyncio

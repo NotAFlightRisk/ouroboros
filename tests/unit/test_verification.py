@@ -1315,9 +1315,15 @@ class TestSpecVerifier:
             ),
             ("Provider.kt", "fun CameraProvider() {}\n", r"fun\s+CameraProvider", True),
             ("provider.c", "void CameraProvider(void) {}\n", r"void\s+CameraProvider", True),
+            (
+                "provider.cpp",
+                "int CameraProvider(int value) { return value; }\n",
+                r"int\s+CameraProvider",
+                True,
+            ),
             ("provider.go", "func CameraProvider() {}\n", r"func\s+CameraProvider", True),
         ],
-        ids=["invalid-java-def", "java", "kotlin", "c", "go"],
+        ids=["invalid-java-def", "java", "kotlin", "c", "cpp", "go"],
     )
     def test_t2_declaration_kind_uses_the_file_language(
         self,
@@ -1381,6 +1387,30 @@ class TestSpecVerifier:
                 "public delegate\nvoid CameraProvider();\n",
                 r"void\s+CameraProvider",
             ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.cpp",
+                "template <class CameraProvider> void use(CameraProvider*);\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.cpp",
+                "struct Widget { explicit Widget(int); }; Widget CameraProvider(42);\n",
+                r"Widget\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.cpp",
+                "Widget value; Widget CameraProvider(value);\n",
+                r"Widget\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.cpp",
+                'Widget CameraProvider("value");\n',
+                r"Widget\s+CameraProvider",
+            ),
         ],
         ids=[
             "enum-class",
@@ -1389,6 +1419,10 @@ class TestSpecVerifier:
             "c-multiline-typedef",
             "csharp-delegate",
             "csharp-multiline-delegate",
+            "cpp-template-parameter",
+            "cpp-numeric-direct-initializer",
+            "cpp-identifier-direct-initializer",
+            "cpp-string-direct-initializer",
         ],
     )
     def test_t2_declaration_kind_rejects_type_declarations(
@@ -1413,6 +1447,25 @@ class TestSpecVerifier:
 
         assert result.verified is False
         assert result.evidence_source == ""
+
+    def test_cpp_template_class_declaration_remains_valid(self) -> None:
+        project = self._create_project(
+            {"provider.cpp": "template <class T>\nclass CameraProvider {};\n"}
+        )
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+CameraProvider",
+            expected_value="CameraProvider",
+            file_hint="provider.cpp",
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is True
+        assert result.evidence_source == "file_content"
 
     @pytest.mark.parametrize(
         "filename",
