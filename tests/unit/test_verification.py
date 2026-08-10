@@ -2449,6 +2449,94 @@ class TestSpecVerifier:
         assert result.evidence_source == ""
 
     @pytest.mark.parametrize(
+        ("filename", "content", "pattern"),
+        [
+            ("provider.rs", "pub(foo) fn CameraProvider() {}\n", r"fn\s+CameraProvider"),
+            ("provider.kt", "public(foo) fun CameraProvider() {}\n", r"fun\s+CameraProvider"),
+            (
+                "provider.swift",
+                "public(foo) func CameraProvider() {}\n",
+                r"func\s+CameraProvider",
+            ),
+            (
+                "provider.c",
+                "extern static void CameraProvider(void) {}\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "provider.c",
+                "static register void CameraProvider(void) {}\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "provider.cpp",
+                "extern static void CameraProvider() {}\n",
+                r"void\s+CameraProvider",
+            ),
+        ],
+        ids=[
+            "rust-invalid-visibility-argument",
+            "kotlin-invalid-modifier-argument",
+            "swift-invalid-modifier-argument",
+            "c-extern-static-function",
+            "c-static-register-function",
+            "cpp-extern-static-function",
+        ],
+    )
+    def test_t2_invalid_modifier_syntax_is_rejected(
+        self,
+        filename: str,
+        content: str,
+        pattern: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider function",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is False
+        assert result.evidence_source == ""
+
+    @pytest.mark.parametrize(
+        ("filename", "content"),
+        [
+            ("provider.c", "extern inline void CameraProvider(void) {}\n"),
+            ("provider.c", "static inline void CameraProvider(void) {}\n"),
+            ("provider.cpp", "extern inline void CameraProvider() {}\n"),
+            ("provider.cpp", "static inline void CameraProvider() {}\n"),
+        ],
+        ids=["c-extern-inline", "c-static-inline", "cpp-extern-inline", "cpp-static-inline"],
+    )
+    def test_t2_valid_c_storage_and_function_specifiers_remain_valid(
+        self,
+        filename: str,
+        content: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider function",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"void\s+CameraProvider",
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is True
+        assert result.evidence_source == "file_content"
+
+    @pytest.mark.parametrize(
         ("filename", "content"),
         [
             ("provider.py", "class CameraProvider:\n    pass\n"),

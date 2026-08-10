@@ -1790,6 +1790,72 @@ async def test_type_declaration_cannot_reach_formal_pass(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("filename", "content", "pattern"),
+    [
+        ("provider.rs", "pub(foo) fn CameraProvider() {}\n", r"fn\s+CameraProvider"),
+        ("provider.kt", "public(foo) fun CameraProvider() {}\n", r"fun\s+CameraProvider"),
+        (
+            "provider.swift",
+            "public(foo) func CameraProvider() {}\n",
+            r"func\s+CameraProvider",
+        ),
+        (
+            "provider.c",
+            "extern static void CameraProvider(void) {}\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "provider.c",
+            "static register void CameraProvider(void) {}\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "provider.cpp",
+            "extern static void CameraProvider() {}\n",
+            r"void\s+CameraProvider",
+        ),
+    ],
+    ids=[
+        "rust-invalid-visibility-argument",
+        "kotlin-invalid-modifier-argument",
+        "swift-invalid-modifier-argument",
+        "c-extern-static-function",
+        "c-static-register-function",
+        "cpp-extern-static-function",
+    ],
+)
+async def test_invalid_modifier_syntax_cannot_reach_formal_pass(
+    tmp_path: Any,
+    filename: str,
+    content: str,
+    pattern: str,
+) -> None:
+    ac_text = "MUST define a CameraProvider function"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": pattern,
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Invalid modifier syntax cannot prove a function",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("filename", "content"),
     [
         ("provider.py", "class CameraProvider:\n    pass\n"),

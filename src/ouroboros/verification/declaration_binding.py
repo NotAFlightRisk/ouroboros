@@ -363,6 +363,12 @@ def _declaration_prefix_is_valid(match: re.Match[str], suffix: str, kind: str) -
     """Validate the complete same-line prefix captured before a declaration."""
     prefix = match.groupdict().get("prefix", "")
     tokens = re.findall(_PREFIX_TOKEN, prefix)
+    # Parenthesized modifier arguments have language- and declaration-specific
+    # semantics (for example Rust visibility and Swift setter access).  The
+    # conservative declaration subset does not prove those grammars, so do not
+    # erase the arguments and treat the remaining modifier name as sufficient.
+    if any("(" in token for token in tokens):
+        return False
     bases = tuple(_modifier_base(token) for token in tokens)
     allowed = (
         _FUNCTION_PREFIX_MODIFIERS.get(suffix, frozenset())
@@ -476,10 +482,17 @@ def _c_like_function_prefix_is_valid(
             }
         )
     elif suffix == ".c":
-        allowed = frozenset({"extern", "inline", "register", "static"})
+        # Function definitions may use extern or static storage, but not both;
+        # register is only valid for object/parameter declarations.
+        allowed = frozenset({"extern", "inline", "static"})
     else:
         allowed = frozenset({"extern", "inline", "static"}).union(_CPP_BUILTIN_PARAMETER_TYPES)
     if any(word not in allowed for word in modifiers) or len(set(modifiers)) != len(modifiers):
+        return False
+    if suffix in {".c", ".cc", ".cpp", ".h", ".hpp", ".mm"} and {
+        "extern",
+        "static",
+    }.issubset(modifiers):
         return False
     return len(_ACCESS_MODIFIERS.intersection(modifiers)) <= 1
 
