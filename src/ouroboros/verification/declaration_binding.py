@@ -161,6 +161,118 @@ _C_LIKE_DECLARATION_MODIFIERS = frozenset(
     }
 )
 
+_TYPE_PREFIX_MODIFIERS = {
+    ".cc": frozenset(),
+    ".cpp": frozenset(),
+    ".cs": frozenset(
+        {
+            "abstract",
+            "file",
+            "internal",
+            "partial",
+            "private",
+            "protected",
+            "public",
+            "sealed",
+            "static",
+        }
+    ),
+    ".h": frozenset(),
+    ".hpp": frozenset(),
+    ".hs": frozenset(),
+    ".java": frozenset(
+        {
+            "abstract",
+            "final",
+            "non-sealed",
+            "private",
+            "protected",
+            "public",
+            "sealed",
+            "static",
+            "strictfp",
+        }
+    ),
+    ".js": frozenset({"default", "export"}),
+    ".jsx": frozenset({"default", "export"}),
+    ".kt": frozenset(
+        {
+            "abstract",
+            "actual",
+            "annotation",
+            "data",
+            "enum",
+            "final",
+            "inner",
+            "internal",
+            "open",
+            "private",
+            "protected",
+            "public",
+            "sealed",
+            "value",
+        }
+    ),
+    ".kts": frozenset(
+        {
+            "abstract",
+            "actual",
+            "annotation",
+            "data",
+            "enum",
+            "final",
+            "inner",
+            "internal",
+            "open",
+            "private",
+            "protected",
+            "public",
+            "sealed",
+            "value",
+        }
+    ),
+    ".mm": frozenset(),
+    ".py": frozenset(),
+    ".pyi": frozenset(),
+    ".rb": frozenset(),
+    ".rs": frozenset({"pub", "unsafe"}),
+    ".swift": frozenset({"fileprivate", "final", "internal", "open", "private", "public"}),
+    ".ts": frozenset({"abstract", "default", "declare", "export"}),
+    ".tsx": frozenset({"abstract", "default", "declare", "export"}),
+}
+_FUNCTION_PREFIX_MODIFIERS = {
+    ".go": frozenset(),
+    ".js": frozenset({"async", "default", "export"}),
+    ".jsx": frozenset({"async", "default", "export"}),
+    ".kt": frozenset({"actual", "final", "internal", "open", "private", "protected", "public"}),
+    ".kts": frozenset({"actual", "final", "internal", "open", "private", "protected", "public"}),
+    ".lua": frozenset({"local"}),
+    ".pl": frozenset(),
+    ".py": frozenset({"async"}),
+    ".pyi": frozenset({"async"}),
+    ".rb": frozenset(),
+    ".rs": frozenset({"async", "const", "extern", "pub", "unsafe"}),
+    ".swift": frozenset(
+        {
+            "fileprivate",
+            "final",
+            "internal",
+            "mutating",
+            "nonisolated",
+            "open",
+            "private",
+            "public",
+            "static",
+        }
+    ),
+    ".ts": frozenset({"async", "default", "export"}),
+    ".tsx": frozenset({"async", "default", "export"}),
+}
+_ACCESS_MODIFIERS = frozenset(
+    {"file", "fileprivate", "internal", "open", "private", "protected", "public"}
+)
+_PREFIX_TOKEN = r"[A-Za-z_][\w-]*(?:\([^()\r\n]*\))?"
+
 _DECLARATION_HEADER_LIMIT = 4096
 _NESTED_DECLARATION = re.compile(
     r"\b(?:class|interface|struct|trait)\s+[A-Za-z_]\w*"
@@ -168,6 +280,87 @@ _NESTED_DECLARATION = re.compile(
     r"|(?m:^[ \t]*(?!(?:extends|implements|where)\b)"
     r"(?:[A-Za-z_]\w*[ \t]+){0,8}[A-Za-z_]\w*[ \t]*\()"
 )
+
+
+def _modifier_base(token: str) -> str:
+    return token.split("(", 1)[0]
+
+
+def _declaration_prefix_is_valid(match: re.Match[str], suffix: str, kind: str) -> bool:
+    """Validate the complete same-line prefix captured before a declaration."""
+    prefix = match.groupdict().get("prefix", "")
+    tokens = re.findall(_PREFIX_TOKEN, prefix)
+    bases = tuple(_modifier_base(token) for token in tokens)
+    allowed = (
+        _FUNCTION_PREFIX_MODIFIERS.get(suffix, frozenset())
+        if kind == "function"
+        else _TYPE_PREFIX_MODIFIERS.get(suffix, frozenset())
+    )
+    if any(base not in allowed for base in bases) or len(set(bases)) != len(bases):
+        return False
+    if len(_ACCESS_MODIFIERS.intersection(bases)) > 1:
+        return False
+    conflicts = (
+        frozenset({"abstract", "final"}),
+        frozenset({"final", "open"}),
+        frozenset({"final", "sealed"}),
+        frozenset({"non-sealed", "sealed"}),
+    )
+    if any(conflict.issubset(bases) for conflict in conflicts):
+        return False
+    return "default" not in bases or "export" in bases
+
+
+def _c_like_function_prefix_is_valid(
+    source: str,
+    match: re.Match[str],
+    suffix: str,
+) -> bool:
+    """Validate canonical modifiers before a C-like function return type."""
+    words = re.findall(
+        r"\b[A-Za-z_]\w*\b",
+        source[match.start() : match.start("target")],
+    )
+    if not words:
+        return False
+    modifiers = words[:-1]
+    if suffix == ".java":
+        allowed = frozenset(
+            {
+                "abstract",
+                "final",
+                "native",
+                "private",
+                "protected",
+                "public",
+                "static",
+                "strictfp",
+                "synchronized",
+            }
+        )
+    elif suffix == ".cs":
+        allowed = frozenset(
+            {
+                "abstract",
+                "async",
+                "extern",
+                "internal",
+                "override",
+                "private",
+                "protected",
+                "public",
+                "sealed",
+                "static",
+                "virtual",
+            }
+        )
+    elif suffix == ".c":
+        allowed = frozenset({"extern", "inline", "register", "static"})
+    else:
+        allowed = _C_LIKE_DECLARATION_MODIFIERS.union(_CPP_BUILTIN_PARAMETER_TYPES)
+    if any(word not in allowed for word in modifiers) or len(set(modifiers)) != len(modifiers):
+        return False
+    return len(_ACCESS_MODIFIERS.intersection(modifiers)) <= 1
 
 
 def _matching_delimiter(
@@ -766,27 +959,28 @@ def _cpp_parameters_are_declarations(masked: str, original: str) -> bool:
 def _declaration_patterns(file_path: str, kind: str) -> tuple[str, ...]:
     """Return only declaration grammars admitted for the file's language."""
     suffix = os.path.splitext(file_path)[1].casefold()
+    prefix = rf"(?m)^(?P<prefix>[ \t]*(?:{_PREFIX_TOKEN}[ \t]+)*)"
     if kind == "class" and suffix in _CLASS_SUFFIXES:
-        return (r"\bclass\s+(?P<target>{target})\b",)
+        return (prefix + r"class\s+(?P<target>{target})\b",)
     if kind == "interface":
         if suffix in _INTERFACE_SUFFIXES:
-            return (r"\binterface\s+(?P<target>{target})\b",)
+            return (prefix + r"interface\s+(?P<target>{target})\b",)
         if suffix == ".go":
-            return (r"\btype\s+(?P<target>{target})\s+interface\b",)
+            return (prefix + r"type\s+(?P<target>{target})\s+interface\b",)
     if kind == "struct":
         if suffix in _STRUCT_SUFFIXES:
-            return (r"\bstruct\s+(?P<target>{target})\b",)
+            return (prefix + r"struct\s+(?P<target>{target})\b",)
         if suffix == ".go":
-            return (r"\btype\s+(?P<target>{target})\s+struct\b",)
+            return (prefix + r"type\s+(?P<target>{target})\s+struct\b",)
     if kind == "trait" and suffix == ".rs":
-        return (r"\btrait\s+(?P<target>{target})\b",)
+        return (prefix + r"trait\s+(?P<target>{target})\b",)
     if kind == "function":
         if keyword := _FUNCTION_KEYWORDS.get(suffix):
-            return (rf"\b{keyword}\s+(?P<target>{{target}})\b",)
+            return (prefix + rf"{keyword}\s+(?P<target>{{target}})\b",)
         if suffix in _C_LIKE_FUNCTION_SUFFIXES:
             return (_C_LIKE_FUNCTION,)
         if suffix == ".r":
-            return (r"(?P<target>{target})\s*(?:<-|=)\s*function\s*\(",)
+            return (prefix + r"(?P<target>{target})\s*(?:<-|=)\s*function\s*\(",)
         if suffix in _SHELL_SUFFIXES:
             return (r"(?m)^[ \t]*(?:function\s+)?(?P<target>{target})\s*\(\s*\)\s*\{",)
     return ()
@@ -824,6 +1018,8 @@ def _source_span_has_declaration_kind(
         for match in re.finditer(template.format(target=escaped), source):
             if match.span("target") != target_span:
                 continue
+            if not _declaration_prefix_is_valid(match, suffix, kind):
+                continue
             declaration_prefix = source[max(0, match.start() - 256) : match.start()]
             if kind in {"class", "struct"} and re.search(
                 r"\benum(?:\s|\[\[[^\]]*\]\])*$",
@@ -845,6 +1041,8 @@ def _source_span_has_declaration_kind(
             ):
                 continue
             if kind == "function" and suffix in _C_LIKE_FUNCTION_SUFFIXES:
+                if not _c_like_function_prefix_is_valid(source, match, suffix):
+                    continue
                 prefix_words = re.findall(r"\b[A-Za-z_]\w*\b", target_prefix)
                 if prefix_words and all(
                     word in _C_LIKE_DECLARATION_MODIFIERS for word in prefix_words

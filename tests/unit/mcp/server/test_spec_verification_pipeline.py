@@ -1026,6 +1026,30 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
             "function CameraProvider() { const = ; }\n",
             r"function\s+CameraProvider",
         ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.js",
+            "if (true) class CameraProvider {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
+            "public private class CameraProvider {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.rs",
+            "nonsense fn CameraProvider() {}\n",
+            r"fn\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.java",
+            "public private void CameraProvider() {}\n",
+            r"void\s+CameraProvider",
+        ),
     ],
     ids=[
         "enum-class",
@@ -1075,6 +1099,10 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         "typescript-invalid-generic-clause",
         "rust-invalid-generic-clause",
         "javascript-invalid-body",
+        "javascript-conditional-class-prefix",
+        "java-conflicting-class-modifiers",
+        "rust-unsupported-function-prefix",
+        "java-conflicting-function-modifiers",
     ],
 )
 async def test_type_declaration_cannot_reach_formal_pass(

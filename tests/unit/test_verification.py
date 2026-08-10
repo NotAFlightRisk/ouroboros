@@ -1689,6 +1689,30 @@ class TestSpecVerifier:
                 "function CameraProvider() { const = ; }\n",
                 r"function\s+CameraProvider",
             ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.js",
+                "if (true) class CameraProvider {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "public private class CameraProvider {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.rs",
+                "nonsense fn CameraProvider() {}\n",
+                r"fn\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.java",
+                "public private void CameraProvider() {}\n",
+                r"void\s+CameraProvider",
+            ),
         ],
         ids=[
             "enum-class",
@@ -1746,6 +1770,10 @@ class TestSpecVerifier:
             "typescript-invalid-generic-clause",
             "rust-invalid-generic-clause",
             "javascript-invalid-body",
+            "javascript-conditional-class-prefix",
+            "java-conflicting-class-modifiers",
+            "rust-unsupported-function-prefix",
+            "java-conflicting-function-modifiers",
         ],
     )
     def test_t2_declaration_kind_rejects_type_declarations(
