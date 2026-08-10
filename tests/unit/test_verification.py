@@ -1789,13 +1789,13 @@ class TestSpecVerifier:
             (
                 "MUST define a CameraProvider function",
                 "Provider.java",
-                "class Provider { abstract void CameraProvider() {} }\n",
+                "class Provider {\n    abstract void CameraProvider() {}\n}\n",
                 r"void\s+CameraProvider",
             ),
             (
                 "MUST define a CameraProvider function",
                 "Provider.java",
-                "class Provider { native void CameraProvider() {} }\n",
+                "class Provider {\n    native void CameraProvider() {}\n}\n",
                 r"void\s+CameraProvider",
             ),
             (
@@ -1807,7 +1807,7 @@ class TestSpecVerifier:
             (
                 "MUST define a CameraProvider function",
                 "Provider.java",
-                "class Provider { public int CameraProvider() {} }\n",
+                "class Provider {\n    public int CameraProvider() {}\n}\n",
                 r"int\s+CameraProvider",
             ),
             (
@@ -1863,6 +1863,94 @@ class TestSpecVerifier:
                 "provider.cpp",
                 "class CameraProvider : public Base, private Base {};\n",
                 r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.java",
+                "class Provider {\n    public void CameraProvider(int value, long value) {}\n}\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.java",
+                "class Provider {\n    public void CameraProvider(int int) {}\n}\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.java",
+                "class Provider {\n    public void CameraProvider() throws int {}\n}\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.java",
+                (
+                    "class Provider {\n"
+                    "    public void CameraProvider() throws IOException, IOException {}\n"
+                    "}\n"
+                ),
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "CameraProvider.java",
+                "public non-sealed class CameraProvider {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "CameraProvider.java",
+                "public sealed class CameraProvider {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.ts",
+                "class CameraProvider<class> {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.ts",
+                "class CameraProvider implements class {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.kt",
+                "data class CameraProvider {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.kt",
+                "value class CameraProvider {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.cpp",
+                "class CameraProvider : public CameraProvider {};\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.cs",
+                "class Provider {\n    public int CameraProvider() {}\n}\n",
+                r"int\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.cs",
+                "class Provider {\n    public abstract void CameraProvider() {}\n}\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.cs",
+                "class Provider {\n    public extern void CameraProvider() {}\n}\n",
+                r"void\s+CameraProvider",
             ),
             (
                 "MUST define a CameraProvider class",
@@ -2058,6 +2146,20 @@ class TestSpecVerifier:
             "kotlin-data-interface",
             "cpp-builtin-base",
             "cpp-duplicate-direct-base",
+            "java-duplicate-parameter-name",
+            "java-keyword-parameter-name",
+            "java-keyword-throws-type",
+            "java-duplicate-throws-type",
+            "java-nonsealed-without-parent",
+            "java-sealed-without-permits",
+            "typescript-keyword-generic-parameter",
+            "typescript-keyword-implements-type",
+            "kotlin-empty-data-class",
+            "kotlin-empty-value-class",
+            "cpp-self-inheritance",
+            "csharp-empty-nonvoid-method",
+            "csharp-abstract-method-body",
+            "csharp-extern-method-body",
             "java-void-field",
             "java-var-field",
             "javascript-default-export-class",
@@ -2529,6 +2631,18 @@ class TestSpecVerifier:
                 "class CameraProvider : public Base {};\n",
                 r"class\s+CameraProvider",
             ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.ts",
+                "class CameraProvider<T> implements Base {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.java",
+                ("class Provider {\n    public void CameraProvider(int value, long count) {}\n}\n"),
+                r"void\s+CameraProvider",
+            ),
         ],
         ids=[
             "java-abstract-interface",
@@ -2536,6 +2650,8 @@ class TestSpecVerifier:
             "rust-unsafe-trait",
             "kotlin-sealed-interface",
             "cpp-type-like-base",
+            "typescript-generic-implements",
+            "java-unique-parameters",
         ],
     )
     def test_type_modifier_and_cpp_base_positive_controls(
@@ -2562,16 +2678,60 @@ class TestSpecVerifier:
         assert result.evidence_source == "file_content"
 
     @pytest.mark.parametrize(
+        ("ac_text", "filename", "content", "pattern"),
+        [
+            (
+                "MUST define a CameraProvider class",
+                "CameraProvider.java",
+                (
+                    "public sealed class CameraProvider permits Other {}\n"
+                    "final class Other extends CameraProvider {}\n"
+                ),
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.java",
+                (
+                    "class Provider {\n"
+                    "    public void CameraProvider() throws java.lang.Exception {}\n"
+                    "}\n"
+                ),
+                r"void\s+CameraProvider",
+            ),
+        ],
+        ids=["java-sealed-relationship", "java-throws-clause"],
+    )
+    def test_valid_unsupported_java_declaration_is_unverifiable(
+        self,
+        ac_text: str,
+        filename: str,
+        content: str,
+        pattern: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+        assert result.discrepancy is False
+
+    @pytest.mark.parametrize(
         ("filename", "content"),
         [
             ("Provider.java", "class CameraProvider {}\n"),
             ("CameraProvider.java", "public class CameraProvider {}\n"),
-            (
-                "CameraProvider.java",
-                "public sealed class CameraProvider permits Other {}\n",
-            ),
         ],
-        ids=["package-private-other-filename", "public-matching-filename", "sealed-permits"],
+        ids=["package-private-other-filename", "public-matching-filename"],
     )
     def test_java_declaration_context_positive_controls(
         self,

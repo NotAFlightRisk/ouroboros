@@ -1130,13 +1130,13 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         (
             "MUST define a CameraProvider function",
             "Provider.java",
-            "class Provider { abstract void CameraProvider() {} }\n",
+            "class Provider {\n    abstract void CameraProvider() {}\n}\n",
             r"void\s+CameraProvider",
         ),
         (
             "MUST define a CameraProvider function",
             "Provider.java",
-            "class Provider { native void CameraProvider() {} }\n",
+            "class Provider {\n    native void CameraProvider() {}\n}\n",
             r"void\s+CameraProvider",
         ),
         (
@@ -1148,7 +1148,7 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         (
             "MUST define a CameraProvider function",
             "Provider.java",
-            "class Provider { public int CameraProvider() {} }\n",
+            "class Provider {\n    public int CameraProvider() {}\n}\n",
             r"int\s+CameraProvider",
         ),
         (
@@ -1204,6 +1204,94 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
             "provider.cpp",
             "class CameraProvider : public Base, private Base {};\n",
             r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.java",
+            "class Provider {\n    public void CameraProvider(int value, long value) {}\n}\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.java",
+            "class Provider {\n    public void CameraProvider(int int) {}\n}\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.java",
+            "class Provider {\n    public void CameraProvider() throws int {}\n}\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.java",
+            (
+                "class Provider {\n"
+                "    public void CameraProvider() throws IOException, IOException {}\n"
+                "}\n"
+            ),
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "CameraProvider.java",
+            "public non-sealed class CameraProvider {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "CameraProvider.java",
+            "public sealed class CameraProvider {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.ts",
+            "class CameraProvider<class> {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.ts",
+            "class CameraProvider implements class {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.kt",
+            "data class CameraProvider {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.kt",
+            "value class CameraProvider {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.cpp",
+            "class CameraProvider : public CameraProvider {};\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.cs",
+            "class Provider {\n    public int CameraProvider() {}\n}\n",
+            r"int\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.cs",
+            "class Provider {\n    public abstract void CameraProvider() {}\n}\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.cs",
+            "class Provider {\n    public extern void CameraProvider() {}\n}\n",
+            r"void\s+CameraProvider",
         ),
         (
             "MUST define a CameraProvider class",
@@ -1391,6 +1479,20 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         "kotlin-data-interface",
         "cpp-builtin-base",
         "cpp-duplicate-direct-base",
+        "java-duplicate-parameter-name",
+        "java-keyword-parameter-name",
+        "java-keyword-throws-type",
+        "java-duplicate-throws-type",
+        "java-nonsealed-without-parent",
+        "java-sealed-without-permits",
+        "typescript-keyword-generic-parameter",
+        "typescript-keyword-implements-type",
+        "kotlin-empty-data-class",
+        "kotlin-empty-value-class",
+        "cpp-self-inheritance",
+        "csharp-empty-nonvoid-method",
+        "csharp-abstract-method-body",
+        "csharp-extern-method-body",
         "java-void-field",
         "java-var-field",
         "javascript-default-export-class",
@@ -1928,6 +2030,18 @@ async def test_t1_valid_unsupported_java_field_context_is_not_formal_discrepancy
             "class CameraProvider : public Base {};\n",
             r"class\s+CameraProvider",
         ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.ts",
+            "class CameraProvider<T> implements Base {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.java",
+            ("class Provider {\n    public void CameraProvider(int value, long count) {}\n}\n"),
+            r"void\s+CameraProvider",
+        ),
     ],
     ids=[
         "java-abstract-interface",
@@ -1935,6 +2049,8 @@ async def test_t1_valid_unsupported_java_field_context_is_not_formal_discrepancy
         "rust-unsafe-trait",
         "kotlin-sealed-interface",
         "cpp-type-like-base",
+        "typescript-generic-implements",
+        "java-unique-parameters",
     ],
 )
 async def test_type_modifier_and_cpp_base_positive_controls_reach_formal_pass(
@@ -1969,16 +2085,69 @@ async def test_type_modifier_and_cpp_base_positive_controls_reach_formal_pass(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("ac_text", "filename", "content", "pattern"),
+    [
+        (
+            "MUST define a CameraProvider class",
+            "CameraProvider.java",
+            (
+                "public sealed class CameraProvider permits Other {}\n"
+                "final class Other extends CameraProvider {}\n"
+            ),
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.java",
+            (
+                "class Provider {\n"
+                "    public void CameraProvider() throws java.lang.Exception {}\n"
+                "}\n"
+            ),
+            r"void\s+CameraProvider",
+        ),
+    ],
+    ids=["java-sealed-relationship", "java-throws-clause"],
+)
+async def test_valid_unsupported_java_declaration_is_not_formal_discrepancy(
+    tmp_path: Any,
+    ac_text: str,
+    filename: str,
+    content: str,
+    pattern: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": pattern,
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Valid unsupported Java declaration",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions, agent_results={0: True})
+    formal = _formal_verdict(ac_text, verification, agent_reported_pass=True)
+
+    assert verification.reports[0].results[0].outcome is VerificationOutcome.UNVERIFIABLE
+    assert formal.final_approved is False
+    assert formal.ac_results[0].ac_verdict_state == "not_evaluated"
+    assert formal.ac_results[0].rendered_verdict == "NOT_EVALUATED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("filename", "content"),
     [
         ("Provider.java", "class CameraProvider {}\n"),
         ("CameraProvider.java", "public class CameraProvider {}\n"),
-        (
-            "CameraProvider.java",
-            "public sealed class CameraProvider permits Other {}\n",
-        ),
     ],
-    ids=["package-private-other-filename", "public-matching-filename", "sealed-permits"],
+    ids=["package-private-other-filename", "public-matching-filename"],
 )
 async def test_java_declaration_context_positive_controls_reach_formal_pass(
     tmp_path: Any,

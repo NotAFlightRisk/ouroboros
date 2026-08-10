@@ -343,7 +343,7 @@ def _java_enclosing_field_type(source: str, line_start: int) -> str:
     declaration = re.fullmatch(
         r"\s*(?P<modifiers>(?:(?:abstract|final|non-sealed|public|sealed|strictfp)\s+)*)"
         r"(?P<kind>class|enum|interface)\s+[A-Za-z_]\w*"
-        r"(?P<generic>\s*<\s*[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s*>)?\s*",
+        r"(?P<generic>\s*<\s*[A-Z]\w*(?:\s*,\s*[A-Z]\w*)*\s*>)?\s*",
         header,
     )
     if declaration is None:
@@ -379,6 +379,8 @@ def _java_enclosing_field_type(source: str, line_start: int) -> str:
         return _JAVA_INVALID_FIELD_CONTEXT
     if kind == "interface" and "final" in modifiers:
         return _JAVA_INVALID_FIELD_CONTEXT
+    if {"non-sealed", "sealed"}.intersection(modifiers):
+        return _JAVA_UNSUPPORTED_FIELD_CONTEXT
     generic = declaration.group("generic")
     if generic is not None:
         names = tuple(name.strip() for name in generic.strip()[1:-1].split(","))

@@ -245,7 +245,6 @@ _TYPE_KIND_PREFIX_MODIFIERS = {
             "abstract",
             "actual",
             "annotation",
-            "data",
             "enum",
             "final",
             "internal",
@@ -253,7 +252,6 @@ _TYPE_KIND_PREFIX_MODIFIERS = {
             "private",
             "public",
             "sealed",
-            "value",
         }
     ),
     (".kt", "interface"): frozenset(
@@ -264,7 +262,6 @@ _TYPE_KIND_PREFIX_MODIFIERS = {
             "abstract",
             "actual",
             "annotation",
-            "data",
             "enum",
             "final",
             "internal",
@@ -272,7 +269,6 @@ _TYPE_KIND_PREFIX_MODIFIERS = {
             "private",
             "public",
             "sealed",
-            "value",
         }
     ),
     (".kts", "interface"): frozenset(
@@ -470,10 +466,23 @@ def _java_declaration_context_is_valid(
     if body_start < 0:
         return False
     header = source[match.end("target") : body_start]
+    if {"non-sealed", "sealed"}.intersection(modifiers):
+        return False
     if re.search(r"\bpermits\b", header) and "sealed" not in modifiers:
         return False
     filename_stem = os.path.splitext(os.path.basename(file_path))[0]
     return "public" not in modifiers or target == filename_stem
+
+
+def _csharp_function_context_is_valid(source: str, match: re.Match[str]) -> bool:
+    """Reject C# method bodies incompatible with their return type or modifiers."""
+    words = re.findall(
+        r"\b[A-Za-z_]\w*\b",
+        source[match.start() : match.start("target")],
+    )
+    return (
+        bool(words) and words[-1] == "void" and not {"abstract", "extern"}.intersection(words[:-1])
+    )
 
 
 def _enclosing_braces(source: str, position: int) -> tuple[int, ...] | None:
@@ -607,7 +616,12 @@ def _matching_delimiter(
     return None
 
 
-def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
+def _type_body_header_is_valid(
+    header: str,
+    kind: str,
+    suffix: str,
+    declaration_name: str = "",
+) -> bool:
     """Recognize a conservative executable subset of braced type headers."""
     if suffix == ".go":
         return re.fullmatch(rf"\s+{re.escape(kind)}\s*", header) is not None
@@ -615,7 +629,7 @@ def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
         return True
     if any(token in header for token in ("=", ";", "{", "}", "@")):
         return False
-    generic = r"<\s*[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s*>"
+    generic = r"<\s*[A-Z]\w*(?:\s*,\s*[A-Z]\w*)*\s*>"
     if suffix in {".java", ".ts", ".tsx"}:
         parameters = re.match(
             r"\s*<\s*(?P<parameters>[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*>",
@@ -647,7 +661,10 @@ def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
                 return False
             if len({"private", "protected", "public"}.intersection(modifiers)) > 1:
                 return False
-            bases.append(type_match.group("type"))
+            base_name = type_match.group("type")
+            if base_name.split("::")[-1] == declaration_name:
+                return False
+            bases.append(base_name)
         return len(set(bases)) == len(bases)
     if suffix == ".java":
         java_non_type = (
@@ -658,7 +675,7 @@ def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
             r"synchronized|this|throw|throws|transient|true|try|var|void|volatile|while"
         )
         java_identifier = rf"(?!(?:{java_non_type})\b)[A-Za-z_]\w*"
-        java_generic = rf"<\s*{java_identifier}(?:\s*,\s*{java_identifier})*\s*>"
+        java_generic = r"<\s*[A-Z]\w*(?:\s*,\s*[A-Z]\w*)*\s*>"
         java_qualified = rf"{java_identifier}(?:\.{java_identifier})*"
         java_type = rf"{java_qualified}(?:\s*{java_generic})?"
         if kind == "class":
@@ -696,7 +713,7 @@ def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
     if suffix in {".ts", ".tsx"}:
         if kind != "class":
             return False
-        ts_name = r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*"
+        ts_name = r"(?:[A-Za-z_$][\w$]*\.)*[A-Z_$][\w$]*"
         ts_type = rf"{ts_name}(?:\s*{generic})?"
         return (
             re.fullmatch(
@@ -764,14 +781,7 @@ def _function_body_header_is_valid(header: str, suffix: str) -> bool:
     if suffix in {".kt", ".kts"}:
         return re.fullmatch(r"\s*(?::\s*Unit)?\s*", header) is not None
     if suffix == ".java":
-        return (
-            re.fullmatch(
-                r"\s*(?:throws\s+[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
-                r"(?:\s*,\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)*)?\s*",
-                header,
-            )
-            is not None
-        )
+        return not header.strip()
     if suffix == ".cs":
         return not header.strip()
     if suffix in {".c", ".cc", ".cpp", ".h", ".hpp", ".mm"}:
@@ -820,6 +830,7 @@ def _complete_braced_body(
     header_start: int,
     declaration_kind: str,
     suffix: str,
+    declaration_name: str = "",
 ) -> bool:
     """Require one bounded declaration header and its complete braced body."""
     search_end = min(len(source), header_start + _DECLARATION_HEADER_LIMIT)
@@ -832,7 +843,7 @@ def _complete_braced_body(
     if declaration_kind == "function":
         if not _function_body_header_is_valid(header, suffix):
             return False
-    elif not _type_body_header_is_valid(header, declaration_kind, suffix):
+    elif not _type_body_header_is_valid(header, declaration_kind, suffix, declaration_name):
         return False
     body_end = _matching_delimiter(source, body_start, "{", "}")
     if body_end is None:
@@ -953,10 +964,28 @@ def _function_parameters_are_valid(
         return False
     if suffix != ".java":
         return not masked.strip()
-    identifier = r"[A-Za-z_]\w*"
+    java_keyword = (
+        r"abstract|assert|boolean|break|byte|case|catch|char|class|const|continue|"
+        r"default|do|double|else|enum|exports|extends|false|final|finally|float|for|"
+        r"goto|if|implements|import|instanceof|int|interface|long|module|native|new|"
+        r"non-sealed|null|open|opens|package|permits|private|protected|provides|public|"
+        r"record|requires|return|sealed|short|static|strictfp|super|switch|synchronized|"
+        r"this|throw|throws|to|transient|transitive|true|try|uses|var|void|volatile|"
+        r"while|with|yield"
+    )
+    identifier = rf"(?!(?:{java_keyword})\b)[A-Za-z_]\w*"
     primitive = r"(?:boolean|byte|char|double|float|int|long|short)"
     parameter = rf"{primitive}(?:\[\])?\s+{identifier}"
-    return re.fullmatch(rf"\s*(?:{parameter}(?:\s*,\s*{parameter})*)?\s*", masked) is not None
+    if re.fullmatch(rf"\s*(?:{parameter}(?:\s*,\s*{parameter})*)?\s*", masked) is None:
+        return False
+    names = tuple(
+        match.group("name")
+        for match in re.finditer(
+            rf"{primitive}(?:\[\])?\s+(?P<name>{identifier})",
+            masked,
+        )
+    )
+    return len(set(names)) == len(names)
 
 
 def _complete_type_definition(
@@ -1006,6 +1035,7 @@ def _complete_type_definition(
             match.end("target"),
             kind,
             suffix,
+            match.group("target"),
         )
     return False
 
@@ -1291,6 +1321,12 @@ def _source_span_has_declaration_kind(
                 target,
                 kind,
                 file_path,
+            ):
+                continue
+            if (
+                kind == "function"
+                and suffix == ".cs"
+                and not _csharp_function_context_is_valid(source, match)
             ):
                 continue
             if kind in {"class", "interface", "struct", "trait"} and not _type_placement_is_valid(
