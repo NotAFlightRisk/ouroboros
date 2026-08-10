@@ -77,6 +77,7 @@ def _has_unsupported_config_container(text: str, suffix: str) -> bool:
         return bool(
             re.search(
                 r"(?m)^[ \t]*(?:-[ \t]+|[^#\r\n]*:[ \t]*)"
+                r"(?:(?:&[^\s#]+|![^\s#]*)[ \t]+)*"
                 r"[|>][1-9+\-]*[ \t]*(?:#.*)?$",
                 text,
             )
@@ -656,6 +657,9 @@ def mask_non_executable_source(
         masked = _mask_ranges(text, ranges)
         # PostgreSQL dollar-quoted strings admit arbitrary multiline bodies.
         if re.search(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", masked):
+            return None
+        # Oracle q/nq alternative quotes accept paired or arbitrary delimiters.
+        if re.search(r"(?i)(?<![\w])(?:n?q)'", masked):
             return None
         return masked
     if suffix == ".hs":
