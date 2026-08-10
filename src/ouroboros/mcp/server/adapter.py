@@ -53,6 +53,7 @@ from ouroboros.mcp.server.spec_verification_adapter import (
 from ouroboros.mcp.server.spec_verification_adapter import (
     evaluation_summary_from_spec_verification as _evaluation_summary_from_spec_verification,
 )
+from ouroboros.mcp.telemetry_boundary import observe_adapter_tool_call, stamp_backend_context
 from ouroboros.mcp.types import (
     MCPCapabilities,
     MCPPromptDefinition,
@@ -109,31 +110,9 @@ if _SDKMCPServer is not None:
             context: Any = None,
         ) -> Any:
             del context
-            from jsonschema import Draft202012Validator
+            from ouroboros.mcp.telemetry_boundary import call_sdk_tool
 
-            from ouroboros.mcp.sdk_mapping import tool_result_to_sdk
-
-            definition = next(
-                (item for item in await self._ouroboros_adapter.list_tools() if item.name == name),
-                None,
-            )
-            if definition is None:
-                raise RuntimeError(f"Tool not found: {name}")
-
-            # Accept the one historical wrapper shape at the application edge,
-            # but validate the normalized payload against the canonical schema.
-            if set(arguments) == {"kwargs"} and isinstance(arguments.get("kwargs"), dict):
-                arguments = arguments["kwargs"]
-            _validate_parameter_constraints(definition.parameters, arguments)
-            Draft202012Validator(definition.to_input_schema()).validate(arguments)
-
-            result = await self._ouroboros_adapter.call_tool(name, arguments)
-            if result.is_err:
-                raise RuntimeError(str(result.error))
-            value = result.value
-            if definition.output_schema is not None:
-                Draft202012Validator(definition.output_schema).validate(value.structured_content)
-            return tool_result_to_sdk(value)
+            return await call_sdk_tool(self._ouroboros_adapter, name, arguments)
 
         async def list_resources(self) -> list[Any]:
             from ouroboros.mcp.sdk_mapping import resource_to_sdk
@@ -854,6 +833,19 @@ class MCPServerAdapter:
         return tuple(h.definition for h in self._prompt_handlers.values())
 
     async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        credentials: dict[str, str] | None = None,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Call a registered tool through the complete request observer."""
+        return await observe_adapter_tool_call(
+            name,
+            lambda: self._call_tool_impl(name, arguments, credentials),
+            registered=name in self._tool_handlers,
+        )
+
+    async def _call_tool_impl(
         self,
         name: str,
         arguments: dict[str, Any],
@@ -1651,6 +1643,14 @@ def create_ouroboros_server(
     interview_llm_backend = role_llm_backend("interview")
     evaluate_llm_backend = role_llm_backend("semantic_evaluation")
     reflect_llm_backend = role_llm_backend("reflect")
+
+    # Provider context for every subsequent telemetry event (TELEMETRY.md).
+    stamp_backend_context(
+        resolved_runtime_backend,
+        execute_runtime_backend,
+        interview_llm_backend,
+        evaluate_llm_backend,
+    )
 
     # Resolve opencode_mode from config file if caller did not pass one.
     # Controls _subagent envelope dispatch gate in every handler.
