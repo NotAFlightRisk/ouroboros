@@ -25,6 +25,7 @@ from ouroboros.verification.binding import (
     acceptance_targets,
     literal_is_bound,
     literal_spans,
+    match_has_assignment_semantics,
 )
 from ouroboros.verification.models import (
     ACVerificationReport,
@@ -1022,7 +1023,6 @@ class SpecVerifier:
 
         agent_results = agent_results or {}
 
-        # Group assertions by AC index
         by_ac: dict[int, list[SpecAssertion]] = {}
         for a in assertions:
             by_ac.setdefault(a.ac_index, []).append(a)
@@ -1681,7 +1681,10 @@ class SpecVerifier:
             elif first_bound is not None:
                 bounds = chain((first_bound,), bounds)
             for match, evidence_target in bounds:
-                # Extract the value after the pattern
+                if assertion.input_binding_required and not match_has_assignment_semantics(
+                    evidence_content, match, evidence_target, file_path
+                ):
+                    continue
                 actual = self._extract_value_after_match(content, match)
                 if assertion.expected_value:
                     verified = assertion.expected_value.strip() == actual.strip()
@@ -1707,7 +1710,6 @@ class SpecVerifier:
                         ),
                     )
                 else:
-                    # Pattern found, no expected value to check
                     return SpecVerificationResult(
                         assertion=assertion,
                         outcome=VerificationOutcome.VERIFIED,
@@ -1732,7 +1734,6 @@ class SpecVerifier:
                 detail=f"Could not read any of {len(files)} matched files",
             )
 
-        # A usable pattern did not match any readable candidate: a real discrepancy.
         return SpecVerificationResult(
             assertion=assertion,
             outcome=VerificationOutcome.DISCREPANCY,
@@ -1792,7 +1793,6 @@ class SpecVerifier:
         )
         blank_subject_contract = _matches_only_a_blank_subject(assertion.pattern)
 
-        # First check: does the pattern match any filename?
         name_pattern = self._safe_compile(
             assertion.pattern,
             re.IGNORECASE,

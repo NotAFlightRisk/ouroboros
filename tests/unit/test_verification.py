@@ -1764,6 +1764,48 @@ class TestSpecVerifier:
             ),
             (
                 "MUST define a CameraProvider class",
+                "Provider.java",
+                "class CameraProvider extends int {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "class CameraProvider implements int {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "class CameraProvider { void value; }\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "class CameraProvider { var value; }\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.js",
+                "default export class CameraProvider {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.js",
+                "default export function CameraProvider() {}\n",
+                r"function\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.js",
+                "async export function CameraProvider() {}\n",
+                r"function\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
                 "provider.js",
                 "if (true) class CameraProvider {}\n",
                 r"class\s+CameraProvider",
@@ -1909,6 +1951,13 @@ class TestSpecVerifier:
             "typescript-invalid-class-clause-order",
             "java-illegal-top-level-modifier",
             "csharp-illegal-top-level-modifier",
+            "java-primitive-extends",
+            "java-primitive-implements",
+            "java-void-field",
+            "java-var-field",
+            "javascript-default-export-class",
+            "javascript-default-export-function",
+            "javascript-async-export-function",
             "javascript-conditional-class-prefix",
             "java-multiline-conditional-class",
             "csharp-multiline-conditional-class",
@@ -2222,6 +2271,23 @@ class TestSpecVerifier:
 
         assert result.outcome is VerificationOutcome.UNVERIFIABLE
         assert result.discrepancy is False
+
+    def test_t1_comparison_cannot_impersonate_assignment(self) -> None:
+        project = self._create_project({"main.py": "assert RETRIES == 3\n"})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST set RETRIES=3",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"RETRIES\s*==\s*",
+            expected_value="3",
+            file_hint="*.py",
+            evidence_targets=("RETRIES",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is False
+        assert result.evidence_source == ""
 
     def test_cpp_template_class_declaration_remains_valid(self) -> None:
         project = self._create_project(

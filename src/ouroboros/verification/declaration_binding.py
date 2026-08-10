@@ -304,6 +304,39 @@ def _declaration_prefix_is_valid(match: re.Match[str], suffix: str, kind: str) -
     )
     if any(conflict.issubset(bases) for conflict in conflicts):
         return False
+    if suffix in {".js", ".jsx"} and kind == "class":
+        return bases in {(), ("export",), ("export", "default")}
+    if suffix in {".js", ".jsx"} and kind == "function":
+        return bases in {
+            (),
+            ("async",),
+            ("export",),
+            ("export", "async"),
+            ("export", "default"),
+            ("export", "default", "async"),
+        }
+    if suffix in {".ts", ".tsx"} and kind == "class":
+        return bases in {
+            (),
+            ("abstract",),
+            ("declare",),
+            ("export",),
+            ("export", "abstract"),
+            ("export", "declare"),
+            ("export", "default"),
+            ("export", "default", "abstract"),
+        }
+    if suffix in {".ts", ".tsx"} and kind == "function":
+        return bases in {
+            (),
+            ("async",),
+            ("declare",),
+            ("export",),
+            ("export", "async"),
+            ("export", "declare"),
+            ("export", "default"),
+            ("export", "default", "async"),
+        }
     return "default" not in bases or "export" in bases
 
 
@@ -514,26 +547,37 @@ def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
             is not None
         )
     if suffix == ".java":
+        java_non_type = (
+            r"abstract|assert|boolean|break|byte|case|catch|char|class|const|continue|"
+            r"default|do|double|else|enum|extends|false|final|finally|float|for|goto|"
+            r"if|implements|import|instanceof|int|interface|long|native|new|null|package|"
+            r"private|protected|public|return|short|static|strictfp|super|switch|"
+            r"synchronized|this|throw|throws|transient|true|try|var|void|volatile|while"
+        )
+        java_identifier = rf"(?!(?:{java_non_type})\b)[A-Za-z_]\w*"
+        java_generic = rf"<\s*{java_identifier}(?:\s*,\s*{java_identifier})*\s*>"
+        java_qualified = rf"{java_identifier}(?:\.{java_identifier})*"
+        java_type = rf"{java_qualified}(?:\s*{java_generic})?"
         if kind == "class":
             clauses = (
-                rf"(?:extends\s+{qualified_generic}\s*)?"
-                rf"(?:implements\s+{qualified_generic}"
-                rf"(?:\s*,\s*{qualified_generic})*\s*)?"
-                rf"(?:permits\s+{qualified_generic}"
-                rf"(?:\s*,\s*{qualified_generic})*\s*)?"
+                rf"(?:extends\s+{java_type}\s*)?"
+                rf"(?:implements\s+{java_type}"
+                rf"(?:\s*,\s*{java_type})*\s*)?"
+                rf"(?:permits\s+{java_type}"
+                rf"(?:\s*,\s*{java_type})*\s*)?"
             )
         elif kind == "interface":
             clauses = (
-                rf"(?:extends\s+{qualified_generic}"
-                rf"(?:\s*,\s*{qualified_generic})*\s*)?"
-                rf"(?:permits\s+{qualified_generic}"
-                rf"(?:\s*,\s*{qualified_generic})*\s*)?"
+                rf"(?:extends\s+{java_type}"
+                rf"(?:\s*,\s*{java_type})*\s*)?"
+                rf"(?:permits\s+{java_type}"
+                rf"(?:\s*,\s*{java_type})*\s*)?"
             )
         else:
             return False
         return (
             re.fullmatch(
-                rf"\s*(?:{generic}\s*)?{clauses}",
+                rf"\s*(?:{java_generic}\s*)?{clauses}",
                 header,
             )
             is not None
@@ -641,7 +685,7 @@ def _declaration_body_is_valid(body: str, declaration_kind: str, suffix: str) ->
         if suffix == ".java" and declaration_kind == "class":
             return (
                 re.fullmatch(
-                    r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\[\])?\s+"
+                    r"(?:boolean|byte|char|double|float|int|long|short)(?:\[\])?\s+"
                     r"[A-Za-z_]\w*\s*;",
                     stripped,
                 )

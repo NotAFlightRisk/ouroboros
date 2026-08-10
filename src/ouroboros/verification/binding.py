@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 
 # Read model-supplied patterns without executing them.  This is the same
@@ -299,6 +300,38 @@ def literal_spans(text: str, literal: str) -> tuple[tuple[int, int], ...]:
 def literal_is_bound(text: str, literal: str) -> bool:
     """Whether ``literal`` is present as a complete value in trusted text."""
     return bool(literal_spans(text, literal))
+
+
+def match_has_assignment_semantics(
+    source: str,
+    match: re.Match[str],
+    target: str,
+    file_path: str,
+) -> bool:
+    """Whether the concrete bound target is a canonical trusted assignment key."""
+    for start, end in literal_spans(source, target):
+        associated = match.start() <= start and end <= match.end()
+        if match.start() == match.end():
+            associated = start == match.start()
+        if not associated:
+            continue
+        line_start = source.rfind("\n", 0, start) + 1
+        line_end = source.find("\n", end)
+        if line_end < 0:
+            line_end = len(source)
+        if (
+            re.fullmatch(
+                r"\s*(?:(?:const|final|let|static|var)\s+)*",
+                source[line_start:start],
+            )
+            is None
+        ):
+            continue
+        suffix = os.path.splitext(file_path)[1].casefold()
+        operator = r"\s*:" if suffix in {".yaml", ".yml"} else r"\s*=(?!=)"
+        if re.match(operator, source[end:line_end]):
+            return True
+    return False
 
 
 def acceptance_declaration_kind(

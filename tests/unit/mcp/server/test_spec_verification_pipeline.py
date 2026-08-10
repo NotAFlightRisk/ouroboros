@@ -1105,6 +1105,48 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         ),
         (
             "MUST define a CameraProvider class",
+            "Provider.java",
+            "class CameraProvider extends int {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
+            "class CameraProvider implements int {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
+            "class CameraProvider { void value; }\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
+            "class CameraProvider { var value; }\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.js",
+            "default export class CameraProvider {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.js",
+            "default export function CameraProvider() {}\n",
+            r"function\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.js",
+            "async export function CameraProvider() {}\n",
+            r"function\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
             "provider.js",
             "if (true) class CameraProvider {}\n",
             r"class\s+CameraProvider",
@@ -1242,6 +1284,13 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         "typescript-invalid-class-clause-order",
         "java-illegal-top-level-modifier",
         "csharp-illegal-top-level-modifier",
+        "java-primitive-extends",
+        "java-primitive-implements",
+        "java-void-field",
+        "java-var-field",
+        "javascript-default-export-class",
+        "javascript-default-export-function",
+        "javascript-async-export-function",
         "javascript-conditional-class-prefix",
         "java-multiline-conditional-class",
         "csharp-multiline-conditional-class",
@@ -1589,6 +1638,32 @@ async def test_unclassified_valid_declaration_shape_is_not_a_formal_discrepancy(
     assert formal.final_approved is False
     assert formal.ac_results[0].ac_verdict_state == "not_evaluated"
     assert formal.ac_results[0].rendered_verdict == "NOT_EVALUATED"
+
+
+@pytest.mark.asyncio
+async def test_t1_comparison_cannot_reach_formal_pass_as_assignment(tmp_path: Any) -> None:
+    ac_text = "MUST set RETRIES=3"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t1_constant",
+                "pattern": r"RETRIES\s*==\s*",
+                "expected_value": "3",
+                "file_hint": "*.py",
+                "description": "RETRIES is set to 3",
+            }
+        ],
+    )
+    (tmp_path / "main.py").write_text("assert RETRIES == 3\n")
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
 
 
 @pytest.mark.asyncio
