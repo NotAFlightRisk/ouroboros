@@ -5,7 +5,7 @@ doc_metadata:
 
 # Running Ouroboros with Codex CLI
 
-> 한국어: [codex.ko.md](./codex.ko.md) (설치까지 번역됨, 이후 절은 이 문서를 보세요)
+> 한국어: [codex.ko.md](./codex.ko.md)
 
 > For installation and first-run onboarding, see [Getting Started](../getting-started.md).
 
@@ -124,6 +124,8 @@ Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, b
 - Retires only untouched legacy generated `ouroboros-*.config.toml` task-profile anchors; user-created Codex profiles are preserved
 - Registers a managed `ouroboros-worker.config.toml` file so Agent OS worker subprocesses can opt out of interactive Codex defaults without losing the MCP/env hookup
 
+Setup also creates artifacts outside `~/.codex/`: `ensure_config_dir()` creates `~/.ouroboros/data/` and `~/.ouroboros/logs/` (`cli/commands/setup.py:2632`), and a fresh configuration gets a new `~/.ouroboros/credentials.yaml` written at mode `0600` (`:2771`).
+
 `~/.codex/config.toml` is not where Ouroboros stage model pins belong. Use the settings UI or the equivalent `~/.ouroboros/config.yaml` values; keep user-managed native Codex profiles when you need an explicit `--profile`. If you manage a long-running URL-based Ouroboros MCP server, keep that URL entry in `~/.codex/config.toml`; `ouroboros setup --runtime codex` preserves it by default. Use `--mcp-mode stdio` only when you intentionally want setup to replace the entry with the managed command-spawned server.
 
 ### Worker subprocess isolation (Agent OS `runtime_profile`)
@@ -196,9 +198,23 @@ message assembly, and MCP invocation local. See
 ### Verify Installation
 
 ```bash
-codex --version
 ouroboros --help
+codex --version
 ```
+
+> `codex --version` reporting `command not found` is **not** a failure on the
+> standalone path. That path supports users whose only Codex executable is the
+> macOS ChatGPT app bundle and is not on `PATH`; setup discovers the bundle. In
+> that case check what setup actually resolved:
+>
+> ```bash
+> ouroboros config show
+> ```
+>
+> The **`CLI path:`** line in that output is the resolved executable
+> (`cli/commands/config.py:696-701`). The string `codex_cli_path` does not appear
+> in the output, so do not grep for it. On the plugin path, and for anyone who
+> put `codex` on `PATH`, `codex --version` is the right check.
 
 ## How It Works
 
@@ -399,6 +415,21 @@ Codex CLI is a proven Synapse `inform` and `after_turn` backend: Ouroboros
 resumes the same persisted Codex thread after the current turn, and only reports
 `applied` after the resumed provider turn emits an acknowledgement. It does not
 advertise live checkpoint `redirect` or hard `replace`.
+
+Concretely, the Codex runtime declares three of the six session-signal capabilities (`orchestrator/codex_cli_runtime.py:453`):
+
+| Capability | Codex | Meaning |
+|---|:---:|---|
+| `inform_delivery` | yes | information can be delivered to a running session |
+| `background_reply` | yes | a reply can arrive in the background |
+| `after_turn_delivery` | yes | **delivered after the current turn completes** |
+| `checkpoint_redirect` | no | cannot steer mid-turn |
+| `owned_turn_abort` | no | cannot abort a turn in flight |
+| `replacement_resume` | no | cannot resume via a replacement session |
+
+The practical consequence: **to change direction during a long turn, you wait for that turn to finish.**
+
+> **Subagent fan-out.** Codex can self-parallelize inside a session, but `codex mcp-server` exposes only `codex` and `codex-reply`, so Codex's native multi-agent team tools are unreachable by an external driver. Ouroboros can reuse and continue a Codex thread but cannot orchestrate Codex children; fan-out stays in-process (`subagent_orchestration=INTERNAL`, `orchestrator/codex_cli_runtime.py:448`).
 
 This becomes publicly callable only in the complete MCP host layer, which
 registers the discovery/delivery tools and shares one Synapse hub with run and
