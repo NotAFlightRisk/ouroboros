@@ -356,6 +356,69 @@ async def test_container_body_evidence_cannot_reach_formal_pass(
     assert formal.ac_results[0].final_verdict == "fail"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("Main.swift", "let pattern = /class CameraProvider/\n"),
+        ("Main.swift", "let pattern = #/class CameraProvider/#\n"),
+        ("main.pl", "$pattern = qr/class CameraProvider/;\n"),
+        ("main.pl", "$pattern = qr{class CameraProvider};\n"),
+        ("Main.hs", "[r| class CameraProvider |]\n"),
+        ("Main.hs", "[| class CameraProvider |]\n"),
+        ("main.rb", "pattern = /class CameraProvider/\n"),
+        ("main.rb", "pattern = %r{class CameraProvider}\n"),
+        ("Main.cs", 'var pattern = @$"class CameraProvider";\n'),
+        ("main.pl", "=pod\nclass CameraProvider\n=cut\n"),
+        ("main.pl", "__DATA__\nclass CameraProvider\n"),
+        ("main.rb", "=begin\nclass CameraProvider\n=end\n"),
+        ("main.rb", "__END__\nclass CameraProvider\n"),
+        ("main.sql", "SELECT $tag$class CameraProvider$tag$;\n"),
+    ],
+    ids=[
+        "swift-bare-regex",
+        "swift-extended-regex",
+        "perl-qr-slash",
+        "perl-qr-brace",
+        "haskell-quasiquote",
+        "haskell-template-quote",
+        "ruby-slash-regex",
+        "ruby-percent-regex",
+        "csharp-interpolated-verbatim",
+        "perl-pod",
+        "perl-data",
+        "ruby-block-comment",
+        "ruby-data",
+        "sql-dollar-quote",
+    ],
+)
+async def test_unclassified_language_literals_cannot_reach_formal_pass(
+    tmp_path: Any, filename: str, content: str
+) -> None:
+    ac_text = "MUST define a CameraProvider class"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"class\s+CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Literal body is not executable evidence",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
 def test_mixed_criterion_text_cannot_borrow_a_report_identity_for_formal_pass(
     tmp_path: Any,
 ) -> None:

@@ -571,6 +571,60 @@ class TestSpecVerifier:
         assert summary.reports[0].verified_pass is False
         assert summary.reports[0].results[0].verified is False
 
+    @pytest.mark.parametrize(
+        ("filename", "content"),
+        [
+            ("Main.swift", "let pattern = /class CameraProvider/\n"),
+            ("Main.swift", "let pattern = #/class CameraProvider/#\n"),
+            ("main.pl", "$pattern = qr/class CameraProvider/;\n"),
+            ("main.pl", "$pattern = qr{class CameraProvider};\n"),
+            ("Main.hs", "[r| class CameraProvider |]\n"),
+            ("Main.hs", "[| class CameraProvider |]\n"),
+            ("main.rb", "pattern = /class CameraProvider/\n"),
+            ("main.rb", "pattern = %r{class CameraProvider}\n"),
+            ("Main.cs", 'var pattern = @$"class CameraProvider";\n'),
+            ("main.pl", "=pod\nclass CameraProvider\n=cut\n"),
+            ("main.pl", "__DATA__\nclass CameraProvider\n"),
+            ("main.rb", "=begin\nclass CameraProvider\n=end\n"),
+            ("main.rb", "__END__\nclass CameraProvider\n"),
+            ("main.sql", "SELECT $tag$class CameraProvider$tag$;\n"),
+        ],
+        ids=[
+            "swift-bare-regex",
+            "swift-extended-regex",
+            "perl-qr-slash",
+            "perl-qr-brace",
+            "haskell-quasiquote",
+            "haskell-template-quote",
+            "ruby-slash-regex",
+            "ruby-percent-regex",
+            "csharp-interpolated-verbatim",
+            "perl-pod",
+            "perl-data",
+            "ruby-block-comment",
+            "ruby-data",
+            "sql-dollar-quote",
+        ],
+    )
+    def test_unclassified_language_literals_fail_the_entire_file_closed(
+        self, filename: str, content: str
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+CameraProvider",
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.reports[0].verified_pass is False
+        assert summary.reports[0].results[0].verified is False
+
     def test_mixed_criterion_text_under_one_index_rejects_the_whole_group(self) -> None:
         project = self._create_project({"main.py": "class Unrelated:\n    pass\n"})
         trusted = SpecAssertion(

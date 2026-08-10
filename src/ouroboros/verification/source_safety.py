@@ -237,6 +237,10 @@ def _triple_quote_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
 
 def _csharp_literal_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
     """Return C# raw and verbatim strings that generic quote rules misread."""
+    if '@$"' in text:
+        # Interpolated verbatim strings permit doubled quotes and need a
+        # dedicated interpolation-aware scanner; reject until one exists.
+        return None
     ranges: list[tuple[int, int]] = []
     raw_opener = re.compile(r'(?<!")(?P<quotes>"{3,})(?!")')
     cursor = 0
@@ -307,7 +311,15 @@ def _c_style_noncode_ranges(text: str, suffix: str) -> tuple[tuple[int, int], ..
         line_markers=("//",),
         block_markers=(("/*", "*/"),),
     )
-    return None if ordinary is None else (*special, *ordinary)
+    if ordinary is None:
+        return None
+    combined = (*special, *ordinary)
+    # Swift bare/extended regex literals share slash syntax with operators.
+    # Until that grammar is classified completely, any unmasked slash makes
+    # the file ineligible rather than exposing a possible regex body.
+    if suffix == ".swift" and "/" in _mask_ranges(text, combined):
+        return None
+    return combined
 
 
 def _rust_raw_string_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
@@ -571,7 +583,26 @@ def mask_non_executable_source(
         if _has_unsupported_shell_container(text):
             return None
         ranges = _delimited_noncode_ranges(text, line_markers=("#",), block_markers=())
-        return None if ranges is None else _mask_ranges(text, ranges)
+        if ranges is None:
+            return None
+        masked = _mask_ranges(text, ranges)
+        if suffix == ".pl" and (
+            "/" in masked
+            or re.search(r"\b(?:q|qq|qw|qx|qr|m|s|tr|y)\s*[^\w\s]", masked)
+            or re.search(
+                r"(?m)^=(?:pod|head\d|over|item|back|begin|for|encoding)\b"
+                r"|^__(?:DATA|END)__\s*$",
+                masked,
+            )
+        ):
+            return None
+        # Ruby slash regexes and percent literals accept many delimiters; an
+        # unmasked slash/percent is ambiguous, so reject the file conservatively.
+        if suffix == ".rb" and (
+            "/" in masked or "%" in masked or re.search(r"(?m)^=begin\b|^__END__\s*$", masked)
+        ):
+            return None
+        return masked
     if suffix in _CONFIG_SUFFIXES:
         if not allow_configuration:
             return None
@@ -594,7 +625,13 @@ def mask_non_executable_source(
             block_markers=(("/*", "*/"),),
             nested_blocks=True,
         )
-        return None if ranges is None else _mask_ranges(text, ranges)
+        if ranges is None:
+            return None
+        masked = _mask_ranges(text, ranges)
+        # PostgreSQL dollar-quoted strings admit arbitrary multiline bodies.
+        if re.search(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", masked):
+            return None
+        return masked
     if suffix == ".hs":
         ranges = _delimited_noncode_ranges(
             text,
@@ -602,7 +639,13 @@ def mask_non_executable_source(
             block_markers=(("{-", "-}"),),
             nested_blocks=True,
         )
-        return None if ranges is None else _mask_ranges(text, ranges)
+        if ranges is None:
+            return None
+        masked = _mask_ranges(text, ranges)
+        # Quasiquotes and Template Haskell quotes are arbitrary containers.
+        if re.search(r"\[(?:[A-Za-z_][\w'.]*)?\|", masked):
+            return None
+        return masked
     if suffix in _MARKUP_SUFFIXES:
         ranges = _markup_noncode_ranges(text)
         return None if ranges is None else _mask_ranges(text, ranges)
