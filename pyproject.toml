@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.12"
 keywords = [
     "agent-os",
+    "agentic-loop",
     "ai-agent",
     "ai-coding-agent",
     "claude-code",
