@@ -519,11 +519,26 @@ def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
             is not None
         )
     if suffix == ".java":
+        if kind == "class":
+            clauses = (
+                rf"(?:extends\s+{qualified_generic}\s*)?"
+                rf"(?:implements\s+{qualified_generic}"
+                rf"(?:\s*,\s*{qualified_generic})*\s*)?"
+                rf"(?:permits\s+{qualified_generic}"
+                rf"(?:\s*,\s*{qualified_generic})*\s*)?"
+            )
+        elif kind == "interface":
+            clauses = (
+                rf"(?:extends\s+{qualified_generic}"
+                rf"(?:\s*,\s*{qualified_generic})*\s*)?"
+                rf"(?:permits\s+{qualified_generic}"
+                rf"(?:\s*,\s*{qualified_generic})*\s*)?"
+            )
+        else:
+            return False
         return (
             re.fullmatch(
-                rf"\s*(?:{generic}\s*)?"
-                r"(?:(?:extends|implements|permits)\s+"
-                rf"{qualified_generic}(?:\s*,\s*{qualified_generic})*\s*)*",
+                rf"\s*(?:{generic}\s*)?{clauses}",
                 header,
             )
             is not None
@@ -537,13 +552,15 @@ def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
             is not None
         )
     if suffix in {".ts", ".tsx"}:
+        if kind != "class":
+            return False
         ts_name = r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*"
         ts_type = rf"{ts_name}(?:\s*{generic})?"
         return (
             re.fullmatch(
                 rf"\s*(?:{generic}\s*)?"
-                rf"(?:(?:extends|implements)\s+{ts_type}"
-                rf"(?:\s*,\s*{ts_type})*\s*)*",
+                rf"(?:extends\s+{ts_type}\s*)?"
+                rf"(?:implements\s+{ts_type}(?:\s*,\s*{ts_type})*\s*)?",
                 header,
             )
             is not None
@@ -626,6 +643,24 @@ def _declaration_body_is_valid(body: str, declaration_kind: str, suffix: str) ->
     if not stripped:
         return True
     if declaration_kind != "function":
+        if suffix == ".java" and declaration_kind == "class":
+            return (
+                re.fullmatch(
+                    r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\[\])?\s+"
+                    r"[A-Za-z_]\w*\s*;",
+                    stripped,
+                )
+                is not None
+            )
+        if suffix == ".rs" and declaration_kind == "struct":
+            return (
+                re.fullmatch(
+                    r"[A-Za-z_]\w*\s*:\s*[A-Za-z_]\w*"
+                    r"(?:::[A-Za-z_]\w*)*\s*,",
+                    stripped,
+                )
+                is not None
+            )
         return False
     if suffix in {".c", ".cc", ".cpp", ".h", ".hpp", ".mm"}:
         return (
@@ -772,7 +807,14 @@ def _function_parameters_are_valid(
         return _cpp_parameters_are_declarations(masked, original)
     if suffix == ".c":
         return masked.strip() in {"", "void"} and original.strip() in {"", "void"}
-    return not masked.strip() and not original.strip()
+    if masked != original:
+        return False
+    if suffix != ".java":
+        return not masked.strip()
+    identifier = r"[A-Za-z_]\w*"
+    primitive = r"(?:boolean|byte|char|double|float|int|long|short)"
+    parameter = rf"{primitive}(?:\[\])?\s+{identifier}"
+    return re.fullmatch(rf"\s*(?:{parameter}(?:\s*,\s*{parameter})*)?\s*", masked) is not None
 
 
 def _complete_type_definition(
@@ -1206,6 +1248,34 @@ def source_has_declaration_kind(
     )
 
 
+def _source_has_declaration_shape(
+    source: str,
+    target: str,
+    kind: str,
+    file_path: str,
+) -> bool:
+    """Whether source contains the requested language-specific declaration header."""
+    target_spans = literal_spans(source, target)
+    escaped = re.escape(target)
+    if any(
+        match.span("target") in target_spans
+        for template in _declaration_patterns(file_path, kind)
+        for match in re.finditer(template.format(target=escaped), source)
+    ):
+        return True
+    suffix = os.path.splitext(file_path)[1].casefold()
+    return (
+        kind == "function"
+        and suffix in _C_LIKE_FUNCTION_SUFFIXES
+        and bool(
+            re.search(
+                rf"\b(?:[A-Za-z_]\w*\s+){{1,8}}[*&\s]*{escaped}\s*\(",
+                source,
+            )
+        )
+    )
+
+
 def matches_criterion(
     source: str,
     original_source: str,
@@ -1217,12 +1287,9 @@ def matches_criterion(
     kind_required, kind = acceptance_declaration_kind(assertion.ac_text, target)
     if not kind_required:
         return literal_is_bound(source, target)
-    return kind is None or source_has_declaration_kind(
-        source,
-        original_source,
-        target,
-        kind,
-        file_path,
+    return kind is None or (
+        source_has_declaration_kind(source, original_source, target, kind, file_path)
+        or _source_has_declaration_shape(source, target, kind, file_path)
     )
 
 

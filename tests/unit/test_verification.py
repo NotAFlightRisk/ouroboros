@@ -1310,7 +1310,7 @@ class TestSpecVerifier:
             ("Provider.java", "def CameraProvider(): {}\n", r"def\s+CameraProvider", False),
             (
                 "Provider.java",
-                "class Provider {\n    public void CameraProvider() {}\n}\n",
+                "class Provider {\n    public void CameraProvider(int value) {}\n}\n",
                 r"void\s+CameraProvider",
                 True,
             ),
@@ -1734,6 +1734,24 @@ class TestSpecVerifier:
             ),
             (
                 "MUST define a CameraProvider class",
+                "Provider.java",
+                "class CameraProvider implements A extends B {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider interface",
+                "Provider.java",
+                "interface CameraProvider implements A {}\n",
+                r"interface\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.ts",
+                "class CameraProvider implements A extends B {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
                 "provider.js",
                 "if (true) class CameraProvider {}\n",
                 r"class\s+CameraProvider",
@@ -1874,6 +1892,9 @@ class TestSpecVerifier:
             "go-invalid-result-clause",
             "csharp-invalid-constraint-clause",
             "cpp-invalid-trailing-return-type",
+            "java-invalid-class-clause-order",
+            "java-interface-implements-clause",
+            "typescript-invalid-class-clause-order",
             "javascript-conditional-class-prefix",
             "java-multiline-conditional-class",
             "csharp-multiline-conditional-class",
@@ -2046,6 +2067,108 @@ class TestSpecVerifier:
         result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
 
         assert result.verified is True
+        assert result.evidence_source == "trusted_project_scan"
+
+    @pytest.mark.parametrize(
+        ("ac_text", "filename", "content", "pattern"),
+        [
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "class CameraProvider { int value; }\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider struct",
+                "provider.rs",
+                "struct CameraProvider { value: i32, }\n",
+                r"struct\s+CameraProvider",
+            ),
+        ],
+        ids=["java-field", "rust-field"],
+    )
+    def test_t2_bounded_nonempty_type_definitions_remain_valid(
+        self,
+        ac_text: str,
+        filename: str,
+        content: str,
+        pattern: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is True
+
+    def test_forbidden_function_finds_parameterized_java_method(self) -> None:
+        project = self._create_project(
+            {"Provider.java": "class Provider { public void CameraProvider(int value) {} }\n"}
+        )
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST NOT define a CameraProvider function",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"void\s+CameraProvider",
+            expected_value="CameraProvider",
+            file_hint="*.java",
+            evidence_targets=("CameraProvider",),
+            evidence_polarity=EvidencePolarity.FORBIDDEN,
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is False
+        assert result.evidence_source == "trusted_project_scan"
+
+    @pytest.mark.parametrize(
+        ("kind", "filename", "content", "pattern"),
+        [
+            (
+                "class",
+                "Provider.java",
+                "class CameraProvider { int value; }\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "struct",
+                "provider.rs",
+                "struct CameraProvider { value: i32, }\n",
+                r"struct\s+CameraProvider",
+            ),
+        ],
+        ids=["java-class", "rust-struct"],
+    )
+    def test_forbidden_type_finds_bounded_nonempty_definition(
+        self,
+        kind: str,
+        filename: str,
+        content: str,
+        pattern: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text=f"MUST NOT define a CameraProvider {kind}",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+            evidence_polarity=EvidencePolarity.FORBIDDEN,
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is False
         assert result.evidence_source == "trusted_project_scan"
 
     def test_cpp_template_class_declaration_remains_valid(self) -> None:

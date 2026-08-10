@@ -685,7 +685,7 @@ async def test_model_cannot_substitute_function_evidence_for_a_class_criterion(
         ("Provider.java", "def CameraProvider(): {}\n", r"def\s+CameraProvider", False),
         (
             "Provider.java",
-            "class Provider {\n    public void CameraProvider() {}\n}\n",
+            "class Provider {\n    public void CameraProvider(int value) {}\n}\n",
             r"void\s+CameraProvider",
             True,
         ),
@@ -1070,6 +1070,24 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         ),
         (
             "MUST define a CameraProvider class",
+            "Provider.java",
+            "class CameraProvider implements A extends B {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider interface",
+            "Provider.java",
+            "interface CameraProvider implements A {}\n",
+            r"interface\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.ts",
+            "class CameraProvider implements A extends B {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
             "provider.js",
             "if (true) class CameraProvider {}\n",
             r"class\s+CameraProvider",
@@ -1202,6 +1220,9 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         "go-invalid-result-clause",
         "csharp-invalid-constraint-clause",
         "cpp-invalid-trailing-return-type",
+        "java-invalid-class-clause-order",
+        "java-interface-implements-clause",
+        "typescript-invalid-class-clause-order",
         "javascript-conditional-class-prefix",
         "java-multiline-conditional-class",
         "csharp-multiline-conditional-class",
@@ -1375,6 +1396,133 @@ async def test_valid_generic_type_definitions_can_reach_formal_pass(
     assert verification.reports[0].verified_pass is True
     assert formal.final_approved is True
     assert formal.ac_results[0].final_verdict == "pass"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "filename", "content", "pattern"),
+    [
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
+            "class CameraProvider { int value; }\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider struct",
+            "provider.rs",
+            "struct CameraProvider { value: i32, }\n",
+            r"struct\s+CameraProvider",
+        ),
+    ],
+    ids=["java-field", "rust-field"],
+)
+async def test_bounded_nonempty_types_can_reach_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    filename: str,
+    content: str,
+    pattern: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": pattern,
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Complete bounded non-empty type definition",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is True
+    assert formal.final_approved is True
+    assert formal.ac_results[0].final_verdict == "pass"
+
+
+@pytest.mark.asyncio
+async def test_forbidden_function_finds_parameterized_java_method(tmp_path: Any) -> None:
+    ac_text = "MUST NOT define a CameraProvider function"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"void\s+CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": "*.java",
+                "description": "CameraProvider function is forbidden",
+            }
+        ],
+    )
+    (tmp_path / "Provider.java").write_text(
+        "class Provider { public void CameraProvider(int value) {} }\n"
+    )
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "filename", "content", "pattern"),
+    [
+        (
+            "class",
+            "Provider.java",
+            "class CameraProvider { int value; }\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "struct",
+            "provider.rs",
+            "struct CameraProvider { value: i32, }\n",
+            r"struct\s+CameraProvider",
+        ),
+    ],
+    ids=["java-class", "rust-struct"],
+)
+async def test_forbidden_type_finds_bounded_nonempty_definition(
+    tmp_path: Any,
+    kind: str,
+    filename: str,
+    content: str,
+    pattern: str,
+) -> None:
+    ac_text = f"MUST NOT define a CameraProvider {kind}"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": pattern,
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": f"CameraProvider {kind} is forbidden",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
 
 
 @pytest.mark.asyncio
