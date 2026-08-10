@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -543,6 +544,73 @@ async def test_negative_structure_polarity_reaches_formal_verdict(
     assert verification.reports[0].verified_pass is approved
     assert formal.final_approved is approved
     assert formal.ac_results[0].final_verdict == ("pass" if approved else "fail")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requested_kind", "target"),
+    [("file", "README.md"), ("directory", "pkg/cache")],
+)
+async def test_forbidden_path_inventory_includes_non_source_files_and_directories(
+    tmp_path: Any,
+    requested_kind: str,
+    target: str,
+) -> None:
+    ac_text = f"MUST NOT create {requested_kind} {target}"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": re.escape(target),
+                "expected_value": target,
+                "file_hint": "safe.py",
+                "description": f"The {requested_kind} is forbidden",
+            }
+        ],
+    )
+    forbidden_path = tmp_path / target
+    forbidden_path.parent.mkdir(parents=True, exist_ok=True)
+    if requested_kind == "directory":
+        forbidden_path.mkdir()
+    else:
+        forbidden_path.write_text("documentation\n")
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    result = verification.reports[0].results[0]
+    assert result.verified is False
+    assert result.evidence_target == target
+    assert f"Forbidden {requested_kind}" in result.detail
+    assert formal.final_approved is False
+
+
+@pytest.mark.asyncio
+async def test_forbidden_declaration_ignores_declaration_like_filename(tmp_path: Any) -> None:
+    ac_text = "MUST NOT define a CameraProvider class"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"class\s+CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": "*.py",
+                "description": "CameraProvider is forbidden",
+            }
+        ],
+    )
+    (tmp_path / "CameraProvider.py").write_text("VALUE = 1\n")
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is True
+    assert formal.final_approved is True
+    assert formal.ac_results[0].final_verdict == "pass"
 
 
 @pytest.mark.asyncio

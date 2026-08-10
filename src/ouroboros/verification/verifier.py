@@ -1360,6 +1360,35 @@ class SpecVerifier:
     def _relative_file(self, file_path: str) -> str:
         return os.path.relpath(file_path, self.project_dir).replace(os.sep, "/")
 
+    def _trusted_project_paths(self) -> tuple[tuple[tuple[str, str], ...], str]:
+        """Return a complete bounded inventory of regular files and directories."""
+        real_project = os.path.realpath(self.project_dir)
+        candidates = sorted(
+            glob.glob(
+                os.path.join(self.project_dir, "**/*"),
+                recursive=True,
+                include_hidden=True,
+            )
+        )
+        inventory: list[tuple[str, str]] = []
+        for path in candidates:
+            real_path = os.path.realpath(path)
+            if not real_path.startswith(real_project + os.sep):
+                continue
+            relative = os.path.relpath(path, self.project_dir)
+            if any(component in _NOISE_DIRECTORY_NAMES for component in relative.split(os.sep)):
+                continue
+            if os.path.isfile(path):
+                inventory.append((path, "file"))
+            elif os.path.isdir(path):
+                inventory.append((path, "directory"))
+        if len(inventory) > MAX_FILES_PER_HINT:
+            return (), (
+                f"Trusted forbidden-path inventory exceeds {MAX_FILES_PER_HINT} objects; "
+                "absence cannot be proven"
+            )
+        return tuple(inventory), ""
+
     def _trusted_project_inventory(
         self,
         *,
@@ -1468,6 +1497,43 @@ class SpecVerifier:
 
     def _verify_forbidden_structural(self, assertion: SpecAssertion) -> SpecVerificationResult:
         """Verify forbidden target absence without model regex or file-hint scope."""
+        target = self._evidence_targets(assertion)[0]
+        path_kind = _criterion_path_kind(assertion.ac_text, target)
+        if path_kind is not None:
+            paths, error = self._trusted_project_paths()
+            if error:
+                return SpecVerificationResult(
+                    assertion=assertion,
+                    verified=False,
+                    discrepancy=True,
+                    detail=error,
+                )
+            for object_path, object_kind in paths:
+                relative = self._relative_file(object_path)
+                path_matches = (
+                    relative == target if "/" in target else os.path.basename(object_path) == target
+                )
+                if object_kind == path_kind and path_matches:
+                    return SpecVerificationResult(
+                        assertion=assertion,
+                        verified=False,
+                        file_path=object_path,
+                        discrepancy=True,
+                        evidence_source="trusted_project_scan",
+                        evidence_target=target,
+                        detail=(
+                            f"Forbidden {path_kind} criterion target '{target}' found at "
+                            f"{relative} by trusted project scan"
+                        ),
+                    )
+            return SpecVerificationResult(
+                assertion=assertion,
+                verified=True,
+                evidence_source="trusted_project_scan",
+                evidence_target=target,
+                detail=f"Forbidden {path_kind} criterion target '{target}' was not found",
+            )
+
         inventory, error = self._trusted_project_inventory(allow_configuration=False)
         if error:
             return SpecVerificationResult(
@@ -1476,11 +1542,9 @@ class SpecVerifier:
                 discrepancy=True,
                 detail=error,
             )
-        target = self._evidence_targets(assertion)[0]
         for file_path, _content, evidence_content in inventory:
             relative_file = self._relative_file(file_path)
-            source = "filename" if literal_is_bound(relative_file, target) else "file_content"
-            if source == "filename" or literal_is_bound(evidence_content, target):
+            if literal_is_bound(evidence_content, target):
                 return SpecVerificationResult(
                     assertion=assertion,
                     verified=False,
@@ -1490,7 +1554,7 @@ class SpecVerifier:
                     evidence_target=target,
                     detail=(
                         f"Forbidden criterion target '{target}' found in {relative_file} "
-                        f"{source} by trusted project scan"
+                        "file_content by trusted project scan"
                     ),
                 )
         return SpecVerificationResult(
