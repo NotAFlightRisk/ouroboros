@@ -147,8 +147,11 @@ class _AbstractValue:
     literal: str | None = None
     truth: bool | None = None
     classes: frozenset[ast.ClassDef] = frozenset()
+    instance_classes: frozenset[ast.ClassDef] = frozenset()
     modules: frozenset[str] = frozenset()
     callables: tuple[_CallableTarget, ...] = ()
+    serialized_sections: frozenset[str] = frozenset()
+    accessed_attributes: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -164,6 +167,8 @@ _UNKNOWN_VALUE = _AbstractValue()
 _ANNOTATION_MODULE = "<annotation-config-module>"
 _TYPE_CHECKING_FALSE = "<typing-type-checking-false>"
 _TYPING_MODULE = "<typing-module>"
+_OPERATOR_MODULE = "<operator-module>"
+_ATTRGETTER_FACTORY = "<attrgetter-factory>"
 _SECTION_ANNOTATIONS: Mapping[str, str] = {
     "EvaluationConfig": "evaluation",
     "ConsensusConfig": "consensus",
@@ -199,8 +204,11 @@ def _conservative_value(value: _AbstractValue) -> _AbstractValue:
     return _AbstractValue(
         origins=_contained_origins(value),
         classes=value.classes,
+        instance_classes=value.instance_classes,
         modules=value.modules,
         callables=value.callables,
+        serialized_sections=value.serialized_sections,
+        accessed_attributes=value.accessed_attributes,
     )
 
 
@@ -273,8 +281,11 @@ def _join_values(*values: _AbstractValue) -> _AbstractValue:
             values[0].truth if all(value.truth == values[0].truth for value in values) else None
         ),
         classes=frozenset().union(*(value.classes for value in values)),
+        instance_classes=frozenset().union(*(value.instance_classes for value in values)),
         modules=frozenset().union(*(value.modules for value in values)),
         callables=tuple(callables),
+        serialized_sections=frozenset().union(*(value.serialized_sections for value in values)),
+        accessed_attributes=frozenset().union(*(value.accessed_attributes for value in values)),
     )
 
 
@@ -581,6 +592,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._path_reachable = True
         self._exception_capture_depth = 0
         self._caught_exception_stack: list[tuple[_AbruptPath, ...]] = []
+        self._function_body_depth = 0
         self.reads: set[ConfigField] = set()
 
     def _name_value(self, name: str) -> _AbstractValue:
@@ -590,6 +602,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         if _looks_like_config_name(name):
             return _origin_value(_CONFIG_ROOT)
         return _UNKNOWN_VALUE
+
+    def _name_is_bound(self, name: str) -> bool:
+        return any(name in scope for scope in self._states) or any(
+            name in scope for scope in self._functions
+        )
 
     def _annotation_name_value(self, name: str) -> _AbstractValue:
         for scope in reversed(self._annotations):
@@ -685,13 +702,24 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             _callable_name(decorator) == "staticmethod" for decorator in function.decorator_list
         )
 
+    @staticmethod
+    def _method_is_property(function: _FunctionNode) -> bool:
+        return isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+            _callable_name(decorator) == "property" for decorator in function.decorator_list
+        )
+
     def _call_targets(
         self, node: ast.AST
     ) -> tuple[tuple[_FunctionNode, _AbstractValue | None], ...]:
         value = self._expression_value(node)
-        if value.callables:
-            return tuple((target.function, target.receiver) for target in value.callables)
-        return tuple((function, None) for function in self._function_value(node))
+        targets = [(target.function, target.receiver) for target in value.callables]
+        for function in self._source_index.methods(value.instance_classes, "__call__"):
+            target = (function, None if self._method_is_static(function) else value)
+            if target not in targets:
+                targets.append(target)
+        if not targets:
+            targets.extend((function, None) for function in self._function_value(node))
+        return tuple(targets)
 
     def _call_has_relevant_provenance(
         self,
@@ -780,8 +808,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             literal=value.literal,
             truth=value.truth,
             classes=value.classes,
+            instance_classes=value.instance_classes,
             modules=value.modules,
             callables=value.callables,
+            serialized_sections=value.serialized_sections,
+            accessed_attributes=value.accessed_attributes,
         )
 
     def _replace_shared_value(
@@ -823,8 +854,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             literal=owner.literal,
             truth=False if not normalized else None,
             classes=owner.classes,
+            instance_classes=owner.instance_classes,
             modules=owner.modules,
             callables=owner.callables,
+            serialized_sections=owner.serialized_sections,
+            accessed_attributes=owner.accessed_attributes,
         )
 
     @staticmethod
@@ -841,8 +875,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             literal=owner.literal,
             truth=False if not items else None,
             classes=owner.classes,
+            instance_classes=owner.instance_classes,
             modules=owner.modules,
             callables=owner.callables,
+            serialized_sections=owner.serialized_sections,
+            accessed_attributes=owner.accessed_attributes,
         )
 
     @staticmethod
@@ -859,8 +896,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             literal=owner.literal,
             truth=owner.truth,
             classes=owner.classes,
+            instance_classes=owner.instance_classes,
             modules=owner.modules,
             callables=owner.callables,
+            serialized_sections=owner.serialized_sections,
+            accessed_attributes=owner.accessed_attributes,
         )
 
     @staticmethod
@@ -1122,6 +1162,20 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             attribute = self._named_value(owner.attributes, node.attr)
             if attribute is not None:
                 return attribute
+            property_getters = tuple(
+                function
+                for function in self._source_index.methods(owner.instance_classes, node.attr)
+                if self._method_is_property(function)
+            )
+            if property_getters:
+                return _join_values(
+                    *(
+                        self._local_direct_call_value(function, (owner,))
+                        for function in property_getters
+                    )
+                )
+            if _OPERATOR_MODULE in owner.origins and node.attr == "attrgetter":
+                return _origin_value(_ATTRGETTER_FACTORY)
             resolved_modules = {
                 child.name
                 for module_name in owner.modules
@@ -1179,6 +1233,28 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if dict_method_value is not None:
                 self._expression_cache[id(node)] = dict_method_value
                 return dict_method_value
+            function_value = self._expression_value(node.func)
+            if _ATTRGETTER_FACTORY in function_value.origins:
+                return _AbstractValue(
+                    accessed_attributes=frozenset(
+                        argument.value
+                        for argument in node.args
+                        if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+                    )
+                )
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "model_dump":
+                sections = self._expression_value(node.func.value).origins & TRACKED_SECTIONS
+                if sections:
+                    return _AbstractValue(serialized_sections=sections)
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "vars"
+                and not self._name_is_bound("vars")
+                and node.args
+            ):
+                sections = self._expression_value(node.args[0]).origins & TRACKED_SECTIONS
+                if sections:
+                    return _AbstractValue(serialized_sections=sections)
             callable_name = _callable_name(node.func)
             if callable_name is not None and _CONFIG_FACTORY.search(callable_name):
                 if isinstance(node.func, ast.Name):
@@ -1232,6 +1308,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     attributes=tuple(attributes),
                     identity=frozenset({id(node)}),
                     classes=constructor_classes,
+                    instance_classes=constructor_classes,
                 )
             if isinstance(node.func, ast.Name) and node.func.id == "dict":
                 entries: dict[str, _AbstractValue] = {}
@@ -1381,6 +1458,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         # Evaluate once even when the call is a standalone mutating
         # ``setdefault`` expression.
         self._expression_value(node)
+        accessor = self._expression_value(node.func)
+        if accessor.accessed_attributes:
+            for argument in node.args:
+                value = self._expression_value(
+                    argument.value if isinstance(argument, ast.Starred) else argument
+                )
+                for section in value.origins & TRACKED_SECTIONS:
+                    for name in accessor.accessed_attributes:
+                        self._record(section, name.partition(".")[0])
         if (
             isinstance(node.func, ast.Name)
             and node.func.id == "getattr"
@@ -1395,6 +1481,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
         before = self._binding_snapshot()
+        if (
+            isinstance(node.ctx, ast.Load)
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+        ):
+            for section in self._expression_value(node.value).serialized_sections:
+                self._record(section, node.slice.value)
         self.generic_visit(node)
         if isinstance(node.ctx, ast.Load):
             self._record_possible_exception(before)
@@ -2358,6 +2451,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 self._states[-1][bound] = (
                     _origin_value(_TYPING_MODULE)
                     if alias.name == "typing"
+                    else _origin_value(_OPERATOR_MODULE)
+                    if alias.name == "operator"
                     else _AbstractValue(
                         modules=frozenset({module.name}) if module is not None else frozenset()
                     )
@@ -2389,6 +2484,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 self._states[-1][bound] = (
                     _type_checking_value()
                     if node.module == "typing" and alias.name == "TYPE_CHECKING"
+                    else _origin_value(_ATTRGETTER_FACTORY)
+                    if node.module == "operator" and alias.name == "attrgetter"
                     else _AbstractValue(
                         classes=classes,
                         modules=(
@@ -2591,6 +2688,23 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             scoped[arguments.kwarg.arg] = _AbstractValue(entries=tuple(extra_keywords))
         return scoped
 
+    def _bound_direct_arguments(
+        self,
+        function: _FunctionNode,
+        values: tuple[_AbstractValue, ...],
+    ) -> dict[str, _AbstractValue]:
+        """Bind already-evaluated positional values to a local callable."""
+
+        arguments = function.args
+        scoped = self._scoped_arguments(arguments)
+        scoped.update(self._default_argument_values(function))
+        positional = (*arguments.posonlyargs, *arguments.args)
+        for parameter, value in zip(positional, values, strict=False):
+            scoped[parameter.arg] = value
+        if arguments.vararg is not None:
+            scoped[arguments.vararg.arg] = _AbstractValue(items=values[len(positional) :])
+        return scoped
+
     def _visit_function_body(
         self,
         node: _FunctionNode,
@@ -2617,6 +2731,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         previous_module = self._module
         self._module = self._source_index.owner(node) or self._module
         self._expression_cache = {}
+        self._function_body_depth += 1
         try:
             if isinstance(node, ast.Lambda):
                 self.visit(node.body)
@@ -2628,6 +2743,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 if path.kind == "return"
             )
         finally:
+            self._function_body_depth -= 1
             self._expression_cache = previous_cache
             self._module = previous_module
             self._functions.pop()
@@ -2648,6 +2764,24 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             returned = self._visit_function_body(
                 function,
                 self._bound_call_arguments(call, function, bound_receiver),
+            )
+        finally:
+            self._active_calls.remove(function_id)
+        return _join_values(*returned)
+
+    def _local_direct_call_value(
+        self,
+        function: _FunctionNode,
+        values: tuple[_AbstractValue, ...],
+    ) -> _AbstractValue:
+        function_id = id(function)
+        if function_id in self._active_calls:
+            return _UNKNOWN_VALUE
+        self._active_calls.add(function_id)
+        try:
+            returned = self._visit_function_body(
+                function,
+                self._bound_direct_arguments(function, values),
             )
         finally:
             self._active_calls.remove(function_id)
@@ -2728,25 +2862,60 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         )
         self._path_reachable = False
 
-    def _visit_scoped(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+    def _decorated_function_value(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> _AbstractValue:
+        original = _AbstractValue(callables=(_CallableTarget(node),))
+        value = original
+        for decorator in reversed(node.decorator_list):
+            targets = self._call_targets(decorator)
+            if not targets:
+                return original
+            replacements = [
+                self._local_direct_call_value(
+                    function,
+                    ((receiver,) if receiver is not None else ()) + (value,),
+                )
+                for function, receiver in targets
+            ]
+            if not replacements:
+                return original
+            replacement = _join_values(*replacements)
+            if not replacement.callables and not replacement.instance_classes:
+                return original
+            value = replacement
+        return value
+
+    def _visit_function_definition(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         for decorator in node.decorator_list:
             self.visit(decorator)
         for default in (*node.args.defaults, *node.args.kw_defaults):
             if default is not None:
                 self.visit(default)
-        self._visit_function_body(node, self._scoped_function_arguments(node))
+        value = self._decorated_function_value(node)
+        functions = frozenset(target.function for target in value.callables)
+        self._states[-1][node.name] = value
+        self._functions[-1][node.name] = functions
+        self._annotations[-1][node.name] = _UNKNOWN_VALUE
+
+        if self._function_body_depth != 0:
+            return
+        targets = value.callables or (_CallableTarget(node),)
+        visited: set[int] = set()
+        for target in targets:
+            if id(target.function) in visited:
+                continue
+            visited.add(id(target.function))
+            scoped = self._scoped_function_arguments(target.function)
+            if target.receiver is not None:
+                scoped.update(self._bound_direct_arguments(target.function, (target.receiver,)))
+            self._visit_function_body(target.function, scoped)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self._functions[-1][node.name] = frozenset({node})
-        self._visit_scoped(node)
-        self._states[-1][node.name] = _UNKNOWN_VALUE
-        self._annotations[-1][node.name] = _UNKNOWN_VALUE
+        self._visit_function_definition(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self._functions[-1][node.name] = frozenset({node})
-        self._visit_scoped(node)
-        self._states[-1][node.name] = _UNKNOWN_VALUE
-        self._annotations[-1][node.name] = _UNKNOWN_VALUE
+        self._visit_function_definition(node)
 
     def visit_Module(self, node: ast.Module) -> None:
         self._functions[-1].update(self._declared_functions(node.body))

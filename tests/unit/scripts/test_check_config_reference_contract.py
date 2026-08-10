@@ -1625,6 +1625,131 @@ def guaranteed_iteration_shadowing(config):
     )
 
 
+def test_runtime_scan_tracks_model_dump_subscript_reads(contract, tmp_path: Path) -> None:
+    (tmp_path / "model_dump_read.py").write_text(
+        """
+def read(section):
+    return section.model_dump()["stage1_enabled"]
+
+read(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_tracks_vars_subscript_reads(contract, tmp_path: Path) -> None:
+    (tmp_path / "vars_read.py").write_text(
+        """
+def read(section):
+    return vars(section)["stage2_enabled"]
+
+read(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage2_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_tracks_operator_attrgetter_reads(contract, tmp_path: Path) -> None:
+    (tmp_path / "attrgetter_read.py").write_text(
+        """
+import operator
+
+read_stage = operator.attrgetter("stage3_enabled")
+read_stage(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage3_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_invokes_captured_property_getters(contract, tmp_path: Path) -> None:
+    (tmp_path / "property_read.py").write_text(
+        """
+class Reader:
+    @property
+    def value(self):
+        return self.section.satisfaction_threshold
+
+reader = Reader(section=config.evaluation)
+captured = reader.value
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "satisfaction_threshold")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_invokes_callable_object_dunder_call(contract, tmp_path: Path) -> None:
+    (tmp_path / "callable_object_read.py").write_text(
+        """
+class Reader:
+    def __call__(self, section):
+        return section.stage2_enabled
+
+reader = Reader()
+reader(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage2_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_ignores_unreachable_local_reader_before_external_overwrite(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "unreachable_local_reader.py").write_text(
+        """
+from ouroboros.config.models import EvaluationConfig
+
+def dispatch(config):
+    def local_reader(section: EvaluationConfig):
+        return section.stage1_enabled
+
+    selected = external
+    if False:
+        selected = local_reader
+    selected = external
+    selected(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+def test_runtime_scan_honors_exact_local_replacement_decorator(contract, tmp_path: Path) -> None:
+    (tmp_path / "replacement_decorator.py").write_text(
+        """
+from ouroboros.config.models import EvaluationConfig
+
+def replace_with_noop(function):
+    return lambda *args, **kwargs: None
+
+@replace_with_noop
+def read_stage(section: EvaluationConfig):
+    return section.stage2_enabled
+
+read_stage(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage2_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
 def test_runtime_scan_keeps_for_break_path_separate_from_loop_else(
     contract, tmp_path: Path
 ) -> None:
