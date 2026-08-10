@@ -23,6 +23,7 @@ from ouroboros.verification import declaration_binding as decl
 from ouroboros.verification.binding import (
     acceptance_polarity,
     acceptance_targets,
+    criterion_path_kind,
     literal_is_bound,
     literal_spans,
     match_has_assignment_semantics,
@@ -969,25 +970,6 @@ def _has_noise_directory(file_path: str, project_dir: str) -> bool:
     return any(component in _NOISE_DIRECTORY_NAMES for component in relative.split(os.sep)[:-1])
 
 
-def _criterion_path_kind(ac_text: str, target: str) -> str | None:
-    """Return the file-system kind explicitly bound to one criterion target."""
-    if not target:
-        return None
-    literal = re.escape(target)
-    quoted_literal = rf"[`'\"]?{literal}[`'\"]?"
-    patterns = (
-        rf"\b(?P<kind>file|directory)\b(?:\s+(?:named|called))?\s+"
-        rf"{quoted_literal}(?![\w./-])",
-        rf"(?<![\w./-]){quoted_literal}\s+(?P<kind>file|directory)\b",
-    )
-    kinds = {
-        match.group("kind").casefold()
-        for pattern in patterns
-        for match in re.finditer(pattern, ac_text, re.IGNORECASE)
-    }
-    return next(iter(kinds)) if len(kinds) == 1 else None
-
-
 @dataclass
 class SpecVerifier:
     """Verifies spec assertions against actual project files.
@@ -1507,7 +1489,7 @@ class SpecVerifier:
     def _verify_forbidden_structural(self, assertion: SpecAssertion) -> SpecVerificationResult:
         """Verify forbidden target absence without model regex or file-hint scope."""
         target = self._evidence_targets(assertion)[0]
-        path_kind = _criterion_path_kind(assertion.ac_text, target)
+        path_kind = criterion_path_kind(assertion.ac_text, target)
         if path_kind is not None:
             paths, error = self._trusted_project_paths()
             if error:
@@ -1650,6 +1632,7 @@ class SpecVerifier:
             )
 
         readable_files = 0
+        unsupported_assignment = False
         for file_path in files:
             content = self._read_file(file_path)
             if content is None:
@@ -1681,10 +1664,18 @@ class SpecVerifier:
             elif first_bound is not None:
                 bounds = chain((first_bound,), bounds)
             for match, evidence_target in bounds:
-                if assertion.input_binding_required and not match_has_assignment_semantics(
-                    evidence_content, match, evidence_target, file_path
-                ):
-                    continue
+                if assertion.input_binding_required:
+                    assignment_semantics = match_has_assignment_semantics(
+                        evidence_content,
+                        match,
+                        evidence_target,
+                        file_path,
+                    )
+                    if assignment_semantics is None:
+                        unsupported_assignment = True
+                        continue
+                    if not assignment_semantics:
+                        continue
                 actual = self._extract_value_after_match(content, match)
                 if assertion.expected_value:
                     verified = assertion.expected_value.strip() == actual.strip()
@@ -1734,6 +1725,13 @@ class SpecVerifier:
                 detail=f"Could not read any of {len(files)} matched files",
             )
 
+        if unsupported_assignment:
+            return SpecVerificationResult(
+                assertion=assertion,
+                outcome=VerificationOutcome.UNVERIFIABLE,
+                detail="A bound assignment uses a valid but unsupported declaration context",
+            )
+
         return SpecVerificationResult(
             assertion=assertion,
             outcome=VerificationOutcome.DISCREPANCY,
@@ -1778,7 +1776,7 @@ class SpecVerifier:
         path_kinds = {
             kind
             for target in evidence_targets
-            if (kind := _criterion_path_kind(assertion.ac_text, target)) is not None
+            if (kind := criterion_path_kind(assertion.ac_text, target)) is not None
         }
         requested_path_kind = next(iter(path_kinds)) if len(path_kinds) == 1 else None
         qualified_paths = tuple(target for target in evidence_targets if "/" in target)

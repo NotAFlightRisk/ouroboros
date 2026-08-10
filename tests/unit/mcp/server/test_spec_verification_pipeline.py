@@ -1164,6 +1164,48 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
             r"class\s+CameraProvider",
         ),
         (
+            "MUST define a CameraProvider interface",
+            "Provider.java",
+            "final interface CameraProvider {}\n",
+            r"interface\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider struct",
+            "Provider.cs",
+            "static struct CameraProvider {}\n",
+            r"struct\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider struct",
+            "Provider.cs",
+            "abstract struct CameraProvider {}\n",
+            r"struct\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider struct",
+            "provider.rs",
+            "unsafe struct CameraProvider {}\n",
+            r"struct\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider interface",
+            "provider.kt",
+            "data interface CameraProvider {}\n",
+            r"interface\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.cpp",
+            "class CameraProvider : public int {};\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.cpp",
+            "class CameraProvider : public Base, private Base {};\n",
+            r"class\s+CameraProvider",
+        ),
+        (
             "MUST define a CameraProvider class",
             "Provider.java",
             "class CameraProvider { void value; }\n",
@@ -1342,6 +1384,13 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         "java-empty-nonvoid-method",
         "java-duplicate-generic-parameters",
         "typescript-duplicate-generic-parameters",
+        "java-final-interface",
+        "csharp-static-struct",
+        "csharp-abstract-struct",
+        "rust-unsafe-struct",
+        "kotlin-data-interface",
+        "cpp-builtin-base",
+        "cpp-duplicate-direct-base",
         "java-void-field",
         "java-var-field",
         "javascript-default-export-class",
@@ -1759,6 +1808,16 @@ async def test_t1_comparison_cannot_reach_formal_pass_as_assignment(tmp_path: An
             "public public class Config {\n    int RETRIES = 3;\n}\n",
             False,
         ),
+        (
+            "Config.java",
+            "class Config<T> {\n    int RETRIES = 3;\n}\n",
+            True,
+        ),
+        (
+            "Config.java",
+            "record Config {\n    int RETRIES = 3;\n}\n",
+            False,
+        ),
     ],
     ids=[
         "python-const",
@@ -1770,6 +1829,8 @@ async def test_t1_comparison_cannot_reach_formal_pass_as_assignment(tmp_path: An
         "java-private-interface-field",
         "java-implicit-public-interface-field",
         "java-invalid-enclosing-type-modifiers",
+        "java-generic-enclosing-class",
+        "java-record-without-parameters",
     ],
 )
 async def test_t1_assignment_syntax_is_bound_to_file_language_before_formal_prompt(
@@ -1800,6 +1861,110 @@ async def test_t1_assignment_syntax_is_bound_to_file_language_before_formal_prom
     assert verification.reports[0].verified_pass is verified
     assert formal.final_approved is verified
     assert formal.ac_results[0].final_verdict == ("pass" if verified else "fail")
+
+
+@pytest.mark.asyncio
+async def test_t1_valid_unsupported_java_field_context_is_not_formal_discrepancy(
+    tmp_path: Any,
+) -> None:
+    ac_text = "MUST set RETRIES=3"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t1_constant",
+                "pattern": r"RETRIES = ",
+                "expected_value": "3",
+                "file_hint": "Config.java",
+                "description": "Valid unsupported record field context",
+            }
+        ],
+    )
+    (tmp_path / "Config.java").write_text(
+        "record Config(int value) {\n    static final int RETRIES = 3;\n}\n"
+    )
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions, agent_results={0: True})
+    formal = _formal_verdict(ac_text, verification, agent_reported_pass=True)
+
+    assert verification.reports[0].results[0].outcome is VerificationOutcome.UNVERIFIABLE
+    assert formal.final_approved is False
+    assert formal.ac_results[0].ac_verdict_state == "not_evaluated"
+    assert formal.ac_results[0].rendered_verdict == "NOT_EVALUATED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "filename", "content", "pattern"),
+    [
+        (
+            "MUST define a CameraProvider interface",
+            "Provider.java",
+            "abstract interface CameraProvider {}\n",
+            r"interface\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider struct",
+            "Provider.cs",
+            "partial struct CameraProvider {}\n",
+            r"struct\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider trait",
+            "provider.rs",
+            "unsafe trait CameraProvider {}\n",
+            r"trait\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider interface",
+            "provider.kt",
+            "sealed interface CameraProvider {}\n",
+            r"interface\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.cpp",
+            "class CameraProvider : public Base {};\n",
+            r"class\s+CameraProvider",
+        ),
+    ],
+    ids=[
+        "java-abstract-interface",
+        "csharp-partial-struct",
+        "rust-unsafe-trait",
+        "kotlin-sealed-interface",
+        "cpp-type-like-base",
+    ],
+)
+async def test_type_modifier_and_cpp_base_positive_controls_reach_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    filename: str,
+    content: str,
+    pattern: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": pattern,
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Valid kind-specific modifier or C++ base",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is True
+    assert formal.final_approved is True
+    assert formal.ac_results[0].final_verdict == "pass"
 
 
 @pytest.mark.asyncio

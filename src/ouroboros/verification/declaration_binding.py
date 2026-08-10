@@ -236,6 +236,52 @@ _TYPE_PREFIX_MODIFIERS = {
     ".ts": frozenset({"abstract", "default", "declare", "export"}),
     ".tsx": frozenset({"abstract", "default", "declare", "export"}),
 }
+_TYPE_KIND_PREFIX_MODIFIERS = {
+    (".cs", "interface"): frozenset({"file", "internal", "partial", "public"}),
+    (".cs", "struct"): frozenset({"file", "internal", "partial", "public"}),
+    (".java", "interface"): frozenset({"abstract", "non-sealed", "public", "sealed", "strictfp"}),
+    (".kt", "class"): frozenset(
+        {
+            "abstract",
+            "actual",
+            "annotation",
+            "data",
+            "enum",
+            "final",
+            "internal",
+            "open",
+            "private",
+            "public",
+            "sealed",
+            "value",
+        }
+    ),
+    (".kt", "interface"): frozenset(
+        {"abstract", "actual", "internal", "private", "public", "sealed"}
+    ),
+    (".kts", "class"): frozenset(
+        {
+            "abstract",
+            "actual",
+            "annotation",
+            "data",
+            "enum",
+            "final",
+            "internal",
+            "open",
+            "private",
+            "public",
+            "sealed",
+            "value",
+        }
+    ),
+    (".kts", "interface"): frozenset(
+        {"abstract", "actual", "internal", "private", "public", "sealed"}
+    ),
+    (".rs", "struct"): frozenset({"pub"}),
+    (".rs", "trait"): frozenset({"pub", "unsafe"}),
+    (".swift", "struct"): frozenset({"fileprivate", "internal", "private", "public"}),
+}
 _FUNCTION_PREFIX_MODIFIERS = {
     ".go": frozenset(),
     ".js": frozenset({"async", "default", "export"}),
@@ -290,7 +336,10 @@ def _declaration_prefix_is_valid(match: re.Match[str], suffix: str, kind: str) -
     allowed = (
         _FUNCTION_PREFIX_MODIFIERS.get(suffix, frozenset())
         if kind == "function"
-        else _TYPE_PREFIX_MODIFIERS.get(suffix, frozenset())
+        else _TYPE_KIND_PREFIX_MODIFIERS.get(
+            (suffix, kind),
+            _TYPE_PREFIX_MODIFIERS.get(suffix, frozenset()),
+        )
     )
     if any(base not in allowed for base in bases) or len(set(bases)) != len(bases):
         return False
@@ -579,17 +628,27 @@ def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
     qualified = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
     qualified_generic = rf"{qualified}(?:\s*{generic})?"
     if suffix in _CPP_SUFFIXES:
-        cpp_type = rf"[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*(?:\s*{generic})?"
-        return (
-            re.fullmatch(
-                r"\s*(?:final\s*)?(?::\s*(?:[A-Za-z_]\w*\s+)*"
-                rf"{cpp_type}"
-                r"(?:\s*,\s*(?:[A-Za-z_]\w*\s+)*[A-Za-z_]\w*"
-                rf"(?:::\w+)*(?:\s*{generic})?)*)?\s*",
-                header,
-            )
-            is not None
-        )
+        stripped = header.strip()
+        if stripped.startswith("final"):
+            stripped = stripped.removeprefix("final").strip()
+        if not stripped:
+            return True
+        cpp_type = r"(?:[A-Za-z_]\w*::)*[A-Z]\w*"
+        base = rf"(?:(?:private|protected|public|virtual)\s+)*{cpp_type}"
+        if re.fullmatch(rf":\s*{base}(?:\s*,\s*{base})*", stripped) is None:
+            return False
+        bases: list[str] = []
+        for base_specifier in stripped[1:].split(","):
+            type_match = re.search(rf"(?P<type>{cpp_type})\s*$", base_specifier)
+            if type_match is None:
+                return False
+            modifiers = re.findall(r"\b(?:private|protected|public|virtual)\b", base_specifier)
+            if len(set(modifiers)) != len(modifiers):
+                return False
+            if len({"private", "protected", "public"}.intersection(modifiers)) > 1:
+                return False
+            bases.append(type_match.group("type"))
+        return len(set(bases)) == len(bases)
     if suffix == ".java":
         java_non_type = (
             r"abstract|assert|boolean|break|byte|case|catch|char|class|const|continue|"

@@ -302,7 +302,30 @@ def literal_is_bound(text: str, literal: str) -> bool:
     return bool(literal_spans(text, literal))
 
 
-def _java_enclosing_field_type(source: str, line_start: int) -> str | None:
+def criterion_path_kind(ac_text: str, target: str) -> str | None:
+    """Return the file-system kind explicitly bound to one criterion target."""
+    if not target:
+        return None
+    literal = re.escape(target)
+    quoted_literal = rf"[`'\"]?{literal}[`'\"]?"
+    patterns = (
+        rf"\b(?P<kind>file|directory)\b(?:\s+(?:named|called))?\s+"
+        rf"{quoted_literal}(?![\w./-])",
+        rf"(?<![\w./-]){quoted_literal}\s+(?P<kind>file|directory)\b",
+    )
+    kinds = {
+        match.group("kind").casefold()
+        for pattern in patterns
+        for match in re.finditer(pattern, ac_text, re.IGNORECASE)
+    }
+    return next(iter(kinds)) if len(kinds) == 1 else None
+
+
+_JAVA_INVALID_FIELD_CONTEXT = "<invalid>"
+_JAVA_UNSUPPORTED_FIELD_CONTEXT = "<unsupported>"
+
+
+def _java_enclosing_field_type(source: str, line_start: int) -> str:
     """Return a simple canonical Java type enclosing a field declaration."""
     braces: list[int] = []
     for position, character in enumerate(source[:line_start]):
@@ -310,20 +333,28 @@ def _java_enclosing_field_type(source: str, line_start: int) -> str | None:
             braces.append(position)
         elif character == "}":
             if not braces:
-                return None
+                return _JAVA_INVALID_FIELD_CONTEXT
             braces.pop()
     if len(braces) != 1:
-        return None
+        return _JAVA_INVALID_FIELD_CONTEXT
     opening = braces[0]
     boundary = max(source.rfind(marker, 0, opening) for marker in ";{}")
     header = source[boundary + 1 : opening]
     declaration = re.fullmatch(
         r"\s*(?P<modifiers>(?:(?:abstract|final|non-sealed|public|sealed|strictfp)\s+)*)"
-        r"(?P<kind>class|enum|interface|record)\s+[A-Za-z_]\w*\s*",
+        r"(?P<kind>class|enum|interface)\s+[A-Za-z_]\w*"
+        r"(?P<generic>\s*<\s*[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s*>)?\s*",
         header,
     )
     if declaration is None:
-        return None
+        if re.fullmatch(
+            r"\s*(?:(?:public|strictfp)\s+)*record\s+[A-Za-z_]\w*\s*",
+            header,
+        ):
+            return _JAVA_INVALID_FIELD_CONTEXT
+        if re.search(r"\b(?:class|enum|interface|record)\s+[A-Za-z_]\w*", header):
+            return _JAVA_UNSUPPORTED_FIELD_CONTEXT
+        return _JAVA_INVALID_FIELD_CONTEXT
     modifiers = tuple(
         re.findall(
             r"\b(?:abstract|final|non-sealed|public|sealed|strictfp)\b",
@@ -331,7 +362,7 @@ def _java_enclosing_field_type(source: str, line_start: int) -> str | None:
         )
     )
     if len(set(modifiers)) != len(modifiers):
-        return None
+        return _JAVA_INVALID_FIELD_CONTEXT
     if any(
         conflict.issubset(modifiers)
         for conflict in (
@@ -340,14 +371,19 @@ def _java_enclosing_field_type(source: str, line_start: int) -> str | None:
             frozenset({"non-sealed", "sealed"}),
         )
     ):
-        return None
+        return _JAVA_INVALID_FIELD_CONTEXT
     kind = declaration.group("kind")
     if kind in {"enum", "record"} and {"abstract", "final", "non-sealed", "sealed"}.intersection(
         modifiers
     ):
-        return None
+        return _JAVA_INVALID_FIELD_CONTEXT
     if kind == "interface" and "final" in modifiers:
-        return None
+        return _JAVA_INVALID_FIELD_CONTEXT
+    generic = declaration.group("generic")
+    if generic is not None:
+        names = tuple(name.strip() for name in generic.strip()[1:-1].split(","))
+        if kind == "enum" or len(set(names)) != len(names):
+            return _JAVA_INVALID_FIELD_CONTEXT
     return kind
 
 
@@ -356,7 +392,7 @@ def _java_field_assignment_is_valid(
     prefix: str,
     tail: str,
     line_start: int,
-) -> bool:
+) -> bool | None:
     """Validate a conservative Java field assignment and its enclosing type."""
     modifier = r"final|private|protected|public|static|transient|volatile"
     field_type = r"(?:boolean|byte|char|double|float|int|long|short|String)(?:\[\])?"
@@ -374,9 +410,13 @@ def _java_field_assignment_is_valid(
     if {"final", "volatile"}.issubset(modifiers):
         return False
     enclosing_kind = _java_enclosing_field_type(source, line_start)
+    if enclosing_kind == _JAVA_UNSUPPORTED_FIELD_CONTEXT:
+        return None
+    if enclosing_kind == _JAVA_INVALID_FIELD_CONTEXT:
+        return False
     if enclosing_kind == "interface":
         return set(modifiers).issubset({"final", "public", "static"})
-    return enclosing_kind in {"class", "enum", "record"}
+    return enclosing_kind in {"class", "enum"}
 
 
 def match_has_assignment_semantics(
@@ -384,8 +424,9 @@ def match_has_assignment_semantics(
     match: re.Match[str],
     target: str,
     file_path: str,
-) -> bool:
+) -> bool | None:
     """Whether the concrete bound target is a canonical trusted assignment key."""
+    unsupported = False
     for start, end in literal_spans(source, target):
         associated = match.start() <= start and end <= match.end()
         if match.start() == match.end():
@@ -406,6 +447,7 @@ def match_has_assignment_semantics(
             )
         elif suffix == ".java":
             valid = _java_field_assignment_is_valid(source, prefix, tail, line_start)
+            unsupported = unsupported or valid is None
         elif suffix in {".js", ".jsx"}:
             valid = re.fullmatch(r"\s*(?:const|let|var)\s+", prefix) and re.match(
                 r"\s*=(?!=)", tail
@@ -420,7 +462,7 @@ def match_has_assignment_semantics(
             valid = not prefix.strip() and re.match(r"\s*=(?!=)", tail)
         if valid:
             return True
-    return False
+    return None if unsupported else False
 
 
 def acceptance_declaration_kind(
