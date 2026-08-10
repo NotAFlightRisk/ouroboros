@@ -685,7 +685,7 @@ async def test_model_cannot_substitute_function_evidence_for_a_class_criterion(
         ("Provider.java", "def CameraProvider(): {}\n", r"def\s+CameraProvider", False),
         (
             "Provider.java",
-            "public void CameraProvider() {}\n",
+            "class Provider {\n    public void CameraProvider() {}\n}\n",
             r"void\s+CameraProvider",
             True,
         ),
@@ -1050,6 +1050,36 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
             "public private void CameraProvider() {}\n",
             r"void\s+CameraProvider",
         ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.java",
+            "public void CameraProvider() {}\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.java",
+            "interface X {\n    public void CameraProvider() {}\n}\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.js",
+            "class X {\n    function CameraProvider() {}\n}\n",
+            r"function\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.go",
+            "func outer() {\n    func CameraProvider() {}\n}\n",
+            r"func\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.cs",
+            "public void CameraProvider() {}\n",
+            r"void\s+CameraProvider",
+        ),
     ],
     ids=[
         "enum-class",
@@ -1103,6 +1133,11 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         "java-conflicting-class-modifiers",
         "rust-unsupported-function-prefix",
         "java-conflicting-function-modifiers",
+        "java-top-level-method",
+        "java-interface-concrete-method",
+        "javascript-class-function-declaration",
+        "go-nested-named-function",
+        "csharp-top-level-method",
     ],
 )
 async def test_type_declaration_cannot_reach_formal_pass(

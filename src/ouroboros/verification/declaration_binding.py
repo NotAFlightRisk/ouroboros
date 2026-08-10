@@ -363,6 +363,57 @@ def _c_like_function_prefix_is_valid(
     return len(_ACCESS_MODIFIERS.intersection(modifiers)) <= 1
 
 
+def _enclosing_braces(source: str, position: int) -> tuple[int, ...] | None:
+    """Return unmatched opening braces before ``position`` in masked source."""
+    stack: list[int] = []
+    for cursor, character in enumerate(source[:position]):
+        if character == "{":
+            stack.append(cursor)
+        elif character == "}":
+            if not stack:
+                return None
+            stack.pop()
+    return tuple(stack)
+
+
+def _enclosing_type_kind(source: str, opening_brace: int) -> str | None:
+    """Classify one canonical type header owning an opening brace."""
+    boundary = max(
+        source.rfind(";", 0, opening_brace),
+        source.rfind("{", 0, opening_brace),
+        source.rfind("}", 0, opening_brace),
+    )
+    header = source[boundary + 1 : opening_brace]
+    declaration = re.search(
+        r"\b(?P<kind>class|enum|interface|record|struct)\s+[A-Za-z_]\w*"
+        r"[^;{}]*$",
+        header,
+    )
+    return None if declaration is None else declaration.group("kind")
+
+
+def _function_placement_is_valid(source: str, match: re.Match[str], suffix: str) -> bool:
+    """Require a canonical legal placement for parser-free function evidence."""
+    if suffix in {".py", ".pyi", ".rb", ".lua", ".r"}:
+        return True
+    braces = _enclosing_braces(source, match.start())
+    if braces is None:
+        return False
+    if suffix == ".java":
+        return len(braces) == 1 and _enclosing_type_kind(source, braces[0]) in {
+            "class",
+            "enum",
+            "record",
+        }
+    if suffix == ".cs":
+        return len(braces) == 1 and _enclosing_type_kind(source, braces[0]) in {
+            "class",
+            "record",
+            "struct",
+        }
+    return not braces
+
+
 def _matching_delimiter(
     source: str,
     opening_position: int,
@@ -1019,6 +1070,12 @@ def _source_span_has_declaration_kind(
             if match.span("target") != target_span:
                 continue
             if not _declaration_prefix_is_valid(match, suffix, kind):
+                continue
+            if kind == "function" and not _function_placement_is_valid(
+                source,
+                match,
+                suffix,
+            ):
                 continue
             declaration_prefix = source[max(0, match.start() - 256) : match.start()]
             if kind in {"class", "struct"} and re.search(

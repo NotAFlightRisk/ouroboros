@@ -1309,7 +1309,7 @@ class TestSpecVerifier:
             ("Provider.java", "def CameraProvider(): {}\n", r"def\s+CameraProvider", False),
             (
                 "Provider.java",
-                "public void CameraProvider() {}\n",
+                "class Provider {\n    public void CameraProvider() {}\n}\n",
                 r"void\s+CameraProvider",
                 True,
             ),
@@ -1713,6 +1713,36 @@ class TestSpecVerifier:
                 "public private void CameraProvider() {}\n",
                 r"void\s+CameraProvider",
             ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.java",
+                "public void CameraProvider() {}\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.java",
+                "interface X {\n    public void CameraProvider() {}\n}\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.js",
+                "class X {\n    function CameraProvider() {}\n}\n",
+                r"function\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.go",
+                "func outer() {\n    func CameraProvider() {}\n}\n",
+                r"func\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.cs",
+                "public void CameraProvider() {}\n",
+                r"void\s+CameraProvider",
+            ),
         ],
         ids=[
             "enum-class",
@@ -1774,6 +1804,11 @@ class TestSpecVerifier:
             "java-conflicting-class-modifiers",
             "rust-unsupported-function-prefix",
             "java-conflicting-function-modifiers",
+            "java-top-level-method",
+            "java-interface-concrete-method",
+            "javascript-class-function-declaration",
+            "go-nested-named-function",
+            "csharp-top-level-method",
         ],
     )
     def test_t2_declaration_kind_rejects_type_declarations(
