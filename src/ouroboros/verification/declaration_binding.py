@@ -392,6 +392,34 @@ def _c_like_function_prefix_is_valid(
     return len(_ACCESS_MODIFIERS.intersection(modifiers)) <= 1
 
 
+def _java_declaration_context_is_valid(
+    source: str,
+    match: re.Match[str],
+    target: str,
+    kind: str,
+    file_path: str,
+) -> bool:
+    """Enforce Java rules that depend on both a declaration and its context."""
+    if kind == "function":
+        words = re.findall(
+            r"\b[A-Za-z_]\w*\b",
+            source[match.start() : match.start("target")],
+        )
+        return not {"abstract", "native"}.intersection(words[:-1])
+
+    prefix = match.groupdict().get("prefix", "")
+    modifiers = {_modifier_base(token) for token in re.findall(_PREFIX_TOKEN, prefix)}
+    search_end = min(len(source), match.end("target") + _DECLARATION_HEADER_LIMIT)
+    body_start = source.find("{", match.end("target"), search_end)
+    if body_start < 0:
+        return False
+    header = source[match.end("target") : body_start]
+    if re.search(r"\bpermits\b", header) and "sealed" not in modifiers:
+        return False
+    filename_stem = os.path.splitext(os.path.basename(file_path))[0]
+    return "public" not in modifiers or target == filename_stem
+
+
 def _enclosing_braces(source: str, position: int) -> tuple[int, ...] | None:
     """Return unmatched opening braces before ``position`` in masked source."""
     stack: list[int] = []
@@ -1181,6 +1209,14 @@ def _source_span_has_declaration_kind(
             if match.span("target") != target_span:
                 continue
             if not _declaration_prefix_is_valid(match, suffix, kind):
+                continue
+            if suffix == ".java" and not _java_declaration_context_is_valid(
+                source,
+                match,
+                target,
+                kind,
+                file_path,
+            ):
                 continue
             if kind in {"class", "interface", "struct", "trait"} and not _type_placement_is_valid(
                 source,

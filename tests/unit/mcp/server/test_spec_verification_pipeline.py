@@ -1118,6 +1118,36 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         (
             "MUST define a CameraProvider class",
             "Provider.java",
+            "class CameraProvider permits Other {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
+            "final class CameraProvider permits Other {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.java",
+            "class Provider { abstract void CameraProvider() {} }\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.java",
+            "class Provider { native void CameraProvider() {} }\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
+            "public class CameraProvider {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
             "class CameraProvider { void value; }\n",
             r"class\s+CameraProvider",
         ),
@@ -1286,6 +1316,11 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         "csharp-illegal-top-level-modifier",
         "java-primitive-extends",
         "java-primitive-implements",
+        "java-unsealed-permits",
+        "java-final-permits",
+        "java-abstract-method-body",
+        "java-native-method-body",
+        "java-public-type-filename-mismatch",
         "java-void-field",
         "java-var-field",
         "javascript-default-export-class",
@@ -1664,6 +1699,93 @@ async def test_t1_comparison_cannot_reach_formal_pass_as_assignment(tmp_path: An
     assert verification.reports[0].verified_pass is False
     assert formal.final_approved is False
     assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "content", "verified"),
+    [
+        ("main.py", "const RETRIES = 3\n", False),
+        ("main.py", "RETRIES: int = 3\n", True),
+        ("Config.java", "class Config {\n    static final RETRIES = 3;\n}\n", False),
+        (
+            "Config.java",
+            "class Config {\n    static final int RETRIES = 3;\n}\n",
+            True,
+        ),
+    ],
+    ids=["python-const", "python-annotated", "java-untyped-field", "java-typed-field"],
+)
+async def test_t1_assignment_syntax_is_bound_to_file_language_before_formal_prompt(
+    tmp_path: Any,
+    filename: str,
+    content: str,
+    verified: bool,
+) -> None:
+    ac_text = "MUST set RETRIES=3"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t1_constant",
+                "pattern": r"RETRIES(?:: int)? = ",
+                "expected_value": "3",
+                "file_hint": filename,
+                "description": "RETRIES is set to 3",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is verified
+    assert formal.final_approved is verified
+    assert formal.ac_results[0].final_verdict == ("pass" if verified else "fail")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("Provider.java", "class CameraProvider {}\n"),
+        ("CameraProvider.java", "public class CameraProvider {}\n"),
+        (
+            "CameraProvider.java",
+            "public sealed class CameraProvider permits Other {}\n",
+        ),
+    ],
+    ids=["package-private-other-filename", "public-matching-filename", "sealed-permits"],
+)
+async def test_java_declaration_context_positive_controls_reach_formal_pass(
+    tmp_path: Any,
+    filename: str,
+    content: str,
+) -> None:
+    ac_text = "MUST define a CameraProvider class"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"class\s+CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Valid Java declaration context",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is True
+    assert formal.final_approved is True
+    assert formal.ac_results[0].final_verdict == "pass"
 
 
 @pytest.mark.asyncio

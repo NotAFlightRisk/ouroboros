@@ -1777,6 +1777,36 @@ class TestSpecVerifier:
             (
                 "MUST define a CameraProvider class",
                 "Provider.java",
+                "class CameraProvider permits Other {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "final class CameraProvider permits Other {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.java",
+                "class Provider { abstract void CameraProvider() {} }\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.java",
+                "class Provider { native void CameraProvider() {} }\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "public class CameraProvider {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
                 "class CameraProvider { void value; }\n",
                 r"class\s+CameraProvider",
             ),
@@ -1953,6 +1983,11 @@ class TestSpecVerifier:
             "csharp-illegal-top-level-modifier",
             "java-primitive-extends",
             "java-primitive-implements",
+            "java-unsealed-permits",
+            "java-final-permits",
+            "java-abstract-method-body",
+            "java-native-method-body",
+            "java-public-type-filename-mismatch",
             "java-void-field",
             "java-var-field",
             "javascript-default-export-class",
@@ -2288,6 +2323,80 @@ class TestSpecVerifier:
 
         assert result.verified is False
         assert result.evidence_source == ""
+
+    @pytest.mark.parametrize(
+        ("filename", "content", "verified"),
+        [
+            ("main.py", "const RETRIES = 3\n", False),
+            ("main.py", "RETRIES: int = 3\n", True),
+            ("Config.java", "class Config {\n    static final RETRIES = 3;\n}\n", False),
+            (
+                "Config.java",
+                "class Config {\n    static final int RETRIES = 3;\n}\n",
+                True,
+            ),
+        ],
+        ids=[
+            "python-const",
+            "python-annotated",
+            "java-untyped-field",
+            "java-typed-field",
+        ],
+    )
+    def test_t1_assignment_syntax_is_bound_to_file_language(
+        self,
+        filename: str,
+        content: str,
+        verified: bool,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST set RETRIES=3",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"RETRIES(?:: int)? = ",
+            expected_value="3",
+            file_hint=filename,
+            evidence_targets=("RETRIES",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is verified
+        assert result.evidence_source == ("file_content" if verified else "")
+
+    @pytest.mark.parametrize(
+        ("filename", "content"),
+        [
+            ("Provider.java", "class CameraProvider {}\n"),
+            ("CameraProvider.java", "public class CameraProvider {}\n"),
+            (
+                "CameraProvider.java",
+                "public sealed class CameraProvider permits Other {}\n",
+            ),
+        ],
+        ids=["package-private-other-filename", "public-matching-filename", "sealed-permits"],
+    )
+    def test_java_declaration_context_positive_controls(
+        self,
+        filename: str,
+        content: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+CameraProvider",
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is True
+        assert result.evidence_source == "file_content"
 
     def test_cpp_template_class_declaration_remains_valid(self) -> None:
         project = self._create_project(

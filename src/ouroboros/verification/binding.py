@@ -319,17 +319,39 @@ def match_has_assignment_semantics(
         line_end = source.find("\n", end)
         if line_end < 0:
             line_end = len(source)
-        if (
-            re.fullmatch(
-                r"\s*(?:(?:const|final|let|static|var)\s+)*",
-                source[line_start:start],
-            )
-            is None
-        ):
-            continue
         suffix = os.path.splitext(file_path)[1].casefold()
-        operator = r"\s*:" if suffix in {".yaml", ".yml"} else r"\s*=(?!=)"
-        if re.match(operator, source[end:line_end]):
+        prefix = source[line_start:start]
+        tail = source[end:line_end]
+        if suffix == ".py":
+            valid = not prefix.strip() and re.match(
+                r"\s*(?::\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)?\s*=(?!=)",
+                tail,
+            )
+        elif suffix == ".java":
+            modifiers = r"(?:(?:final|private|protected|public|static|transient|volatile)\s+)*"
+            field_type = (
+                r"(?:boolean|byte|char|double|float|int|long|short|String)"
+                r"(?:\[\])?"
+            )
+            brace_depth = source[:line_start].count("{") - source[:line_start].count("}")
+            valid = (
+                brace_depth == 1
+                and re.fullmatch(rf"\s*{modifiers}{field_type}\s+", prefix)
+                and re.match(r"\s*=(?!=)", tail)
+            )
+        elif suffix in {".js", ".jsx"}:
+            valid = re.fullmatch(r"\s*(?:const|let|var)\s+", prefix) and re.match(
+                r"\s*=(?!=)", tail
+            )
+        elif suffix in {".ts", ".tsx"}:
+            valid = re.fullmatch(r"\s*(?:const|let|var)\s+", prefix) and re.match(
+                r"\s*(?::\s*[A-Za-z_$][\w$]*)?\s*=(?!=)", tail
+            )
+        elif suffix in {".yaml", ".yml"}:
+            valid = not prefix.strip() and re.match(r"\s*:", tail)
+        else:
+            valid = not prefix.strip() and re.match(r"\s*=(?!=)", tail)
+        if valid:
             return True
     return False
 
