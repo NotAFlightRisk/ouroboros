@@ -1141,6 +1141,33 @@ class TestSpecVerifier:
         assert summary.reports[0].results[0].verified is False
 
     @pytest.mark.parametrize(
+        "content",
+        [
+            r"\u002f\u002f class CameraProvider {}" "\n",
+            r"String s = \u0022class CameraProvider {}\u0022;" "\n",
+            r"// ignored \u000a class CameraProvider {}" "\n",
+            r"cl\u0061ss CameraProvider {}" "\n",
+        ],
+        ids=["comment", "quote", "line-terminator", "token"],
+    )
+    def test_java_prelexical_unicode_escape_fails_the_file_closed(self, content: str) -> None:
+        project = self._create_project({"Provider.java": content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+CameraProvider",
+            expected_value="CameraProvider",
+            file_hint="*.java",
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is False
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+
+    @pytest.mark.parametrize(
         ("ac_text", "filename", "content", "pattern"),
         [
             (

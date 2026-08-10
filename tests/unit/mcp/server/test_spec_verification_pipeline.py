@@ -512,6 +512,45 @@ async def test_unclassified_language_literals_cannot_reach_formal_pass(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "content",
+    [
+        r"\u002f\u002f class CameraProvider {}" "\n",
+        r"String s = \u0022class CameraProvider {}\u0022;" "\n",
+        r"// ignored \u000a class CameraProvider {}" "\n",
+        r"cl\u0061ss CameraProvider {}" "\n",
+    ],
+    ids=["comment", "quote", "line-terminator", "token"],
+)
+async def test_java_prelexical_unicode_escape_cannot_reach_formal_pass(
+    tmp_path: Any,
+    content: str,
+) -> None:
+    ac_text = "MUST define a CameraProvider class"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"class\s+CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": "*.java",
+                "description": "Translated Java text is not physical source evidence",
+            }
+        ],
+    )
+    (tmp_path / "Provider.java").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("ac_text", "filename", "content", "pattern"),
     [
         (

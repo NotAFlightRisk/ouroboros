@@ -46,6 +46,7 @@ _MARKUP_SUFFIXES = frozenset({".htm", ".html", ".svg", ".xml"})
 _STYLE_SUFFIXES = frozenset({".css", ".scss"})
 _C_TRIGRAPH_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".h", ".hpp", ".mm"})
 _C_TRIGRAPH = re.compile(r"\?\?[=/'()!<>-]")
+_JAVA_UNICODE_ESCAPE = re.compile(r"\\u+[0-9A-Fa-f]{4}")
 _GOOS_NAMES = frozenset(
     {
         "aix",
@@ -410,6 +411,10 @@ def _swift_extended_string_ranges(text: str) -> tuple[tuple[int, int], ...] | No
 
 def _c_style_noncode_ranges(text: str, suffix: str) -> tuple[tuple[int, int], ...] | None:
     """Scan C-family comments and every supported multiline/raw literal."""
+    if suffix == ".java" and _JAVA_UNICODE_ESCAPE.search(text):
+        # Java translates Unicode escapes before token and comment recognition.
+        # Physical offsets are not authoritative once that phase can change text.
+        return None
     special: tuple[tuple[int, int], ...] | None = ()
     if suffix in {".cc", ".cpp", ".h", ".hpp", ".mm"}:
         special = _cpp_raw_string_ranges(text)
