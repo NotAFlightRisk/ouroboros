@@ -282,8 +282,8 @@ _FUNCTION_PREFIX_MODIFIERS = {
     ".go": frozenset(),
     ".js": frozenset({"async", "default", "export"}),
     ".jsx": frozenset({"async", "default", "export"}),
-    ".kt": frozenset({"actual", "final", "internal", "open", "private", "protected", "public"}),
-    ".kts": frozenset({"actual", "final", "internal", "open", "private", "protected", "public"}),
+    ".kt": frozenset({"actual", "internal", "private", "public"}),
+    ".kts": frozenset({"actual", "internal", "private", "public"}),
     ".lua": frozenset({"local"}),
     ".pl": frozenset(),
     ".py": frozenset({"async"}),
@@ -293,14 +293,9 @@ _FUNCTION_PREFIX_MODIFIERS = {
     ".swift": frozenset(
         {
             "fileprivate",
-            "final",
             "internal",
-            "mutating",
-            "nonisolated",
-            "open",
             "private",
             "public",
-            "static",
         }
     ),
     ".ts": frozenset({"async", "default", "export"}),
@@ -459,7 +454,7 @@ def _c_like_function_prefix_is_valid(
     elif suffix == ".c":
         allowed = frozenset({"extern", "inline", "register", "static"})
     else:
-        allowed = _C_LIKE_DECLARATION_MODIFIERS.union(_CPP_BUILTIN_PARAMETER_TYPES)
+        allowed = frozenset({"extern", "inline", "static"}).union(_CPP_BUILTIN_PARAMETER_TYPES)
     if any(word not in allowed for word in modifiers) or len(set(modifiers)) != len(modifiers):
         return False
     return len(_ACCESS_MODIFIERS.intersection(modifiers)) <= 1
@@ -661,11 +656,28 @@ def _split_flat_generic_type_list(value: str) -> tuple[str, ...]:
     return tuple(parts)
 
 
+def _relationship_type_names(
+    value: str,
+    declaration_name: str,
+) -> tuple[str, ...] | None:
+    """Normalize flat relationship types and reject intrinsic duplicates/self-use."""
+    names = tuple(
+        re.sub(r"\s*<.*>\s*$", "", re.sub(r"\(\s*\)\s*$", "", item.strip()))
+        for item in _split_flat_generic_type_list(value)
+    )
+    if len(set(names)) != len(names):
+        return None
+    if any(name.rsplit(".", 1)[-1] == declaration_name for name in names):
+        return None
+    return names
+
+
 def _type_body_header_is_valid(
     header: str,
     kind: str,
     suffix: str,
     declaration_name: str = "",
+    declaration_modifiers: frozenset[str] = frozenset(),
 ) -> bool:
     """Recognize a conservative executable subset of braced type headers."""
     if suffix == ".go":
@@ -675,7 +687,7 @@ def _type_body_header_is_valid(
     if any(token in header for token in ("=", ";", "{", "}", "@")):
         return False
     generic = r"<\s*[A-Z]\w*(?:\s*,\s*[A-Z]\w*)*\s*>"
-    if suffix in {".java", ".ts", ".tsx"}:
+    if suffix in {".cs", ".java", ".kt", ".kts", ".rs", ".swift", ".ts", ".tsx"}:
         parameters = re.match(
             r"\s*<\s*(?P<parameters>[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*>",
             header,
@@ -748,67 +760,111 @@ def _type_body_header_is_valid(
             r"(?P<types>.*?)(?=\b(?:implements|permits)\b|$)",
             header,
         ):
-            type_names = tuple(
-                re.sub(r"\s*<.*>\s*$", "", item.strip())
-                for item in _split_flat_generic_type_list(relationship.group("types"))
+            type_names = _relationship_type_names(
+                relationship.group("types"),
+                declaration_name,
             )
-            if len(set(type_names)) != len(type_names):
-                return False
-            if any(name.rsplit(".", 1)[-1] == declaration_name for name in type_names):
+            if type_names is None:
                 return False
             relationships[relationship.group("kind")] = type_names
         direct_supertypes = relationships.get("extends", ()) + relationships.get("implements", ())
         return len(set(direct_supertypes)) == len(direct_supertypes)
     if suffix in {".js", ".jsx"}:
-        return (
-            re.fullmatch(
-                r"\s*(?:extends\s+[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)?\s*",
-                header,
-            )
-            is not None
+        match = re.fullmatch(
+            r"\s*(?:extends\s+(?P<base>[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*))?\s*",
+            header,
+        )
+        return match is not None and (
+            match.group("base") is None
+            or match.group("base").rsplit(".", 1)[-1] != declaration_name
         )
     if suffix in {".ts", ".tsx"}:
         if kind != "class":
             return False
         ts_name = r"(?:[A-Za-z_$][\w$]*\.)*[A-Z_$][\w$]*"
         ts_type = rf"{ts_name}(?:\s*{generic})?"
-        return (
+        if (
             re.fullmatch(
                 rf"\s*(?:{generic}\s*)?"
                 rf"(?:extends\s+{ts_type}\s*)?"
                 rf"(?:implements\s+{ts_type}(?:\s*,\s*{ts_type})*\s*)?",
                 header,
             )
-            is not None
-        )
+            is None
+        ):
+            return False
+        relationships: list[str] = []
+        for relationship in re.finditer(
+            r"\b(?:extends|implements)\s+(?P<types>.*?)(?=\bimplements\b|$)",
+            header,
+        ):
+            names = _relationship_type_names(relationship.group("types"), declaration_name)
+            if names is None:
+                return False
+            relationships.extend(names)
+        return len(set(relationships)) == len(relationships)
     if suffix == ".cs":
-        return (
+        cs_name = r"(?:[A-Za-z_]\w*\.)*[A-Z]\w*"
+        cs_type = rf"{cs_name}(?:\s*{generic})?"
+        if (
             re.fullmatch(
-                rf"\s*(?:{generic}\s*)?(?::\s*{qualified_generic}"
-                rf"(?:\s*,\s*{qualified_generic})*)?\s*",
+                rf"\s*(?:{generic}\s*)?(?::\s*{cs_type}"
+                rf"(?:\s*,\s*{cs_type})*)?\s*",
                 header,
             )
-            is not None
+            is None
+        ):
+            return False
+        _, separator, base_list = header.partition(":")
+        if not separator:
+            return True
+        bases = _relationship_type_names(base_list, declaration_name)
+        return (
+            bases is not None
+            and "static" not in declaration_modifiers
+            and not {
+                "Boolean",
+                "Byte",
+                "Char",
+                "Decimal",
+                "Double",
+                "Int16",
+                "Int32",
+                "Int64",
+                "Object",
+                "SByte",
+                "Single",
+                "String",
+                "UInt16",
+                "UInt32",
+                "UInt64",
+            }.intersection(name.rsplit(".", 1)[-1] for name in bases)
         )
     if suffix == ".swift":
-        return (
+        if (
             re.fullmatch(
                 rf"\s*(?:{generic}\s*)?(?::\s*{qualified}"
                 rf"(?:\s*,\s*{qualified})*)?\s*",
                 header,
             )
-            is not None
-        )
+            is None
+        ):
+            return False
+        _, separator, base_list = header.partition(":")
+        return not separator or _relationship_type_names(base_list, declaration_name) is not None
     if suffix in {".kt", ".kts"}:
         kotlin_parent = rf"{qualified_generic}(?:\(\s*\))?"
-        return (
+        if (
             re.fullmatch(
                 rf"\s*(?:{generic}\s*)?(?:\(\s*\)\s*)?"
                 rf"(?::\s*{kotlin_parent}(?:\s*,\s*{kotlin_parent})*)?\s*",
                 header,
             )
-            is not None
-        )
+            is None
+        ):
+            return False
+        _, separator, base_list = header.partition(":")
+        return not separator or _relationship_type_names(base_list, declaration_name) is not None
     if suffix == ".rs":
         return re.fullmatch(rf"\s*(?:{generic}\s*)?", header) is not None
     return False
@@ -888,6 +944,7 @@ def _complete_braced_body(
     declaration_kind: str,
     suffix: str,
     declaration_name: str = "",
+    declaration_modifiers: frozenset[str] = frozenset(),
 ) -> bool:
     """Require one bounded declaration header and its complete braced body."""
     search_end = min(len(source), header_start + _DECLARATION_HEADER_LIMIT)
@@ -900,7 +957,13 @@ def _complete_braced_body(
     if declaration_kind == "function":
         if not _function_body_header_is_valid(header, suffix):
             return False
-    elif not _type_body_header_is_valid(header, declaration_kind, suffix, declaration_name):
+    elif not _type_body_header_is_valid(
+        header,
+        declaration_kind,
+        suffix,
+        declaration_name,
+        declaration_modifiers,
+    ):
         return False
     body_end = _matching_delimiter(source, body_start, "{", "}")
     if body_end is None:
@@ -1087,12 +1150,15 @@ def _complete_type_definition(
                 and not source[line_end:].strip()
             )
     if suffix in _BRACED_TYPE_SUFFIXES.get(kind, ()):
+        prefix = match.groupdict().get("prefix", "")
+        modifiers = frozenset(_modifier_base(token) for token in re.findall(_PREFIX_TOKEN, prefix))
         return _complete_braced_body(
             source,
             match.end("target"),
             kind,
             suffix,
             match.group("target"),
+            modifiers,
         )
     return False
 
