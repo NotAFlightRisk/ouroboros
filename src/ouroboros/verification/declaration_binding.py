@@ -405,7 +405,14 @@ def _java_declaration_context_is_valid(
             r"\b[A-Za-z_]\w*\b",
             source[match.start() : match.start("target")],
         )
-        return not {"abstract", "native"}.intersection(words[:-1])
+        return (
+            bool(words)
+            and words[-1] == "void"
+            and not {
+                "abstract",
+                "native",
+            }.intersection(words[:-1])
+        )
 
     prefix = match.groupdict().get("prefix", "")
     modifiers = {_modifier_base(token) for token in re.findall(_PREFIX_TOKEN, prefix)}
@@ -560,6 +567,15 @@ def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
     if any(token in header for token in ("=", ";", "{", "}", "@")):
         return False
     generic = r"<\s*[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s*>"
+    if suffix in {".java", ".ts", ".tsx"}:
+        parameters = re.match(
+            r"\s*<\s*(?P<parameters>[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*>",
+            header,
+        )
+        if parameters is not None:
+            names = tuple(name.strip() for name in parameters.group("parameters").split(","))
+            if len(set(names)) != len(names):
+                return False
     qualified = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
     qualified_generic = rf"{qualified}(?:\s*{generic})?"
     if suffix in _CPP_SUFFIXES:

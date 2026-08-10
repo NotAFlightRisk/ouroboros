@@ -1805,6 +1805,24 @@ class TestSpecVerifier:
                 r"class\s+CameraProvider",
             ),
             (
+                "MUST define a CameraProvider function",
+                "Provider.java",
+                "class Provider { public int CameraProvider() {} }\n",
+                r"int\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
+                "class CameraProvider<T, T> {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.ts",
+                "class CameraProvider<T, T> {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
                 "MUST define a CameraProvider class",
                 "Provider.java",
                 "class CameraProvider { void value; }\n",
@@ -1988,6 +2006,9 @@ class TestSpecVerifier:
             "java-abstract-method-body",
             "java-native-method-body",
             "java-public-type-filename-mismatch",
+            "java-empty-nonvoid-method",
+            "java-duplicate-generic-parameters",
+            "typescript-duplicate-generic-parameters",
             "java-void-field",
             "java-var-field",
             "javascript-default-export-class",
@@ -2335,12 +2356,42 @@ class TestSpecVerifier:
                 "class Config {\n    static final int RETRIES = 3;\n}\n",
                 True,
             ),
+            (
+                "Config.java",
+                "class Config {\n    public public int RETRIES = 3;\n}\n",
+                False,
+            ),
+            (
+                "Config.java",
+                "class Config {\n    public private int RETRIES = 3;\n}\n",
+                False,
+            ),
+            (
+                "Config.java",
+                "interface Config {\n    private int RETRIES = 3;\n}\n",
+                False,
+            ),
+            (
+                "Config.java",
+                "interface Config {\n    int RETRIES = 3;\n}\n",
+                True,
+            ),
+            (
+                "Config.java",
+                "public public class Config {\n    int RETRIES = 3;\n}\n",
+                False,
+            ),
         ],
         ids=[
             "python-const",
             "python-annotated",
             "java-untyped-field",
             "java-typed-field",
+            "java-duplicate-field-modifier",
+            "java-conflicting-field-modifiers",
+            "java-private-interface-field",
+            "java-implicit-public-interface-field",
+            "java-invalid-enclosing-type-modifiers",
         ],
     )
     def test_t1_assignment_syntax_is_bound_to_file_language(

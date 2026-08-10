@@ -302,6 +302,83 @@ def literal_is_bound(text: str, literal: str) -> bool:
     return bool(literal_spans(text, literal))
 
 
+def _java_enclosing_field_type(source: str, line_start: int) -> str | None:
+    """Return a simple canonical Java type enclosing a field declaration."""
+    braces: list[int] = []
+    for position, character in enumerate(source[:line_start]):
+        if character == "{":
+            braces.append(position)
+        elif character == "}":
+            if not braces:
+                return None
+            braces.pop()
+    if len(braces) != 1:
+        return None
+    opening = braces[0]
+    boundary = max(source.rfind(marker, 0, opening) for marker in ";{}")
+    header = source[boundary + 1 : opening]
+    declaration = re.fullmatch(
+        r"\s*(?P<modifiers>(?:(?:abstract|final|non-sealed|public|sealed|strictfp)\s+)*)"
+        r"(?P<kind>class|enum|interface|record)\s+[A-Za-z_]\w*\s*",
+        header,
+    )
+    if declaration is None:
+        return None
+    modifiers = tuple(
+        re.findall(
+            r"\b(?:abstract|final|non-sealed|public|sealed|strictfp)\b",
+            declaration.group("modifiers"),
+        )
+    )
+    if len(set(modifiers)) != len(modifiers):
+        return None
+    if any(
+        conflict.issubset(modifiers)
+        for conflict in (
+            frozenset({"abstract", "final"}),
+            frozenset({"final", "sealed"}),
+            frozenset({"non-sealed", "sealed"}),
+        )
+    ):
+        return None
+    kind = declaration.group("kind")
+    if kind in {"enum", "record"} and {"abstract", "final", "non-sealed", "sealed"}.intersection(
+        modifiers
+    ):
+        return None
+    if kind == "interface" and "final" in modifiers:
+        return None
+    return kind
+
+
+def _java_field_assignment_is_valid(
+    source: str,
+    prefix: str,
+    tail: str,
+    line_start: int,
+) -> bool:
+    """Validate a conservative Java field assignment and its enclosing type."""
+    modifier = r"final|private|protected|public|static|transient|volatile"
+    field_type = r"(?:boolean|byte|char|double|float|int|long|short|String)(?:\[\])?"
+    declaration = re.fullmatch(
+        rf"\s*(?P<modifiers>(?:(?:{modifier})\s+)*){field_type}\s+",
+        prefix,
+    )
+    if declaration is None or re.match(r"\s*=(?!=)", tail) is None:
+        return False
+    modifiers = tuple(re.findall(rf"\b(?:{modifier})\b", declaration.group("modifiers")))
+    if len(set(modifiers)) != len(modifiers):
+        return False
+    if len({"private", "protected", "public"}.intersection(modifiers)) > 1:
+        return False
+    if {"final", "volatile"}.issubset(modifiers):
+        return False
+    enclosing_kind = _java_enclosing_field_type(source, line_start)
+    if enclosing_kind == "interface":
+        return set(modifiers).issubset({"final", "public", "static"})
+    return enclosing_kind in {"class", "enum", "record"}
+
+
 def match_has_assignment_semantics(
     source: str,
     match: re.Match[str],
@@ -328,17 +405,7 @@ def match_has_assignment_semantics(
                 tail,
             )
         elif suffix == ".java":
-            modifiers = r"(?:(?:final|private|protected|public|static|transient|volatile)\s+)*"
-            field_type = (
-                r"(?:boolean|byte|char|double|float|int|long|short|String)"
-                r"(?:\[\])?"
-            )
-            brace_depth = source[:line_start].count("{") - source[:line_start].count("}")
-            valid = (
-                brace_depth == 1
-                and re.fullmatch(rf"\s*{modifiers}{field_type}\s+", prefix)
-                and re.match(r"\s*=(?!=)", tail)
-            )
+            valid = _java_field_assignment_is_valid(source, prefix, tail, line_start)
         elif suffix in {".js", ".jsx"}:
             valid = re.fullmatch(r"\s*(?:const|let|var)\s+", prefix) and re.match(
                 r"\s*=(?!=)", tail
