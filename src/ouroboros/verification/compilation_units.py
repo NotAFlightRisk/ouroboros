@@ -181,3 +181,41 @@ def top_level_braced_declaration_is_final(
         suffix,
         allow_semicolon=suffix in _OPTIONAL_EMPTY_STATEMENT_SUFFIXES,
     )
+
+
+def nested_method_owns_type_body(
+    source: str,
+    original_source: str,
+    enclosing_start: int,
+    method_start: int,
+    method_header_start: int,
+    suffix: str,
+    enclosing_kind: str,
+    header_limit: int,
+    *,
+    java_keyword: str,
+) -> bool:
+    """Require a nested method to account for its complete enclosing type body."""
+    enclosing_end = _matching_brace(source, enclosing_start)
+    body_start = source.find(
+        "{",
+        method_header_start,
+        min(len(source), method_header_start + header_limit),
+    )
+    method_end = None if body_start < 0 else _matching_brace(source, body_start)
+    if enclosing_end is None or method_end is None or method_end > enclosing_end:
+        return False
+    leading = source_without_comments(
+        original_source[enclosing_start + 1 : method_start],
+        suffix,
+    )
+    if suffix == ".java" and enclosing_kind == "enum":
+        identifier = rf"(?!(?:{java_keyword})\b)[A-Za-z_]\w*"
+        if re.fullmatch(rf"\s*(?:{identifier}(?:\s*,\s*{identifier})*)?\s*;\s*", leading) is None:
+            return False
+    elif leading.strip():
+        return False
+    return region_is_ignorable(
+        original_source[method_end + 1 : enclosing_end],
+        suffix,
+    ) and region_is_ignorable(original_source[enclosing_end + 1 :], suffix)

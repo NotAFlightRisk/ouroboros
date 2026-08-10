@@ -18,6 +18,7 @@ from ouroboros.verification.compilation_units import (
     go_compilation_unit_prefix_is_valid as _go_compilation_unit_prefix_is_valid,
 )
 from ouroboros.verification.compilation_units import (
+    nested_method_owns_type_body,
     region_is_ignorable,
     top_level_braced_declaration_is_final,
 )
@@ -625,7 +626,11 @@ def _java_declaration_context_is_valid(
     return "public" not in modifiers or target == filename_stem
 
 
-def _csharp_function_context_is_valid(source: str, match: re.Match[str]) -> bool:
+def _csharp_function_context_is_valid(
+    source: str,
+    original_source: str,
+    match: re.Match[str],
+) -> bool:
     """Reject C# method bodies incompatible with their return type or modifiers."""
     words = re.findall(
         r"\b[A-Za-z_]\w*\b",
@@ -643,7 +648,7 @@ def _csharp_function_context_is_valid(source: str, match: re.Match[str]) -> bool
     braces = _enclosing_braces(source, match.start())
     if braces is None or len(braces) != 1:
         return False
-    enclosing = _enclosing_type_context(source, braces[0], ".cs")
+    enclosing = _enclosing_type_context(source, braces[0], ".cs", original_source)
     if enclosing is None:
         return False
     enclosing_kind, enclosing_modifiers = enclosing
@@ -721,6 +726,7 @@ def _enclosing_type_context(
     source: str,
     opening_brace: int,
     suffix: str,
+    original_source: str | None = None,
 ) -> tuple[str, frozenset[str]] | None:
     """Classify one complete canonical type header owning an opening brace."""
     boundary = max(
@@ -749,14 +755,15 @@ def _enclosing_type_context(
     if not _compilation_unit_prefix_is_valid(
         source[: boundary + 1],
         suffix,
-        None,
+        None if original_source is None else original_source[: boundary + 1],
         java_keyword=_JAVA_KEYWORD,
         csharp_keyword=_CSHARP_RESERVED_KEYWORD,
         cpp_suffixes=_CPP_SUFFIXES,
     ):
         return None
     body_end = _matching_delimiter(source, opening_brace, "{", "}")
-    if body_end is None or source[body_end + 1 :].strip():
+    tail_source = source if original_source is None else original_source
+    if body_end is None or not region_is_ignorable(tail_source[body_end + 1 :], suffix):
         return None
     if suffix == ".java" and kind == "enum":
         enum_body = source[opening_brace + 1 : body_end]
@@ -765,12 +772,6 @@ def _enclosing_type_context(
     prefix = declaration.group("prefix")
     modifiers = frozenset(_modifier_base(token) for token in re.findall(_PREFIX_TOKEN, prefix))
     return kind, modifiers
-
-
-def _enclosing_type_kind(source: str, opening_brace: int, suffix: str) -> str | None:
-    """Return the validated kind of a canonical enclosing type."""
-    context = _enclosing_type_context(source, opening_brace, suffix)
-    return None if context is None else context[0]
 
 
 def _function_placement_is_valid(
@@ -785,18 +786,25 @@ def _function_placement_is_valid(
     braces = _enclosing_braces(source, match.start())
     if braces is None:
         return False
-    if suffix == ".java":
-        return len(braces) == 1 and _enclosing_type_kind(source, braces[0], suffix) in {
-            "class",
-            "enum",
-            "record",
-        }
-    if suffix == ".cs":
-        return len(braces) == 1 and _enclosing_type_kind(source, braces[0], suffix) in {
-            "class",
-            "record",
-            "struct",
-        }
+    if suffix in {".java", ".cs"}:
+        if len(braces) != 1:
+            return False
+        context = _enclosing_type_context(source, braces[0], suffix, original_source)
+        kind = None if context is None else context[0]
+        allowed = (
+            {"class", "enum", "record"} if suffix == ".java" else {"class", "record", "struct"}
+        )
+        return kind in allowed and nested_method_owns_type_body(
+            source,
+            original_source,
+            braces[0],
+            match.start(),
+            match.end("target"),
+            suffix,
+            kind or "",
+            _DECLARATION_HEADER_LIMIT,
+            java_keyword=_JAVA_KEYWORD,
+        )
     if suffix == ".go":
         prefix_is_valid = _go_compilation_unit_prefix_is_valid(
             source[: match.start()],
@@ -1753,7 +1761,7 @@ def _source_span_has_declaration_kind(
             if (
                 kind == "function"
                 and suffix == ".cs"
-                and not _csharp_function_context_is_valid(source, match)
+                and not _csharp_function_context_is_valid(source, original_source, match)
             ):
                 continue
             if kind in {"class", "interface", "struct", "trait"} and not _type_placement_is_valid(

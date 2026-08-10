@@ -2751,6 +2751,26 @@ class TestSpecVerifier:
             ),
             (
                 "MUST define a CameraProvider function",
+                "Provider.java",
+                "class Provider {\n    banana banana;\n    public void CameraProvider() {}\n}\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.java",
+                "class Provider {\n    public void CameraProvider() {}\n    banana banana;\n}\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.cs",
+                "class Provider {\n    banana banana;\n    public void CameraProvider() {}\n}\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.cs",
+                "class Provider {\n    public void CameraProvider() {}\n    banana banana;\n}\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
                 "provider.js",
                 "function CameraProvider() {}\nbanana banana\n",
             ),
@@ -2862,6 +2882,10 @@ class TestSpecVerifier:
         ],
         ids=[
             "csharp-protected-struct-method",
+            "java-invalid-member-before-method",
+            "java-invalid-member-after-method",
+            "csharp-invalid-member-before-method",
+            "csharp-invalid-member-after-method",
             "javascript-trailing-invalid-function-content",
             "go-trailing-invalid-function-content",
             "cpp-trailing-invalid-function-content",
