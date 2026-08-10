@@ -324,6 +324,32 @@ def _modifier_base(token: str) -> str:
     return token.split("(", 1)[0]
 
 
+def _type_modifier_combination_is_valid(
+    bases: tuple[str, ...],
+    suffix: str,
+) -> bool:
+    """Reject language-invalid combinations among individually valid modifiers."""
+    modifiers = frozenset(bases)
+    if suffix == ".cs":
+        # A C# static class is sealed by definition, but neither keyword may be
+        # written alongside ``static``; abstract and sealed are also exclusive.
+        return not any(
+            conflict.issubset(modifiers)
+            for conflict in (
+                frozenset({"abstract", "sealed"}),
+                frozenset({"abstract", "static"}),
+                frozenset({"sealed", "static"}),
+            )
+        )
+    if suffix in {".kt", ".kts"}:
+        # Kotlin permits at most one inheritance/modality modifier. Treating
+        # these as independent allowlisted tokens admits non-compilable forms
+        # such as ``sealed open class``.
+        modality = frozenset({"abstract", "final", "open", "sealed"})
+        return len(modality.intersection(modifiers)) <= 1
+    return True
+
+
 def _declaration_prefix_is_valid(match: re.Match[str], suffix: str, kind: str) -> bool:
     """Validate the complete same-line prefix captured before a declaration."""
     prefix = match.groupdict().get("prefix", "")
@@ -348,6 +374,8 @@ def _declaration_prefix_is_valid(match: re.Match[str], suffix: str, kind: str) -
         frozenset({"non-sealed", "sealed"}),
     )
     if any(conflict.issubset(bases) for conflict in conflicts):
+        return False
+    if kind != "function" and not _type_modifier_combination_is_valid(bases, suffix):
         return False
     if suffix in {".js", ".jsx"} and kind == "class":
         return bases in {(), ("export",), ("export", "default")}
@@ -616,6 +644,23 @@ def _matching_delimiter(
     return None
 
 
+def _split_flat_generic_type_list(value: str) -> tuple[str, ...]:
+    """Split a comma list while preserving the verifier's flat generic subset."""
+    parts: list[str] = []
+    start = 0
+    angle_depth = 0
+    for position, character in enumerate(value):
+        if character == "<":
+            angle_depth += 1
+        elif character == ">":
+            angle_depth -= 1
+        elif character == "," and angle_depth == 0:
+            parts.append(value[start:position].strip())
+            start = position + 1
+    parts.append(value[start:].strip())
+    return tuple(parts)
+
+
 def _type_body_header_is_valid(
     header: str,
     kind: str,
@@ -695,13 +740,25 @@ def _type_body_header_is_valid(
             )
         else:
             return False
-        return (
-            re.fullmatch(
-                rf"\s*(?:{java_generic}\s*)?{clauses}",
-                header,
+        if re.fullmatch(rf"\s*(?:{java_generic}\s*)?{clauses}", header) is None:
+            return False
+        relationships: dict[str, tuple[str, ...]] = {}
+        for relationship in re.finditer(
+            r"\b(?P<kind>extends|implements|permits)\s+"
+            r"(?P<types>.*?)(?=\b(?:implements|permits)\b|$)",
+            header,
+        ):
+            type_names = tuple(
+                re.sub(r"\s*<.*>\s*$", "", item.strip())
+                for item in _split_flat_generic_type_list(relationship.group("types"))
             )
-            is not None
-        )
+            if len(set(type_names)) != len(type_names):
+                return False
+            if any(name.rsplit(".", 1)[-1] == declaration_name for name in type_names):
+                return False
+            relationships[relationship.group("kind")] = type_names
+        direct_supertypes = relationships.get("extends", ()) + relationships.get("implements", ())
+        return len(set(direct_supertypes)) == len(direct_supertypes)
     if suffix in {".js", ".jsx"}:
         return (
             re.fullmatch(
