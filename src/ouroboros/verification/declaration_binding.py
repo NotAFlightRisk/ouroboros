@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 
@@ -93,6 +94,24 @@ _CPP_EXPRESSION_WORDS = frozenset(
         "or_eq",
         "xor",
         "xor_eq",
+    }
+)
+_C_LIKE_DECLARATION_MODIFIERS = frozenset(
+    {
+        "abstract",
+        "async",
+        "explicit",
+        "extern",
+        "final",
+        "inline",
+        "internal",
+        "override",
+        "private",
+        "protected",
+        "public",
+        "sealed",
+        "static",
+        "virtual",
     }
 )
 
@@ -216,6 +235,11 @@ def _source_span_has_declaration_kind(
 ) -> bool:
     escaped = re.escape(target)
     suffix = os.path.splitext(file_path)[1].casefold()
+    if kind == "function" and suffix == ".py":
+        try:
+            ast.parse(original_source)
+        except (SyntaxError, ValueError):
+            return False
     for template in _declaration_patterns(file_path, kind):
         for match in re.finditer(template.format(target=escaped), source):
             if match.span("target") != target_span:
@@ -242,10 +266,16 @@ def _source_span_has_declaration_kind(
             declaration_boundary = max(source.rfind(marker, 0, target_start) for marker in ";{}")
             target_prefix = source[declaration_boundary + 1 : target_start]
             if kind == "function" and re.search(
-                r"\b(?:delegate|typedef|using)\b",
+                r"\b(?:delegate|operator|typedef|using)\b",
                 target_prefix,
             ):
                 continue
+            if kind == "function" and suffix in _C_LIKE_FUNCTION_SUFFIXES:
+                prefix_words = re.findall(r"\b[A-Za-z_]\w*\b", target_prefix)
+                if prefix_words and all(
+                    word in _C_LIKE_DECLARATION_MODIFIERS for word in prefix_words
+                ):
+                    continue
             if kind == "function" and suffix in _CPP_SUFFIXES:
                 parameters_start = source.find("(", match.end("target"), match.end())
                 parameters_end = source.rfind(")", parameters_start, match.end())
@@ -285,6 +315,16 @@ def _source_span_has_declaration_kind(
                 if suffix in {".kt", ".kts"}:
                     has_body = has_body or "=" in implementation_tail
                 if not has_body:
+                    continue
+            if kind in {"class", "interface"} and suffix in {".kt", ".kts"}:
+                line_start = source.rfind("\n", 0, match.start()) + 1
+                if re.search(
+                    r"\b(?:expect|external)\b",
+                    source[line_start : match.start()],
+                ):
+                    continue
+            if kind == "function" and suffix in {".lua", ".rb"}:
+                if re.search(r"\bend\b", source[match.end("target") :]) is None:
                     continue
             return True
     return False

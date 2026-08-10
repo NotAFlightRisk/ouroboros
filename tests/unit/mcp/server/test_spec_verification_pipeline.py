@@ -834,6 +834,24 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
             "struct CameraProvider;\n",
             r"struct\s+CameraProvider",
         ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.java",
+            "class CameraProvider { public CameraProvider() {} }\n",
+            r"CameraProvider\s*\(",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.kt",
+            "expect class CameraProvider\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.py",
+            "def CameraProvider():\n",
+            r"def\s+CameraProvider",
+        ),
     ],
     ids=[
         "enum-class",
@@ -851,6 +869,9 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         "rust-trait-signature",
         "cpp-class-forward-declaration",
         "cpp-struct-forward-declaration",
+        "java-constructor",
+        "kotlin-expect-class",
+        "python-incomplete-function",
     ],
 )
 async def test_type_declaration_cannot_reach_formal_pass(
