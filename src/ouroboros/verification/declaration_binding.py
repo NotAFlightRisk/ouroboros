@@ -115,11 +115,26 @@ def _source_span_has_declaration_kind(
     file_path: str,
 ) -> bool:
     escaped = re.escape(target)
-    return any(
-        match.span("target") == target_span
-        for template in _declaration_patterns(file_path, kind)
-        for match in re.finditer(template.format(target=escaped), source)
-    )
+    for template in _declaration_patterns(file_path, kind):
+        for match in re.finditer(template.format(target=escaped), source):
+            if match.span("target") != target_span:
+                continue
+            declaration_prefix = source[max(0, match.start() - 256) : match.start()]
+            if kind in {"class", "struct"} and re.search(
+                r"\benum(?:\s|\[\[[^\]]*\]\])*$",
+                declaration_prefix,
+            ):
+                continue
+            target_start = match.start("target")
+            declaration_boundary = max(source.rfind(marker, 0, target_start) for marker in ";{}")
+            target_prefix = source[declaration_boundary + 1 : target_start]
+            if kind == "function" and re.search(
+                r"\b(?:delegate|typedef|using)\b",
+                target_prefix,
+            ):
+                continue
+            return True
+    return False
 
 
 def match_has_bound_declaration_kind(

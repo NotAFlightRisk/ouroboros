@@ -411,7 +411,7 @@ def _swift_extended_string_ranges(text: str) -> tuple[tuple[int, int], ...] | No
 def _c_style_noncode_ranges(text: str, suffix: str) -> tuple[tuple[int, int], ...] | None:
     """Scan C-family comments and every supported multiline/raw literal."""
     special: tuple[tuple[int, int], ...] | None = ()
-    if suffix in {".cc", ".cpp", ".h", ".hpp"}:
+    if suffix in {".cc", ".cpp", ".h", ".hpp", ".mm"}:
         special = _cpp_raw_string_ranges(text)
     elif suffix == ".go":
         special = _go_raw_string_ranges(text)

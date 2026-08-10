@@ -439,6 +439,7 @@ async def test_container_body_evidence_cannot_reach_formal_pass(
         ("main.cpp", "#de\\\nfine UNUSED_DECL class CameraProvider\n"),
         ("main.cpp", "// ignored \\\nclass CameraProvider {};\n"),
         ("main.cpp", "/\\\n/ class CameraProvider {};\n"),
+        ("main.mm", 'const char* s = R"TAG(foo " class CameraProvider)TAG";\n'),
     ],
     ids=[
         "swift-bare-regex",
@@ -479,6 +480,7 @@ async def test_container_body_evidence_cannot_reach_formal_pass(
         "cpp-spliced-macro-name",
         "cpp-spliced-line-comment",
         "cpp-splice-created-line-comment",
+        "objective-cpp-raw-string",
     ],
 )
 async def test_unclassified_language_literals_cannot_reach_formal_pass(
@@ -683,6 +685,86 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
     assert verification.reports[0].verified_pass is approved
     assert formal.final_approved is approved
     assert formal.ac_results[0].final_verdict == ("pass" if approved else "fail")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "filename", "content", "pattern"),
+    [
+        (
+            "MUST define a CameraProvider class",
+            "provider.cpp",
+            "enum class CameraProvider { A };\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider struct",
+            "provider.cpp",
+            "enum struct CameraProvider { A };\n",
+            r"struct\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.c",
+            "typedef void CameraProvider(void);\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.c",
+            "typedef\nvoid CameraProvider(void);\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.cs",
+            "public delegate void CameraProvider();\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.cs",
+            "public delegate\nvoid CameraProvider();\n",
+            r"void\s+CameraProvider",
+        ),
+    ],
+    ids=[
+        "enum-class",
+        "enum-struct",
+        "c-typedef",
+        "c-multiline-typedef",
+        "csharp-delegate",
+        "csharp-multiline-delegate",
+    ],
+)
+async def test_type_declaration_cannot_reach_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    filename: str,
+    content: str,
+    pattern: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": pattern,
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Type declarations are not requested declarations",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
 
 
 @pytest.mark.asyncio

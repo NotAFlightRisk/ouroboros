@@ -728,6 +728,13 @@ class TestSpecVerifier:
             ),
             (
                 VerificationTier.T2_STRUCTURAL,
+                "main.mm",
+                'const char* decoy = R"TAG(foo " class CameraProvider)TAG";\n',
+                r"class\s+CameraProvider",
+                "CameraProvider",
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
                 "Main.java",
                 'String decoy = """\nfoo " class CameraProvider\n""";\n',
                 r"class\s+CameraProvider",
@@ -782,6 +789,7 @@ class TestSpecVerifier:
             "javascript-arrow-regex-literal",
             "javascript-else-regex-literal",
             "cpp-raw-string",
+            "objective-cpp-raw-string",
             "java-text-block",
             "rust-raw-string",
             "csharp-verbatim-string",
@@ -1306,6 +1314,78 @@ class TestSpecVerifier:
 
         assert result.verified is verified
         assert result.evidence_source == ("file_content" if verified else "")
+
+    @pytest.mark.parametrize(
+        ("ac_text", "filename", "content", "pattern"),
+        [
+            (
+                "MUST define a CameraProvider class",
+                "provider.cpp",
+                "enum class CameraProvider { A };\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider struct",
+                "provider.cpp",
+                "enum struct CameraProvider { A };\n",
+                r"struct\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.c",
+                "typedef void CameraProvider(void);\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.c",
+                "typedef\nvoid CameraProvider(void);\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.cs",
+                "public delegate void CameraProvider();\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.cs",
+                "public delegate\nvoid CameraProvider();\n",
+                r"void\s+CameraProvider",
+            ),
+        ],
+        ids=[
+            "enum-class",
+            "enum-struct",
+            "c-typedef",
+            "c-multiline-typedef",
+            "csharp-delegate",
+            "csharp-multiline-delegate",
+        ],
+    )
+    def test_t2_declaration_kind_rejects_type_declarations(
+        self,
+        ac_text: str,
+        filename: str,
+        content: str,
+        pattern: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is False
+        assert result.evidence_source == ""
 
     @pytest.mark.parametrize(
         "filename",
