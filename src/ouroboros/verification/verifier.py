@@ -968,6 +968,25 @@ def _has_noise_directory(file_path: str, project_dir: str) -> bool:
     return any(component in _NOISE_DIRECTORY_NAMES for component in relative.split(os.sep)[:-1])
 
 
+def _criterion_path_kind(ac_text: str, target: str) -> str | None:
+    """Return the file-system kind explicitly bound to one criterion target."""
+    if not target:
+        return None
+    literal = re.escape(target)
+    quoted_literal = rf"[`'\"]?{literal}[`'\"]?"
+    patterns = (
+        rf"\b(?P<kind>file|directory)\b(?:\s+(?:named|called))?\s+"
+        rf"{quoted_literal}(?![\w./-])",
+        rf"(?<![\w./-]){quoted_literal}\s+(?P<kind>file|directory)\b",
+    )
+    kinds = {
+        match.group("kind").casefold()
+        for pattern in patterns
+        for match in re.finditer(pattern, ac_text, re.IGNORECASE)
+    }
+    return next(iter(kinds)) if len(kinds) == 1 else None
+
+
 @dataclass
 class SpecVerifier:
     """Verifies spec assertions against actual project files.
@@ -1200,6 +1219,16 @@ class SpecVerifier:
         filename_binding: bool = False,
     ) -> Iterator[tuple[re.Match, str]]:
         """Return all criterion-bound matches in deterministic search order."""
+        if not pattern_has_bounded_execution(
+            pattern.pattern,
+            pattern.flags,
+            externally_anchored=filename_binding,
+        ):
+            logger.warning(
+                "Regex has unbounded backtracking risk, skipping: %r",
+                pattern.pattern,
+            )
+            return
         if not assertion.input_binding_required:
             yield from ((match, "") for match in pattern.finditer(searched_text))
             return
@@ -1246,16 +1275,6 @@ class SpecVerifier:
                 )
             )
         if not target_spans:
-            return
-        if not pattern_has_bounded_execution(
-            pattern.pattern,
-            pattern.flags,
-            externally_anchored=filename_binding,
-        ):
-            logger.warning(
-                "Criterion-bound regex has unbounded backtracking risk, skipping: %r",
-                pattern.pattern,
-            )
             return
         if filename_binding:
             full_match = pattern.fullmatch(searched_text)
@@ -1676,6 +1695,12 @@ class SpecVerifier:
                 detail=f"No files matched hint: {assertion.file_hint}",
             )
         evidence_targets = self._evidence_targets(assertion)
+        path_kinds = {
+            kind
+            for target in evidence_targets
+            if (kind := _criterion_path_kind(assertion.ac_text, target)) is not None
+        }
+        requested_path_kind = next(iter(path_kinds)) if len(path_kinds) == 1 else None
         qualified_paths = tuple(target for target in evidence_targets if "/" in target)
         strict_qualified_paths = (
             qualified_paths
@@ -1710,6 +1735,15 @@ class SpecVerifier:
                 )
                 if bound:
                     _match, evidence_target = bound
+                    if requested_path_kind is None:
+                        continue
+                    has_requested_kind = (
+                        os.path.isfile(file_path)
+                        if requested_path_kind == "file"
+                        else os.path.isdir(file_path)
+                    )
+                    if not has_requested_kind:
+                        continue
                     return SpecVerificationResult(
                         assertion=assertion,
                         verified=True,
@@ -1717,7 +1751,7 @@ class SpecVerifier:
                         evidence_source="filename",
                         evidence_target=evidence_target,
                         detail=(
-                            f"Found file: {basename}"
+                            f"Found {requested_path_kind}: {basename}"
                             + (
                                 f"; criterion target '{evidence_target}' from filename"
                                 if evidence_target
@@ -1725,6 +1759,17 @@ class SpecVerifier:
                             )
                         ),
                     )
+
+        if requested_path_kind is not None and not blank_subject_contract:
+            return SpecVerificationResult(
+                assertion=assertion,
+                verified=False,
+                discrepancy=True,
+                detail=(
+                    f"No {requested_path_kind} with matching criterion-bound "
+                    "path evidence was found"
+                ),
+            )
 
         if strict_qualified_paths and not blank_subject_contract:
             return SpecVerificationResult(

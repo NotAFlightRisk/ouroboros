@@ -1420,6 +1420,41 @@ class TestSpecVerifier:
 
         assert completed.returncode == 0, completed.stderr
 
+    def test_explicit_compatibility_regex_is_bounded_before_execution(self) -> None:
+        """Trusted compatibility skips input binding, never execution safety."""
+        project = self._create_project({"attack.txt": "A" * 32 + "!"})
+        script = textwrap.dedent(
+            f"""
+            from ouroboros.verification.models import SpecAssertion, VerificationTier
+            from ouroboros.verification.verifier import SpecVerifier
+
+            for tier in (VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL):
+                assertion = SpecAssertion(
+                    ac_index=0,
+                    ac_text="Inspect attack.txt",
+                    tier=tier,
+                    pattern=r"(A+)+$",
+                    file_hint="attack.txt",
+                    input_binding_required=False,
+                )
+                summary = SpecVerifier(project_dir={project!r}).verify_all((assertion,))
+                assert summary.reports[0].verified_pass is False
+            """
+        )
+
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail("explicit compatibility executed an unbounded regex")
+
+        assert completed.returncode == 0, completed.stderr
+
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
     @pytest.mark.parametrize(
         "ac_text",

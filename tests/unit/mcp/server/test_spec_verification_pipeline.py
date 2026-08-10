@@ -1721,6 +1721,54 @@ async def test_target_specific_filename_regex_still_reaches_formal_pass(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("requested_kind", "actual_kind", "approved"),
+    [
+        ("file", "file", True),
+        ("file", "directory", False),
+        ("directory", "directory", True),
+        ("directory", "file", False),
+    ],
+)
+async def test_filename_evidence_binds_the_requested_filesystem_kind(
+    tmp_path: Any,
+    requested_kind: str,
+    actual_kind: str,
+    approved: bool,
+) -> None:
+    ac_text = f"MUST create {requested_kind} pkg/artifact"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"pkg/artifact",
+                "expected_value": "pkg/artifact",
+                "file_hint": "**/*",
+                "description": f"Find the requested {requested_kind}",
+            }
+        ],
+    )
+    artifact = tmp_path / "pkg" / "artifact"
+    artifact.parent.mkdir()
+    if actual_kind == "directory":
+        artifact.mkdir()
+    else:
+        artifact.write_text("contents\n")
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    result = verification.reports[0].results[0]
+    assert verification.reports[0].verified_pass is approved
+    assert formal.final_approved is approved
+    assert result.evidence_source == ("filename" if approved else "")
+    if approved:
+        assert result.detail.startswith(f"Found {requested_kind}:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("ac_text", "tier", "pattern", "expected", "content"),
     [
         (
