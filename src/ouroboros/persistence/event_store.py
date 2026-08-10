@@ -55,6 +55,12 @@ from ouroboros.persistence.sqlite_memory import (
     validate_standard_shared_memory_sqlite_url,
 )
 from ouroboros.persistence.write_lifecycle import run_with_write_lifecycle
+from ouroboros.persistence.write_settlement import (
+    append_with_sqlite_deadline,
+)
+from ouroboros.persistence.write_settlement import (
+    run_to_settlement as _run_to_settlement,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,77 +130,6 @@ _AC_ACCEPTANCE_DISPOSITIONS = frozenset(
         "invalid",
     }
 )
-
-
-async def _run_to_settlement[T](
-    coro: Coroutine[Any, Any, T],
-    *,
-    registry: set[asyncio.Future[Any]] | None = None,
-    refuse_when: Callable[[], bool] | None = None,
-    operation: str = "append",
-) -> T:
-    """Run a transactional coroutine, settling it before cancellation surfaces.
-
-    A write, once begun, must commit or roll back inside the caller's
-    lifetime: shield-only semantics let a cancelled caller (and even
-    ``EventStore.close()``) return while the transaction was still pending,
-    so durable history could change after shutdown. Cancellation is re-raised
-    only after the inner task completes, which both preserves the
-    cancellation-atomicity contract and keeps every write within the store
-    lifecycle (#1794 review rounds one and two).
-    """
-    if refuse_when is not None and refuse_when():
-        # Admission is synchronized with close(): this check and the registry
-        # add below run in one synchronous block on the event loop, so a
-        # write either registers before close() snapshots the registry or is
-        # refused outright — it can never slip past the drain (round five).
-        coro.close()
-        raise PersistenceError(
-            "EventStore is closing; write refused.",
-            operation=operation,
-        )
-    inner: asyncio.Task[T] = asyncio.ensure_future(coro)
-    if registry is not None:
-        # close() drains this registry so no settling write can escape the
-        # store lifecycle (review round four).
-        registry.add(inner)
-        inner.add_done_callback(registry.discard)
-    try:
-        return await asyncio.shield(inner)
-    except asyncio.CancelledError as caller_cancellation:
-        while not inner.done():
-            try:
-                await asyncio.shield(inner)
-            except asyncio.CancelledError:
-                # A further caller cancellation — keep settling.
-                continue
-            except Exception:
-                # The transaction settled by failing; the loop exits below.
-                break
-        settlement_error: BaseException | None = None
-        if not inner.cancelled():
-            settlement_error = inner.exception()
-        if settlement_error is not None:
-            # Cancellation outranks the write's own failure: lifecycle code
-            # awaiting a cancelled task must still observe CancelledError
-            # (e.g. the watchdog's decision batch depends on it). The
-            # transaction failure is preserved as the cause.
-            logger.debug(
-                "event_store.append.settled_with_error",
-                exc_info=settlement_error,
-            )
-            raise caller_cancellation from settlement_error
-        raise
-
-
-async def _await_sqlite_write_atomically[T](awaitable: Coroutine[Any, Any, T]) -> T:
-    """Compatibility wrapper for cancellation-atomic SQLite writes.
-
-    The lifecycle-aware settlement primitive now also supports write
-    registration and close admission fencing. Keep the narrower helper for
-    callers and regressions that only need transaction settlement.
-    """
-    return await _run_to_settlement(awaitable)
 
 
 def acceptance_generation_id_for_session(session_id: str, execution_id: str) -> str:
@@ -623,6 +558,7 @@ class EventStore:
         self._picker_projection_ready = False
         self._settling_writes = set()
         self._closing = False
+        self._initialized = False
         self._lifecycle_lock = asyncio.Lock()
         validate_standard_shared_memory_sqlite_url(database_url)
         validate_canonical_named_memdb_sqlite_url(database_url)
@@ -773,6 +709,7 @@ class EventStore:
                 self._initialize_locked(create_schema=create_schema),
                 operation="initialize",
             )
+            self._initialized = True
 
     async def _initialize_locked(self, *, create_schema: bool | None = None) -> None:
         if self._configuration_error is not None:
@@ -881,6 +818,67 @@ class EventStore:
             )
         await self.append_with_rowid(event, _skip_workflow_ir_guard=_skip_workflow_ir_guard)
         return None
+
+    async def append_durable(self, event: BaseEvent, *, timeout: float) -> None:
+        """Append one ordinary event within a cancellation-atomic deadline.
+
+        Caller-side ``wait_for()`` cannot bound :func:`_run_to_settlement`:
+        cancellation intentionally waits for the transaction's final commit
+        or rollback.  This entry point moves the deadline into persistence.
+        SQLite receives both a deadline-sized ``busy_timeout`` and a progress
+        handler/interrupt, while a small part of the advertised budget is
+        reserved for rollback and connection cleanup.  ``TimeoutError`` is
+        raised only after that settlement, so returning never leaves an
+        ambiguous transaction running in the background.
+
+        Agent-process lifecycle events are ordinary append-only events.  The
+        guarded session/workflow event families keep their specialized APIs
+        and are deliberately rejected here rather than silently weakening
+        their conditional transition contracts.
+        """
+        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+            raise ValueError("append_durable timeout must be a positive number")
+        if not isinstance(event, BaseEvent):
+            self._raise_invalid_append_input(event, operation="append_durable")
+        if (
+            _is_session_start_event(event)
+            or _is_session_terminal_event(event)
+            or _is_ac_acceptance_finalized_type(event)
+            or event.aggregate_type == "workflow_ir"
+        ):
+            raise PersistenceError(
+                "append_durable only accepts ordinary append-only events.",
+                operation="append_durable",
+                details={"event_type": event.type, "aggregate_type": event.aggregate_type},
+            )
+
+        loop = asyncio.get_running_loop()
+        overall_deadline = loop.time() + float(timeout)
+
+        # Schema initialization has its own cancellation-atomic settlement
+        # contract and cannot honestly be folded into a hard append deadline.
+        # Production EventStores initialize during service startup; refusing
+        # lazy initialization here is the bounded, ambiguity-free contract.
+        engine = self._engine
+        if not self._initialized or engine is None:
+            raise PersistenceError(
+                "Durable append requires an initialized EventStore; initialize it "
+                "during startup before beginning the bounded lifecycle write.",
+                operation="append_durable",
+            )
+
+        await _run_to_settlement(
+            append_with_sqlite_deadline(
+                engine,
+                event,
+                overall_deadline=overall_deadline,
+                picker_projection_ready=self._picker_projection_ready,
+                insert_event=_insert_event,
+            ),
+            registry=self._settling_writes,
+            refuse_when=lambda: self._closing,
+            operation="append_durable",
+        )
 
     async def append_session_start_if_absent(self, event: BaseEvent) -> None:
         """Fenced wrapper: admission + settlement for the CAS below.
@@ -3066,6 +3064,7 @@ class EventStore:
                     await self.checkpoint_wal()
                     await self._engine.dispose()
                     self._engine = None
+                    self._initialized = False
                 if self._memory_keepalive is not None:
                     # Release the shared in-memory database anchor last so
                     # pooled connections never observe the database
