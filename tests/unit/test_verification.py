@@ -1268,6 +1268,67 @@ class TestSpecVerifier:
         assert result.verified is verified
         assert result.evidence_source == ("file_content" if verified else "")
 
+    @pytest.mark.parametrize(
+        ("filename", "content", "pattern", "verified"),
+        [
+            ("Provider.java", "def CameraProvider(): {}\n", r"def\s+CameraProvider", False),
+            (
+                "Provider.java",
+                "public void CameraProvider() {}\n",
+                r"void\s+CameraProvider",
+                True,
+            ),
+            ("Provider.kt", "fun CameraProvider() {}\n", r"fun\s+CameraProvider", True),
+            ("provider.c", "void CameraProvider(void) {}\n", r"void\s+CameraProvider", True),
+            ("provider.go", "func CameraProvider() {}\n", r"func\s+CameraProvider", True),
+        ],
+        ids=["invalid-java-def", "java", "kotlin", "c", "go"],
+    )
+    def test_t2_declaration_kind_uses_the_file_language(
+        self,
+        filename: str,
+        content: str,
+        pattern: str,
+        verified: bool,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider function",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is verified
+        assert result.evidence_source == ("file_content" if verified else "")
+
+    @pytest.mark.parametrize(
+        "filename",
+        ["provider_windows.go", "provider_test.go", "_provider.go", ".provider.go"],
+        ids=["goos", "test", "underscore", "dot"],
+    )
+    def test_implicitly_excluded_go_filename_fails_closed(self, filename: str) -> None:
+        project = self._create_project({filename: "func CameraProvider() {}\n"})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider function",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"func\s+CameraProvider",
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is False
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+
     def test_mixed_criterion_text_under_one_index_rejects_the_whole_group(self) -> None:
         project = self._create_project({"main.py": "class Unrelated:\n    pass\n"})
         trusted = SpecAssertion(

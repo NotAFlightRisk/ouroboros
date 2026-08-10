@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 
 from ouroboros.verification.binding import (
@@ -10,19 +11,82 @@ from ouroboros.verification.binding import (
 )
 from ouroboros.verification.models import SpecAssertion, VerificationTier
 
-_DECLARATION_PATTERNS = {
-    "class": (r"\bclass\s+(?P<target>{target})\b",),
-    "interface": (
-        r"\binterface\s+(?P<target>{target})\b",
-        r"\btype\s+(?P<target>{target})\s+interface\b",
-    ),
-    "struct": (
-        r"\bstruct\s+(?P<target>{target})\b",
-        r"\btype\s+(?P<target>{target})\s+struct\b",
-    ),
-    "trait": (r"\btrait\s+(?P<target>{target})\b",),
-    "function": (r"\b(?:def|fn|func|function)\s+(?P<target>{target})\b",),
+_CLASS_SUFFIXES = frozenset(
+    {
+        ".cc",
+        ".cpp",
+        ".cs",
+        ".h",
+        ".hpp",
+        ".hs",
+        ".java",
+        ".js",
+        ".jsx",
+        ".kt",
+        ".kts",
+        ".mm",
+        ".py",
+        ".pyi",
+        ".rb",
+        ".swift",
+        ".ts",
+        ".tsx",
+    }
+)
+_INTERFACE_SUFFIXES = frozenset({".cs", ".java", ".kt", ".kts", ".ts", ".tsx"})
+_STRUCT_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cs", ".h", ".hpp", ".mm", ".rs", ".swift"})
+_C_LIKE_FUNCTION_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cs", ".h", ".hpp", ".java", ".mm"})
+_FUNCTION_KEYWORDS = {
+    ".go": "func",
+    ".js": "function",
+    ".jsx": "function",
+    ".kt": "fun",
+    ".kts": "fun",
+    ".lua": "function",
+    ".pl": "sub",
+    ".py": "(?:async\\s+)?def",
+    ".pyi": "(?:async\\s+)?def",
+    ".rb": "def",
+    ".rs": "fn",
+    ".swift": "func",
+    ".ts": "function",
+    ".tsx": "function",
 }
+_SHELL_SUFFIXES = frozenset({".bash", ".sh", ".zsh"})
+_C_LIKE_FUNCTION = (
+    r"(?m)^[ \t]*(?!(?:return|if|for|while|switch|catch|throw|new|sizeof)\b)"
+    r"(?:[A-Za-z_]\w*\s+){{1,8}}[*&\s]*(?P<target>{target})[ \t]*"
+    r"\([^;{{}}\r\n]*\)[ \t]*(?:throws\s+[^;{{\r\n]+)?(?:\{{|;)"
+)
+
+
+def _declaration_patterns(file_path: str, kind: str) -> tuple[str, ...]:
+    """Return only declaration grammars admitted for the file's language."""
+    suffix = os.path.splitext(file_path)[1].casefold()
+    if kind == "class" and suffix in _CLASS_SUFFIXES:
+        return (r"\bclass\s+(?P<target>{target})\b",)
+    if kind == "interface":
+        if suffix in _INTERFACE_SUFFIXES:
+            return (r"\binterface\s+(?P<target>{target})\b",)
+        if suffix == ".go":
+            return (r"\btype\s+(?P<target>{target})\s+interface\b",)
+    if kind == "struct":
+        if suffix in _STRUCT_SUFFIXES:
+            return (r"\bstruct\s+(?P<target>{target})\b",)
+        if suffix == ".go":
+            return (r"\btype\s+(?P<target>{target})\s+struct\b",)
+    if kind == "trait" and suffix == ".rs":
+        return (r"\btrait\s+(?P<target>{target})\b",)
+    if kind == "function":
+        if keyword := _FUNCTION_KEYWORDS.get(suffix):
+            return (rf"\b{keyword}\s+(?P<target>{{target}})\b",)
+        if suffix in _C_LIKE_FUNCTION_SUFFIXES:
+            return (_C_LIKE_FUNCTION,)
+        if suffix == ".r":
+            return (r"(?P<target>{target})\s*(?:<-|=)\s*function\s*\(",)
+        if suffix in _SHELL_SUFFIXES:
+            return (r"(?m)^[ \t]*(?:function\s+)?(?P<target>{target})\s*\(\s*\)\s*\{",)
+    return ()
 
 
 def _literal_occurrences(
@@ -48,11 +112,12 @@ def _source_span_has_declaration_kind(
     target_span: tuple[int, int],
     target: str,
     kind: str,
+    file_path: str,
 ) -> bool:
     escaped = re.escape(target)
     return any(
         match.span("target") == target_span
-        for template in _DECLARATION_PATTERNS.get(kind, ())
+        for template in _declaration_patterns(file_path, kind)
         for match in re.finditer(template.format(target=escaped), source)
     )
 
@@ -64,6 +129,7 @@ def match_has_bound_declaration_kind(
     assertion: SpecAssertion,
     evidence_target: str,
     finite_witnesses: tuple[tuple[int, int, int], ...],
+    file_path: str,
 ) -> bool:
     """Whether the exact matched occurrence has the caller-requested kind."""
     if not assertion.input_binding_required or assertion.tier is not VerificationTier.T2_STRUCTURAL:
@@ -102,6 +168,6 @@ def match_has_bound_declaration_kind(
                 candidate_spans.append(occurrences[0])
 
     return any(
-        _source_span_has_declaration_kind(searched_text, span, evidence_target, kind)
+        _source_span_has_declaration_kind(searched_text, span, evidence_target, kind, file_path)
         for span in candidate_spans
     )

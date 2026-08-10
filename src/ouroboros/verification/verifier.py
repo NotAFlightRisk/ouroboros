@@ -1908,12 +1908,12 @@ class SpecVerifier:
                         assertion,
                         candidate[1],
                         _finite_target_assertions(content_pattern, candidate[1]),
+                        file_path,
                     )
                 ),
                 None,
             )
-            # Preserve #1837: blank content binds through the exact relative
-            # filename because the target is absent from the proven subject.
+            # Preserve #1837: blank content binds through the exact filename.
             if bound is None and blank_subject_contract:
                 bound = self._find_bound_match(
                     content_pattern,

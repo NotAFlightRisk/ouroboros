@@ -637,6 +637,88 @@ async def test_model_cannot_substitute_function_evidence_for_a_class_criterion(
     assert formal.ac_results[0].final_verdict == "fail"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "content", "pattern", "approved"),
+    [
+        ("Provider.java", "def CameraProvider(): {}\n", r"def\s+CameraProvider", False),
+        (
+            "Provider.java",
+            "public void CameraProvider() {}\n",
+            r"void\s+CameraProvider",
+            True,
+        ),
+        ("Provider.kt", "fun CameraProvider() {}\n", r"fun\s+CameraProvider", True),
+        ("provider.c", "void CameraProvider(void) {}\n", r"void\s+CameraProvider", True),
+        ("provider.go", "func CameraProvider() {}\n", r"func\s+CameraProvider", True),
+    ],
+    ids=["invalid-java-def", "java", "kotlin", "c", "go"],
+)
+async def test_declaration_kind_is_bound_to_the_file_language_before_formal_promotion(
+    tmp_path: Any,
+    filename: str,
+    content: str,
+    pattern: str,
+    approved: bool,
+) -> None:
+    ac_text = "MUST define a CameraProvider function"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": pattern,
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Language-specific function declaration",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is approved
+    assert formal.final_approved is approved
+    assert formal.ac_results[0].final_verdict == ("pass" if approved else "fail")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "filename",
+    ["provider_windows.go", "provider_test.go", "_provider.go", ".provider.go"],
+    ids=["goos", "test", "underscore", "dot"],
+)
+async def test_implicitly_excluded_go_file_cannot_reach_formal_pass(
+    tmp_path: Any,
+    filename: str,
+) -> None:
+    ac_text = "MUST define a CameraProvider function"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"func\s+CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Implicitly excluded Go source is not evidence",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text("func CameraProvider() {}\n")
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
 def test_mixed_criterion_text_cannot_borrow_a_report_identity_for_formal_pass(
     tmp_path: Any,
 ) -> None:

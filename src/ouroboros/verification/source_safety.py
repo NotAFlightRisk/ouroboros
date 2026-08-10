@@ -46,6 +46,43 @@ _MARKUP_SUFFIXES = frozenset({".htm", ".html", ".svg", ".xml"})
 _STYLE_SUFFIXES = frozenset({".css", ".scss"})
 _C_TRIGRAPH_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".h", ".hpp", ".mm"})
 _C_TRIGRAPH = re.compile(r"\?\?[=/'()!<>-]")
+_GOOS_NAMES = frozenset(
+    {
+        "aix",
+        "android",
+        "darwin",
+        "dragonfly",
+        "freebsd",
+        "illumos",
+        "ios",
+        "js",
+        "linux",
+        "netbsd",
+        "openbsd",
+        "plan9",
+        "solaris",
+        "wasip1",
+        "windows",
+    }
+)
+_GOARCH_NAMES = frozenset(
+    {
+        "386",
+        "amd64",
+        "arm",
+        "arm64",
+        "loong64",
+        "mips",
+        "mips64",
+        "mips64le",
+        "mipsle",
+        "ppc64",
+        "ppc64le",
+        "riscv64",
+        "s390x",
+        "wasm",
+    }
+)
 
 
 def is_known_non_evidence_format(
@@ -452,6 +489,16 @@ def _has_go_build_constraint(text: str) -> bool:
     return bool(re.search(r"(?m)^[ \t]*//(?:go:build\b|[ \t]*\+build\b)", text))
 
 
+def _go_path_has_implicit_build_constraint(file_path: str) -> bool:
+    """Whether the Go tool ignores or conditionally selects this basename."""
+    basename = os.path.basename(file_path)
+    if basename.startswith((".", "_")) or basename.endswith("_test.go"):
+        return True
+    stem = basename.removesuffix(".go")
+    final_component = stem.rpartition("_")[2] if "_" in stem else ""
+    return final_component in _GOOS_NAMES or final_component in _GOARCH_NAMES
+
+
 def _lua_long_delimiter(text: str, index: int) -> tuple[int, str] | None:
     """Return a Lua long-bracket opener length and its exact closer."""
     if index >= len(text) or text[index] != "[":
@@ -633,7 +680,9 @@ def mask_non_executable_source(
         ranges = _python_noncode_ranges(text)
         return None if ranges is None else _mask_ranges(text, ranges)
     if suffix in _C_STYLE_SUFFIXES:
-        if suffix == ".go" and _has_go_build_constraint(text):
+        if suffix == ".go" and (
+            _has_go_build_constraint(text) or _go_path_has_implicit_build_constraint(file_path)
+        ):
             return None
         ranges = _c_style_noncode_ranges(text, suffix)
         return None if ranges is None else _mask_ranges(text, ranges)
