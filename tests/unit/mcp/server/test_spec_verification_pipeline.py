@@ -431,6 +431,9 @@ async def test_container_body_evidence_cannot_reach_formal_pass(
         ("main.pl", "format Foo::Bar\n=\nclass CameraProvider\n.\n"),
         ("main.cpp", "#if 0\nclass CameraProvider {};\n#endif\n"),
         ("main.cpp", "#i\\\nf 0\nclass CameraProvider {};\n#e\\\nndif\n"),
+        ("main.cpp", "%:if 0\nclass CameraProvider {};\n%:endif\n"),
+        ("main.cpp", "%:i\\\nf 0\nclass CameraProvider {};\n%:e\\\nndif\n"),
+        ("main.cpp", "??=if 0\nclass CameraProvider {};\n??=endif\n"),
         ("main.cpp", "#define UNUSED_DECL class CameraProvider\n"),
         ("main.cpp", "#define UNUSED_DECL \\\nclass CameraProvider\n"),
         ("main.cpp", "#de\\\nfine UNUSED_DECL class CameraProvider\n"),
@@ -468,6 +471,9 @@ async def test_container_body_evidence_cannot_reach_formal_pass(
         "perl-package-multiline-format",
         "cpp-disabled-preprocessor-region",
         "cpp-spliced-disabled-preprocessor-region",
+        "cpp-digraph-disabled-preprocessor-region",
+        "cpp-spliced-digraph-disabled-preprocessor-region",
+        "cpp-trigraph-disabled-preprocessor-region",
         "cpp-macro-replacement-list",
         "cpp-continued-macro-replacement-list",
         "cpp-spliced-macro-name",
@@ -544,6 +550,52 @@ async def test_build_excluded_declarations_cannot_reach_formal_pass(
                 "expected_value": "CameraProvider",
                 "file_hint": filename,
                 "description": "Build-excluded declaration is not evidence",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        (
+            "provider.go",
+            "package provider\nvar a = `ends with \\`\nvar b = `func CameraProvider`\n",
+        ),
+        ("provider.rs", "const _: &str = stringify!(fn CameraProvider);\n"),
+        (
+            "provider.rs",
+            "macro_rules! hidden { () => { fn CameraProvider() {} }; }\n",
+        ),
+    ],
+    ids=["go-raw-string", "rust-macro-invocation", "rust-macro-definition"],
+)
+async def test_arbitrary_token_containers_cannot_reach_formal_pass(
+    tmp_path: Any,
+    filename: str,
+    content: str,
+) -> None:
+    ac_text = "MUST define a CameraProvider function"
+    pattern = r"(?:func|fn)\s+CameraProvider"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": pattern,
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Token container is not a function declaration",
             }
         ],
     )

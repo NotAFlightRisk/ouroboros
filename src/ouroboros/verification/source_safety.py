@@ -44,6 +44,8 @@ _CONFIG_SUFFIXES = frozenset({".cfg", ".conf", ".ini", ".toml", ".yaml", ".yml"}
 _NON_SOURCE_SUFFIXES = frozenset({".csv", ".json", ".lock", ".md"})
 _MARKUP_SUFFIXES = frozenset({".htm", ".html", ".svg", ".xml"})
 _STYLE_SUFFIXES = frozenset({".css", ".scss"})
+_C_TRIGRAPH_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".h", ".hpp", ".mm"})
+_C_TRIGRAPH = re.compile(r"\?\?[=/'()!<>-]")
 
 
 def is_known_non_evidence_format(
@@ -300,9 +302,23 @@ def _csharp_literal_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
     return tuple(ranges)
 
 
+def _go_raw_string_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
+    """Return Go raw strings, where backslashes never escape backticks."""
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    while (start := text.find("`", cursor)) >= 0:
+        end = text.find("`", start + 1)
+        if end < 0:
+            return None
+        end += 1
+        ranges.append((start, end))
+        cursor = end
+    return tuple(ranges)
+
+
 def _c_preprocessor_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
     """Return directive lines, rejecting conditional-compilation regions."""
-    directive = re.compile(r"(?m)^[ \t]*#")
+    directive = re.compile(r"(?m)^[ \t]*(?:#|%:)")
     conditional_keywords = {
         "elif",
         "elifdef",
@@ -326,7 +342,10 @@ def _c_preprocessor_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
             next_end = text.find("\n", line_start)
             end = len(text) if next_end < 0 else next_end
         logical_directive = re.sub(r"\\\r?\n", "", text[start:end])
-        keyword = re.match(r"^[ \t]*#[ \t]*(?P<keyword>[A-Za-z_]\w*)", logical_directive)
+        keyword = re.match(
+            r"^[ \t]*(?:#|%:)[ \t]*(?P<keyword>[A-Za-z_]\w*)",
+            logical_directive,
+        )
         if keyword is not None and keyword.group("keyword") in conditional_keywords:
             # Whether a conditional body is executable depends on build flags
             # and macro state that the verifier cannot establish statically.
@@ -357,6 +376,8 @@ def _c_style_noncode_ranges(text: str, suffix: str) -> tuple[tuple[int, int], ..
     special: tuple[tuple[int, int], ...] | None = ()
     if suffix in {".cc", ".cpp", ".h", ".hpp"}:
         special = _cpp_raw_string_ranges(text)
+    elif suffix == ".go":
+        special = _go_raw_string_ranges(text)
     elif suffix in {".java", ".kt", ".kts"}:
         special = _triple_quote_ranges(text)
     elif suffix == ".swift":
@@ -388,7 +409,12 @@ def _c_style_noncode_ranges(text: str, suffix: str) -> tuple[tuple[int, int], ..
     if preprocessor is None:
         return None
     all_ranges = (*combined, *preprocessor)
-    if re.search(r"\\\r?\n", _mask_ranges(text, all_ranges)):
+    executable = _mask_ranges(text, all_ranges)
+    if suffix in _C_TRIGRAPH_SUFFIXES and _C_TRIGRAPH.search(executable):
+        # Trigraph replacement precedes splicing and can synthesize both '#'
+        # and '\\'; reject rather than partially reimplement translation phase 1.
+        return None
+    if re.search(r"\\\r?\n", executable):
         # Translation-phase splicing can create tokens or comment delimiters
         # that the physical-line scanner cannot classify safely.
         return None
@@ -414,6 +440,11 @@ def _rust_raw_string_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
 def _has_rust_conditional_attribute(text: str) -> bool:
     """Whether Rust source contains build-conditional item attributes."""
     return bool(re.search(r"#\s*!?\s*\[\s*cfg(?:_attr)?\b", text))
+
+
+def _has_rust_macro_container(text: str) -> bool:
+    """Whether Rust source contains an unclassified macro token container."""
+    return bool(re.search(r"(?<![\w#])(?:r#)?[^\W\d]\w*\s*!", text))
 
 
 def _has_go_build_constraint(text: str) -> bool:
@@ -629,7 +660,11 @@ def mask_non_executable_source(
             return None
         combined = (*raw_ranges, *ranges)
         masked = _mask_ranges(text, combined)
-        return None if _has_rust_conditional_attribute(masked) else masked
+        return (
+            None
+            if _has_rust_conditional_attribute(masked) or _has_rust_macro_container(masked)
+            else masked
+        )
     if suffix in _HASH_STYLE_SUFFIXES:
         if _has_unsupported_shell_container(text):
             return None

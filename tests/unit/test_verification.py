@@ -1063,6 +1063,9 @@ class TestSpecVerifier:
             ("main.pl", "format Foo::Bar\n=\nclass CameraProvider\n.\n"),
             ("main.cpp", "#if 0\nclass CameraProvider {};\n#endif\n"),
             ("main.cpp", "#i\\\nf 0\nclass CameraProvider {};\n#e\\\nndif\n"),
+            ("main.cpp", "%:if 0\nclass CameraProvider {};\n%:endif\n"),
+            ("main.cpp", "%:i\\\nf 0\nclass CameraProvider {};\n%:e\\\nndif\n"),
+            ("main.cpp", "??=if 0\nclass CameraProvider {};\n??=endif\n"),
             ("main.cpp", "#define UNUSED_DECL class CameraProvider\n"),
             ("main.cpp", "#define UNUSED_DECL \\\nclass CameraProvider\n"),
             ("main.cpp", "#de\\\nfine UNUSED_DECL class CameraProvider\n"),
@@ -1100,6 +1103,9 @@ class TestSpecVerifier:
             "perl-package-multiline-format",
             "cpp-disabled-preprocessor-region",
             "cpp-spliced-disabled-preprocessor-region",
+            "cpp-digraph-disabled-preprocessor-region",
+            "cpp-spliced-digraph-disabled-preprocessor-region",
+            "cpp-trigraph-disabled-preprocessor-region",
             "cpp-macro-replacement-list",
             "cpp-continued-macro-replacement-list",
             "cpp-spliced-macro-name",
@@ -1173,6 +1179,64 @@ class TestSpecVerifier:
 
         assert result.verified is False
         assert result.outcome is VerificationOutcome.UNVERIFIABLE
+
+    @pytest.mark.parametrize(
+        ("filename", "content"),
+        [
+            (
+                "provider.go",
+                "package provider\nvar a = `ends with \\`\nvar b = `func CameraProvider`\n",
+            ),
+            ("provider.rs", "const _: &str = stringify!(fn CameraProvider);\n"),
+            (
+                "provider.rs",
+                "macro_rules! hidden { () => { fn CameraProvider() {} }; }\n",
+            ),
+        ],
+        ids=["go-raw-string", "rust-macro-invocation", "rust-macro-definition"],
+    )
+    def test_arbitrary_token_containers_fail_the_file_closed(
+        self,
+        filename: str,
+        content: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider function",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"(?:func|fn)\s+CameraProvider",
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is False
+        assert result.evidence_source == ""
+
+    def test_go_raw_string_mask_preserves_a_following_function(self) -> None:
+        project = self._create_project(
+            {
+                "provider.go": "package provider\nvar decoy = `ends with \\`\n"
+                "func CameraProvider() {}\n"
+            }
+        )
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider function",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"func\s+CameraProvider",
+            expected_value="CameraProvider",
+            file_hint="*.go",
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is True
+        assert result.evidence_source == "file_content"
 
     @pytest.mark.parametrize(
         ("content", "pattern", "verified"),
