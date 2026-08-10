@@ -199,7 +199,7 @@ def _type_body_header_is_valid(header: str, kind: str, suffix: str) -> bool:
         return re.fullmatch(rf"\s+{re.escape(kind)}\s*", header) is not None
     if not header.strip():
         return True
-    if any(token in header for token in ("=", ";", "{", "}", "@")):
+    if any(token in header for token in ("=", ";", "{", "}", "@", "<", ">")):
         return False
     if suffix in _CPP_SUFFIXES:
         return (
@@ -346,6 +346,24 @@ def _function_body_header_is_valid(header: str, suffix: str) -> bool:
     return False
 
 
+def _declaration_body_is_valid(body: str, declaration_kind: str, suffix: str) -> bool:
+    """Admit only body syntax the verifier can prove without a language parser."""
+    stripped = body.strip()
+    if not stripped:
+        return True
+    if declaration_kind != "function":
+        return False
+    if suffix in {".c", ".cc", ".cpp", ".h", ".hpp", ".mm"}:
+        return (
+            re.fullmatch(
+                r"return\s+(?:[A-Za-z_]\w*|[-+]?\d+|false|nullptr|true)\s*;",
+                stripped,
+            )
+            is not None
+        )
+    return False
+
+
 def _complete_braced_body(
     source: str,
     header_start: int,
@@ -365,7 +383,14 @@ def _complete_braced_body(
             return False
     elif not _type_body_header_is_valid(header, declaration_kind, suffix):
         return False
-    if _matching_delimiter(source, body_start, "{", "}") is None:
+    body_end = _matching_delimiter(source, body_start, "{", "}")
+    if body_end is None:
+        return False
+    if not _declaration_body_is_valid(
+        source[body_start + 1 : body_end],
+        declaration_kind,
+        suffix,
+    ):
         return False
     return all(
         _all_delimiters_balanced(source, opening, closing)
@@ -388,6 +413,9 @@ def _all_delimiters_balanced(source: str, opening: str, closing: str) -> bool:
 
 def _complete_ruby_block(source: str, declaration_start: int) -> bool:
     """Conservatively balance a Ruby class or method block through its ``end``."""
+    body_start = source.find("\n", declaration_start)
+    if body_start < 0:
+        return False
     depth = 0
     for token in re.finditer(
         r"\b(?:begin|case|class|def|do|for|if|module|unless|until|while|end)\b",
@@ -396,7 +424,8 @@ def _complete_ruby_block(source: str, declaration_start: int) -> bool:
         if token.group() == "end":
             depth -= 1
             if depth == 0:
-                return True
+                token_start = declaration_start + token.start()
+                return not source[body_start + 1 : token_start].strip()
             if depth < 0:
                 return False
         else:
@@ -404,7 +433,11 @@ def _complete_ruby_block(source: str, declaration_start: int) -> bool:
     return False
 
 
-def _complete_lua_function(source: str, declaration_start: int) -> bool:
+def _complete_lua_function(
+    source: str,
+    declaration_start: int,
+    body_start: int,
+) -> bool:
     """Conservatively balance a Lua function and nested block terminators."""
     stack: list[str] = []
     for token in re.finditer(
@@ -421,20 +454,19 @@ def _complete_lua_function(source: str, declaration_start: int) -> bool:
         else:
             stack.pop()
             if not stack:
-                return True
+                token_start = declaration_start + token.start()
+                return not source[body_start + 1 : token_start].strip()
     return False
 
 
 def _complete_haskell_class(source: str, target_end: int) -> bool:
     """Require the bounded core of a Haskell typeclass declaration."""
     tail = source[target_end : target_end + _DECLARATION_HEADER_LIMIT]
-    return (
-        re.match(
-            r"[ \t]+[a-z_]\w*(?:[ \t]+[a-z_]\w*)*[ \t]+where[ \t]*(?:\r?\n|$)",
-            tail,
-        )
-        is not None
+    header = re.match(
+        r"[ \t]+[a-z_]\w*(?:[ \t]+[a-z_]\w*)*[ \t]+where[ \t]*(?:\r?\n|$)",
+        tail,
     )
+    return header is not None and not source[target_end + header.end() :].strip()
 
 
 def _complete_parameter_list(source: str, target_end: int) -> int | None:
@@ -447,6 +479,26 @@ def _complete_parameter_list(source: str, target_end: int) -> int | None:
     if any(marker in header for marker in ";{}") or _NESTED_DECLARATION.search(header):
         return None
     return _matching_delimiter(source, parameters_start, "(", ")")
+
+
+def _function_parameters_are_valid(
+    source: str,
+    original_source: str,
+    target_end: int,
+    parameters_end: int,
+    suffix: str,
+) -> bool:
+    """Admit only parameter syntax provable without a language parser."""
+    parameters_start = source.find("(", target_end, parameters_end + 1)
+    if parameters_start < 0:
+        return False
+    masked = source[parameters_start + 1 : parameters_end]
+    original = original_source[parameters_start + 1 : parameters_end]
+    if suffix in _CPP_SUFFIXES:
+        return _cpp_parameters_are_declarations(masked, original)
+    if suffix == ".c":
+        return masked.strip() in {"", "void"} and original.strip() in {"", "void"}
+    return not masked.strip() and not original.strip()
 
 
 def _complete_type_definition(
@@ -464,6 +516,17 @@ def _complete_type_definition(
             return False
         return True
     if kind == "class" and suffix == ".rb":
+        line_end = source.find("\n", match.end("target"))
+        if line_end < 0:
+            return False
+        if (
+            re.fullmatch(
+                r"\s*(?:<\s*[A-Z]\w*(?:::[A-Z]\w*)*)?\s*",
+                source[match.end("target") : line_end],
+            )
+            is None
+        ):
+            return False
         return _complete_ruby_block(source, match.start())
     if kind == "class" and suffix == ".hs":
         return _complete_haskell_class(source, match.end("target"))
@@ -472,9 +535,12 @@ def _complete_type_definition(
         if line_end < 0:
             line_end = len(source)
         if not source[match.end("target") : line_end].strip():
-            return all(
-                _all_delimiters_balanced(source, opening, closing)
-                for opening, closing in (("{", "}"), ("(", ")"), ("[", "]"))
+            return (
+                all(
+                    _all_delimiters_balanced(source, opening, closing)
+                    for opening, closing in (("{", "}"), ("(", ")"), ("[", "]"))
+                )
+                and not source[line_end:].strip()
             )
     if suffix in _BRACED_TYPE_SUFFIXES.get(kind, ()):
         return _complete_braced_body(
@@ -486,7 +552,11 @@ def _complete_type_definition(
     return False
 
 
-def _complete_ruby_function(source: str, match: re.Match[str]) -> bool:
+def _complete_ruby_function(
+    source: str,
+    original_source: str,
+    match: re.Match[str],
+) -> bool:
     line_end = source.find("\n", match.end("target"))
     if line_end < 0:
         line_end = len(source)
@@ -495,13 +565,31 @@ def _complete_ruby_function(source: str, match: re.Match[str]) -> bool:
         parameters_end = _matching_delimiter(source, parameters_start, "(", ")")
         if parameters_end is None or parameters_end > line_end:
             return False
+        if (
+            source[parameters_start + 1 : parameters_end].strip()
+            or original_source[parameters_start + 1 : parameters_end].strip()
+        ):
+            return False
+        if (
+            source[match.end("target") : parameters_start].strip()
+            or source[parameters_end + 1 : line_end].strip()
+        ):
+            return False
+    elif source[match.end("target") : line_end].strip():
+        return False
     return _complete_ruby_block(source, match.start())
 
 
 def _complete_expression_function(source: str, match: re.Match[str]) -> bool:
     """Validate an R function expression with either a body block or expression."""
     parameters_end = _complete_parameter_list(source, match.end("target"))
-    if parameters_end is None:
+    if parameters_end is None or not _function_parameters_are_valid(
+        source,
+        source,
+        match.end("target"),
+        parameters_end,
+        ".r",
+    ):
         return False
     line_end = source.find("\n", parameters_end)
     if line_end < 0:
@@ -515,7 +603,13 @@ def _complete_expression_function(source: str, match: re.Match[str]) -> bool:
             "function",
             ".r",
         )
-    return bool(implementation.strip())
+    return (
+        re.fullmatch(
+            r"(?:[A-Za-z_.]\w*|[-+]?\d+(?:\.\d+)?|FALSE|NULL|TRUE)",
+            implementation.strip(),
+        )
+        is not None
+    )
 
 
 def _complete_function_definition(
@@ -534,16 +628,31 @@ def _complete_function_definition(
     if suffix == ".pyi":
         return False
     if suffix == ".rb":
-        return _complete_ruby_function(source, match)
+        return _complete_ruby_function(source, original_source, match)
     if suffix == ".lua":
-        return _complete_parameter_list(
-            source, match.end("target")
-        ) is not None and _complete_lua_function(source, match.start())
+        parameters_end = _complete_parameter_list(source, match.end("target"))
+        return (
+            parameters_end is not None
+            and _function_parameters_are_valid(
+                source,
+                original_source,
+                match.end("target"),
+                parameters_end,
+                suffix,
+            )
+            and _complete_lua_function(source, match.start(), parameters_end)
+        )
     if suffix == ".r":
         return _complete_expression_function(source, match)
     if suffix in {".kt", ".kts"}:
         parameters_end = _complete_parameter_list(source, match.end("target"))
-        if parameters_end is None:
+        if parameters_end is None or not _function_parameters_are_valid(
+            source,
+            original_source,
+            match.end("target"),
+            parameters_end,
+            suffix,
+        ):
             return False
         line_end = source.find("\n", parameters_end)
         if line_end < 0:
@@ -558,7 +667,15 @@ def _complete_function_definition(
                 suffix,
             )
         expression_offset = implementation.find("=")
-        return expression_offset >= 0 and bool(implementation[expression_offset + 1 :].strip())
+        if expression_offset < 0:
+            return False
+        return (
+            re.fullmatch(
+                r"(?:[A-Za-z_]\w*|[-+]?\d+(?:\.\d+)?|false|null|true|Unit)",
+                implementation[expression_offset + 1 :].strip(),
+            )
+            is not None
+        )
     if suffix in _BRACED_FUNCTION_SUFFIXES:
         parameters_end = _complete_parameter_list(source, match.end("target"))
         if parameters_end is None:
@@ -566,6 +683,14 @@ def _complete_function_definition(
                 return False
             header_start = match.end("target")
         else:
+            if not _function_parameters_are_valid(
+                source,
+                original_source,
+                match.end("target"),
+                parameters_end,
+                suffix,
+            ):
+                return False
             header_start = parameters_end + 1
         return _complete_braced_body(
             source,
