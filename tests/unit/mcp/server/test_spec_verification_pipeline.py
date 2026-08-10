@@ -1856,6 +1856,72 @@ async def test_invalid_modifier_syntax_cannot_reach_formal_pass(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("ac_text", "filename", "content", "pattern"),
+    [
+        (
+            "MUST define a CameraProvider function",
+            "provider.cpp",
+            "signed unsigned void CameraProvider() {}\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.cpp",
+            "long short int CameraProvider() { return 0; }\n",
+            r"int\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.cpp",
+            "char float CameraProvider() { return 0; }\n",
+            r"float\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "CameraProvider.java",
+            "public class CameraProvider { int class; }\n",
+            r"class\s+CameraProvider",
+        ),
+    ],
+    ids=[
+        "cpp-conflicting-sign-specifiers",
+        "cpp-conflicting-width-specifiers",
+        "cpp-conflicting-scalar-specifiers",
+        "java-keyword-field-name",
+    ],
+)
+async def test_invalid_language_tokens_cannot_reach_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    filename: str,
+    content: str,
+    pattern: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": pattern,
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Invalid language tokens cannot prove a declaration",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("filename", "content"),
     [
         ("provider.py", "class CameraProvider:\n    pass\n"),

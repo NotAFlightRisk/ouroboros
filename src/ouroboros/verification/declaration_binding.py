@@ -128,6 +128,55 @@ _CPP_BUILTIN_PARAMETER_TYPES = frozenset(
         "wchar_t",
     }
 )
+_CPP_FUNCTION_MODIFIERS = frozenset({"extern", "inline", "static"})
+_CPP_BUILTIN_RETURN_TYPE_SEQUENCES = frozenset(
+    {
+        ("bool",),
+        ("char",),
+        ("char8_t",),
+        ("char16_t",),
+        ("char32_t",),
+        ("double",),
+        ("float",),
+        ("int",),
+        ("long",),
+        ("long", "double"),
+        ("long", "int"),
+        ("long", "long"),
+        ("long", "long", "int"),
+        ("short",),
+        ("short", "int"),
+        ("signed",),
+        ("signed", "char"),
+        ("signed", "int"),
+        ("signed", "long"),
+        ("signed", "long", "int"),
+        ("signed", "long", "long"),
+        ("signed", "long", "long", "int"),
+        ("signed", "short"),
+        ("signed", "short", "int"),
+        ("unsigned",),
+        ("unsigned", "char"),
+        ("unsigned", "int"),
+        ("unsigned", "long"),
+        ("unsigned", "long", "int"),
+        ("unsigned", "long", "long"),
+        ("unsigned", "long", "long", "int"),
+        ("unsigned", "short"),
+        ("unsigned", "short", "int"),
+        ("void",),
+        ("wchar_t",),
+    }
+)
+_JAVA_KEYWORD = (
+    r"_|abstract|assert|boolean|break|byte|case|catch|char|class|const|continue|"
+    r"default|do|double|else|enum|exports|extends|false|final|finally|float|for|"
+    r"goto|if|implements|import|instanceof|int|interface|long|module|native|new|"
+    r"non-sealed|null|open|opens|package|permits|private|protected|provides|public|"
+    r"record|requires|return|sealed|short|static|strictfp|super|switch|synchronized|"
+    r"this|throw|throws|to|transient|transitive|true|try|uses|var|void|volatile|"
+    r"when|while|with|yield"
+)
 _CPP_EXPRESSION_WORDS = frozenset(
     {
         "and",
@@ -451,6 +500,24 @@ def _c_like_function_prefix_is_valid(
     if not words:
         return False
     modifiers = words[:-1]
+    if suffix in _CPP_SUFFIXES:
+        modifier_end = 0
+        while modifier_end < len(words) and words[modifier_end] in _CPP_FUNCTION_MODIFIERS:
+            modifier_end += 1
+        cpp_modifiers = tuple(words[:modifier_end])
+        type_specifiers = tuple(words[modifier_end:])
+        if (
+            not type_specifiers
+            or any(word in _CPP_FUNCTION_MODIFIERS for word in type_specifiers)
+            or len(set(cpp_modifiers)) != len(cpp_modifiers)
+            or {"extern", "static"}.issubset(cpp_modifiers)
+        ):
+            return False
+        if type_specifiers in _CPP_BUILTIN_RETURN_TYPE_SEQUENCES:
+            return True
+        return len(type_specifiers) == 1 and (
+            type_specifiers[0] == "auto" or type_specifiers[0][:1].isupper()
+        )
     if suffix == ".java":
         allowed = frozenset(
             {
@@ -486,10 +553,10 @@ def _c_like_function_prefix_is_valid(
         # register is only valid for object/parameter declarations.
         allowed = frozenset({"extern", "inline", "static"})
     else:
-        allowed = frozenset({"extern", "inline", "static"}).union(_CPP_BUILTIN_PARAMETER_TYPES)
+        allowed = _CPP_FUNCTION_MODIFIERS
     if any(word not in allowed for word in modifiers) or len(set(modifiers)) != len(modifiers):
         return False
-    if suffix in {".c", ".cc", ".cpp", ".h", ".hpp", ".mm"} and {
+    if suffix == ".c" and {
         "extern",
         "static",
     }.issubset(modifiers):
@@ -802,14 +869,7 @@ def _type_body_header_is_valid(
             bases.append(base_name)
         return len(set(bases)) == len(bases)
     if suffix == ".java":
-        java_non_type = (
-            r"abstract|assert|boolean|break|byte|case|catch|char|class|const|continue|"
-            r"default|do|double|else|enum|extends|false|final|finally|float|for|goto|"
-            r"if|implements|import|instanceof|int|interface|long|native|new|null|package|"
-            r"private|protected|public|return|short|static|strictfp|super|switch|"
-            r"synchronized|this|throw|throws|transient|true|try|var|void|volatile|while"
-        )
-        java_identifier = rf"(?!(?:{java_non_type})\b)[A-Za-z_]\w*"
+        java_identifier = rf"(?!(?:{_JAVA_KEYWORD})\b)[A-Za-z_]\w*"
         java_generic = r"<\s*[A-Z]\w*(?:\s*,\s*[A-Z]\w*)*\s*>"
         java_qualified = rf"{java_identifier}(?:\.{java_identifier})*"
         java_type = rf"{java_qualified}(?:\s*{java_generic})?"
@@ -1055,10 +1115,11 @@ def _declaration_body_is_valid(body: str, declaration_kind: str, suffix: str) ->
         return True
     if declaration_kind != "function":
         if suffix == ".java" and declaration_kind == "class":
+            identifier = rf"(?!(?:{_JAVA_KEYWORD})\b)[A-Za-z_]\w*"
             return (
                 re.fullmatch(
                     r"(?:boolean|byte|char|double|float|int|long|short)(?:\[\])?\s+"
-                    r"[A-Za-z_]\w*\s*;",
+                    rf"{identifier}\s*;",
                     stripped,
                 )
                 is not None
@@ -1230,16 +1291,7 @@ def _function_parameters_are_valid(
         return False
     if suffix != ".java":
         return not masked.strip()
-    java_keyword = (
-        r"abstract|assert|boolean|break|byte|case|catch|char|class|const|continue|"
-        r"default|do|double|else|enum|exports|extends|false|final|finally|float|for|"
-        r"goto|if|implements|import|instanceof|int|interface|long|module|native|new|"
-        r"non-sealed|null|open|opens|package|permits|private|protected|provides|public|"
-        r"record|requires|return|sealed|short|static|strictfp|super|switch|synchronized|"
-        r"this|throw|throws|to|transient|transitive|true|try|uses|var|void|volatile|"
-        r"while|with|yield"
-    )
-    identifier = rf"(?!(?:{java_keyword})\b)[A-Za-z_]\w*"
+    identifier = rf"(?!(?:{_JAVA_KEYWORD})\b)[A-Za-z_]\w*"
     primitive = r"(?:boolean|byte|char|double|float|int|long|short)"
     parameter = rf"{primitive}(?:\[\])?\s+{identifier}"
     if re.fullmatch(rf"\s*(?:{parameter}(?:\s*,\s*{parameter})*)?\s*", masked) is None:

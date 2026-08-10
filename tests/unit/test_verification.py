@@ -2537,6 +2537,86 @@ class TestSpecVerifier:
         assert result.evidence_source == "file_content"
 
     @pytest.mark.parametrize(
+        ("filename", "content", "pattern"),
+        [
+            (
+                "provider.cpp",
+                "signed unsigned void CameraProvider() {}\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "provider.cpp",
+                "long short int CameraProvider() { return 0; }\n",
+                r"int\s+CameraProvider",
+            ),
+            (
+                "provider.cpp",
+                "char float CameraProvider() { return 0; }\n",
+                r"float\s+CameraProvider",
+            ),
+            (
+                "CameraProvider.java",
+                "public class CameraProvider { int class; }\n",
+                r"class\s+CameraProvider",
+            ),
+        ],
+        ids=[
+            "cpp-conflicting-sign-specifiers",
+            "cpp-conflicting-width-specifiers",
+            "cpp-conflicting-scalar-specifiers",
+            "java-keyword-field-name",
+        ],
+    )
+    def test_t2_invalid_language_tokens_are_rejected(
+        self,
+        filename: str,
+        content: str,
+        pattern: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        kind = "class" if filename.endswith(".java") else "function"
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text=f"MUST define a CameraProvider {kind}",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is False
+        assert result.evidence_source == ""
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "unsigned long int CameraProvider() { return 0; }\n",
+            "long long int CameraProvider() { return 0; }\n",
+            "Widget CameraProvider() {}\n",
+        ],
+        ids=["unsigned-long", "long-long", "external-type"],
+    )
+    def test_t2_valid_cpp_return_types_remain_valid(self, content: str) -> None:
+        project = self._create_project({"provider.cpp": content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider function",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"CameraProvider",
+            expected_value="CameraProvider",
+            file_hint="provider.cpp",
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is True
+        assert result.evidence_source == "file_content"
+
+    @pytest.mark.parametrize(
         ("filename", "content"),
         [
             ("provider.py", "class CameraProvider:\n    pass\n"),
