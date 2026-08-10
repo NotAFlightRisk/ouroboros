@@ -190,6 +190,10 @@ _RUST_KEYWORD = (
     r"mut|override|priv|pub|ref|return|safe|self|Self|static|struct|super|trait|true|"
     r"try|type|typeof|union|unsafe|unsized|use|virtual|where|while|yield"
 )
+_GO_KEYWORD = (
+    r"_|break|case|chan|const|continue|default|defer|else|fallthrough|for|func|go|"
+    r"goto|if|import|interface|map|package|range|return|select|struct|switch|type|var"
+)
 _C_LIKE_DECLARATION_MODIFIERS = frozenset(
     {
         "abstract",
@@ -626,6 +630,8 @@ def _csharp_function_context_is_valid(source: str, match: re.Match[str]) -> bool
     enclosing_kind, enclosing_modifiers = enclosing
     if "static" in enclosing_modifiers and "static" not in modifiers:
         return False
+    if enclosing_kind == "struct" and "protected" in modifiers:
+        return False
     return "virtual" not in modifiers or (
         enclosing_kind != "struct" and not {"sealed", "static"}.intersection(enclosing_modifiers)
     )
@@ -670,7 +676,6 @@ def _compilation_unit_prefix_is_valid(prefix: str, suffix: str) -> bool:
             )
             is not None
         )
-
     boundary = max(prefix.rfind(";"), prefix.rfind("{"), prefix.rfind("}"))
     context = prefix[boundary + 1 :]
     if suffix in _CPP_SUFFIXES and re.fullmatch(
@@ -681,14 +686,46 @@ def _compilation_unit_prefix_is_valid(prefix: str, suffix: str) -> bool:
     return not context.strip()
 
 
-def _type_placement_is_valid(source: str, match: re.Match[str], suffix: str) -> bool:
+def _go_compilation_unit_prefix_is_valid(prefix: str, original_prefix: str) -> bool:
+    """Require one Go package clause and only conservatively parsed prior declarations."""
+    identifier = rf"(?!(?:{_GO_KEYWORD})\b)[A-Za-z_]\w*"
+    package_clause = rf"\s*package[ \t]+{identifier}[ \t]*(?:;[ \t]*|\r?\n)"
+    string_literal = r'(?:`[^`]*`|"(?:\\.|[^"\\\r\n])*")'
+    rune_literal = r"'(?:\\.|[^'\\\r\n])'"
+    scalar_literal = r"(?:[-+]?\d+(?:\.\d+)?|false|nil|true)"
+    declaration = (
+        rf"(?:var|const)[ \t]+{identifier}(?:[ \t]+{identifier})?[ \t]*=[ \t]*"
+        rf"(?:{string_literal}|{rune_literal}|{scalar_literal})[ \t]*;?[ \t]*(?:\r?\n|$)"
+    )
+    grammar = rf"{package_clause}\s*(?:{declaration}\s*)*"
+    return (
+        len(prefix) == len(original_prefix)
+        and re.fullmatch(grammar, original_prefix) is not None
+        and re.fullmatch(
+            rf"{package_clause}\s*(?:(?:var|const)[^\r\n]*(?:\r?\n|$)\s*)*",
+            prefix,
+        )
+        is not None
+    )
+
+
+def _type_placement_is_valid(
+    source: str,
+    original_source: str,
+    match: re.Match[str],
+    suffix: str,
+) -> bool:
     """Require a top-level type in a canonical compilation-unit context."""
     if suffix == ".py":
         return True
     braces = _enclosing_braces(source, match.start())
     if braces is None or braces:
         return False
-    if not _compilation_unit_prefix_is_valid(source[: match.start()], suffix):
+    prefix = source[: match.start()]
+    if suffix == ".go":
+        if not _go_compilation_unit_prefix_is_valid(prefix, original_source[: match.start()]):
+            return False
+    elif not _compilation_unit_prefix_is_valid(prefix, suffix):
         return False
     if suffix not in {".cs", ".java"}:
         return True
@@ -747,7 +784,12 @@ def _enclosing_type_kind(source: str, opening_brace: int, suffix: str) -> str | 
     return None if context is None else context[0]
 
 
-def _function_placement_is_valid(source: str, match: re.Match[str], suffix: str) -> bool:
+def _function_placement_is_valid(
+    source: str,
+    original_source: str,
+    match: re.Match[str],
+    suffix: str,
+) -> bool:
     """Require a canonical legal placement for parser-free function evidence."""
     if suffix in {".py", ".pyi", ".rb", ".lua", ".r"}:
         return True
@@ -766,6 +808,11 @@ def _function_placement_is_valid(source: str, match: re.Match[str], suffix: str)
             "record",
             "struct",
         }
+    if suffix == ".go":
+        return not braces and _go_compilation_unit_prefix_is_valid(
+            source[: match.start()],
+            original_source[: match.start()],
+        )
     return not braces
 
 
@@ -1095,6 +1142,10 @@ def _type_body_header_is_valid(
         )
     if suffix == ".rs":
         return re.fullmatch(rf"\s*(?:{generic}\s*)?", header) is not None
+    if suffix == ".go":
+        return (
+            kind in {"interface", "struct"} and re.fullmatch(rf"\s*{kind}\s*", header) is not None
+        )
     return False
 
 
@@ -1697,12 +1748,14 @@ def _source_span_has_declaration_kind(
                 continue
             if kind in {"class", "interface", "struct", "trait"} and not _type_placement_is_valid(
                 source,
+                original_source,
                 match,
                 suffix,
             ):
                 continue
             if kind == "function" and not _function_placement_is_valid(
                 source,
+                original_source,
                 match,
                 suffix,
             ):

@@ -720,7 +720,12 @@ async def test_model_cannot_substitute_function_evidence_for_a_class_criterion(
             r"CameraProvider",
             True,
         ),
-        ("provider.go", "func CameraProvider() {}\n", r"func\s+CameraProvider", True),
+        (
+            "provider.go",
+            "package provider\n\nfunc CameraProvider() {}\n",
+            r"func\s+CameraProvider",
+            True,
+        ),
         (
             "provider.ts",
             "function CameraProvider(): void {}\n",
@@ -1977,6 +1982,120 @@ async def test_invalid_language_tokens_cannot_reach_formal_pass(
     assert verification.reports[0].verified_pass is False
     assert formal.final_approved is False
     assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "filename", "content"),
+    [
+        (
+            "MUST define a CameraProvider function",
+            "Provider.cs",
+            "public struct Shell {\n    protected void CameraProvider() {}\n}\n",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.go",
+            "func CameraProvider() {}\n",
+        ),
+        (
+            "MUST define a CameraProvider struct",
+            "provider.go",
+            "type CameraProvider struct {}\n",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.go",
+            "package provider\nbanana\nfunc CameraProvider() {}\n",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.go",
+            "package first\npackage second\nfunc CameraProvider() {}\n",
+        ),
+    ],
+    ids=[
+        "csharp-protected-struct-method",
+        "go-package-less-function",
+        "go-package-less-struct",
+        "go-invalid-top-level-prefix",
+        "go-duplicate-package-clause",
+    ],
+)
+async def test_invalid_compilation_unit_semantics_cannot_reach_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    filename: str,
+    content: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Invalid compilation-unit semantics cannot prove a declaration",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "content"),
+    [
+        (
+            "MUST define a CameraProvider function",
+            "package provider\n\nfunc CameraProvider() {}\n",
+        ),
+        (
+            "MUST define a CameraProvider struct",
+            "package provider\n\ntype CameraProvider struct {}\n",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "package provider\nvar decoy = `ends with \\`\nfunc CameraProvider() {}\n",
+        ),
+    ],
+    ids=["go-packaged-function", "go-packaged-struct", "go-prior-raw-string-variable"],
+)
+async def test_go_compilation_unit_positive_controls_reach_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    content: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": "provider.go",
+                "description": "Packaged Go declaration exists",
+            }
+        ],
+    )
+    (tmp_path / "provider.go").write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is True
+    assert formal.final_approved is True
+    assert formal.ac_results[0].final_verdict == "pass"
 
 
 @pytest.mark.asyncio

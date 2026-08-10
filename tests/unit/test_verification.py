@@ -1340,7 +1340,12 @@ class TestSpecVerifier:
                 r"CameraProvider",
                 True,
             ),
-            ("provider.go", "func CameraProvider() {}\n", r"func\s+CameraProvider", True),
+            (
+                "provider.go",
+                "package provider\n\nfunc CameraProvider() {}\n",
+                r"func\s+CameraProvider",
+                True,
+            ),
             (
                 "provider.ts",
                 "function CameraProvider(): void {}\n",
@@ -2660,8 +2665,23 @@ class TestSpecVerifier:
                 "Provider.cs",
                 "namespace A;\npublic class CameraProvider {}\n",
             ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.go",
+                "package provider\n\nfunc CameraProvider() {}\n",
+            ),
+            (
+                "MUST define a CameraProvider struct",
+                "provider.go",
+                "package provider\n\ntype CameraProvider struct {}\n",
+            ),
         ],
-        ids=["c-canonical-builtin-return-type", "csharp-single-file-scoped-namespace"],
+        ids=[
+            "c-canonical-builtin-return-type",
+            "csharp-single-file-scoped-namespace",
+            "go-packaged-function",
+            "go-packaged-struct",
+        ],
     )
     def test_t2_compilation_unit_positive_controls_remain_valid(
         self,
@@ -2684,6 +2704,65 @@ class TestSpecVerifier:
 
         assert result.verified is True
         assert result.evidence_source == "file_content"
+
+    @pytest.mark.parametrize(
+        ("ac_text", "filename", "content"),
+        [
+            (
+                "MUST define a CameraProvider function",
+                "Provider.cs",
+                "public struct Shell {\n    protected void CameraProvider() {}\n}\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.go",
+                "func CameraProvider() {}\n",
+            ),
+            (
+                "MUST define a CameraProvider struct",
+                "provider.go",
+                "type CameraProvider struct {}\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.go",
+                "package provider\nbanana\nfunc CameraProvider() {}\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.go",
+                "package first\npackage second\nfunc CameraProvider() {}\n",
+            ),
+        ],
+        ids=[
+            "csharp-protected-struct-method",
+            "go-package-less-function",
+            "go-package-less-struct",
+            "go-invalid-top-level-prefix",
+            "go-duplicate-package-clause",
+        ],
+    )
+    def test_t2_invalid_compilation_unit_semantics_are_rejected(
+        self,
+        ac_text: str,
+        filename: str,
+        content: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"CameraProvider",
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is False
+        assert result.evidence_source == ""
 
     @pytest.mark.parametrize(
         "content",
