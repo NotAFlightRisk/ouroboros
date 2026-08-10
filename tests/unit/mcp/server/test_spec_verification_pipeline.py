@@ -2458,6 +2458,15 @@ async def test_compilation_unit_positive_controls_reach_formal_pass(
             "class CameraProvider extends true {}\n",
             r"class\s+CameraProvider",
         ),
+        *(
+            (
+                "MUST define a CameraProvider class",
+                "provider.js",
+                f"class CameraProvider extends {base} {{}}\n",
+                r"class\s+CameraProvider",
+            )
+            for base in ("return", "class", "function", "new", "const", "switch", "extends")
+        ),
         (
             "MUST define a CameraProvider struct",
             "provider.rs",
@@ -2497,6 +2506,13 @@ async def test_compilation_unit_positive_controls_reach_formal_pass(
         "java-class-as-interface",
         "java-special-nonextendable-base",
         "javascript-primitive-base",
+        "javascript-return-keyword-base",
+        "javascript-class-keyword-base",
+        "javascript-function-keyword-base",
+        "javascript-new-keyword-base",
+        "javascript-const-keyword-base",
+        "javascript-switch-keyword-base",
+        "javascript-extends-keyword-base",
         "rust-keyword-field-and-type",
         "rust-function-keyword-field-and-type",
     ],
@@ -3020,6 +3036,12 @@ async def test_t1_valid_unsupported_java_field_context_is_not_formal_discrepancy
         ),
         (
             "MUST define a CameraProvider class",
+            "provider.js",
+            "class CameraProvider extends Namespace.return {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
             "provider.ts",
             "class CameraProvider<T> implements Base {}\n",
             r"class\s+CameraProvider",
@@ -3037,6 +3059,7 @@ async def test_t1_valid_unsupported_java_field_context_is_not_formal_discrepancy
         "rust-unsafe-trait",
         "kotlin-sealed-interface",
         "cpp-type-like-base",
+        "javascript-keyword-property-base",
         "typescript-generic-implements",
         "java-unique-parameters",
     ],

@@ -3141,6 +3141,15 @@ class TestSpecVerifier:
                 "class CameraProvider extends true {}\n",
                 r"class\s+CameraProvider",
             ),
+            *(
+                (
+                    "MUST define a CameraProvider class",
+                    "provider.js",
+                    f"class CameraProvider extends {base} {{}}\n",
+                    r"class\s+CameraProvider",
+                )
+                for base in ("return", "class", "function", "new", "const", "switch", "extends")
+            ),
             (
                 "MUST define a CameraProvider struct",
                 "provider.rs",
@@ -3180,6 +3189,13 @@ class TestSpecVerifier:
             "java-class-as-interface",
             "java-special-nonextendable-base",
             "javascript-primitive-base",
+            "javascript-return-keyword-base",
+            "javascript-class-keyword-base",
+            "javascript-function-keyword-base",
+            "javascript-new-keyword-base",
+            "javascript-const-keyword-base",
+            "javascript-switch-keyword-base",
+            "javascript-extends-keyword-base",
             "rust-keyword-field-and-type",
             "rust-function-keyword-field-and-type",
         ],
@@ -3219,6 +3235,11 @@ class TestSpecVerifier:
             ),
             ("provider.js", "class CameraProvider extends Base {}\n", r"class\s+CameraProvider"),
             (
+                "provider.js",
+                "class CameraProvider extends Namespace.return {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
                 "provider.rs",
                 "struct CameraProvider { value: i32, }\n",
                 r"struct\s+CameraProvider",
@@ -3229,6 +3250,7 @@ class TestSpecVerifier:
             "cpp-void-pointer-nullptr",
             "java-known-valid-bases",
             "javascript-base",
+            "javascript-keyword-property-base",
             "rust-field",
         ],
     )

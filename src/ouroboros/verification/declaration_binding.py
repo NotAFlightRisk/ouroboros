@@ -210,6 +210,12 @@ _JAVASCRIPT_NON_CONSTRUCTOR_BASES = frozenset(
         "undefined",
     }
 )
+_JAVASCRIPT_RESERVED_KEYWORD = (
+    r"await|break|case|catch|class|const|continue|debugger|default|delete|do|else|enum|"
+    r"export|extends|false|finally|for|function|if|implements|import|in|instanceof|"
+    r"interface|let|new|null|package|private|protected|public|return|static|super|switch|"
+    r"this|throw|true|try|typeof|var|void|while|with|yield"
+)
 _RUST_KEYWORD = (
     r"_|abstract|as|async|await|become|box|break|const|continue|crate|do|dyn|else|"
     r"enum|extern|false|final|fn|for|gen|if|impl|in|let|loop|macro|match|mod|move|"
@@ -1007,8 +1013,10 @@ def _type_body_header_is_valid(
             return False
         return len(set(direct_supertypes)) == len(direct_supertypes)
     if suffix in {".js", ".jsx"}:
+        identifier = rf"(?!(?:{_JAVASCRIPT_RESERVED_KEYWORD})\b)[A-Za-z_$][\w$]*"
+        property_name = r"[A-Za-z_$][\w$]*"
         match = re.fullmatch(
-            r"\s*(?:extends\s+(?P<base>[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*))?\s*",
+            rf"\s*(?:extends\s+(?P<base>{identifier}(?:\.{property_name})*))?\s*",
             header,
         )
         if match is None:
