@@ -11,6 +11,16 @@ from ouroboros.verification.binding import (
     literal_is_bound,
     literal_spans,
 )
+from ouroboros.verification.compilation_units import (
+    compilation_unit_prefix_is_valid as _compilation_unit_prefix_is_valid,
+)
+from ouroboros.verification.compilation_units import (
+    go_compilation_unit_prefix_is_valid as _go_compilation_unit_prefix_is_valid,
+)
+from ouroboros.verification.compilation_units import (
+    region_is_ignorable,
+    top_level_braced_declaration_is_final,
+)
 from ouroboros.verification.cpp_declarations import (
     CPP_BUILTIN_PARAMETER_TYPES,
     CPP_BUILTIN_TYPE_SEQUENCES,
@@ -659,71 +669,6 @@ def _enclosing_braces(source: str, position: int) -> tuple[int, ...] | None:
     return tuple(stack)
 
 
-def _compilation_unit_prefix_is_valid(prefix: str, suffix: str) -> bool:
-    """Admit only a provable top-level context before a declaration."""
-    if suffix == ".java":
-        identifier = rf"(?!(?:{_JAVA_KEYWORD})\b)[A-Za-z_]\w*"
-        qualified_name = rf"{identifier}(?:\.{identifier})*"
-        return (
-            re.fullmatch(
-                rf"\s*(?:package\s+{qualified_name}\s*;\s*)?"
-                rf"(?:import\s+(?:static\s+)?{qualified_name}(?:\.\*)?\s*;\s*)*",
-                prefix,
-            )
-            is not None
-        )
-    if suffix == ".cs":
-        identifier = rf"(?!(?:{_CSHARP_RESERVED_KEYWORD})\b)[A-Za-z_]\w*"
-        qualified_name = rf"{identifier}(?:\.{identifier})*"
-        extern_alias = rf"extern\s+alias\s+{identifier}\s*;\s*"
-        global_using = rf"global\s+using\s+(?:static\s+)?{qualified_name}\s*;\s*"
-        local_using = rf"using\s+(?:static\s+)?{qualified_name}\s*;\s*"
-        outer_directives = rf"(?:{extern_alias})*(?:{global_using})*(?:{local_using})*"
-        inner_directives = rf"(?:{extern_alias})*(?:{local_using})*"
-        file_namespace = rf"namespace\s+{qualified_name}\s*;\s*{inner_directives}"
-        return (
-            re.fullmatch(
-                rf"\s*{outer_directives}(?:{file_namespace})?",
-                prefix,
-            )
-            is not None
-        )
-    boundary = max(prefix.rfind(";"), prefix.rfind("{"), prefix.rfind("}"))
-    context = prefix[boundary + 1 :]
-    if suffix in _CPP_SUFFIXES and re.fullmatch(
-        r"\s*template\s*<[^(){};=]+>\s*",
-        context,
-    ):
-        return True
-    return not context.strip()
-
-
-def _go_compilation_unit_prefix_is_valid(prefix: str, original_prefix: str) -> bool:
-    """Require one Go package clause and only conservatively parsed prior declarations."""
-    identifier = rf"(?!(?:{_GO_KEYWORD})\b)[A-Za-z_]\w*"
-    package_clause = rf"\s*package[ \t]+{identifier}[ \t]*(?:;[ \t]*|\r?\n)"
-    string_literal = r'(?:`[^`]*`|"(?:\\.|[^"\\\r\n])*")'
-    rune_literal = r"'(?:\\.|[^'\\\r\n])'"
-    scalar_literal = r"(?:[-+]?\d+(?:\.\d+)?|false|nil|true)"
-    declaration = (
-        rf"(?:var|const)[ \t]+(?P<name>{identifier})[ \t]*=[ \t]*"
-        rf"(?:{string_literal}|{rune_literal}|{scalar_literal})[ \t]*;?[ \t]*(?:\r?\n|$)"
-    )
-    grammar = rf"{package_clause}\s*(?:{declaration}\s*)*"
-    grammar_match = re.fullmatch(grammar, original_prefix)
-    names = tuple(match.group("name") for match in re.finditer(declaration, original_prefix))
-    return (
-        len(prefix) == len(original_prefix)
-        and grammar_match is not None
-        and len(set(names)) == len(names)
-        and re.fullmatch(
-            rf"{package_clause}\s*(?:(?:var|const)[^\r\n]*(?:\r?\n|$)\s*)*",
-            prefix,
-        )
-        is not None
-    )
-
-
 def _type_placement_is_valid(
     source: str,
     original_source: str,
@@ -738,16 +683,38 @@ def _type_placement_is_valid(
         return False
     prefix = source[: match.start()]
     if suffix == ".go":
-        if not _go_compilation_unit_prefix_is_valid(prefix, original_source[: match.start()]):
+        if not _go_compilation_unit_prefix_is_valid(
+            prefix,
+            original_source[: match.start()],
+            go_keyword=_GO_KEYWORD,
+        ):
             return False
-    elif not _compilation_unit_prefix_is_valid(prefix, suffix):
+    elif not _compilation_unit_prefix_is_valid(
+        prefix,
+        suffix,
+        original_source[: match.start()],
+        java_keyword=_JAVA_KEYWORD,
+        csharp_keyword=_CSHARP_RESERVED_KEYWORD,
+        cpp_suffixes=_CPP_SUFFIXES,
+    ):
         return False
-    if suffix not in {".cs", ".java"}:
-        return True
     search_end = min(len(source), match.end("target") + _DECLARATION_HEADER_LIMIT)
     body_start = source.find("{", match.end("target"), search_end)
+    if body_start < 0:
+        return True
     body_end = _matching_delimiter(source, body_start, "{", "}")
-    return body_end is not None and not source[body_end + 1 :].strip()
+    if body_end is None:
+        return False
+    if suffix in {".cs", ".java"}:
+        return region_is_ignorable(original_source[body_end + 1 :], suffix)
+    return top_level_braced_declaration_is_final(
+        source,
+        original_source,
+        match.end("target"),
+        suffix,
+        "type",
+        _DECLARATION_HEADER_LIMIT,
+    )
 
 
 def _enclosing_type_context(
@@ -779,7 +746,14 @@ def _enclosing_type_context(
         return None
     if not _declaration_prefix_is_valid(declaration, suffix, kind):
         return None
-    if not _compilation_unit_prefix_is_valid(source[: boundary + 1], suffix):
+    if not _compilation_unit_prefix_is_valid(
+        source[: boundary + 1],
+        suffix,
+        None,
+        java_keyword=_JAVA_KEYWORD,
+        csharp_keyword=_CSHARP_RESERVED_KEYWORD,
+        cpp_suffixes=_CPP_SUFFIXES,
+    ):
         return None
     body_end = _matching_delimiter(source, opening_brace, "{", "}")
     if body_end is None or source[body_end + 1 :].strip():
@@ -824,11 +798,32 @@ def _function_placement_is_valid(
             "struct",
         }
     if suffix == ".go":
-        return not braces and _go_compilation_unit_prefix_is_valid(
+        prefix_is_valid = _go_compilation_unit_prefix_is_valid(
             source[: match.start()],
             original_source[: match.start()],
+            go_keyword=_GO_KEYWORD,
         )
-    return not braces
+    else:
+        prefix_is_valid = _compilation_unit_prefix_is_valid(
+            source[: match.start()],
+            suffix,
+            original_source[: match.start()],
+            java_keyword=_JAVA_KEYWORD,
+            csharp_keyword=_CSHARP_RESERVED_KEYWORD,
+            cpp_suffixes=_CPP_SUFFIXES,
+        )
+    return (
+        not braces
+        and prefix_is_valid
+        and top_level_braced_declaration_is_final(
+            source,
+            original_source,
+            match.end("target"),
+            suffix,
+            "function",
+            _DECLARATION_HEADER_LIMIT,
+        )
+    )
 
 
 def _matching_delimiter(

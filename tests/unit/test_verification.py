@@ -2685,6 +2685,26 @@ class TestSpecVerifier:
                 "Provider.cs",
                 "using System.Text;\nnamespace Provider;\npublic class CameraProvider {}\n",
             ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.js",
+                "/* header */\nfunction CameraProvider() {}\n// trailer\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.go",
+                "package provider\nfunc CameraProvider() {}\n// trailer\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.cpp",
+                "/* header */\nvoid CameraProvider() {}\n// trailer\n",
+            ),
+            (
+                "MUST define a CameraProvider struct",
+                "provider.rs",
+                "struct CameraProvider {}\n/* outer /* inner */ trailer */\n",
+            ),
         ],
         ids=[
             "c-canonical-builtin-return-type",
@@ -2693,6 +2713,10 @@ class TestSpecVerifier:
             "go-packaged-struct",
             "java-package-and-import",
             "csharp-namespace-and-using",
+            "javascript-surrounding-comments",
+            "go-trailing-comment",
+            "cpp-surrounding-comments",
+            "rust-nested-trailing-comment",
         ],
     )
     def test_t2_compilation_unit_positive_controls_remain_valid(
@@ -2724,6 +2748,61 @@ class TestSpecVerifier:
                 "MUST define a CameraProvider function",
                 "Provider.cs",
                 "public struct Shell {\n    protected void CameraProvider() {}\n}\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.js",
+                "function CameraProvider() {}\nbanana banana\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.go",
+                "package provider\nfunc CameraProvider() {}\nbanana\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.cpp",
+                "void CameraProvider() {}\nbanana banana\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.rs",
+                "fn CameraProvider() {}\nbanana banana\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.js",
+                "banana banana;\nfunction CameraProvider() {}\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.cpp",
+                "banana banana;\nvoid CameraProvider() {}\n",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "provider.rs",
+                "banana banana;\nfn CameraProvider() {}\n",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "provider.js",
+                "class CameraProvider {}\nbanana banana\n",
+            ),
+            (
+                "MUST define a CameraProvider struct",
+                "provider.go",
+                "package provider\ntype CameraProvider struct {}\nbanana\n",
+            ),
+            (
+                "MUST define a CameraProvider struct",
+                "provider.cpp",
+                "banana banana;\nstruct CameraProvider {};\n",
+            ),
+            (
+                "MUST define a CameraProvider struct",
+                "provider.rs",
+                "struct CameraProvider {}\nbanana banana\n",
             ),
             (
                 "MUST define a CameraProvider function",
@@ -2783,6 +2862,17 @@ class TestSpecVerifier:
         ],
         ids=[
             "csharp-protected-struct-method",
+            "javascript-trailing-invalid-function-content",
+            "go-trailing-invalid-function-content",
+            "cpp-trailing-invalid-function-content",
+            "rust-trailing-invalid-function-content",
+            "javascript-leading-invalid-function-content",
+            "cpp-leading-invalid-function-content",
+            "rust-leading-invalid-function-content",
+            "javascript-trailing-invalid-class-content",
+            "go-trailing-invalid-struct-content",
+            "cpp-leading-invalid-struct-content",
+            "rust-trailing-invalid-struct-content",
             "go-package-less-function",
             "go-package-less-struct",
             "go-invalid-top-level-prefix",
