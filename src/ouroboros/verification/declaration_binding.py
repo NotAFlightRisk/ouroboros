@@ -793,7 +793,7 @@ def _type_body_header_is_valid(
             is None
         ):
             return False
-        relationships: list[str] = []
+        typescript_relationships: list[str] = []
         for relationship in re.finditer(
             r"\b(?:extends|implements)\s+(?P<types>.*?)(?=\bimplements\b|$)",
             header,
@@ -801,8 +801,8 @@ def _type_body_header_is_valid(
             names = _relationship_type_names(relationship.group("types"), declaration_name)
             if names is None:
                 return False
-            relationships.extend(names)
-        return len(set(relationships)) == len(relationships)
+            typescript_relationships.extend(names)
+        return len(set(typescript_relationships)) == len(typescript_relationships)
     if suffix == ".cs":
         cs_name = r"(?:[A-Za-z_]\w*\.)*[A-Z]\w*"
         cs_type = rf"{cs_name}(?:\s*{generic})?"
