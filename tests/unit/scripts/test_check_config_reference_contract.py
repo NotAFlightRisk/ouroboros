@@ -1170,6 +1170,104 @@ dead_reader(config.consensus)
     )
 
 
+def test_runtime_scan_propagates_method_and_imported_helper_arguments(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "helpers.py").write_text(
+        """
+def read_stage(section):
+    return section.stage2_enabled
+
+def read_semantic(section):
+    return section.semantic_model
+
+def unused_helper(section):
+    return section.uncertainty_threshold
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "callers.py").write_text(
+        """
+from helpers import read_stage
+import helpers
+
+class Reader:
+    def read(self, section):
+        return section.stage1_enabled
+
+class BoundReader:
+    def read(self, section):
+        return section.stage3_enabled
+
+class UnusedReader:
+    def read(self, section):
+        return section.satisfaction_threshold
+
+direct_method = Reader().read(config.evaluation)
+reader = BoundReader()
+bound_method = reader.read(config.evaluation)
+imported_helper = read_stage(config.evaluation)
+module_helper = helpers.read_semantic(config.evaluation)
+unknown_receiver = report.read(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        {
+            contract.ConfigField("evaluation", "satisfaction_threshold"),
+            contract.ConfigField("evaluation", "semantic_model"),
+            contract.ConfigField("evaluation", "stage1_enabled"),
+            contract.ConfigField("evaluation", "stage2_enabled"),
+            contract.ConfigField("evaluation", "stage3_enabled"),
+            contract.ConfigField("evaluation", "uncertainty_threshold"),
+        }
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {
+            contract.ConfigField("evaluation", "semantic_model"),
+            contract.ConfigField("evaluation", "stage1_enabled"),
+            contract.ConfigField("evaluation", "stage2_enabled"),
+            contract.ConfigField("evaluation", "stage3_enabled"),
+        }
+    )
+
+
+def test_runtime_scan_defers_lambda_bodies_until_tracked_invocation(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "lambda_calls.py").write_text(
+        """
+lambda section: section.stage1_enabled
+unused = lambda section: section.stage2_enabled
+
+called = lambda section: section.stage3_enabled
+called(config.evaluation)
+
+immediate = (lambda section: section.semantic_model)(config.evaluation)
+default_is_eager = lambda value=config.evaluation.uncertainty_threshold: value
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        {
+            contract.ConfigField("evaluation", "semantic_model"),
+            contract.ConfigField("evaluation", "stage1_enabled"),
+            contract.ConfigField("evaluation", "stage2_enabled"),
+            contract.ConfigField("evaluation", "stage3_enabled"),
+            contract.ConfigField("evaluation", "uncertainty_threshold"),
+        }
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {
+            contract.ConfigField("evaluation", "semantic_model"),
+            contract.ConfigField("evaluation", "stage3_enabled"),
+            contract.ConfigField("evaluation", "uncertainty_threshold"),
+        }
+    )
+
+
 def test_runtime_scan_joins_callable_bindings_across_compound_statement_paths(
     contract, tmp_path: Path
 ) -> None:

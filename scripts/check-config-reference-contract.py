@@ -143,6 +143,8 @@ class _AbstractValue:
     identity: frozenset[int] = frozenset()
     literal: str | None = None
     truth: bool | None = None
+    classes: frozenset[ast.ClassDef] = frozenset()
+    modules: frozenset[str] = frozenset()
 
 
 _UNKNOWN_VALUE = _AbstractValue()
@@ -182,7 +184,11 @@ def _contained_origins(value: _AbstractValue) -> frozenset[str]:
 
 
 def _conservative_value(value: _AbstractValue) -> _AbstractValue:
-    return _AbstractValue(origins=_contained_origins(value))
+    return _AbstractValue(
+        origins=_contained_origins(value),
+        classes=value.classes,
+        modules=value.modules,
+    )
 
 
 def _join_values(*values: _AbstractValue) -> _AbstractValue:
@@ -247,6 +253,8 @@ def _join_values(*values: _AbstractValue) -> _AbstractValue:
         truth=(
             values[0].truth if all(value.truth == values[0].truth for value in values) else None
         ),
+        classes=frozenset().union(*(value.classes for value in values)),
+        modules=frozenset().union(*(value.modules for value in values)),
     )
 
 
@@ -256,13 +264,99 @@ def _key_token(node: ast.AST) -> str:
 
 _DYNAMIC_KEY = "**"
 _MAPPING_MISSING = "<mapping-missing>"
-_FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
+_FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
 _FunctionSet = frozenset[_FunctionNode]
 _BindingSnapshot = tuple[
     dict[str, _AbstractValue],
     dict[str, _FunctionSet],
     dict[str, _AbstractValue],
 ]
+
+
+@dataclass(frozen=True)
+class _IndexedModule:
+    """One parsed source module and its statically declared callables."""
+
+    name: str
+    package: str
+    tree: ast.Module
+    functions: Mapping[str, _FunctionSet]
+    classes: Mapping[str, frozenset[ast.ClassDef]]
+
+
+class _SourceIndex:
+    """Resolve only explicit imports and class receivers inside the scanned tree."""
+
+    def __init__(self, source_root: Path, trees: Mapping[Path, ast.Module]) -> None:
+        self._root_name = source_root.name
+        self._aliases: dict[str, _IndexedModule] = {}
+        self._owners: dict[int, _IndexedModule] = {}
+        self._paths: dict[Path, _IndexedModule] = {}
+        for path, tree in trees.items():
+            relative = path.relative_to(source_root).with_suffix("")
+            parts = list(relative.parts)
+            is_package = bool(parts and parts[-1] == "__init__")
+            if is_package:
+                parts.pop()
+            name = ".".join(parts) or self._root_name
+            package = name if is_package else name.rpartition(".")[0]
+            functions = {
+                statement.name: frozenset({statement})
+                for statement in tree.body
+                if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            classes = {
+                statement.name: frozenset({statement})
+                for statement in tree.body
+                if isinstance(statement, ast.ClassDef)
+            }
+            indexed = _IndexedModule(name, package, tree, functions, classes)
+            self._paths[path] = indexed
+            aliases = {name}
+            if name != self._root_name and not name.startswith(f"{self._root_name}."):
+                aliases.add(f"{self._root_name}.{name}")
+            for alias in aliases:
+                self._aliases[alias] = indexed
+            for candidate in ast.walk(tree):
+                if isinstance(
+                    candidate,
+                    (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
+                ):
+                    self._owners[id(candidate)] = indexed
+
+    def module_for_path(self, path: Path) -> _IndexedModule:
+        return self._paths[path]
+
+    def owner(self, node: ast.AST) -> _IndexedModule | None:
+        return self._owners.get(id(node))
+
+    def resolve_module(
+        self,
+        module: str | None,
+        current: _IndexedModule,
+        level: int = 0,
+    ) -> _IndexedModule | None:
+        if level:
+            package = current.package.split(".") if current.package else []
+            keep = max(0, len(package) - level + 1)
+            parts = [*package[:keep], *(module.split(".") if module else [])]
+            name = ".".join(parts)
+        else:
+            name = module or ""
+        direct = self._aliases.get(name)
+        if direct is not None:
+            return direct
+        return None
+
+    @staticmethod
+    def methods(classes: Iterable[ast.ClassDef], name: str) -> _FunctionSet:
+        return frozenset(
+            statement
+            for class_node in classes
+            for statement in class_node.body
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and statement.name == name
+        )
 
 
 @dataclass(frozen=True)
@@ -288,8 +382,15 @@ class _FlowResult:
 class _RuntimeReadVisitor(ast.NodeVisitor):
     """Collect config reads with conservative flow- and binding-aware provenance."""
 
-    def __init__(self, fields: frozenset[ConfigField]) -> None:
+    def __init__(
+        self,
+        fields: frozenset[ConfigField],
+        source_index: _SourceIndex,
+        module: _IndexedModule,
+    ) -> None:
         self._fields = fields
+        self._source_index = source_index
+        self._module = module
         # Explicit unknown values shadow name-based config inference.
         self._states: list[dict[str, _AbstractValue]] = [{}]
         self._annotations: list[dict[str, _AbstractValue]] = [{}]
@@ -386,17 +487,66 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def _function_value(self, node: ast.AST) -> _FunctionSet:
         if isinstance(node, ast.Name):
             return self._local_functions(node.id)
+        if isinstance(node, ast.Lambda):
+            return frozenset({node})
         if isinstance(node, ast.IfExp):
             truth = self._static_truth(node.test)
             if truth is not None:
                 return self._function_value(node.body if truth else node.orelse)
             return self._function_value(node.body) | self._function_value(node.orelse)
+        if isinstance(node, ast.Attribute):
+            owner = self._expression_value(node.value)
+            imported = frozenset(
+                function
+                for module_name in owner.modules
+                if (module := self._source_index.resolve_module(module_name, self._module))
+                is not None
+                for function in module.functions.get(node.attr, frozenset())
+            )
+            return imported | self._source_index.methods(owner.classes, node.attr)
         return frozenset()
+
+    @staticmethod
+    def _method_is_static(function: _FunctionNode) -> bool:
+        return isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+            _callable_name(decorator) == "staticmethod" for decorator in function.decorator_list
+        )
+
+    def _call_targets(
+        self, node: ast.AST
+    ) -> tuple[tuple[_FunctionNode, _AbstractValue | None], ...]:
+        if isinstance(node, ast.IfExp):
+            truth = self._static_truth(node.test)
+            branches = (
+                (node.body if truth else node.orelse,)
+                if truth is not None
+                else (
+                    node.body,
+                    node.orelse,
+                )
+            )
+            return tuple(target for branch in branches for target in self._call_targets(branch))
+        if isinstance(node, ast.Attribute):
+            owner = self._expression_value(node.value)
+            imported = [
+                (function, None)
+                for module_name in owner.modules
+                if (module := self._source_index.resolve_module(module_name, self._module))
+                is not None
+                for function in module.functions.get(node.attr, frozenset())
+            ]
+            methods = [
+                (function, None if self._method_is_static(function) else owner)
+                for function in self._source_index.methods(owner.classes, node.attr)
+            ]
+            return (*imported, *methods)
+        return tuple((function, None) for function in self._function_value(node))
 
     def _call_has_config_provenance(
         self,
         node: ast.Call,
-        function: ast.FunctionDef | ast.AsyncFunctionDef,
+        function: _FunctionNode,
+        bound_receiver: _AbstractValue | None = None,
     ) -> bool:
         values = [
             self._expression_value(
@@ -406,6 +556,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         ]
         values.extend(self._expression_value(keyword.value) for keyword in node.keywords)
         values.extend(self._scoped_function_arguments(function).values())
+        if bound_receiver is not None:
+            values.append(bound_receiver)
         tracked = TRACKED_SECTIONS | {_CONFIG_ROOT}
         return any(_contained_origins(value) & tracked for value in values)
 
@@ -762,6 +914,28 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             attribute = self._named_value(owner.attributes, node.attr)
             if attribute is not None:
                 return attribute
+            resolved_modules = {
+                child.name
+                for module_name in owner.modules
+                if (
+                    child := self._source_index.resolve_module(
+                        f"{module_name}.{node.attr}", self._module
+                    )
+                )
+                is not None
+            }
+            resolved_classes = frozenset(
+                class_node
+                for module_name in owner.modules
+                if (module := self._source_index.resolve_module(module_name, self._module))
+                is not None
+                for class_node in module.classes.get(node.attr, frozenset())
+            )
+            if resolved_modules or resolved_classes:
+                return _AbstractValue(
+                    modules=frozenset(resolved_modules),
+                    classes=resolved_classes,
+                )
             if node.attr in TRACKED_SECTIONS and _CONFIG_ROOT in owner.origins:
                 return _origin_value(node.attr)
             if node.attr == "TYPE_CHECKING" and _TYPING_MODULE in owner.origins:
@@ -797,7 +971,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 and _CONFIG_ROOT in self._expression_value(node.args[0]).origins
             ):
                 return _origin_value(node.args[1].value)
-            if callable_name is not None and callable_name[:1].isupper():
+            constructor_classes = self._expression_value(node.func).classes
+            if constructor_classes or callable_name is not None and callable_name[:1].isupper():
                 items: list[_AbstractValue] = []
                 for argument in node.args:
                     if isinstance(argument, ast.Starred):
@@ -819,6 +994,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _AbstractValue(
                     items=tuple(items),
                     attributes=tuple(attributes),
+                    classes=constructor_classes,
                 )
             if isinstance(node.func, ast.Name) and node.func.id == "dict":
                 entries: dict[str, _AbstractValue] = {}
@@ -841,17 +1017,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _AbstractValue(
                     entries=tuple(sorted(entries.items())), identity=frozenset({id(node)})
                 )
-            if isinstance(node.func, ast.Name):
-                functions = self._local_functions(node.func.id)
-                values = [
-                    self._local_call_value(node, function)
-                    for function in functions
-                    if self._call_has_config_provenance(node, function)
-                ]
-                if values:
-                    value = _join_values(*values)
-                    self._expression_cache[id(node)] = value
-                    return value
+            values = [
+                self._local_call_value(node, function, bound_receiver)
+                for function, bound_receiver in self._call_targets(node.func)
+                if self._call_has_config_provenance(node, function, bound_receiver)
+            ]
+            if values:
+                value = _join_values(*values)
+                self._expression_cache[id(node)] = value
+                return value
             return _UNKNOWN_VALUE
         if isinstance(node, ast.Subscript):
             owner = self._expression_value(node.value)
@@ -1925,22 +2099,50 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self._annotations[-1][bound] = annotation_value
             if runtime:
                 self._functions[-1][bound] = frozenset()
+                imported_name = alias.name if alias.asname else alias.name.partition(".")[0]
+                module = self._source_index.resolve_module(imported_name, self._module)
                 self._states[-1][bound] = (
-                    _origin_value(_TYPING_MODULE) if alias.name == "typing" else _UNKNOWN_VALUE
+                    _origin_value(_TYPING_MODULE)
+                    if alias.name == "typing"
+                    else _AbstractValue(
+                        modules=frozenset({module.name}) if module is not None else frozenset()
+                    )
                 )
 
     def _bind_import_from(self, node: ast.ImportFrom, *, runtime: bool) -> None:
+        module = self._source_index.resolve_module(node.module, self._module, node.level)
         for alias in node.names:
             if alias.name == "*":
                 continue
             bound = alias.asname or alias.name
             self._annotations[-1][bound] = self._imported_annotation(node.module, alias.name)
             if runtime:
-                self._functions[-1][bound] = frozenset()
+                functions = (
+                    module.functions.get(alias.name, frozenset())
+                    if module is not None
+                    else frozenset()
+                )
+                classes = (
+                    module.classes.get(alias.name, frozenset())
+                    if module is not None
+                    else frozenset()
+                )
+                imported_module = self._source_index.resolve_module(
+                    f"{module.name}.{alias.name}" if module is not None else alias.name,
+                    self._module,
+                )
+                self._functions[-1][bound] = functions
                 self._states[-1][bound] = (
                     _type_checking_value()
                     if node.module == "typing" and alias.name == "TYPE_CHECKING"
-                    else _UNKNOWN_VALUE
+                    else _AbstractValue(
+                        classes=classes,
+                        modules=(
+                            frozenset({imported_module.name})
+                            if imported_module is not None
+                            else frozenset()
+                        ),
+                    )
                 )
 
     def visit_Import(self, node: ast.Import) -> None:
@@ -1985,9 +2187,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             scoped[arguments.kwarg.arg] = self._argument_value(arguments.kwarg)
         return scoped
 
-    def _default_argument_values(
-        self, node: ast.FunctionDef | ast.AsyncFunctionDef
-    ) -> dict[str, _AbstractValue]:
+    def _default_argument_values(self, node: _FunctionNode) -> dict[str, _AbstractValue]:
         previous_cache = self._expression_cache
         self._expression_cache = {}
         try:
@@ -2014,9 +2214,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         finally:
             self._expression_cache = previous_cache
 
-    def _scoped_function_arguments(
-        self, node: ast.FunctionDef | ast.AsyncFunctionDef
-    ) -> dict[str, _AbstractValue]:
+    def _scoped_function_arguments(self, node: _FunctionNode) -> dict[str, _AbstractValue]:
         scoped = self._scoped_arguments(node.args)
         for name, value in self._default_argument_values(node).items():
             scoped[name] = _join_values(scoped[name], value)
@@ -2035,7 +2233,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def _bound_call_arguments(
         self,
         call: ast.Call,
-        function: ast.FunctionDef | ast.AsyncFunctionDef,
+        function: _FunctionNode,
+        bound_receiver: _AbstractValue | None = None,
     ) -> dict[str, _AbstractValue]:
         arguments = function.args
         scoped = self._scoped_arguments(arguments)
@@ -2058,6 +2257,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 elif arguments.vararg is not None:
                     bound.append((index, bindings, (*extras, value)))
             return bound
+
+        if bound_receiver is not None:
+            positional_states = bind_positional(positional_states, bound_receiver)
 
         for argument in call.args:
             if isinstance(argument, ast.Starred):
@@ -2137,7 +2339,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
     def _visit_function_body(
         self,
-        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        node: _FunctionNode,
         scoped: dict[str, _AbstractValue],
     ) -> tuple[_AbstractValue, ...]:
         self._states.append(scoped)
@@ -2154,11 +2356,17 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             function_bindings[node.args.vararg.arg] = frozenset()
         if node.args.kwarg is not None:
             function_bindings[node.args.kwarg.arg] = frozenset()
-        function_bindings.update(self._declared_functions(node.body))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            function_bindings.update(self._declared_functions(node.body))
         self._functions.append(function_bindings)
         previous_cache = self._expression_cache
+        previous_module = self._module
+        self._module = self._source_index.owner(node) or self._module
         self._expression_cache = {}
         try:
+            if isinstance(node, ast.Lambda):
+                self.visit(node.body)
+                return (self._expression_value(node.body),)
             result = self._visit_binding_branch(node.body, self._binding_snapshot())
             return tuple(
                 path.return_value or _UNKNOWN_VALUE
@@ -2167,6 +2375,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             )
         finally:
             self._expression_cache = previous_cache
+            self._module = previous_module
             self._functions.pop()
             self._annotations.pop()
             self._states.pop()
@@ -2174,7 +2383,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def _local_call_value(
         self,
         call: ast.Call,
-        function: ast.FunctionDef | ast.AsyncFunctionDef,
+        function: _FunctionNode,
+        bound_receiver: _AbstractValue | None = None,
     ) -> _AbstractValue:
         function_id = id(function)
         if function_id in self._active_calls:
@@ -2182,7 +2392,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._active_calls.add(function_id)
         try:
             returned = self._visit_function_body(
-                function, self._bound_call_arguments(call, function)
+                function,
+                self._bound_call_arguments(call, function, bound_receiver),
             )
         finally:
             self._active_calls.remove(function_id)
@@ -2303,7 +2514,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self._functions.pop()
             self._annotations.pop()
             self._states.pop()
-        self._states[-1][node.name] = _UNKNOWN_VALUE
+        self._states[-1][node.name] = _AbstractValue(classes=frozenset({node}))
         self._annotations[-1][node.name] = _UNKNOWN_VALUE
         self._functions[-1][node.name] = frozenset()
 
@@ -2311,24 +2522,19 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         for default in (*node.args.defaults, *node.args.kw_defaults):
             if default is not None:
                 self.visit(default)
-        self._states.append(self._scoped_arguments(node.args))
-        self._annotations.append({})
-        self._functions.append({})
-        try:
-            self.visit(node.body)
-        finally:
-            self._functions.pop()
-            self._annotations.pop()
-            self._states.pop()
 
 
 def runtime_reads(source_root: Path, fields: frozenset[ConfigField]) -> frozenset[ConfigField]:
     """Return config fields loaded from their named sections in production Python."""
 
     reads: set[ConfigField] = set()
-    for path in sorted(source_root.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        visitor = _RuntimeReadVisitor(fields)
+    trees = {
+        path: ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for path in sorted(source_root.rglob("*.py"))
+    }
+    source_index = _SourceIndex(source_root, trees)
+    for path, tree in trees.items():
+        visitor = _RuntimeReadVisitor(fields, source_index, source_index.module_for_path(path))
         visitor.visit(tree)
         reads.update(visitor.reads)
     return frozenset(reads)
