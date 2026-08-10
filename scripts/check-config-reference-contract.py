@@ -132,6 +132,9 @@ def _callable_name(node: ast.AST) -> str | None:
     return None
 
 
+_FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+
+
 @dataclass(frozen=True)
 class _AbstractValue:
     """Possible config provenance plus bounded container/object shape."""
@@ -145,6 +148,15 @@ class _AbstractValue:
     truth: bool | None = None
     classes: frozenset[ast.ClassDef] = frozenset()
     modules: frozenset[str] = frozenset()
+    callables: tuple[_CallableTarget, ...] = ()
+
+
+@dataclass(frozen=True)
+class _CallableTarget:
+    """A tracked callable plus the receiver captured by attribute binding."""
+
+    function: _FunctionNode
+    receiver: _AbstractValue | None = None
 
 
 _UNKNOWN_VALUE = _AbstractValue()
@@ -188,6 +200,7 @@ def _conservative_value(value: _AbstractValue) -> _AbstractValue:
         origins=_contained_origins(value),
         classes=value.classes,
         modules=value.modules,
+        callables=value.callables,
     )
 
 
@@ -239,6 +252,12 @@ def _join_values(*values: _AbstractValue) -> _AbstractValue:
             joined.append((name, _join_values(*possibilities)))
         return tuple(joined)
 
+    callables: list[_CallableTarget] = []
+    for value in values:
+        for target in value.callables:
+            if target not in callables:
+                callables.append(target)
+
     return _AbstractValue(
         origins=origins,
         items=items,
@@ -255,6 +274,7 @@ def _join_values(*values: _AbstractValue) -> _AbstractValue:
         ),
         classes=frozenset().union(*(value.classes for value in values)),
         modules=frozenset().union(*(value.modules for value in values)),
+        callables=tuple(callables),
     )
 
 
@@ -264,7 +284,6 @@ def _key_token(node: ast.AST) -> str:
 
 _DYNAMIC_KEY = "**"
 _MAPPING_MISSING = "<mapping-missing>"
-_FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
 _FunctionSet = frozenset[_FunctionNode]
 _BindingSnapshot = tuple[
     dict[str, _AbstractValue],
@@ -280,8 +299,8 @@ class _IndexedModule:
     name: str
     package: str
     tree: ast.Module
-    functions: Mapping[str, _FunctionSet]
-    classes: Mapping[str, frozenset[ast.ClassDef]]
+    functions: dict[str, _FunctionSet]
+    classes: dict[str, frozenset[ast.ClassDef]]
 
 
 class _SourceIndex:
@@ -292,6 +311,8 @@ class _SourceIndex:
         self._aliases: dict[str, _IndexedModule] = {}
         self._owners: dict[int, _IndexedModule] = {}
         self._paths: dict[Path, _IndexedModule] = {}
+        self._reexports: dict[tuple[str, str], tuple[_IndexedModule, str]] = {}
+        self._class_bases: dict[int, tuple[ast.ClassDef, ...]] = {}
         for path, tree in trees.items():
             relative = path.relative_to(source_root).with_suffix("")
             parts = list(relative.parts)
@@ -323,6 +344,153 @@ class _SourceIndex:
                     (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
                 ):
                     self._owners[id(candidate)] = indexed
+        for indexed in self._paths.values():
+            self._index_exports(indexed)
+        for indexed in self._paths.values():
+            self._index_class_bases(indexed)
+
+    @staticmethod
+    def _assigned_names(target: ast.AST) -> frozenset[str]:
+        if isinstance(target, ast.Name):
+            return frozenset({target.id})
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return frozenset().union(
+                *(_SourceIndex._assigned_names(element) for element in target.elts)
+            )
+        if isinstance(target, ast.Starred):
+            return _SourceIndex._assigned_names(target.value)
+        return frozenset()
+
+    def _clear_export(self, module: _IndexedModule, name: str) -> None:
+        module.functions.pop(name, None)
+        module.classes.pop(name, None)
+        self._reexports.pop((module.name, name), None)
+
+    def _index_exports(self, module: _IndexedModule) -> None:
+        """Index final explicit module bindings without suffix/name guessing."""
+
+        module.functions.clear()
+        module.classes.clear()
+        for statement in module.tree.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self._clear_export(module, statement.name)
+                module.functions[statement.name] = frozenset({statement})
+            elif isinstance(statement, ast.ClassDef):
+                self._clear_export(module, statement.name)
+                module.classes[statement.name] = frozenset({statement})
+            elif isinstance(statement, ast.ImportFrom):
+                target = self.resolve_module(statement.module, module, statement.level)
+                for alias in statement.names:
+                    if alias.name == "*":
+                        continue
+                    bound = alias.asname or alias.name
+                    self._clear_export(module, bound)
+                    if target is not None:
+                        self._reexports[(module.name, bound)] = (target, alias.name)
+            elif isinstance(statement, ast.Import):
+                for alias in statement.names:
+                    self._clear_export(module, alias.asname or alias.name.partition(".")[0])
+            elif isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = (
+                    statement.targets if isinstance(statement, ast.Assign) else (statement.target,)
+                )
+                for target in targets:
+                    for name in self._assigned_names(target):
+                        self._clear_export(module, name)
+
+    def resolve_functions(
+        self,
+        module: _IndexedModule,
+        name: str,
+        seen: frozenset[tuple[str, str]] = frozenset(),
+    ) -> _FunctionSet:
+        key = (module.name, name)
+        if key in seen:
+            return frozenset()
+        direct = module.functions.get(name)
+        if direct is not None:
+            return direct
+        edge = self._reexports.get(key)
+        if edge is None:
+            return frozenset()
+        target, target_name = edge
+        return self.resolve_functions(target, target_name, seen | {key})
+
+    def resolve_classes(
+        self,
+        module: _IndexedModule,
+        name: str,
+        seen: frozenset[tuple[str, str]] = frozenset(),
+    ) -> frozenset[ast.ClassDef]:
+        key = (module.name, name)
+        if key in seen:
+            return frozenset()
+        direct = module.classes.get(name)
+        if direct is not None:
+            return direct
+        edge = self._reexports.get(key)
+        if edge is None:
+            return frozenset()
+        target, target_name = edge
+        return self.resolve_classes(target, target_name, seen | {key})
+
+    def _index_class_bases(self, module: _IndexedModule) -> None:
+        class_bindings: dict[str, frozenset[ast.ClassDef]] = {}
+        module_bindings: dict[str, _IndexedModule] = {}
+        for statement in module.tree.body:
+            if isinstance(statement, ast.Import):
+                for alias in statement.names:
+                    bound = alias.asname or alias.name.partition(".")[0]
+                    imported_name = alias.name if alias.asname else alias.name.partition(".")[0]
+                    imported = self.resolve_module(imported_name, module)
+                    class_bindings.pop(bound, None)
+                    if imported is not None:
+                        module_bindings[bound] = imported
+            elif isinstance(statement, ast.ImportFrom):
+                imported = self.resolve_module(statement.module, module, statement.level)
+                for alias in statement.names:
+                    if alias.name == "*":
+                        continue
+                    bound = alias.asname or alias.name
+                    module_bindings.pop(bound, None)
+                    class_bindings[bound] = (
+                        self.resolve_classes(imported, alias.name)
+                        if imported is not None
+                        else frozenset()
+                    )
+                    child = self.resolve_module(
+                        f"{imported.name}.{alias.name}" if imported is not None else alias.name,
+                        module,
+                    )
+                    if child is not None:
+                        module_bindings[bound] = child
+            elif isinstance(statement, ast.ClassDef):
+                bases: list[ast.ClassDef] = []
+                for base in statement.bases:
+                    if isinstance(base, ast.Name):
+                        for resolved in class_bindings.get(base.id, frozenset()):
+                            if resolved not in bases:
+                                bases.append(resolved)
+                    elif isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name):
+                        imported = module_bindings.get(base.value.id)
+                        if imported is not None:
+                            for resolved in self.resolve_classes(imported, base.attr):
+                                if resolved not in bases:
+                                    bases.append(resolved)
+                self._class_bases[id(statement)] = tuple(bases)
+                class_bindings[statement.name] = frozenset({statement})
+                module_bindings.pop(statement.name, None)
+            elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                class_bindings.pop(statement.name, None)
+                module_bindings.pop(statement.name, None)
+            elif isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = (
+                    statement.targets if isinstance(statement, ast.Assign) else (statement.target,)
+                )
+                for target in targets:
+                    for name in self._assigned_names(target):
+                        class_bindings.pop(name, None)
+                        module_bindings.pop(name, None)
 
     def module_for_path(self, path: Path) -> _IndexedModule:
         return self._paths[path]
@@ -348,15 +516,27 @@ class _SourceIndex:
             return direct
         return None
 
-    @staticmethod
-    def methods(classes: Iterable[ast.ClassDef], name: str) -> _FunctionSet:
-        return frozenset(
-            statement
-            for class_node in classes
-            for statement in class_node.body
-            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and statement.name == name
-        )
+    def methods(self, classes: Iterable[ast.ClassDef], name: str) -> _FunctionSet:
+        """Resolve the first known implementation along each exact class lineage."""
+
+        def inherited(class_node: ast.ClassDef, seen: frozenset[int]) -> _FunctionSet:
+            if id(class_node) in seen:
+                return frozenset()
+            direct = frozenset(
+                statement
+                for statement in class_node.body
+                if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and statement.name == name
+            )
+            if direct:
+                return direct
+            for base in self._class_bases.get(id(class_node), ()):
+                resolved = inherited(base, seen | {id(class_node)})
+                if resolved:
+                    return resolved
+            return frozenset()
+
+        return frozenset().union(*(inherited(class_node, frozenset()) for class_node in classes))
 
 
 @dataclass(frozen=True)
@@ -485,6 +665,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         return frozenset()
 
     def _function_value(self, node: ast.AST) -> _FunctionSet:
+        value = self._expression_value(node)
+        if value.callables:
+            return frozenset(target.function for target in value.callables)
         if isinstance(node, ast.Name):
             return self._local_functions(node.id)
         if isinstance(node, ast.Lambda):
@@ -494,16 +677,6 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if truth is not None:
                 return self._function_value(node.body if truth else node.orelse)
             return self._function_value(node.body) | self._function_value(node.orelse)
-        if isinstance(node, ast.Attribute):
-            owner = self._expression_value(node.value)
-            imported = frozenset(
-                function
-                for module_name in owner.modules
-                if (module := self._source_index.resolve_module(module_name, self._module))
-                is not None
-                for function in module.functions.get(node.attr, frozenset())
-            )
-            return imported | self._source_index.methods(owner.classes, node.attr)
         return frozenset()
 
     @staticmethod
@@ -515,39 +688,19 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def _call_targets(
         self, node: ast.AST
     ) -> tuple[tuple[_FunctionNode, _AbstractValue | None], ...]:
-        if isinstance(node, ast.IfExp):
-            truth = self._static_truth(node.test)
-            branches = (
-                (node.body if truth else node.orelse,)
-                if truth is not None
-                else (
-                    node.body,
-                    node.orelse,
-                )
-            )
-            return tuple(target for branch in branches for target in self._call_targets(branch))
-        if isinstance(node, ast.Attribute):
-            owner = self._expression_value(node.value)
-            imported = [
-                (function, None)
-                for module_name in owner.modules
-                if (module := self._source_index.resolve_module(module_name, self._module))
-                is not None
-                for function in module.functions.get(node.attr, frozenset())
-            ]
-            methods = [
-                (function, None if self._method_is_static(function) else owner)
-                for function in self._source_index.methods(owner.classes, node.attr)
-            ]
-            return (*imported, *methods)
+        value = self._expression_value(node)
+        if value.callables:
+            return tuple((target.function, target.receiver) for target in value.callables)
         return tuple((function, None) for function in self._function_value(node))
 
-    def _call_has_config_provenance(
+    def _call_has_relevant_provenance(
         self,
         node: ast.Call,
         function: _FunctionNode,
-        bound_receiver: _AbstractValue | None = None,
+        bound_receiver: _AbstractValue | None,
     ) -> bool:
+        if isinstance(function, ast.Lambda):
+            return True
         values = [
             self._expression_value(
                 argument.value if isinstance(argument, ast.Starred) else argument
@@ -555,11 +708,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             for argument in node.args
         ]
         values.extend(self._expression_value(keyword.value) for keyword in node.keywords)
-        values.extend(self._scoped_function_arguments(function).values())
-        if bound_receiver is not None:
-            values.append(bound_receiver)
+        values.extend(self._default_argument_values(function).values())
         tracked = TRACKED_SECTIONS | {_CONFIG_ROOT}
-        return any(_contained_origins(value) & tracked for value in values)
+        if any(_contained_origins(value) & tracked or value.callables for value in values):
+            return True
+        return bound_receiver is not None and bool(_contained_origins(bound_receiver) & tracked)
 
     @staticmethod
     def _named_value(
@@ -626,6 +779,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             identity=value.identity,
             literal=value.literal,
             truth=value.truth,
+            classes=value.classes,
+            modules=value.modules,
+            callables=value.callables,
         )
 
     def _replace_shared_value(
@@ -666,6 +822,45 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             identity=owner.identity,
             literal=owner.literal,
             truth=False if not normalized else None,
+            classes=owner.classes,
+            modules=owner.modules,
+            callables=owner.callables,
+        )
+
+    @staticmethod
+    def _sequence_replacement(
+        owner: _AbstractValue,
+        items: tuple[_AbstractValue, ...],
+    ) -> _AbstractValue:
+        return _AbstractValue(
+            origins=owner.origins,
+            items=items,
+            entries=owner.entries,
+            attributes=owner.attributes,
+            identity=owner.identity,
+            literal=owner.literal,
+            truth=False if not items else None,
+            classes=owner.classes,
+            modules=owner.modules,
+            callables=owner.callables,
+        )
+
+    @staticmethod
+    def _attribute_replacement(
+        owner: _AbstractValue,
+        attributes: tuple[tuple[str, _AbstractValue], ...],
+    ) -> _AbstractValue:
+        return _AbstractValue(
+            origins=owner.origins,
+            items=owner.items,
+            entries=owner.entries,
+            attributes=attributes,
+            identity=owner.identity,
+            literal=owner.literal,
+            truth=owner.truth,
+            classes=owner.classes,
+            modules=owner.modules,
+            callables=owner.callables,
         )
 
     @staticmethod
@@ -908,7 +1103,20 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         if isinstance(node, ast.Constant):
             return _AbstractValue(literal=_key_token(node), truth=bool(node.value))
         if isinstance(node, ast.Name):
-            return self._name_value(node.id)
+            value = self._name_value(node.id)
+            if value.callables:
+                return value
+            functions = self._local_functions(node.id)
+            if functions:
+                return _join_values(
+                    value,
+                    _AbstractValue(
+                        callables=tuple(_CallableTarget(function) for function in functions)
+                    ),
+                )
+            return value
+        if isinstance(node, ast.Lambda):
+            return _AbstractValue(callables=(_CallableTarget(node),))
         if isinstance(node, ast.Attribute):
             owner = self._expression_value(node.value)
             attribute = self._named_value(owner.attributes, node.attr)
@@ -929,12 +1137,31 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 for module_name in owner.modules
                 if (module := self._source_index.resolve_module(module_name, self._module))
                 is not None
-                for class_node in module.classes.get(node.attr, frozenset())
+                for class_node in self._source_index.resolve_classes(module, node.attr)
             )
-            if resolved_modules or resolved_classes:
+            imported_functions = frozenset(
+                function
+                for module_name in owner.modules
+                if (module := self._source_index.resolve_module(module_name, self._module))
+                is not None
+                for function in self._source_index.resolve_functions(module, node.attr)
+            )
+            methods = self._source_index.methods(owner.classes, node.attr)
+            if resolved_modules or resolved_classes or imported_functions or methods:
+                callable_targets = [
+                    *(_CallableTarget(function) for function in imported_functions),
+                    *(
+                        _CallableTarget(
+                            function,
+                            None if self._method_is_static(function) else owner,
+                        )
+                        for function in methods
+                    ),
+                ]
                 return _AbstractValue(
                     modules=frozenset(resolved_modules),
                     classes=resolved_classes,
+                    callables=tuple(callable_targets),
                 )
             if node.attr in TRACKED_SECTIONS and _CONFIG_ROOT in owner.origins:
                 return _origin_value(node.attr)
@@ -971,6 +1198,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 and _CONFIG_ROOT in self._expression_value(node.args[0]).origins
             ):
                 return _origin_value(node.args[1].value)
+            values = [
+                self._local_call_value(node, function, bound_receiver)
+                for function, bound_receiver in self._call_targets(node.func)
+                if self._call_has_relevant_provenance(node, function, bound_receiver)
+            ]
+            if values:
+                value = _join_values(*values)
+                self._expression_cache[id(node)] = value
+                return value
             constructor_classes = self._expression_value(node.func).classes
             if constructor_classes or callable_name is not None and callable_name[:1].isupper():
                 items: list[_AbstractValue] = []
@@ -994,6 +1230,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _AbstractValue(
                     items=tuple(items),
                     attributes=tuple(attributes),
+                    identity=frozenset({id(node)}),
                     classes=constructor_classes,
                 )
             if isinstance(node.func, ast.Name) and node.func.id == "dict":
@@ -1017,15 +1254,6 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _AbstractValue(
                     entries=tuple(sorted(entries.items())), identity=frozenset({id(node)})
                 )
-            values = [
-                self._local_call_value(node, function, bound_receiver)
-                for function, bound_receiver in self._call_targets(node.func)
-                if self._call_has_config_provenance(node, function, bound_receiver)
-            ]
-            if values:
-                value = _join_values(*values)
-                self._expression_cache[id(node)] = value
-                return value
             return _UNKNOWN_VALUE
         if isinstance(node, ast.Subscript):
             owner = self._expression_value(node.value)
@@ -1054,7 +1282,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     sequence_items.extend(value.items)
                 else:
                     sequence_items.append(value)
-            return _AbstractValue(items=tuple(sequence_items), truth=self._static_truth(node))
+            return _AbstractValue(
+                items=tuple(sequence_items),
+                identity=(frozenset({id(node)}) if isinstance(node, ast.List) else frozenset()),
+                truth=self._static_truth(node),
+            )
         if isinstance(node, ast.Dict):
             literal_entries: dict[str, _AbstractValue] = {}
             for key, item in zip(node.keys, node.values, strict=True):
@@ -1363,10 +1595,32 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self._visit_store_target(target.value)
 
     def _assign_store_target(self, target: ast.expr, value: _AbstractValue) -> None:
+        if isinstance(target, ast.Attribute):
+            owner = self._expression_value(target.value)
+            if owner.attributes is None and not owner.identity:
+                return
+            attributes = dict(owner.attributes or ())
+            attributes[target.attr] = value
+            replacement = self._attribute_replacement(owner, tuple(sorted(attributes.items())))
+            self._replace_shared_value(owner, replacement, target.value)
+            return
         if not isinstance(target, ast.Subscript):
             return
         owner = self._expression_value(target.value)
         if owner.entries is None and not owner.identity:
+            return
+        if owner.items is not None:
+            items = list(owner.items)
+            if isinstance(target.slice, ast.Constant) and isinstance(target.slice.value, int):
+                index = target.slice.value
+                if -len(items) <= index < len(items):
+                    items[index] = value
+                else:
+                    return
+            else:
+                items = [_join_values(item, value) for item in items]
+            replacement = self._sequence_replacement(owner, tuple(items))
+            self._replace_shared_value(owner, replacement, target.value)
             return
         entries = dict(owner.entries or ())
         if isinstance(target.slice, ast.Constant):
@@ -2118,12 +2372,12 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self._annotations[-1][bound] = self._imported_annotation(node.module, alias.name)
             if runtime:
                 functions = (
-                    module.functions.get(alias.name, frozenset())
+                    self._source_index.resolve_functions(module, alias.name)
                     if module is not None
                     else frozenset()
                 )
                 classes = (
-                    module.classes.get(alias.name, frozenset())
+                    self._source_index.resolve_classes(module, alias.name)
                     if module is not None
                     else frozenset()
                 )

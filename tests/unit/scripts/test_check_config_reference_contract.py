@@ -1301,6 +1301,201 @@ selected(config.evaluation)
     )
 
 
+def test_runtime_scan_preserves_callable_provenance_across_runtime_boundaries(
+    contract, tmp_path: Path
+) -> None:
+    package = tmp_path / "readers"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        "from .public import read_semantic\n",
+        encoding="utf-8",
+    )
+    (package / "public.py").write_text(
+        "from .helpers import read_semantic\n",
+        encoding="utf-8",
+    )
+    (package / "helpers.py").write_text(
+        """
+def read_semantic(section):
+    return section.semantic_model
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "base_reader.py").write_text(
+        """
+class BaseReader:
+    def read(self, section):
+        return section.satisfaction_threshold
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "callable_boundaries.py").write_text(
+        """
+from base_reader import BaseReader
+from readers import read_semantic
+
+class Reader:
+    def read(self, section):
+        return section.stage1_enabled
+
+class InheritedReader(BaseReader):
+    pass
+
+class Holder:
+    pass
+
+reader = Reader()
+callback = reader.read
+reader = report
+callback(config.evaluation)
+
+callbacks = {"stage": lambda section: section.stage2_enabled}
+callbacks["stage"](config.evaluation)
+listed_callbacks = [lambda section: section.stage2_enabled]
+listed_callbacks[0](config.evaluation)
+holder = Holder(callback=lambda section: section.stage2_enabled)
+holder.callback(config.evaluation)
+
+def invoke(callback, section):
+    return callback(section)
+
+invoke(lambda section: section.stage3_enabled, config.evaluation)
+
+def Choose(callback):
+    return callback
+
+chosen = Choose(lambda section: section.stage3_enabled)
+chosen(config.evaluation)
+read_semantic(config.evaluation)
+InheritedReader().read(config.evaluation)
+
+def invoke_without_arguments(callback):
+    return callback()
+
+invoke_without_arguments(lambda: config.evaluation.uncertainty_threshold)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        {
+            contract.ConfigField("evaluation", "satisfaction_threshold"),
+            contract.ConfigField("evaluation", "semantic_model"),
+            contract.ConfigField("evaluation", "stage1_enabled"),
+            contract.ConfigField("evaluation", "stage2_enabled"),
+            contract.ConfigField("evaluation", "stage3_enabled"),
+            contract.ConfigField("evaluation", "uncertainty_threshold"),
+        }
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_rejects_callable_binding_overreach(contract, tmp_path: Path) -> None:
+    package = tmp_path / "overwritten"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        """
+from .helpers import read_judge
+read_judge = external
+""",
+        encoding="utf-8",
+    )
+    (package / "helpers.py").write_text(
+        """
+def read_judge(section):
+    return section.judge_model
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "callable_negatives.py").write_text(
+        """
+from overwritten import read_judge
+
+class Reader:
+    def read(self, section):
+        return section.models
+
+reader = Reader()
+reader = report
+unknown_method = reader.read
+unknown_method(config.consensus)
+
+callbacks = {
+    "unused": lambda section: section.min_models,
+    "selected": external,
+}
+callbacks["selected"](config.consensus)
+callbacks["unused"] = external
+callbacks["unused"](config.consensus)
+callbacks.get("missing", external)(config.consensus)
+
+handlers = [lambda section: section.threshold]
+alias = handlers
+alias[0] = external
+handlers[0](config.consensus)
+
+class Holder:
+    pass
+
+holder = Holder(callback=lambda section: section.models)
+holder.callback = external
+holder.callback(config.consensus)
+
+def invoke(callback, section):
+    return callback(section)
+
+invoke(lambda section: section.diversity_required, report.consensus)
+read_judge(config.consensus)
+
+class BaseReader:
+    def read(self, section):
+        return section.advocate_model
+
+class OverrideReader(BaseReader):
+    def read(self, section):
+        return None
+
+OverrideReader().read(config.consensus)
+
+class FirstReader:
+    def read(self, section):
+        return None
+
+class SecondReader:
+    def read(self, section):
+        return section.devil_model
+
+class OrderedReader(FirstReader, SecondReader):
+    pass
+
+OrderedReader().read(config.consensus)
+
+class ExternalReader(external.BaseReader):
+    pass
+
+class CoincidentalReader:
+    def read(self, section):
+        return section.models
+
+ExternalReader().read(config.consensus)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        {
+            contract.ConfigField("consensus", "advocate_model"),
+            contract.ConfigField("consensus", "devil_model"),
+            contract.ConfigField("consensus", "diversity_required"),
+            contract.ConfigField("consensus", "judge_model"),
+            contract.ConfigField("consensus", "min_models"),
+            contract.ConfigField("consensus", "models"),
+            contract.ConfigField("consensus", "threshold"),
+        }
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset()
+
+
 def test_runtime_scan_joins_callable_bindings_across_compound_statement_paths(
     contract, tmp_path: Path
 ) -> None:
