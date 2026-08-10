@@ -1183,12 +1183,23 @@ def read_semantic(section):
 
 def unused_helper(section):
     return section.uncertainty_threshold
+
+def read_threshold(section):
+    return section.satisfaction_threshold
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "vendor").mkdir()
+    (tmp_path / "vendor" / "helpers.py").write_text(
+        """
+def read_stage(section):
+    return section.uncertainty_threshold
 """,
         encoding="utf-8",
     )
     (tmp_path / "callers.py").write_text(
         """
-from helpers import read_stage
+from helpers import read_stage, read_threshold
 import helpers
 
 class Reader:
@@ -1203,12 +1214,20 @@ class UnusedReader:
     def read(self, section):
         return section.satisfaction_threshold
 
+class ReboundReader:
+    def read(self, section):
+        return section.uncertainty_threshold
+
 direct_method = Reader().read(config.evaluation)
 reader = BoundReader()
 bound_method = reader.read(config.evaluation)
 imported_helper = read_stage(config.evaluation)
 module_helper = helpers.read_semantic(config.evaluation)
 unknown_receiver = report.read(config.evaluation)
+unrelated_argument = read_threshold(report.evaluation)
+rebound = ReboundReader()
+rebound = report
+rebound_method = rebound.read(config.evaluation)
 """,
         encoding="utf-8",
     )
@@ -1246,12 +1265,24 @@ called(config.evaluation)
 
 immediate = (lambda section: section.semantic_model)(config.evaluation)
 default_is_eager = lambda value=config.evaluation.uncertainty_threshold: value
+
+aliased = lambda section: section.satisfaction_threshold
+alias = aliased
+alias(config.evaluation)
+
+left = lambda section: section.stage1_enabled
+right = lambda section: section.satisfaction_threshold
+selected = left
+if runtime_condition:
+    selected = right
+selected(config.evaluation)
 """,
         encoding="utf-8",
     )
     fields = frozenset(
         {
             contract.ConfigField("evaluation", "semantic_model"),
+            contract.ConfigField("evaluation", "satisfaction_threshold"),
             contract.ConfigField("evaluation", "stage1_enabled"),
             contract.ConfigField("evaluation", "stage2_enabled"),
             contract.ConfigField("evaluation", "stage3_enabled"),
@@ -1262,6 +1293,8 @@ default_is_eager = lambda value=config.evaluation.uncertainty_threshold: value
     assert contract.runtime_reads(tmp_path, fields) == frozenset(
         {
             contract.ConfigField("evaluation", "semantic_model"),
+            contract.ConfigField("evaluation", "satisfaction_threshold"),
+            contract.ConfigField("evaluation", "stage1_enabled"),
             contract.ConfigField("evaluation", "stage3_enabled"),
             contract.ConfigField("evaluation", "uncertainty_threshold"),
         }
