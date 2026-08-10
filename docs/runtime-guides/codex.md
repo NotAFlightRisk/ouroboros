@@ -156,7 +156,7 @@ When `runtime_profile` is unset (the default), Ouroboros emits `codex exec` exac
 
 ### `ooo` Skill Availability on Codex
 
-After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are installed into `~/.codex/skills/ouroboros-*` and the routing rules into `~/.codex/rules/`. To refresh only those artifacts after upgrading Ouroboros, run `ouroboros codex refresh`; it does not modify `~/.codex/config.toml` or `~/.ouroboros/config.yaml`. The table below shows each skill and its CLI equivalent for terminal-only workflows.
+After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are installed into `~/.codex/skills/ouroboros-*` and the routing rules into `~/.codex/rules/`. To refresh only those artifacts after upgrading Ouroboros, run `ouroboros codex refresh`; it does not modify `~/.codex/config.toml` or `~/.ouroboros/config.yaml`. `resolve_packaged_codex_assets()` currently resolves and installs 22 `skills/*/SKILL.md` bundles. The table below is a **subset** — the ones most often driven from a terminal — with their CLI equivalents. See the Korean guide for the complete 22-row table.
 
 | `ooo` Skill | Codex session | CLI equivalent (Terminal) |
 |-------------|---------------|--------------------------|
@@ -173,7 +173,7 @@ After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are in
 | `ooo welcome` | Yes | *(MCP only)* |
 | `ooo update` | Yes | `ouroboros update` |
 | `ooo help` | Yes | `ouroboros --help` |
-| `ooo qa` | Yes | *(MCP only)* |
+| `ooo qa` | Yes | `ouroboros qa` |
 | `ooo setup` | Yes | `ouroboros setup --runtime codex` |
 | `ooo publish` | Yes | *(no direct `ouroboros publish` subcommand; skill/runtime flow uses `gh` CLI)* |
 
@@ -268,12 +268,12 @@ Codex CLI and Claude Code are independent runtime backends with different tool s
 | Aspect | Codex CLI | Claude Code |
 |--------|-----------|-------------|
 | What it is | Ouroboros session runtime backed by Codex CLI transport | Anthropic's agentic coding tool |
-| Authentication | OpenAI API key | Max Plan subscription |
+| Authentication | Codex account sign-in or OpenAI API key | Max Plan subscription |
 | Model | Codex's current default model (recommended) | Claude (via claude-agent-sdk) |
 | Sandbox | Codex CLI's own sandbox model | Claude Code's permission system |
 | Tool surface | Codex-native tools (file I/O, shell) | Read, Write, Edit, Bash, Glob, Grep |
 | Session model | Session-aware via runtime handles, resume IDs, and skill dispatch | Native Claude session context |
-| Cost model | OpenAI API usage charges | Included in Max Plan subscription |
+| Cost model | Follows whatever your Codex CLI is configured for — Codex OAuth or OpenAI API key | Included in Max Plan subscription |
 | Windows (native) | Not supported | Experimental |
 
 > **Note:** The Ouroboros workflow model (Seed files, acceptance criteria, evaluation principles) is identical across runtimes. However, because Codex CLI and Claude Code have different underlying agent capabilities, tool access, and sandboxing, they may produce different execution paths and results for the same Seed file.
@@ -301,14 +301,40 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `goal` | Yes | Primary objective |
-| `task_type` | No | Execution strategy: `code` (default), `research`, or `analysis` |
+| `goal` | Yes | Primary objective. Cannot be empty |
+| `task_type` | No | Execution strategy: `code` (default), `research`, `analysis`, `artifact`, `document`, `documentation`, or `presentation` |
+| `brownfield_context` | No | Existing-codebase context. Empty means greenfield |
 | `constraints` | No | Hard constraints to satisfy |
 | `acceptance_criteria` | No | Specific success criteria |
 | `ontology_schema` | Yes | Output structure definition |
 | `evaluation_principles` | No | Principles for evaluation |
 | `exit_conditions` | No | Termination conditions |
-| `metadata.ambiguity_score` | Yes | Must be <= 0.2 |
+| `metadata` | Yes | Generation metadata |
+| `metadata.ambiguity_score` | No | Ambiguity at generation time. Defaults to `0.15`, accepts `0.0`-`1.0` |
+
+> **Where the 0.2 threshold actually applies.** The field itself accepts `0.0`-`1.0`
+> ([`core/seed.py:409`](../../src/ouroboros/core/seed.py)). The 0.2 gate is enforced at **seed
+> generation**: if the interview cannot get below it, no seed is produced. That gate has an explicit
+> opt-out — the CLI's "Generate Seed anyway" and the MCP `force` parameter. Bypassing it still records
+> the real score in seed metadata and emits the bypass to the audit log.
+>
+> `ouroboros auto` re-checks readiness during a run, but **conditionally**, and the
+> two suppression cases have opposite consequences
+> ([`auto/grading.py:225-226`](../../src/ouroboros/auto/grading.py)):
+>
+> - **Ledger closure** (`closure_mode` of `ledger_only` or `safe_default`, not
+>   degraded): the ledger's structural completeness is the acceptance signal and
+>   the LLM-derived score is stale by design, so a Seed scoring well above 0.2 can
+>   grade A and **run**. Other grading axes still apply.
+> - **Degraded Seed**: the blocker is suppressed only so the run can emit a typed
+>   partial product. A blocker-free degraded Seed goes straight to the
+>   partial-product terminal as `AutoPhase.COMPLETE` **regardless of grade or
+>   `may_run`** ([`auto/pipeline.py:1286`](../../src/ouroboros/auto/pipeline.py)).
+>   It never reaches RUN. Remaining blockers are hard safety blockers and still
+>   terminate.
+>
+> In practice: a hand-written seed carrying a high `ambiguity_score` is not blocked by
+> `ouroboros run workflow`. The field is provenance, not an enforcement gate.
 
 ## Troubleshooting
 
