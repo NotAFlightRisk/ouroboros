@@ -37,6 +37,8 @@ _INTERFACE_SUFFIXES = frozenset({".cs", ".java", ".kt", ".kts"})
 _STRUCT_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cs", ".h", ".hpp", ".mm", ".rs", ".swift"})
 _C_LIKE_FUNCTION_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cs", ".h", ".hpp", ".java", ".mm"})
 _CPP_SUFFIXES = frozenset({".cc", ".cpp", ".h", ".hpp", ".mm"})
+_BRACED_TYPE_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".h", ".hpp", ".mm"})
+_BRACED_FUNCTION_SUFFIXES = frozenset({".go", ".js", ".jsx", ".pl", ".rs", ".ts", ".tsx"})
 _FUNCTION_KEYWORDS = {
     ".go": "func",
     ".js": "function",
@@ -230,6 +232,12 @@ def _source_span_has_declaration_kind(
                 and _inside_cpp_template_parameter_list(source, match.start())
             ):
                 continue
+            if kind in {"class", "struct"} and suffix in _BRACED_TYPE_SUFFIXES:
+                declaration_tail = source[match.end("target") : match.end("target") + 512]
+                body_start = declaration_tail.find("{")
+                declaration_end = declaration_tail.find(";")
+                if body_start < 0 or (declaration_end >= 0 and declaration_end < body_start):
+                    continue
             target_start = match.start("target")
             declaration_boundary = max(source.rfind(marker, 0, target_start) for marker in ";{}")
             target_prefix = source[declaration_boundary + 1 : target_start]
@@ -247,6 +255,36 @@ def _source_span_has_declaration_kind(
                     source[parameters_start + 1 : parameters_end],
                     original_source[parameters_start + 1 : parameters_end],
                 ):
+                    continue
+            if kind == "function" and suffix in _BRACED_FUNCTION_SUFFIXES:
+                declaration_tail = source[match.end("target") : match.end("target") + 512]
+                body_start = declaration_tail.find("{")
+                declaration_end = declaration_tail.find(";")
+                if body_start < 0 or (declaration_end >= 0 and declaration_end < body_start):
+                    continue
+            if kind == "function" and suffix in {".kt", ".kts", ".swift"}:
+                line_start = source.rfind("\n", 0, match.start()) + 1
+                declaration_prefix = source[line_start : match.start()]
+                if suffix in {".kt", ".kts"} and re.search(
+                    r"\b(?:abstract|expect|external)\b",
+                    declaration_prefix,
+                ):
+                    continue
+                line_end = source.find("\n", match.end())
+                if line_end < 0:
+                    line_end = len(source)
+                declaration_tail = source[match.end("target") : line_end]
+                parameters_start = declaration_tail.find("(")
+                parameters_end = declaration_tail.rfind(")")
+                implementation_tail = (
+                    ""
+                    if parameters_start < 0 or parameters_end < parameters_start
+                    else declaration_tail[parameters_end + 1 :]
+                )
+                has_body = "{" in implementation_tail
+                if suffix in {".kt", ".kts"}:
+                    has_body = has_body or "=" in implementation_tail
+                if not has_body:
                     continue
             return True
     return False

@@ -698,8 +698,16 @@ async def test_model_cannot_substitute_function_evidence_for_a_class_criterion(
             True,
         ),
         ("provider.go", "func CameraProvider() {}\n", r"func\s+CameraProvider", True),
+        (
+            "provider.ts",
+            "function CameraProvider(): void {}\n",
+            r"function\s+CameraProvider",
+            True,
+        ),
+        ("provider.swift", "func CameraProvider() {}\n", r"func\s+CameraProvider", True),
+        ("provider.rs", "fn CameraProvider() {}\n", r"fn\s+CameraProvider", True),
     ],
-    ids=["invalid-java-def", "java", "kotlin", "c", "cpp", "go"],
+    ids=["invalid-java-def", "java", "kotlin", "c", "cpp", "go", "typescript", "swift", "rust"],
 )
 async def test_declaration_kind_is_bound_to_the_file_language_before_formal_promotion(
     tmp_path: Any,
@@ -790,6 +798,42 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
             "Widget CameraProvider(foo.value);\n",
             r"Widget\s+CameraProvider",
         ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.ts",
+            "function CameraProvider(): void;\n",
+            r"function\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.kt",
+            "expect fun CameraProvider(): Unit\n",
+            r"fun\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.swift",
+            "protocol Provider { func CameraProvider() }\n",
+            r"func\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "provider.rs",
+            "trait Provider { fn CameraProvider(); }\n",
+            r"fn\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "provider.hpp",
+            "class CameraProvider;\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider struct",
+            "provider.hpp",
+            "struct CameraProvider;\n",
+            r"struct\s+CameraProvider",
+        ),
     ],
     ids=[
         "enum-class",
@@ -801,6 +845,12 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         "cpp-template-parameter",
         "cpp-direct-initializer",
         "cpp-member-direct-initializer",
+        "typescript-signature",
+        "kotlin-expect",
+        "swift-protocol-requirement",
+        "rust-trait-signature",
+        "cpp-class-forward-declaration",
+        "cpp-struct-forward-declaration",
     ],
 )
 async def test_type_declaration_cannot_reach_formal_pass(
