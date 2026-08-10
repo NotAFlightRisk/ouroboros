@@ -19,16 +19,13 @@ _C_STYLE_SUFFIXES = frozenset(
         ".cc",
         ".cpp",
         ".cs",
-        ".css",
         ".go",
         ".h",
         ".hpp",
         ".java",
         ".kt",
         ".kts",
-        ".m",
         ".mm",
-        ".scss",
         ".swift",
     }
 )
@@ -46,6 +43,7 @@ _HASH_STYLE_SUFFIXES = frozenset(
 _CONFIG_SUFFIXES = frozenset({".cfg", ".conf", ".ini", ".toml", ".yaml", ".yml"})
 _NON_SOURCE_SUFFIXES = frozenset({".csv", ".json", ".lock", ".md"})
 _MARKUP_SUFFIXES = frozenset({".htm", ".html", ".svg", ".xml"})
+_STYLE_SUFFIXES = frozenset({".css", ".scss"})
 
 
 def is_known_non_evidence_format(
@@ -58,6 +56,7 @@ def is_known_non_evidence_format(
     return (
         suffix in _NON_SOURCE_SUFFIXES
         or suffix in _MARKUP_SUFFIXES
+        or suffix in _STYLE_SUFFIXES
         or suffix == ".txt"
         or (suffix in _CONFIG_SUFFIXES and not allow_configuration)
     )
@@ -636,6 +635,9 @@ def mask_non_executable_source(
     if suffix in _MARKUP_SUFFIXES:
         # Markup syntax can prove a requested path, but not an executable T2
         # declaration: tag and attribute names are caller-unrelated structure.
+        return None
+    if suffix in _STYLE_SUFFIXES:
+        # Stylesheet selectors/declarations are not programming declarations.
         return None
     if suffix in _NON_SOURCE_SUFFIXES:
         return None
