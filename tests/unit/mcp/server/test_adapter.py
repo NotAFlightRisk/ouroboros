@@ -1423,7 +1423,7 @@ Parallel Execution Verification Report
         [
             (
                 VerificationTier.T2_STRUCTURAL,
-                "MUST define a CameraProvider interface",
+                "MUST define a CameraProvider class",
                 "main.py",
                 "class CameraProvider:\n    pass\n",
                 r"(?i)class\s+cameraprovider",
@@ -1433,7 +1433,7 @@ Parallel Execution Verification Report
             ),
             (
                 VerificationTier.T2_STRUCTURAL,
-                "MUST define a CameraProvider interface",
+                "MUST define a CameraProvider class",
                 "main.py",
                 "class cameraprovider:\n    pass\n",
                 r"(?i)class\s+cameraprovider",
@@ -1597,7 +1597,7 @@ Parallel Execution Verification Report
         self, tmp_path: Any
     ) -> None:
         """A real target may verify without consuming it, and names its provenance."""
-        ac_text = "MUST define a CameraProvider interface"
+        ac_text = "MUST define a CameraProvider class"
         (tmp_path / "main.py").write_text("class CameraProvider:\n    pass\n")
         assertion = SpecAssertion(
             ac_index=0,

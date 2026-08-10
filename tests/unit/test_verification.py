@@ -1126,6 +1126,84 @@ class TestSpecVerifier:
         assert summary.reports[0].verified_pass is False
         assert summary.reports[0].results[0].verified is False
 
+    @pytest.mark.parametrize(
+        ("ac_text", "filename", "content", "pattern"),
+        [
+            (
+                "MUST define a CameraProvider interface",
+                "provider.go",
+                "//go:build ignore && !ignore\npackage provider\n"
+                "type CameraProvider interface {}\n",
+                r"type\s+CameraProvider\s+interface",
+            ),
+            (
+                "MUST define a CameraProvider trait",
+                "provider.rs",
+                "#[cfg(any())]\ntrait CameraProvider {}\n",
+                r"trait\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.hs",
+                "{-# LANGUAGE CPP #-}\n#if 0\nclass CameraProvider a\n#endif\n",
+                r"class\s+CameraProvider",
+            ),
+        ],
+        ids=["go-build-constraint", "rust-cfg", "haskell-cpp"],
+    )
+    def test_build_excluded_declarations_fail_the_file_closed(
+        self,
+        ac_text: str,
+        filename: str,
+        content: str,
+        pattern: str,
+    ) -> None:
+        project = self._create_project({filename: content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint=filename,
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is False
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+
+    @pytest.mark.parametrize(
+        ("content", "pattern", "verified"),
+        [
+            ("class CameraProvider:\n    pass\n", r"class\s+CameraProvider", True),
+            ("def CameraProvider():\n    pass\n", r"def\s+CameraProvider", False),
+        ],
+        ids=["matching-class", "function-substitution"],
+    )
+    def test_t2_declaration_kind_is_bound_to_the_caller_criterion(
+        self,
+        content: str,
+        pattern: str,
+        verified: bool,
+    ) -> None:
+        project = self._create_project({"provider.py": content})
+        assertion = _SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+        )
+
+        result = SpecVerifier(project_dir=project).verify_all((assertion,)).reports[0].results[0]
+
+        assert result.verified is verified
+        assert result.evidence_source == ("file_content" if verified else "")
+
     def test_mixed_criterion_text_under_one_index_rejects_the_whole_group(self) -> None:
         project = self._create_project({"main.py": "class Unrelated:\n    pass\n"})
         trusted = SpecAssertion(
@@ -2743,7 +2821,7 @@ class TestSpecVerifier:
         project = self._create_project({"main.py": "class CameraProvider:\n    pass\n"})
         assertion = SpecAssertion(
             ac_index=0,
-            ac_text="MUST define a CameraProvider interface",
+            ac_text="MUST define a CameraProvider class",
             tier=VerificationTier.T2_STRUCTURAL,
             pattern=pattern,
             expected_value="CameraProvider",

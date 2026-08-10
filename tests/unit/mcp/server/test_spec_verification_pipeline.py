@@ -502,6 +502,89 @@ async def test_unclassified_language_literals_cannot_reach_formal_pass(
     assert formal.ac_results[0].final_verdict == "fail"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ac_text", "filename", "content", "pattern"),
+    [
+        (
+            "MUST define a CameraProvider interface",
+            "provider.go",
+            "//go:build ignore && !ignore\npackage provider\ntype CameraProvider interface {}\n",
+            r"type\s+CameraProvider\s+interface",
+        ),
+        (
+            "MUST define a CameraProvider trait",
+            "provider.rs",
+            "#[cfg(any())]\ntrait CameraProvider {}\n",
+            r"trait\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.hs",
+            "{-# LANGUAGE CPP #-}\n#if 0\nclass CameraProvider a\n#endif\n",
+            r"class\s+CameraProvider",
+        ),
+    ],
+    ids=["go-build-constraint", "rust-cfg", "haskell-cpp"],
+)
+async def test_build_excluded_declarations_cannot_reach_formal_pass(
+    tmp_path: Any,
+    ac_text: str,
+    filename: str,
+    content: str,
+    pattern: str,
+) -> None:
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": pattern,
+                "expected_value": "CameraProvider",
+                "file_hint": filename,
+                "description": "Build-excluded declaration is not evidence",
+            }
+        ],
+    )
+    (tmp_path / filename).write_text(content)
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
+@pytest.mark.asyncio
+async def test_model_cannot_substitute_function_evidence_for_a_class_criterion(
+    tmp_path: Any,
+) -> None:
+    ac_text = "MUST define a CameraProvider class"
+    assertions = await _extract(
+        ac_text,
+        [
+            {
+                "ac_index": 0,
+                "tier": "t2_structural",
+                "pattern": r"def\s+CameraProvider",
+                "expected_value": "CameraProvider",
+                "file_hint": "*.py",
+                "description": "Substitute a function for the requested class",
+            }
+        ],
+    )
+    (tmp_path / "provider.py").write_text("def CameraProvider():\n    pass\n")
+
+    verification = SpecVerifier(str(tmp_path)).verify_all(assertions)
+    formal = _formal_verdict(ac_text, verification)
+
+    assert verification.reports[0].verified_pass is False
+    assert formal.final_approved is False
+    assert formal.ac_results[0].final_verdict == "fail"
+
+
 def test_mixed_criterion_text_cannot_borrow_a_report_identity_for_formal_pass(
     tmp_path: Any,
 ) -> None:

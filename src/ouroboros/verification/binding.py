@@ -19,6 +19,19 @@ _QUOTED_TOKEN = re.compile(
 _STRUCTURAL_WORDS = frozenset(
     {"class", "constant", "directory", "file", "flag", "function", "interface", "struct", "trait"}
 )
+_DECLARATION_KIND_WORD = re.compile(
+    r"\b(?P<kind>class|function|interface|struct|trait)\b",
+    re.IGNORECASE,
+)
+_DECLARATION_KIND_BEFORE_TARGET = re.compile(
+    r"\b(?P<kind>class|function|interface|struct|trait)\b"
+    r"(?:\s+(?:must|shall|should)\s+be)?(?:\s+(?:called|named))?\s*$",
+    re.IGNORECASE,
+)
+_DECLARATION_KIND_AFTER_TARGET = re.compile(
+    r"^\s+(?P<kind>class|function|interface|struct|trait)\b",
+    re.IGNORECASE,
+)
 _CONSTANT_BINDING_SUFFIX = re.compile(
     r"(?:=|:|\bto\b|\bof\b|\bis\b|\bshould\s+be\b|\bmust\s+be\b)\s*$",
     re.IGNORECASE,
@@ -285,6 +298,35 @@ def literal_spans(text: str, literal: str) -> tuple[tuple[int, int], ...]:
 def literal_is_bound(text: str, literal: str) -> bool:
     """Whether ``literal`` is present as a complete value in trusted text."""
     return bool(literal_spans(text, literal))
+
+
+def acceptance_declaration_kind(
+    ac_text: str,
+    target: str,
+) -> tuple[bool, str | None]:
+    """Return whether the AC requires a declaration kind and its exact kind.
+
+    The extraction model may select a regex, but it cannot reinterpret a
+    caller-authored ``class`` as a function (or vice versa). Only a small,
+    explicit grammar is authoritative. If a declaration kind is mentioned but
+    cannot be bound uniquely to every occurrence of ``target``, callers must
+    fail closed.
+    """
+    if not target.isidentifier() or _DECLARATION_KIND_WORD.search(ac_text) is None:
+        return False, None
+
+    kinds: set[str] = set()
+    spans = literal_spans(ac_text, target)
+    if not spans:
+        return True, None
+    for start, end in spans:
+        before = _DECLARATION_KIND_BEFORE_TARGET.search(ac_text[:start])
+        after = _DECLARATION_KIND_AFTER_TARGET.match(ac_text[end:])
+        bound = after or before
+        if bound is None:
+            return True, None
+        kinds.add(bound.group("kind").casefold())
+    return (True, next(iter(kinds))) if len(kinds) == 1 else (True, None)
 
 
 def _looks_code_like(token: str) -> bool:

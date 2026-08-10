@@ -14,10 +14,8 @@ import logging
 import os
 import re
 
-# The standard library's own regex parser, so that a pattern can be inspected
-# without being run. Private, but stable across 3.11–3.14 and vendored by every
-# CPython this runs on; the alternative is to hand-write a regex parser, and a
-# second parser that disagrees with the real one in a corner is worse than this.
+# The standard-library parser permits inspection without running model regexes.
+# It is private but more reliable than maintaining a second regex parser here.
 from re import _parser as regex_parser
 from typing import NamedTuple
 
@@ -27,6 +25,7 @@ from ouroboros.verification.binding import (
     literal_is_bound,
     literal_spans,
 )
+from ouroboros.verification.declaration_binding import match_has_bound_declaration_kind
 from ouroboros.verification.models import (
     ACVerificationReport,
     EvidencePolarity,
@@ -1894,11 +1893,27 @@ class SpecVerifier:
             if evidence_content is None:
                 continue
             readable_files += 1
-            bound = self._find_bound_match(content_pattern, evidence_content, assertion)
-            # Preserve #1837's exact named-file blank-subject contract: the
-            # pattern proves the file contents and the criterion target binds to
-            # the project-relative file name rather than to content that, by
-            # definition, is absent.
+            bound = next(
+                (
+                    candidate
+                    for candidate in self._bound_matches(
+                        content_pattern,
+                        evidence_content,
+                        assertion,
+                    )
+                    if match_has_bound_declaration_kind(
+                        content_pattern,
+                        candidate[0],
+                        evidence_content,
+                        assertion,
+                        candidate[1],
+                        _finite_target_assertions(content_pattern, candidate[1]),
+                    )
+                ),
+                None,
+            )
+            # Preserve #1837: blank content binds through the exact relative
+            # filename because the target is absent from the proven subject.
             if bound is None and blank_subject_contract:
                 bound = self._find_bound_match(
                     content_pattern,

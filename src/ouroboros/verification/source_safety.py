@@ -411,6 +411,16 @@ def _rust_raw_string_ranges(text: str) -> tuple[tuple[int, int], ...] | None:
     return tuple(ranges)
 
 
+def _has_rust_conditional_attribute(text: str) -> bool:
+    """Whether Rust source contains build-conditional item attributes."""
+    return bool(re.search(r"#\s*!?\s*\[\s*cfg(?:_attr)?\b", text))
+
+
+def _has_go_build_constraint(text: str) -> bool:
+    """Whether Go source eligibility depends on a build constraint."""
+    return bool(re.search(r"(?m)^[ \t]*//(?:go:build\b|[ \t]*\+build\b)", text))
+
+
 def _lua_long_delimiter(text: str, index: int) -> tuple[int, str] | None:
     """Return a Lua long-bracket opener length and its exact closer."""
     if index >= len(text) or text[index] != "[":
@@ -592,6 +602,8 @@ def mask_non_executable_source(
         ranges = _python_noncode_ranges(text)
         return None if ranges is None else _mask_ranges(text, ranges)
     if suffix in _C_STYLE_SUFFIXES:
+        if suffix == ".go" and _has_go_build_constraint(text):
+            return None
         ranges = _c_style_noncode_ranges(text, suffix)
         return None if ranges is None else _mask_ranges(text, ranges)
     if suffix in _JAVASCRIPT_SUFFIXES:
@@ -613,7 +625,11 @@ def mask_non_executable_source(
             block_markers=(("/*", "*/"),),
             nested_blocks=True,
         )
-        return None if ranges is None else _mask_ranges(text, (*raw_ranges, *ranges))
+        if ranges is None:
+            return None
+        combined = (*raw_ranges, *ranges)
+        masked = _mask_ranges(text, combined)
+        return None if _has_rust_conditional_attribute(masked) else masked
     if suffix in _HASH_STYLE_SUFFIXES:
         if _has_unsupported_shell_container(text):
             return None
@@ -686,7 +702,12 @@ def mask_non_executable_source(
         # Quasiquotes and Template Haskell quotes are arbitrary containers.
         if re.search(r"\[(?:[A-Za-z_][\w'.]*)?\|", masked):
             return None
-        return masked
+        preprocessor = _c_preprocessor_ranges(masked)
+        if preprocessor is None:
+            return None
+        combined = (*ranges, *preprocessor)
+        masked = _mask_ranges(text, combined)
+        return None if re.search(r"\\\r?\n", masked) else masked
     if suffix in _MARKUP_SUFFIXES:
         # Markup syntax can prove a requested path, but not an executable T2
         # declaration: tag and attribute names are caller-unrelated structure.
