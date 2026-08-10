@@ -1035,6 +1035,18 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         (
             "MUST define a CameraProvider class",
             "Provider.java",
+            "if (true)\nclass CameraProvider {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.cs",
+            "if (true)\nclass CameraProvider {}\n",
+            r"class\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider class",
+            "Provider.java",
             "public private class CameraProvider {}\n",
             r"class\s+CameraProvider",
         ),
@@ -1078,6 +1090,18 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
             "MUST define a CameraProvider function",
             "Provider.cs",
             "public void CameraProvider() {}\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.java",
+            "if (true) class X { public void CameraProvider() {} }\n",
+            r"void\s+CameraProvider",
+        ),
+        (
+            "MUST define a CameraProvider function",
+            "Provider.cs",
+            "if (true) class X { public void CameraProvider() {} }\n",
             r"void\s+CameraProvider",
         ),
     ],
@@ -1130,6 +1154,8 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         "rust-invalid-generic-clause",
         "javascript-invalid-body",
         "javascript-conditional-class-prefix",
+        "java-multiline-conditional-class",
+        "csharp-multiline-conditional-class",
         "java-conflicting-class-modifiers",
         "rust-unsupported-function-prefix",
         "java-conflicting-function-modifiers",
@@ -1138,6 +1164,8 @@ async def test_declaration_kind_is_bound_to_the_file_language_before_formal_prom
         "javascript-class-function-declaration",
         "go-nested-named-function",
         "csharp-top-level-method",
+        "java-method-in-invalid-type-shell",
+        "csharp-method-in-invalid-type-shell",
     ],
 )
 async def test_type_declaration_cannot_reach_formal_pass(

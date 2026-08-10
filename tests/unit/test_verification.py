@@ -1698,6 +1698,18 @@ class TestSpecVerifier:
             (
                 "MUST define a CameraProvider class",
                 "Provider.java",
+                "if (true)\nclass CameraProvider {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.cs",
+                "if (true)\nclass CameraProvider {}\n",
+                r"class\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider class",
+                "Provider.java",
                 "public private class CameraProvider {}\n",
                 r"class\s+CameraProvider",
             ),
@@ -1741,6 +1753,18 @@ class TestSpecVerifier:
                 "MUST define a CameraProvider function",
                 "Provider.cs",
                 "public void CameraProvider() {}\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.java",
+                "if (true) class X { public void CameraProvider() {} }\n",
+                r"void\s+CameraProvider",
+            ),
+            (
+                "MUST define a CameraProvider function",
+                "Provider.cs",
+                "if (true) class X { public void CameraProvider() {} }\n",
                 r"void\s+CameraProvider",
             ),
         ],
@@ -1801,6 +1825,8 @@ class TestSpecVerifier:
             "rust-invalid-generic-clause",
             "javascript-invalid-body",
             "javascript-conditional-class-prefix",
+            "java-multiline-conditional-class",
+            "csharp-multiline-conditional-class",
             "java-conflicting-class-modifiers",
             "rust-unsupported-function-prefix",
             "java-conflicting-function-modifiers",
@@ -1809,6 +1835,8 @@ class TestSpecVerifier:
             "javascript-class-function-declaration",
             "go-nested-named-function",
             "csharp-top-level-method",
+            "java-method-in-invalid-type-shell",
+            "csharp-method-in-invalid-type-shell",
         ],
     )
     def test_t2_declaration_kind_rejects_type_declarations(

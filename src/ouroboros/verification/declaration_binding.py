@@ -376,20 +376,77 @@ def _enclosing_braces(source: str, position: int) -> tuple[int, ...] | None:
     return tuple(stack)
 
 
-def _enclosing_type_kind(source: str, opening_brace: int) -> str | None:
-    """Classify one canonical type header owning an opening brace."""
+def _compilation_unit_prefix_is_valid(prefix: str, suffix: str) -> bool:
+    """Admit only a provable top-level context before a declaration."""
+    qualified_name = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+    if suffix == ".java":
+        return (
+            re.fullmatch(
+                rf"\s*(?:package\s+{qualified_name}\s*;\s*)?"
+                rf"(?:import\s+(?:static\s+)?{qualified_name}(?:\.\*)?\s*;\s*)*",
+                prefix,
+            )
+            is not None
+        )
+    if suffix == ".cs":
+        directive = (
+            rf"extern\s+alias\s+[A-Za-z_]\w*"
+            rf"|(?:global\s+)?using\s+(?:static\s+)?{qualified_name}"
+            rf"|namespace\s+{qualified_name}"
+        )
+        return re.fullmatch(rf"\s*(?:(?:{directive})\s*;\s*)*", prefix) is not None
+
+    boundary = max(prefix.rfind(";"), prefix.rfind("{"), prefix.rfind("}"))
+    context = prefix[boundary + 1 :]
+    if suffix in _CPP_SUFFIXES and re.fullmatch(
+        r"\s*template\s*<[^(){};=]+>\s*",
+        context,
+    ):
+        return True
+    return not context.strip()
+
+
+def _type_placement_is_valid(source: str, match: re.Match[str], suffix: str) -> bool:
+    """Require a top-level type in a canonical compilation-unit context."""
+    if suffix == ".py":
+        return True
+    braces = _enclosing_braces(source, match.start())
+    if braces is None or braces:
+        return False
+    if not _compilation_unit_prefix_is_valid(source[: match.start()], suffix):
+        return False
+    if suffix not in {".cs", ".java"}:
+        return True
+    search_end = min(len(source), match.end("target") + _DECLARATION_HEADER_LIMIT)
+    body_start = source.find("{", match.end("target"), search_end)
+    body_end = _matching_delimiter(source, body_start, "{", "}")
+    return body_end is not None and not source[body_end + 1 :].strip()
+
+
+def _enclosing_type_kind(source: str, opening_brace: int, suffix: str) -> str | None:
+    """Classify one complete canonical type header owning an opening brace."""
     boundary = max(
         source.rfind(";", 0, opening_brace),
         source.rfind("{", 0, opening_brace),
         source.rfind("}", 0, opening_brace),
     )
     header = source[boundary + 1 : opening_brace]
-    declaration = re.search(
-        r"\b(?P<kind>class|enum|interface|record|struct)\s+[A-Za-z_]\w*"
-        r"[^;{}]*$",
+    declaration = re.fullmatch(
+        rf"\s*(?P<prefix>(?:{_PREFIX_TOKEN}\s+)*)"
+        r"(?P<kind>class|enum|interface|record|struct)\s+[A-Za-z_]\w*\s*",
         header,
     )
-    return None if declaration is None else declaration.group("kind")
+    if declaration is None:
+        return None
+    kind = declaration.group("kind")
+    if not _declaration_prefix_is_valid(declaration, suffix, "class"):
+        return None
+    if not _compilation_unit_prefix_is_valid(source[: boundary + 1], suffix):
+        return None
+    body_end = _matching_delimiter(source, opening_brace, "{", "}")
+    if body_end is None or source[body_end + 1 :].strip():
+        return None
+    return kind
 
 
 def _function_placement_is_valid(source: str, match: re.Match[str], suffix: str) -> bool:
@@ -400,13 +457,13 @@ def _function_placement_is_valid(source: str, match: re.Match[str], suffix: str)
     if braces is None:
         return False
     if suffix == ".java":
-        return len(braces) == 1 and _enclosing_type_kind(source, braces[0]) in {
+        return len(braces) == 1 and _enclosing_type_kind(source, braces[0], suffix) in {
             "class",
             "enum",
             "record",
         }
     if suffix == ".cs":
-        return len(braces) == 1 and _enclosing_type_kind(source, braces[0]) in {
+        return len(braces) == 1 and _enclosing_type_kind(source, braces[0], suffix) in {
             "class",
             "record",
             "struct",
@@ -1070,6 +1127,12 @@ def _source_span_has_declaration_kind(
             if match.span("target") != target_span:
                 continue
             if not _declaration_prefix_is_valid(match, suffix, kind):
+                continue
+            if kind in {"class", "interface", "struct", "trait"} and not _type_placement_is_valid(
+                source,
+                match,
+                suffix,
+            ):
                 continue
             if kind == "function" and not _function_placement_is_valid(
                 source,
