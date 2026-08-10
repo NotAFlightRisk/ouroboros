@@ -11,6 +11,12 @@ from ouroboros.verification.binding import (
     literal_is_bound,
     literal_spans,
 )
+from ouroboros.verification.cpp_declarations import (
+    CPP_BUILTIN_PARAMETER_TYPES,
+    CPP_BUILTIN_TYPE_SEQUENCES,
+    cpp_parameter_bindings,
+    cpp_parameters_are_declarations,
+)
 from ouroboros.verification.models import SpecAssertion, VerificationTier
 
 _CLASS_SUFFIXES = frozenset(
@@ -110,64 +116,7 @@ _C_LIKE_FUNCTION = (
     r"\([^;{{}}\r\n]*\)[ \t]*(?:throws\s+[^;{{\r\n]+)?\{{"
 )
 
-_CPP_BUILTIN_PARAMETER_TYPES = frozenset(
-    {
-        "bool",
-        "char",
-        "char8_t",
-        "char16_t",
-        "char32_t",
-        "double",
-        "float",
-        "int",
-        "long",
-        "short",
-        "signed",
-        "unsigned",
-        "void",
-        "wchar_t",
-    }
-)
 _CPP_FUNCTION_MODIFIERS = frozenset({"extern", "inline", "static"})
-_CPP_BUILTIN_RETURN_TYPE_SEQUENCES = frozenset(
-    {
-        ("bool",),
-        ("char",),
-        ("char8_t",),
-        ("char16_t",),
-        ("char32_t",),
-        ("double",),
-        ("float",),
-        ("int",),
-        ("long",),
-        ("long", "double"),
-        ("long", "int"),
-        ("long", "long"),
-        ("long", "long", "int"),
-        ("short",),
-        ("short", "int"),
-        ("signed",),
-        ("signed", "char"),
-        ("signed", "int"),
-        ("signed", "long"),
-        ("signed", "long", "int"),
-        ("signed", "long", "long"),
-        ("signed", "long", "long", "int"),
-        ("signed", "short"),
-        ("signed", "short", "int"),
-        ("unsigned",),
-        ("unsigned", "char"),
-        ("unsigned", "int"),
-        ("unsigned", "long"),
-        ("unsigned", "long", "int"),
-        ("unsigned", "long", "long"),
-        ("unsigned", "long", "long", "int"),
-        ("unsigned", "short"),
-        ("unsigned", "short", "int"),
-        ("void",),
-        ("wchar_t",),
-    }
-)
 _JAVA_KEYWORD = (
     r"_|abstract|assert|boolean|break|byte|case|catch|char|class|const|continue|"
     r"default|do|double|else|enum|exports|extends|false|final|finally|float|for|"
@@ -220,21 +169,6 @@ _RUST_KEYWORD = (
     r"enum|extern|false|final|fn|for|gen|if|impl|in|let|loop|macro|match|mod|move|"
     r"mut|override|priv|pub|ref|return|safe|self|Self|static|struct|super|trait|true|"
     r"try|type|typeof|union|unsafe|unsized|use|virtual|where|while|yield"
-)
-_CPP_EXPRESSION_WORDS = frozenset(
-    {
-        "and",
-        "and_eq",
-        "bitand",
-        "bitor",
-        "compl",
-        "not",
-        "not_eq",
-        "or",
-        "or_eq",
-        "xor",
-        "xor_eq",
-    }
 )
 _C_LIKE_DECLARATION_MODIFIERS = frozenset(
     {
@@ -557,7 +491,7 @@ def _c_like_function_prefix_is_valid(
             or {"extern", "static"}.issubset(cpp_modifiers)
         ):
             return False
-        if type_specifiers in _CPP_BUILTIN_RETURN_TYPE_SEQUENCES:
+        if type_specifiers in CPP_BUILTIN_TYPE_SEQUENCES:
             return True
         return len(type_specifiers) == 1 and (
             type_specifiers[0] == "auto" or type_specifiers[0][:1].isupper()
@@ -1149,7 +1083,7 @@ def _function_body_header_is_valid(header: str, suffix: str) -> bool:
     if suffix == ".swift":
         return (
             re.fullmatch(
-                r"\s*(?:async\s+)?(?:(?:rethrows|throws)\s+)?"
+                r"\s*(?:async\s+)?(?:throws\s+)?"
                 r"(?:->\s*(?:Void|\(\s*\)))?\s*",
                 header,
             )
@@ -1171,6 +1105,7 @@ def _declaration_body_is_valid(
     declaration_kind: str,
     suffix: str,
     function_prefix: str = "",
+    function_parameter_bindings: tuple[tuple[str, tuple[str, ...], bool], ...] = (),
 ) -> bool:
     """Admit only body syntax the verifier can prove without a language parser."""
     stripped = body.strip()
@@ -1212,19 +1147,34 @@ def _declaration_body_is_valid(
         ):
             return False
         value = return_statement.group("value")
+        parameter_binding = next(
+            (binding for binding in function_parameter_bindings if binding[0] == value),
+            None,
+        )
+        return_type_words = tuple(
+            word for word in return_words if word not in _CPP_FUNCTION_MODIFIERS
+        )
         if is_pointer:
             if value == "nullptr":
                 return suffix in _CPP_SUFFIXES
             if re.fullmatch(r"[-+]?\d+", value):
                 return int(value) == 0
-            return value not in {"false", "true"}
+            return (
+                parameter_binding is not None
+                and parameter_binding[2]
+                and (return_type_words == ("auto",) or return_type_words == parameter_binding[1])
+            )
         if value == "nullptr":
             return False
         if re.fullmatch(r"[-+]?\d+|false|true", value):
-            return return_words[-1] == "auto" or return_words[
-                -1
-            ] in _CPP_BUILTIN_PARAMETER_TYPES - {"void"}
-        return True
+            return return_words[-1] == "auto" or return_words[-1] in CPP_BUILTIN_PARAMETER_TYPES - {
+                "void"
+            }
+        return (
+            parameter_binding is not None
+            and not parameter_binding[2]
+            and (return_type_words == ("auto",) or return_type_words == parameter_binding[1])
+        )
     return False
 
 
@@ -1236,6 +1186,7 @@ def _complete_braced_body(
     declaration_name: str = "",
     declaration_modifiers: frozenset[str] = frozenset(),
     function_prefix: str = "",
+    function_parameter_bindings: tuple[tuple[str, tuple[str, ...], bool], ...] = (),
 ) -> bool:
     """Require one bounded declaration header and its complete braced body."""
     search_end = min(len(source), header_start + _DECLARATION_HEADER_LIMIT)
@@ -1259,11 +1210,18 @@ def _complete_braced_body(
     body_end = _matching_delimiter(source, body_start, "{", "}")
     if body_end is None:
         return False
+    if (
+        declaration_kind != "function"
+        and suffix in {".c", ".cc", ".cpp", ".h", ".hpp", ".mm"}
+        and re.match(r"\s*;", source[body_end + 1 :]) is None
+    ):
+        return False
     if not _declaration_body_is_valid(
         source[body_start + 1 : body_end],
         declaration_kind,
         suffix,
         function_prefix,
+        function_parameter_bindings,
     ):
         return False
     return all(
@@ -1369,7 +1327,7 @@ def _function_parameters_are_valid(
     masked = source[parameters_start + 1 : parameters_end]
     original = original_source[parameters_start + 1 : parameters_end]
     if suffix in _CPP_SUFFIXES:
-        return _cpp_parameters_are_declarations(masked, original)
+        return cpp_parameters_are_declarations(masked, original)
     if suffix == ".c":
         return masked.strip() in {"", "void"} and original.strip() in {"", "void"}
     if masked != original:
@@ -1586,6 +1544,12 @@ def _complete_function_definition(
             ):
                 return False
             header_start = parameters_end + 1
+        function_parameter_bindings = ()
+        if parameters_end is not None and suffix in _CPP_SUFFIXES:
+            parameters_start = source.find("(", match.end("target"), parameters_end + 1)
+            function_parameter_bindings = cpp_parameter_bindings(
+                source[parameters_start + 1 : parameters_end]
+            )
         return _complete_braced_body(
             source,
             header_start,
@@ -1596,6 +1560,7 @@ def _complete_function_definition(
                 if suffix in _C_LIKE_FUNCTION_SUFFIXES
                 else ""
             ),
+            function_parameter_bindings=function_parameter_bindings,
         )
     return False
 
@@ -1620,46 +1585,6 @@ def _inside_cpp_template_parameter_list(source: str, position: int) -> bool:
         if depth:
             return True
     return False
-
-
-def _split_cpp_parameters(parameters: str) -> tuple[str, ...] | None:
-    """Split a flat C++ parameter list, failing closed on nested expressions."""
-    if any(character in parameters for character in "(){}[]"):
-        return None
-    return tuple(part.strip() for part in parameters.split(","))
-
-
-def _cpp_parameters_are_declarations(masked: str, original: str) -> bool:
-    """Reject C++ initializer expressions that resemble function parameters."""
-    if not masked.strip():
-        return not original.strip()
-    if '"' in original or "'" in original:
-        return False
-    parameters = _split_cpp_parameters(masked)
-    if parameters is None or any(not parameter for parameter in parameters):
-        return False
-    for parameter in parameters:
-        declaration = parameter.split("=", 1)[0].strip()
-        if declaration == "...":
-            continue
-        if re.search(r"\b(?:false|nullptr|true)\b|(?:^|\W)(?:0[xX][0-9A-Fa-f]+|\d)", declaration):
-            return False
-        if re.search(r"[+/%!?|^~]", declaration) or "&&" in declaration:
-            return False
-        identifiers = re.findall(r"\b[A-Za-z_]\w*\b", declaration)
-        if any(identifier in _CPP_EXPRESSION_WORDS for identifier in identifiers):
-            return False
-        if any(identifier in _CPP_BUILTIN_PARAMETER_TYPES for identifier in identifiers):
-            continue
-        if re.search(r"(?:->|::)|[.*&<>:-]", declaration):
-            return False
-        if len(identifiers) >= 2 and re.fullmatch(
-            r"[A-Za-z_]\w*(?:\s+[A-Za-z_]\w*)+",
-            declaration,
-        ):
-            continue
-        return False
-    return True
 
 
 def _declaration_patterns(file_path: str, kind: str) -> tuple[str, ...]:
@@ -1785,7 +1710,7 @@ def _source_span_has_declaration_kind(
                 parameters_end = source.rfind(")", parameters_start, match.end())
                 if parameters_start < 0 or parameters_end < parameters_start:
                     continue
-                if not _cpp_parameters_are_declarations(
+                if not cpp_parameters_are_declarations(
                     source[parameters_start + 1 : parameters_end],
                     original_source[parameters_start + 1 : parameters_end],
                 ):
