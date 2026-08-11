@@ -52,7 +52,7 @@
 </p>
 
 <p align="center">
-  <sub>同一场访谈，跑在 ChatGPT 应用里而不是终端。Ouroboros 是作为 integration 被调用的，所以提问、各个顾问视角、以及模糊度台账都直接出现在你本来就在用的宿主里。</sub>
+  <sub>另一次运行，跑在 ChatGPT 应用里而不是终端，任务是视频发布流水线——和上面那段录屏不是同一场访谈。Ouroboros 是作为 integration 被调用的，所以提问、各个顾问视角、以及模糊度台账都直接出现在你本来就在用的宿主里。</sub>
 </p>
 
 **把一个模糊的想法，跨 Claude Code、Codex CLI、OpenCode、Hermes、Gemini、Kiro、Copilot、Pi、Zcode、Goose、GJC、Antigravity 和 Grok，变成一份经过验证、可运行的代码库。**
