@@ -56,14 +56,6 @@
 </tr>
 </table>
 
-<p align="center">
-  <img src="./docs/images/ooo-codex-host.gif" width="560" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration: the interview asks which outcome the harness must optimize for, five advisory perspectives run beside it, and an ambiguity ledger lists four unresolved tracks">
-</p>
-
-<p align="center">
-  <sub>The same interview, running inside the ChatGPT app instead of a terminal. Ouroboros is called as an integration, so the questions, the advisory perspectives and the ambiguity ledger all show up in the host you already work in.</sub>
-</p>
-
 **Turn a vague idea into a verified, working codebase -- across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, Zcode, Goose, GJC, Antigravity, and Grok.**
 
 Ouroboros is an **Agent OS** for AI coding: a local-first runtime layer that
