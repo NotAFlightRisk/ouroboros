@@ -312,7 +312,7 @@ AI coding tools are powerful -- but they solve the **wrong problem** when the in
 |                     | Vanilla AI Coding                        | Ouroboros                                                                       |
 | :------------------ | :--------------------------------------- | :------------------------------------------------------------------------------ |
 | **Vague prompt**    | AI guesses intent, builds on assumptions | Socratic interview forces clarity *before* code                                 |
-| **Spec validation** | No spec -- architecture drifts mid-build | Immutable seed spec locks intent; Ambiguity gate (<= 0.2) blocks premature code |
+| **Spec validation** | No spec -- architecture drifts mid-build | Immutable seed spec locks intent; ambiguity gate (<= 0.2) blocks premature code without explicit `force` |
 | **Evaluation**      | "Looks good" / manual QA                 | 3-stage automated gate: Mechanical -> Semantic -> Multi-Model Consensus         |
 | **Rework rate**     | High -- wrong assumptions surface late   | Low -- assumptions surface in the interview, not in the PR review               |
 
@@ -508,7 +508,7 @@ Each dimension is scored 0.0-1.0 by the LLM (temperature 0.1 for reproducibility
 | **Success Criteria** -- *Are outcomes measurable?*            |    30%     |    25%     |
 | **Context Clarity** -- *Is the existing codebase understood?* |     --     |    15%     |
 
-**Threshold: Ambiguity <= 0.2** -- only then can a Seed be generated.
+**Threshold: Ambiguity <= 0.2.** A score above that blocks Seed generation. Passing `force` explicitly is what gets past it, and the CLI puts that choice on screen next to continue and cancel. The gate is a default worth arguing with, not a lock.
 
 ```
 Example (Greenfield):
