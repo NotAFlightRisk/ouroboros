@@ -16,9 +16,9 @@
 
 
 <p align="center">
-  <strong>Stop prompting. Start specifying.</strong>
+  <strong>When an acceptance criterion defines a verify command or an expected-output assertion, those values are omitted from the worker's contract block, with no flag to put them back.</strong>
   <br/>
-  <sub>The <strong>Agent OS</strong> for replayable, specification-first AI coding workflows</sub>
+  <sub>The <strong>Agent OS</strong> for replayable AI coding workflows</sub>
 </p>
 
 <p align="center">
