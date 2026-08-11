@@ -39,13 +39,18 @@
   <a href="https://ouroboros.page/learn/zh/">指南</a>
 </p>
 
-<p align="center">
-  <img src="./docs/images/ooo-interview.gif" width="760" alt="终端录制：ouroboros init start 追问排序、崩溃后的持久性、v1 范围以及任务用什么来指认，最后报出模糊度 0.31，并询问是继续访谈、强制生成还是取消">
-</p>
+<p align="center"><sub><b>四次各自独立的运行，四个宿主。任务不同是故意的——共享的是引擎，不是提示词</b></sub></p>
 
-<p align="center">
-  <sub>录自终端 CLI。问了四轮，模糊度仍是 0.31，阈值是 0.2，于是 CLI 给出警告并询问：继续访谈、强制生成 Seed、还是取消。下方“快速开始”中的 <code>ooo interview</code> 在 agent 宿主内运行，用的是同一个 0.2 模糊度阈值，并在生成 Seed 前额外加上自己的 closure 与 restate 关卡。</sub>
-</p>
+<table align="center">
+<tr>
+<td align="center" width="50%"><img src="./docs/images/ooo-interview.gif" width="440" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>终端 CLI</b> — 待办管理 CLI 任务，<code>ouroboros init start</code> 追问顺序与范围，然后报出模糊度分数</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-codex.gif" width="440" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b> — 视频发布流水线任务，作为 integration 被调用：提问、顾问轨、模糊度台账都在同一屏</sub></td>
+</tr>
+<tr>
+<td align="center" width="50%"><img src="./docs/images/host-claude.gif" width="440" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b> — YouTube 自动化任务，六条顾问轨并行跑完，访谈才提交结果</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-hermes.gif" width="440" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — 卡丁车游戏任务跑在聊天机器人里，收在 <code>Final ambiguity: 0.15</code></sub></td>
+</tr>
+</table>
 
 <p align="center">
   <img src="./docs/images/ooo-codex-host.gif" width="560" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration: the interview asks which outcome the harness must optimize for, five advisory perspectives run beside it, and an ambiguity ledger lists four unresolved tracks">
