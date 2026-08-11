@@ -56,7 +56,7 @@
 </p>
 
 <p align="center">
-  <sub>The same interview, running inside the ChatGPT app instead of a terminal. Ouroboros is called as an integration, so the questions, the advisory perspectives and the ambiguity ledger all show up in the host you already work in.</sub>
+  <sub>A second run, this one inside the ChatGPT app rather than a terminal, on a video-publishing harness. Ouroboros is called as an integration, so the questions, the advisory perspectives and the ambiguity ledger all show up in the host you already work in.</sub>
 </p>
 
 **Turn a vague idea into a verified, working codebase -- across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, Zcode, Goose, GJC, Antigravity, and Grok.**
