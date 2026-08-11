@@ -48,7 +48,7 @@
 </p>
 
 <p align="center">
-  <img src="./docs/images/ooo-codex-host.gif" width="560" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration: the interview asks which outcome the harness must optimize for, five advisory perspectives run beside it, and an ambiguity ledger lists four unresolved tracks">
+  <img src="./docs/images/ooo-codex-host.gif" width="560" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration: the interview asks which outcome the harness must optimize for, its advisory perspectives run beside it, and an ambiguity ledger lists four unresolved tracks">
 </p>
 
 <p align="center">
