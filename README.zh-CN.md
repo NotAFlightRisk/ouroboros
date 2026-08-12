@@ -16,9 +16,11 @@
 
 
 <p align="center">
-  <strong>每条验收标准自己的验证命令和期望输出不会进 worker 的契约块，也没有开关能把它放回去。</strong>
+  <strong>让 Agent 自己变聪明，边界由我们来划定。</strong>
   <br/>
-  <sub>面向 AI 编码工作流的 Agent OS —— 可重放</sub>
+  <sub>不用手写 prompt，它跑起来、失败、一代比一代聪明。评分命令和期望结果不会进入我们交给它的成功契约。</sub>
+  <br/>
+  <sub>面向可重放 AI 编码工作流的 <strong>Agent OS</strong></sub>
 </p>
 
 <p align="center">
