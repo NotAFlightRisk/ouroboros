@@ -37,6 +37,7 @@ from ouroboros.bigbang.requirement_distillation import (
     is_reference_aware_distillation,
     seed_readiness_details,
 )
+from ouroboros.bigbang.seed_extraction_contract import TASK_TYPE_RULE, project_type_template
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.owner_only import write_owner_only
@@ -52,6 +53,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
     parse_expected_artifact_list,
 )
+from ouroboros.core.task_type import explicit_task_type_from_goal, normalize_task_type
 from ouroboros.core.types import Result
 from ouroboros.evolution.acceptance_contracts import evolve_seed_contract_fields
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
@@ -1832,6 +1834,8 @@ class SeedGenerator:
                 )
             )
         requirements = applied.requirements
+        if task_type := explicit_task_type_from_goal(self._build_interview_context(state)):
+            requirements["task_type"] = task_type
 
         # Create metadata
         metadata = SeedMetadata(
@@ -2113,8 +2117,7 @@ ACCEPTANCE_CRITERIA artifacts rule: `artifacts` must be a JSON array of exact po
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
-
-GOAL: <clear goal statement>
+{TASK_TYPE_RULE}
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
 ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "artifacts": ["<path>"], "expect": "<literal output or NONE>"}}]
 ONTOLOGY_NAME: <name>
@@ -2122,34 +2125,7 @@ ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: [{{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}}, ...]
 EVALUATION_PRINCIPLES: [{{"name": "<name>", "description": "<description>", "weight": <0.0-1.0>}}, ...]
 EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria": "<criteria>"}}, ...]
-{self._project_type_template(is_brownfield=is_brownfield)}"""
-
-    @staticmethod
-    def _project_type_template(*, is_brownfield: bool) -> str:
-        """Return the PROJECT_TYPE trailer for the extraction format.
-
-        Greenfield interviews keep today's single ``PROJECT_TYPE: greenfield``
-        line. Brownfield interviews declare the type and request the three
-        brownfield keys the parser already recognizes so the resulting Seed
-        carries a populated ``brownfield_context``.
-        """
-        if not is_brownfield:
-            return "PROJECT_TYPE: greenfield"
-        return (
-            "PROJECT_TYPE: brownfield\n"
-            'CONTEXT_REFERENCES: [{{"path": "<path>", "role": "<primary|reference>", "summary": "<summary>"}}, ...]\n'
-            'EXISTING_PATTERNS: ["<pattern 1>", "<pattern 2>", ...]\n'
-            'EXISTING_DEPENDENCIES: ["<dependency 1>", "<dependency 2>", ...]\n'
-            "CONTEXT_REFERENCES rule: respond with one single-line JSON array of objects. "
-            "Path, role, and summary values may contain any characters, including literal "
-            ": colons and | pipes; never use a bare pipe as the list separator.\n"
-            "EXISTING_PATTERNS rule: respond with one single-line JSON array of strings. "
-            "Pattern values may contain any characters, including literal | pipes; "
-            "never use a bare pipe as the list separator.\n"
-            "EXISTING_DEPENDENCIES rule: respond with one single-line JSON array of strings. "
-            "Dependency values may contain any characters, including literal | pipes; "
-            "never use a bare pipe as the list separator."
-        )
+{project_type_template(is_brownfield=is_brownfield)}"""
 
     def _build_interview_context(self, state: InterviewState) -> str:
         """Build context string from interview state.
@@ -2226,8 +2202,7 @@ ACCEPTANCE_CRITERIA artifacts rule: `artifacts` must be a JSON array of exact po
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
-
-GOAL: <clear goal statement>
+{TASK_TYPE_RULE}
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
 ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "artifacts": ["<path>"], "expect": "<literal output or NONE>"}}]
 ONTOLOGY_NAME: <name>
@@ -2235,10 +2210,11 @@ ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: [{{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}}, ...]
 EVALUATION_PRINCIPLES: [{{"name": "<name>", "description": "<description>", "weight": <0.0-1.0>}}, ...]
 EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria": "<criteria>"}}, ...]
-{self._project_type_template(is_brownfield=is_brownfield)}"""
+{project_type_template(is_brownfield=is_brownfield)}"""
 
     _KNOWN_PREFIXES = (
         "GOAL:",
+        "TASK_TYPE:",
         "CONSTRAINTS:",
         "ACCEPTANCE_CRITERIA:",
         "ONTOLOGY_NAME:",
@@ -2326,6 +2302,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
         # Validate required fields
         required_fields = [
             "goal",
+            "task_type",
             "ontology_name",
             "ontology_description",
         ]
@@ -2337,6 +2314,8 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
                     f"Found: {list(requirements.keys())}. "
                     f"Response preview: {response[:200]}"
                 )
+
+        requirements["task_type"] = normalize_task_type(requirements["task_type"])
 
         # Validate list-valued fields at parse time so malformed JSON-intent
         # output triggers the extraction retry path instead of being silently
@@ -2436,6 +2415,11 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
 
         return Seed(
             goal=requirements["goal"],
+            task_type=(
+                str(requirements.get("task_type", "")).strip().casefold()
+                or explicit_task_type_from_goal(requirements["goal"])
+                or "code"
+            ),
             brownfield_context=brownfield_context,
             constraints=constraints,
             acceptance_criteria=acceptance_criteria,

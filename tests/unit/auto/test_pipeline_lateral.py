@@ -116,6 +116,39 @@ def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> Non
     assert repaired.metadata.parent_seed_id == "seed_dirty"
 
 
+def test_seed_qa_feedback_repairs_explicit_document_task_type() -> None:
+    seed = _build_seed(seed_id="seed_wrong_task_type").model_copy(
+        update={
+            "goal": (
+                "seed_6619d294d5c7을 계승해 문서형 Seed로 명세한다. task_type은 document여야 한다."
+            ),
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.61,
+        verdict="revise",
+        differences=(
+            "task_type is code but the goal explicitly requires document and its exit condition.",
+            "Provenance inconsistency: the goal cites parent seed_6619d294d5c7 "
+            "while metadata.parent_seed_id is seed_generated.",
+            "The external lecture assumption needs a stream-specific uncertainty note.",
+        ),
+        suggestions=(
+            "Set task_type to document before execution.",
+            "Reconcile the parent lineage.",
+            "Add an uncertainty and fallback rule for the high-risk assumption.",
+        ),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.task_type == "document"
+    assert repaired.metadata.parent_seed_id == "seed_6619d294d5c7"
+    assert any("uncertainty and fallback rule" in item for item in repaired.constraints)
+
+
 def test_seed_qa_feedback_rejects_unmapped_reviewer_diagnostics() -> None:
     seed = _build_seed().model_copy(
         update={"metadata": SeedMetadata(seed_id="seed_generic_feedback", ambiguity_score=0.12)}

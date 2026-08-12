@@ -77,6 +77,13 @@ class TestSynthesizeSeedFromLedgerUnchanged:
         assert seed.metadata.recovery_reason is None
         assert seed.metadata.interview_id == "iv-1"
 
+    def test_complete_ledger_preserves_explicit_document_task_type(self) -> None:
+        ledger = _populate_complete_ledger("Create a plan document; task_type must be document.")
+
+        seed = synthesize_seed_from_ledger(ledger)
+
+        assert seed.task_type == "document"
+
     def test_incomplete_ledger_still_raises_on_strict_path(self) -> None:
         # Goal-only ledger is intentionally not Seed-ready; legacy contract is
         # to refuse rather than fabricate.
@@ -104,6 +111,13 @@ class TestPartialSeedFromEvidence:
         assert seed.metadata.degraded is True
         assert seed.metadata.recovery_reason == "interview_phase_deadline"
         assert seed.metadata.interview_id == "iv-partial"
+
+    def test_partial_seed_preserves_explicit_document_task_type(self) -> None:
+        ledger = SeedDraftLedger.from_goal("문서형 계획을 만든다. task_type은 document여야 한다.")
+
+        seed = partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
+
+        assert seed.task_type == "document"
 
     def test_unresolved_slots_match_open_gaps(self) -> None:
         ledger = SeedDraftLedger.from_goal("A bare goal.")

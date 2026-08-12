@@ -97,6 +97,7 @@ def create_mock_completion_response(
 
 def create_valid_extraction_response(
     goal: str = "Build a CLI task manager with project grouping",
+    task_type: str = "code",
     constraints: str = '["Python 3.14+", "No external database", "Single-file storage"]',
     acceptance_criteria: str = "Tasks can be created | Tasks can be listed | Tasks can be deleted",
     ontology_name: str = "TaskManager",
@@ -153,6 +154,7 @@ def create_valid_extraction_response(
             # text so the production retry boundary can reject it.
             pass
     return f"""GOAL: {goal}
+TASK_TYPE: {task_type}
 CONSTRAINTS: {constraints}
 ACCEPTANCE_CRITERIA: {acceptance_criteria}
 ONTOLOGY_NAME: {ontology_name}
@@ -351,6 +353,33 @@ class TestSeedGeneratorAmbiguityGating:
 
             assert result.is_ok
             assert isinstance(result.value, Seed)
+
+    @pytest.mark.asyncio
+    async def test_generate_preserves_explicit_document_task_type(self) -> None:
+        """A document contract must not silently fall back to code execution."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds(
+            initial_context="Create the requested plan; task_type must be document."
+        )
+        low_ambiguity = create_low_ambiguity_score(0.15)
+        extraction_response = create_valid_extraction_response(
+            goal="Create the requested plan as a document.",
+            task_type="code",
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert result.value.task_type == "document"
 
     @pytest.mark.asyncio
     async def test_generate_requires_summary_for_large_initial_context(self) -> None:
