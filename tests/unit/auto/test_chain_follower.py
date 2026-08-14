@@ -11,6 +11,7 @@ import pytest
 from ouroboros.auto.chain_follower import (
     MISMATCHED_LINK_STATUS,
     UNAVAILABLE_LINK_STATUS,
+    UNBOUND_LINK_STATUS,
     RALPH_APPROVED_STOP_REASON,
     ChainTerminal,
     follow_run_chain,
@@ -69,14 +70,24 @@ async def test_follows_run_to_evaluate_to_ralph() -> None:
     manager = _FakeJobManager(
         {
             "job_run": [
-                _FakeSnapshot("job_run", "completed", "ran", {"chained_evaluate_job_id": "job_ev"})
+                _FakeSnapshot(
+                    "job_run",
+                    "completed",
+                    "ran",
+                    {"session_id": "orch_1", "chained_evaluate_job_id": "job_ev"},
+                )
             ],
             "job_ev": [
                 _FakeSnapshot(
                     "job_ev",
                     "completed",
                     "judged",
-                    {"final_approved": False, "chained_ralph_job_id": "job_ralph"},
+                    {
+                        "session_id": "orch_1",
+                        "final_approved": False,
+                        "chained_ralph_lineage_id": "lin_1",
+                        "chained_ralph_job_id": "job_ralph",
+                    },
                 )
             ],
             "job_ralph": [
@@ -84,7 +95,7 @@ async def test_follows_run_to_evaluate_to_ralph() -> None:
                     "job_ralph",
                     "completed",
                     "converged",
-                    {"stop_reason": RALPH_APPROVED_STOP_REASON},
+                    {"lineage_id": "lin_1", "stop_reason": RALPH_APPROVED_STOP_REASON},
                 )
             ],
         }
@@ -104,9 +115,21 @@ async def test_stops_where_the_chain_stops() -> None:
     manager = _FakeJobManager(
         {
             "job_run": [
-                _FakeSnapshot("job_run", "completed", "ran", {"chained_evaluate_job_id": "job_ev"})
+                _FakeSnapshot(
+                    "job_run",
+                    "completed",
+                    "ran",
+                    {"session_id": "orch_1", "chained_evaluate_job_id": "job_ev"},
+                )
             ],
-            "job_ev": [_FakeSnapshot("job_ev", "completed", "judged", {"final_approved": True})],
+            "job_ev": [
+                _FakeSnapshot(
+                    "job_ev",
+                    "completed",
+                    "judged",
+                    {"session_id": "orch_1", "final_approved": True},
+                )
+            ],
         }
     )
 
@@ -132,19 +155,32 @@ async def test_budget_terminal_is_not_approval() -> None:
     manager = _FakeJobManager(
         {
             "job_run": [
-                _FakeSnapshot("job_run", "completed", "ran", {"chained_evaluate_job_id": "job_ev"})
+                _FakeSnapshot(
+                    "job_run",
+                    "completed",
+                    "ran",
+                    {"session_id": "orch_1", "chained_evaluate_job_id": "job_ev"},
+                )
             ],
             "job_ev": [
                 _FakeSnapshot(
                     "job_ev",
                     "completed",
                     "judged",
-                    {"final_approved": False, "chained_ralph_job_id": "job_ralph"},
+                    {
+                        "session_id": "orch_1",
+                        "final_approved": False,
+                        "chained_ralph_lineage_id": "lin_1",
+                        "chained_ralph_job_id": "job_ralph",
+                    },
                 )
             ],
             "job_ralph": [
                 _FakeSnapshot(
-                    "job_ralph", "failed", "gave up", {"stop_reason": "max_generations reached"}
+                    "job_ralph",
+                    "failed",
+                    "gave up",
+                    {"lineage_id": "lin_1", "stop_reason": "max_generations reached"},
                 )
             ],
         }
@@ -165,7 +201,7 @@ async def test_budget_terminal_is_not_approval() -> None:
         ("ralph", "completed", {"final_approved": True}),
         # A link that did not finish cleanly never approves, whatever it carries.
         ("evaluate", "failed", {"final_approved": True}),
-        ("ralph", "failed", {"stop_reason": RALPH_APPROVED_STOP_REASON}),
+        ("ralph", "failed", {"lineage_id": "lin_1", "stop_reason": RALPH_APPROVED_STOP_REASON}),
     ],
 )
 def test_only_the_owning_link_can_approve(job_kind: str, status: str, meta: dict[str, Any]) -> None:
@@ -180,14 +216,24 @@ async def test_deadline_preserves_the_deepest_handles_reached() -> None:
     manager = _FakeJobManager(
         {
             "job_run": [
-                _FakeSnapshot("job_run", "completed", "ran", {"chained_evaluate_job_id": "job_ev"})
+                _FakeSnapshot(
+                    "job_run",
+                    "completed",
+                    "ran",
+                    {"session_id": "orch_1", "chained_evaluate_job_id": "job_ev"},
+                )
             ],
             "job_ev": [
                 _FakeSnapshot(
                     "job_ev",
                     "completed",
                     "judged",
-                    {"final_approved": False, "chained_ralph_job_id": "job_ralph"},
+                    {
+                        "session_id": "orch_1",
+                        "final_approved": False,
+                        "chained_ralph_lineage_id": "lin_1",
+                        "chained_ralph_job_id": "job_ralph",
+                    },
                 )
             ],
             "job_ralph": [_FakeSnapshot("job_ralph", "running", terminal=False)],
@@ -235,7 +281,12 @@ async def test_a_successor_handle_pointing_at_the_wrong_job_is_refused() -> None
     manager = _FakeJobManager(
         {
             "job_run": [
-                _FakeSnapshot("job_run", "completed", "ran", {"chained_evaluate_job_id": "job_ev"})
+                _FakeSnapshot(
+                    "job_run",
+                    "completed",
+                    "ran",
+                    {"session_id": "orch_1", "chained_evaluate_job_id": "job_ev"},
+                )
             ],
             # The handle resolves to another execution, not an evaluation.
             "job_ev": [
@@ -243,7 +294,7 @@ async def test_a_successor_handle_pointing_at_the_wrong_job_is_refused() -> None
                     "job_ev",
                     "completed",
                     "someone else's run",
-                    {"final_approved": True},
+                    {"session_id": "orch_1", "final_approved": True},
                     job_type="execute_seed",
                 )
             ],
@@ -294,3 +345,82 @@ async def test_a_successor_handle_naming_no_readable_job_fails_closed() -> None:
     assert terminal.job_kind == "evaluate"
     assert terminal.approved is False
     assert terminal.followed_job_ids == ("job_run", "missing")
+
+
+@pytest.mark.asyncio
+async def test_a_valid_evaluation_from_another_chain_is_refused() -> None:
+    """Type alone does not prove *this* chain produced the job.
+
+    A stale handle can name an unrelated but perfectly valid evaluation whose
+    ``final_approved`` would otherwise be accepted as this run's verdict, so the
+    link must also carry the identity its predecessor published.
+    """
+    manager = _FakeJobManager(
+        {
+            "job_run": [
+                _FakeSnapshot(
+                    "job_run",
+                    "completed",
+                    "ran",
+                    {"session_id": "orch_1", "chained_evaluate_job_id": "job_ev"},
+                )
+            ],
+            # A real evaluation — of somebody else's run.
+            "job_ev": [
+                _FakeSnapshot(
+                    "job_ev",
+                    "completed",
+                    "judged",
+                    {"session_id": "orch_other", "final_approved": True},
+                )
+            ],
+        }
+    )
+
+    terminal = await follow_run_chain(manager, "job_run", poll_seconds=0.0)
+
+    assert terminal.status == UNBOUND_LINK_STATUS
+    assert terminal.approved is False
+
+
+@pytest.mark.asyncio
+async def test_a_ralph_job_from_another_lineage_is_refused() -> None:
+    """The Ralph link is bound to the lineage the evaluation published."""
+    manager = _FakeJobManager(
+        {
+            "job_run": [
+                _FakeSnapshot(
+                    "job_run",
+                    "completed",
+                    "ran",
+                    {"session_id": "orch_1", "chained_evaluate_job_id": "job_ev"},
+                )
+            ],
+            "job_ev": [
+                _FakeSnapshot(
+                    "job_ev",
+                    "completed",
+                    "judged",
+                    {
+                        "session_id": "orch_1",
+                        "final_approved": False,
+                        "chained_ralph_lineage_id": "lin_1",
+                        "chained_ralph_job_id": "job_ralph",
+                    },
+                )
+            ],
+            "job_ralph": [
+                _FakeSnapshot(
+                    "job_ralph",
+                    "completed",
+                    "converged",
+                    {"lineage_id": "lin_other", "stop_reason": RALPH_APPROVED_STOP_REASON},
+                )
+            ],
+        }
+    )
+
+    terminal = await follow_run_chain(manager, "job_run", poll_seconds=0.0)
+
+    assert terminal.status == UNBOUND_LINK_STATUS
+    assert terminal.approved is False

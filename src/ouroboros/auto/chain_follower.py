@@ -104,6 +104,16 @@ _EXPECTED_JOB_TYPES: dict[str, str] = {
     "ralph": "ralph",
 }
 MISMATCHED_LINK_STATUS = "link_type_mismatch"
+# Type alone does not prove *this* chain produced the job: a stale handle can
+# name an unrelated but perfectly valid evaluation. Each successor is therefore
+# also bound to an identity its predecessor published — the run's session for
+# the evaluation, the evaluation's lineage for Ralph. Reading (predecessor key,
+# successor key) per link keeps the binding a lookup rather than a special case.
+_LINK_BINDINGS: dict[str, tuple[str, str]] = {
+    "evaluate": ("session_id", "session_id"),
+    "ralph": ("chained_ralph_lineage_id", "lineage_id"),
+}
+UNBOUND_LINK_STATUS = "link_identity_mismatch"
 # A successor handle is a cross-job reference into durable state. It can name a
 # job that no longer exists (pruned history, a different store, a mis-copied
 # id), and ``JobManager.get_snapshot`` raises for an unknown id. The walk fails
@@ -136,6 +146,7 @@ async def follow_run_chain(
     followed: list[str] = []
     job_id = run_job_id
     depth = 0
+    previous_meta: dict[str, Any] = {}
     terminal: ChainTerminal | None = None
 
     while True:
@@ -161,6 +172,15 @@ async def follow_run_chain(
                 followed_job_ids=tuple(followed),
             )
         meta = dict(snapshot.result_meta or {})
+        if not _binds_to_predecessor(kind, previous_meta, meta):
+            # An unauthenticated link decides nothing: this boundary grants
+            # approval, so an identity that cannot be matched fails closed.
+            return ChainTerminal(
+                job_id=job_id,
+                job_kind=kind,
+                status=UNBOUND_LINK_STATUS,
+                followed_job_ids=tuple(followed),
+            )
         terminal = ChainTerminal(
             job_id=job_id,
             job_kind=kind,
@@ -173,7 +193,20 @@ async def follow_run_chain(
         if successor is None:
             return terminal
         job_id = successor
+        previous_meta = meta
         depth += 1
+
+
+def _binds_to_predecessor(kind: str, previous_meta: dict[str, Any], meta: dict[str, Any]) -> bool:
+    """Return whether this link carries the identity its predecessor published."""
+    binding = _LINK_BINDINGS.get(kind)
+    if binding is None:
+        return True  # the root run has no predecessor to bind to
+    expected = previous_meta.get(binding[0])
+    observed = meta.get(binding[1])
+    if not isinstance(expected, str) or not expected.strip():
+        return False
+    return observed == expected
 
 
 def _next_job_id(meta: dict[str, Any], depth: int) -> str | None:
