@@ -1572,7 +1572,9 @@ class TestBackgroundJobPath:
         kwargs = captured["pipeline_kwargs"]
         assert kwargs["seed_qa_evaluator"] is not None
         assert kwargs["seed_qa_evaluator"].qa_handler is qa_handler
-        assert kwargs["evaluator"] is None
+        # The pipeline no longer takes an `evaluator`: the run job's chain owns
+        # the post-run verdict.
+        assert "evaluator" not in kwargs
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("complete_product", [False, True])

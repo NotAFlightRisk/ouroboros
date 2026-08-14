@@ -9,7 +9,6 @@ mcp_args:
   max_interview_rounds: "$max_interview_rounds"
   max_repair_rounds: "$max_repair_rounds"
   skip_run: "$skip_run"
-  complete_product: "$complete_product"
   pipeline_timeout_seconds: "$pipeline_timeout_seconds"
   efficiency_mode: "$efficiency_mode"
   frugality_assurance: "$frugality_assurance"
@@ -70,7 +69,6 @@ When the user types `ooo auto` with CLI-style flags inside chat, translate to MC
 
 | CLI flag | MCP arg | Type |
 |----------|---------|------|
-| `--complete-product` | `complete_product=true` | boolean |
 | `--skip-run` | `skip_run=true` | boolean |
 | `--max-interview-rounds N` | `max_interview_rounds=N` | integer |
 | `--max-repair-rounds N` | `max_repair_rounds=N` | integer |
@@ -79,7 +77,9 @@ When the user types `ooo auto` with CLI-style flags inside chat, translate to MC
 | `--frugality-assurance off\|observe\|strict` | `frugality_assurance=<value>` | string |
 | `--resume <id>` | `resume=<id>` | string |
 
-`--max-generations` is **not** a flag for `ooo auto`; it belongs to `ooo ralph`. When `complete_product=true`, the chained Ralph uses its built-in default (10 generations) bounded by `pipeline_timeout_seconds` or Ralph's own per-iteration / wall-clock budgets.
+`--max-generations` is **not** a flag for `ooo auto`; it belongs to `ooo ralph`. The chained Ralph started by the run job is bounded by `execution.auto_evolve_max_generations`.
+
+`--complete-product` is deprecated and ignored: the run job owns `run → evaluate → ralph`, so a single Auto invocation no longer drives Ralph itself. Follow the run job's chain with `ooo status` or the job tools.
 
 `--pipeline-timeout-seconds` is accepted only when starting a session. Passing it with `--resume` is rejected because the original deadline is preserved across process restarts.
 
@@ -101,8 +101,7 @@ ask or send either argument; Auto restores the persisted contract.
 3. Generates a Seed.
 4. Reviews and repairs until A-grade or blocked.
 5. Starts execution only after A-grade.
-6. When `complete_product=false` (the default), auto reaches `COMPLETE` as soon as the run has a durable handle — the run itself keeps going as a background job, and that job carries its own `run → evaluate → ralph` chain governed by `execution.auto_evaluate` / `execution.auto_evolve` (both default `true`, Ralph bounded by `execution.auto_evolve_max_generations`). Auto does not evaluate the run itself in this mode; the chained evaluate job does.
-7. When `complete_product=true`, chains RUN → RALPH_HANDOFF after a successful run handoff and waits for a terminal Ralph status so a single invocation iterates Ralph until QA passes, convergence, or a budget bound trips. A QA-pass on the executed product completes the auto session; recognized failure modes (`iteration_timeout`, `wall_clock_exhausted`, `oscillation_detected`, `grade_regressing`, `max_generations reached`) block the auto session with the matching `stop_reason` in `last_error` so operators can resume after the cause is addressed.
+6. Auto reaches `COMPLETE` as soon as the run has a durable handle. The run keeps going as a background job, and that job carries its own `run → evaluate → ralph` chain governed by `execution.auto_evaluate` / `execution.auto_evolve` (both default `true`, Ralph bounded by `execution.auto_evolve_max_generations`). Auto does not evaluate the run itself; the chained evaluate job does.
 
 ## Background monitoring UX
 

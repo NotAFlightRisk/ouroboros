@@ -15,12 +15,8 @@ from typing import Any
 from uuid import uuid4
 
 from ouroboros.auto.adapters import (
-    EnvRuntimeProbeRunner,
-    HandlerEvaluator,
     HandlerInterviewBackend,
     HandlerLateralThinker,
-    HandlerRalphPoller,
-    HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
     HandlerSeedQAEvaluator,
@@ -560,42 +556,6 @@ class AutoHandler:
             # ambiguity converges. Best-effort; None falls back to deterministic.
             answer_refiner=build_answer_refiner(),
         )
-        # Complete-product Ralph follows the execute-stage runtime because it
-        # continues product mutation/evaluation after the initial run handoff.
-        # OpenCode plugin mode is intentionally preserved here: unlike
-        # interview/Seed authoring, Ralph can surface a plugin delegation
-        # receipt to the caller.
-        ralph_opencode_mode = (
-            state.ralph_opencode_mode or runtime_plan.execute.opencode_mode
-            if runtime_plan.execute.runtime_backend == "opencode"
-            else None
-        )
-        ralph_handler = None
-        if complete_product:
-            ralph_handler = (
-                self.ralph_handler_factory(
-                    runtime_plan.execute.runtime_backend,
-                    ralph_opencode_mode,
-                )
-                if self.ralph_handler_factory is not None
-                else RalphHandler(
-                    agent_runtime_backend=runtime_plan.execute.runtime_backend,
-                    opencode_mode=ralph_opencode_mode,
-                )
-            )
-        ralph_starter = (
-            HandlerRalphStarter(ralph_handler, project_dir=state.cwd)
-            if ralph_handler is not None
-            else None
-        )
-        # Q00/ouroboros#773 (review-5 finding 1): wire a poller backed by the
-        # same ``RalphHandler`` so MCP-side resumes of an interrupted
-        # ``RALPH_HANDOFF`` checkpoint actually reconcile the persisted job
-        # to a terminal auto phase. The same handler is reused so both the
-        # starter and the poller share a ``JobManager`` (and underlying
-        # ``EventStore``) — without that share the poller would query a
-        # fresh, empty job table.
-        ralph_resumer = HandlerRalphPoller(ralph_handler) if ralph_handler is not None else None
         # RFC #809 Phase 2.1 — wire Seed QA on every MCP auto surface before
         # RUN/skip-run transitions. For OpenCode plugin sessions, use the same
         # demoted authoring mode as Interview/GenerateSeed so QA executes
@@ -608,24 +568,12 @@ class AutoHandler:
         # EVALUATE → UNSTUCK_LATERAL path. The complete-product evaluator is
         # plugin-skipped based on the resolved EVALUATE stage, not the default
         # runtime, so explicit non-plugin stage overrides remain consumable.
-        evaluator = None
         seed_qa_handler = QAHandler(
             llm_backend=self.llm_backend,
             agent_runtime_backend=runtime_plan.interview.runtime_backend,
             opencode_mode=authoring_opencode_mode,
         )
         seed_qa_evaluator = HandlerSeedQAEvaluator(seed_qa_handler)
-        evaluate_plugin_mode = should_dispatch_via_plugin(
-            runtime_plan.evaluate.runtime_backend,
-            runtime_plan.evaluate.opencode_mode,
-        )
-        if complete_product and not evaluate_plugin_mode:
-            evaluation_handler = QAHandler(
-                llm_backend=self.llm_backend,
-                agent_runtime_backend=runtime_plan.evaluate.runtime_backend,
-                opencode_mode=demote_plugin_opencode_mode(runtime_plan.evaluate.opencode_mode),
-            )
-            evaluator = HandlerEvaluator(evaluation_handler)
         watchdog_event_store = self.event_store or EventStore()
         await watchdog_event_store.initialize()
         watchdog = Watchdog(
@@ -655,14 +603,9 @@ class AutoHandler:
             attach_source=attach_source,
             reconcile_run=reconcile_run,
             reconcile_source=reconcile_source,
-            ralph_starter=ralph_starter,
-            ralph_resumer=ralph_resumer,
-            complete_product=complete_product,
-            evaluator=evaluator,
             seed_qa_evaluator=seed_qa_evaluator,
             lateral_thinker=lateral_thinker,
             watchdog=watchdog,
-            probe_runner=EnvRuntimeProbeRunner() if complete_product else None,
         )
         result: AutoPipelineResult | None = None
         try:
