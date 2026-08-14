@@ -33,6 +33,11 @@ _DEFAULT_POLL_SECONDS = 2.0
 # into matching a budget terminal such as ``max_generations reached``.
 RALPH_APPROVED_STOP_REASON = "qa passed"
 
+# A verdict only counts from a job that actually finished cleanly. `failed`,
+# `cancelled`, `interrupted` and the follower's own `timed_out` never approve,
+# whatever their (possibly inherited) result meta says.
+_APPROVING_STATUSES = frozenset({"completed"})
+
 
 class _Snapshot(Protocol):
     job_id: str
@@ -69,13 +74,20 @@ class ChainTerminal:
         the formal evaluation's ``final_approved``, or a Ralph loop that stopped
         on :data:`RALPH_APPROVED_STOP_REASON` (every other Ralph stop reason is a
         budget or regression terminal, not a passing verdict).
+
+        Both signals are read **only from the link that owns them**. Result meta
+        is merged and forwarded along the chain, so an unqualified
+        ``final_approved`` lookup would let a run or a *failed* Ralph inherit an
+        approval it never issued — the same "someone else's verdict counts as
+        mine" defect at a different layer. A non-terminal status never approves.
         """
-        if self.result_meta.get("final_approved") is True:
-            return True
-        return (
-            self.job_kind == "ralph"
-            and self.result_meta.get("stop_reason") == RALPH_APPROVED_STOP_REASON
-        )
+        if self.status not in _APPROVING_STATUSES:
+            return False
+        if self.job_kind == "evaluate":
+            return self.result_meta.get("final_approved") is True
+        if self.job_kind == "ralph":
+            return self.result_meta.get("stop_reason") == RALPH_APPROVED_STOP_REASON
+        return False
 
 
 _JOB_KINDS = ("run", "evaluate", "ralph")

@@ -132,6 +132,52 @@ async def test_budget_terminal_is_not_approval() -> None:
     assert terminal.approved is False
 
 
+@pytest.mark.parametrize(
+    ("job_kind", "status", "meta"),
+    [
+        # Result meta is merged and forwarded along the chain, so a link must
+        # never inherit a verdict issued by a different link.
+        ("run", "completed", {"final_approved": True}),
+        ("ralph", "completed", {"final_approved": True}),
+        # A link that did not finish cleanly never approves, whatever it carries.
+        ("evaluate", "failed", {"final_approved": True}),
+        ("ralph", "failed", {"stop_reason": RALPH_APPROVED_STOP_REASON}),
+    ],
+)
+def test_only_the_owning_link_can_approve(job_kind: str, status: str, meta: dict[str, Any]) -> None:
+    terminal = ChainTerminal(job_id="job_x", job_kind=job_kind, status=status, result_meta=meta)
+
+    assert terminal.approved is False
+
+
+@pytest.mark.asyncio
+async def test_deadline_preserves_the_deepest_handles_reached() -> None:
+    """A timeout deep in the chain must keep every handle needed to resume."""
+    manager = _FakeJobManager(
+        {
+            "job_run": [
+                _FakeSnapshot("job_run", "completed", "ran", {"chained_evaluate_job_id": "job_ev"})
+            ],
+            "job_ev": [
+                _FakeSnapshot(
+                    "job_ev",
+                    "completed",
+                    "judged",
+                    {"final_approved": False, "chained_ralph_job_id": "job_ralph"},
+                )
+            ],
+            "job_ralph": [_FakeSnapshot("job_ralph", "running", terminal=False)],
+        }
+    )
+
+    terminal = await follow_run_chain(manager, "job_run", poll_seconds=0.0, deadline_seconds=0.0)
+
+    assert terminal.status == "timed_out"
+    assert terminal.job_kind == "ralph"
+    assert terminal.followed_job_ids == ("job_run", "job_ev", "job_ralph")
+    assert terminal.approved is False
+
+
 @pytest.mark.asyncio
 async def test_deadline_returns_handles_instead_of_losing_the_chain() -> None:
     manager = _FakeJobManager(
