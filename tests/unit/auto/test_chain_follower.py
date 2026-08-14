@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
 
 from ouroboros.auto.chain_follower import (
+    MISMATCHED_LINK_STATUS,
     RALPH_APPROVED_STOP_REASON,
     ChainTerminal,
     follow_run_chain,
 )
+
+# Durable job types for the scripted chain, so tests exercise the same
+# link-identity check production reads from persistence.
+_DEFAULT_JOB_TYPES = {"job_run": "execute_seed", "job_ev": "evaluate", "job_ralph": "ralph"}
 
 
 @dataclass
@@ -21,6 +27,11 @@ class _FakeSnapshot:
     result_text: str | None = None
     result_meta: dict[str, Any] = field(default_factory=dict)
     terminal: bool = True
+    job_type: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.job_type:
+            self.job_type = _DEFAULT_JOB_TYPES.get(self.job_id, "execute_seed")
 
     @property
     def is_terminal(self) -> bool:
@@ -28,14 +39,23 @@ class _FakeSnapshot:
 
 
 class _FakeJobManager:
-    """Serves a scripted snapshot sequence per job id."""
+    """Serves a scripted snapshot sequence per job id, optionally slowly."""
 
-    def __init__(self, timelines: dict[str, list[_FakeSnapshot]]) -> None:
+    def __init__(
+        self,
+        timelines: dict[str, list[_FakeSnapshot]],
+        *,
+        read_delay_seconds: dict[str, float] | None = None,
+    ) -> None:
         self._timelines = {job_id: list(items) for job_id, items in timelines.items()}
+        self._delays = read_delay_seconds or {}
         self.calls: list[str] = []
 
     async def get_snapshot(self, job_id: str) -> _FakeSnapshot:
         self.calls.append(job_id)
+        delay = self._delays.get(job_id)
+        if delay:
+            await asyncio.sleep(delay)
         timeline = self._timelines[job_id]
         return timeline.pop(0) if len(timeline) > 1 else timeline[0]
 
@@ -170,12 +190,67 @@ async def test_deadline_preserves_the_deepest_handles_reached() -> None:
         }
     )
 
-    terminal = await follow_run_chain(manager, "job_run", poll_seconds=0.0, deadline_seconds=0.0)
+    terminal = await follow_run_chain(manager, "job_run", poll_seconds=0.0, deadline_seconds=0.05)
 
     assert terminal.status == "timed_out"
     assert terminal.job_kind == "ralph"
     assert terminal.followed_job_ids == ("job_run", "job_ev", "job_ralph")
     assert terminal.approved is False
+
+
+@pytest.mark.asyncio
+async def test_a_slow_snapshot_read_cannot_outlive_the_deadline() -> None:
+    """The read itself is bounded, not just the interval between reads.
+
+    A snapshot served from persistence or a reconciliation path can block; a
+    deadline enforced only after the await would let one read outlive the whole
+    budget, or hang forever.
+    """
+    manager = _FakeJobManager(
+        {"job_run": [_FakeSnapshot("job_run", "completed", "ran", {})]},
+        read_delay_seconds={"job_run": 5.0},
+    )
+
+    terminal = await asyncio.wait_for(
+        follow_run_chain(manager, "job_run", poll_seconds=0.0, deadline_seconds=0.05),
+        timeout=2.0,
+    )
+
+    assert terminal.status == "timed_out"
+    assert terminal.followed_job_ids == ("job_run",)
+
+
+@pytest.mark.asyncio
+async def test_a_successor_handle_pointing_at_the_wrong_job_is_refused() -> None:
+    """A successor handle is just a string on someone else's result meta.
+
+    A stale or misdirected id can name any completed job; identifying the link
+    by traversal depth alone would let that job's ``final_approved`` be read as
+    this chain's evaluation verdict.
+    """
+    manager = _FakeJobManager(
+        {
+            "job_run": [
+                _FakeSnapshot("job_run", "completed", "ran", {"chained_evaluate_job_id": "job_ev"})
+            ],
+            # The handle resolves to another execution, not an evaluation.
+            "job_ev": [
+                _FakeSnapshot(
+                    "job_ev",
+                    "completed",
+                    "someone else's run",
+                    {"final_approved": True},
+                    job_type="execute_seed",
+                )
+            ],
+        }
+    )
+
+    terminal = await follow_run_chain(manager, "job_run", poll_seconds=0.0)
+
+    assert terminal.status == MISMATCHED_LINK_STATUS
+    assert terminal.approved is False
+    assert terminal.result_meta["observed_job_type"] == "execute_seed"
 
 
 @pytest.mark.asyncio

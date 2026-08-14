@@ -41,6 +41,7 @@ _APPROVING_STATUSES = frozenset({"completed"})
 
 class _Snapshot(Protocol):
     job_id: str
+    job_type: str
     status: Any
     result_text: str | None
     result_meta: dict[str, Any]
@@ -92,6 +93,18 @@ class ChainTerminal:
 
 _JOB_KINDS = ("run", "evaluate", "ralph")
 
+# The durable ``job_type`` each link must actually be. A successor handle is
+# just a string on someone else's result meta: stale, mis-copied or misdirected
+# values are possible, and a link identified only by traversal depth would let
+# any completed job carrying ``final_approved`` be read as this chain's
+# evaluation. Depth proposes; the persisted job type disposes.
+_EXPECTED_JOB_TYPES: dict[str, str] = {
+    "run": "execute_seed",
+    "evaluate": "evaluate",
+    "ralph": "ralph",
+}
+MISMATCHED_LINK_STATUS = "link_type_mismatch"
+
 
 async def follow_run_chain(
     job_manager: _JobManager,
@@ -129,6 +142,16 @@ async def follow_run_chain(
                 status="timed_out",
                 followed_job_ids=tuple(followed),
             )
+        if getattr(snapshot, "job_type", None) != _EXPECTED_JOB_TYPES[kind]:
+            # Refuse to interpret the metadata of a job that is not the link it
+            # claims to be — neither its verdict nor its successor handle.
+            return ChainTerminal(
+                job_id=job_id,
+                job_kind=kind,
+                status=MISMATCHED_LINK_STATUS,
+                result_meta={"observed_job_type": getattr(snapshot, "job_type", None)},
+                followed_job_ids=tuple(followed),
+            )
         meta = dict(snapshot.result_meta or {})
         terminal = ChainTerminal(
             job_id=job_id,
@@ -159,13 +182,32 @@ async def _await_terminal(
     poll_seconds: float,
     expiry: float | None,
 ) -> _Snapshot | None:
-    """Poll one job until terminal; None when the deadline trips first."""
+    """Poll one job until terminal; None when the deadline trips first.
+
+    The read itself is bounded, not just the interval between reads: a snapshot
+    that comes from persistence or a reconciliation path can block, and a
+    deadline enforced only after the await would let one slow read outlive the
+    whole budget — or hang forever.
+    """
     loop = asyncio.get_running_loop()
     while True:
-        snapshot = await job_manager.get_snapshot(job_id)
+        if expiry is None:
+            snapshot = await job_manager.get_snapshot(job_id)
+        else:
+            remaining = expiry - loop.time()
+            if remaining <= 0:
+                return None
+            try:
+                snapshot = await asyncio.wait_for(
+                    job_manager.get_snapshot(job_id), timeout=remaining
+                )
+            except TimeoutError:
+                return None
         if snapshot.is_terminal:
             return snapshot
         if expiry is not None and loop.time() >= expiry:
             return None
-        remaining = poll_seconds if expiry is None else min(poll_seconds, expiry - loop.time())
-        await asyncio.sleep(max(0.0, remaining))
+        remaining_sleep = (
+            poll_seconds if expiry is None else min(poll_seconds, expiry - loop.time())
+        )
+        await asyncio.sleep(max(0.0, remaining_sleep))
