@@ -10,9 +10,9 @@ import pytest
 
 from ouroboros.auto.chain_follower import (
     MISMATCHED_LINK_STATUS,
+    RALPH_APPROVED_STOP_REASON,
     UNAVAILABLE_LINK_STATUS,
     UNBOUND_LINK_STATUS,
-    RALPH_APPROVED_STOP_REASON,
     ChainTerminal,
     follow_run_chain,
 )
