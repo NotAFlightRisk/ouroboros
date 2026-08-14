@@ -53,7 +53,6 @@ in the main session. The user should not have to poll the job manually.
 ooo auto "Build a local-first habit tracker CLI"
 ooo auto --resume auto_abc123
 ooo auto "Build a local-first habit tracker CLI" --skip-run
-ooo auto "Build a local-first habit tracker CLI" --complete-product
 /ouroboros:auto "Build a local-first habit tracker CLI"
 ```
 
@@ -273,7 +272,7 @@ Genuine-deadlock and partial-unsafe outcomes do **not** set `interview_closure_m
 
 `assumption_sources` is a *broader* surface than `assumptions` — it includes inference- and conservative-default-class entries that `assumptions` (filtered to `LedgerSource.ASSUMPTION` only) does not surface. Callers wanting to know *which assumptions the system made on the user's behalf* should read `assumption_sources`; callers preserving the older string-only contract continue to read `assumptions`.
 
-The pipeline must not hang indefinitely: all loops are bounded and timeout failures return a resumable `auto_session_id`. Resume with `ooo auto --resume <auto_session_id>`. Use `--skip-run` to stop after the A-grade Seed. Use `--complete-product` to drive the full Interview → Seed → Run → Ralph → Product chain on a single `ooo auto` invocation; the chained Ralph loop honors the same wall-clock deadline as the parent auto session (`--timeout`). The CLI-only `--show-ledger` flag prints assumptions/non-goals; MCP skill responses already include the same ledger summary when available.
+The pipeline must not hang indefinitely: all loops are bounded and timeout failures return a resumable `auto_session_id`. Resume with `ooo auto --resume <auto_session_id>`. Use `--skip-run` to stop after the A-grade Seed. `--complete-product` is deprecated and ignored: the run job owns `run → evaluate → ralph`, and the chained Ralph is bounded by `execution.auto_evolve_max_generations` and Ralph's own per-iteration / wall-clock budgets rather than by the auto session's `--timeout`. The CLI-only `--show-ledger` flag prints assumptions/non-goals; MCP skill responses already include the same ledger summary when available.
 
 ## RFC #1392 State Breadcrumb Footer
 

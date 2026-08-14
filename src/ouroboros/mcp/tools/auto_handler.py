@@ -268,10 +268,9 @@ class AutoHandler:
                     "complete_product",
                     ToolInputType.BOOLEAN,
                     (
-                        "When true, chain RUN → RALPH_HANDOFF after a successful run "
-                        "handoff so a single ouroboros_auto invocation iterates Ralph "
-                        "until QA passes, convergence, or a budget bound trips. "
-                        "Defaults to false (opt-in)."
+                        "Deprecated and ignored. The run job owns "
+                        "run -> evaluate -> ralph; follow it with ouroboros_job_status "
+                        "or ouroboros_job_wait instead."
                     ),
                     required=False,
                     default=False,
