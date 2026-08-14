@@ -104,6 +104,13 @@ _EXPECTED_JOB_TYPES: dict[str, str] = {
     "ralph": "ralph",
 }
 MISMATCHED_LINK_STATUS = "link_type_mismatch"
+# A successor handle is a cross-job reference into durable state. It can name a
+# job that no longer exists (pruned history, a different store, a mis-copied
+# id), and ``JobManager.get_snapshot`` raises for an unknown id. The walk fails
+# closed on that too: an unreadable link is a non-approving terminal that keeps
+# its handles, never an exception that loses them.
+UNAVAILABLE_LINK_STATUS = "link_unavailable"
+TIMED_OUT_STATUS = "timed_out"
 
 
 async def follow_run_chain(
@@ -133,15 +140,16 @@ async def follow_run_chain(
 
     while True:
         kind = _JOB_KINDS[min(depth, len(_JOB_KINDS) - 1)]
-        snapshot = await _await_terminal(job_manager, job_id, poll_seconds, expiry)
+        observed = await _await_terminal(job_manager, job_id, poll_seconds, expiry)
         followed.append(job_id)
-        if snapshot is None:
+        if isinstance(observed, str):
             return ChainTerminal(
                 job_id=job_id,
                 job_kind=kind,
-                status="timed_out",
+                status=observed,
                 followed_job_ids=tuple(followed),
             )
+        snapshot = observed
         if getattr(snapshot, "job_type", None) != _EXPECTED_JOB_TYPES[kind]:
             # Refuse to interpret the metadata of a job that is not the link it
             # claims to be — neither its verdict nor its successor handle.
@@ -181,8 +189,12 @@ async def _await_terminal(
     job_id: str,
     poll_seconds: float,
     expiry: float | None,
-) -> _Snapshot | None:
-    """Poll one job until terminal; None when the deadline trips first.
+) -> _Snapshot | str:
+    """Poll one job until terminal.
+
+    Returns the snapshot, or a terminal status string when the job cannot be
+    observed: :data:`TIMED_OUT_STATUS` when the budget runs out,
+    :data:`UNAVAILABLE_LINK_STATUS` when the handle names no readable job.
 
     The read itself is bounded, not just the interval between reads: a snapshot
     that comes from persistence or a reconciliation path can block, and a
@@ -191,22 +203,24 @@ async def _await_terminal(
     """
     loop = asyncio.get_running_loop()
     while True:
-        if expiry is None:
-            snapshot = await job_manager.get_snapshot(job_id)
-        else:
-            remaining = expiry - loop.time()
-            if remaining <= 0:
-                return None
-            try:
+        try:
+            if expiry is None:
+                snapshot = await job_manager.get_snapshot(job_id)
+            else:
+                remaining = expiry - loop.time()
+                if remaining <= 0:
+                    return TIMED_OUT_STATUS
                 snapshot = await asyncio.wait_for(
                     job_manager.get_snapshot(job_id), timeout=remaining
                 )
-            except TimeoutError:
-                return None
+        except TimeoutError:
+            return TIMED_OUT_STATUS
+        except (ValueError, KeyError, LookupError):
+            return UNAVAILABLE_LINK_STATUS
         if snapshot.is_terminal:
             return snapshot
         if expiry is not None and loop.time() >= expiry:
-            return None
+            return TIMED_OUT_STATUS
         remaining_sleep = (
             poll_seconds if expiry is None else min(poll_seconds, expiry - loop.time())
         )

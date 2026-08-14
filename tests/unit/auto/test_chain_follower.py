@@ -10,6 +10,7 @@ import pytest
 
 from ouroboros.auto.chain_follower import (
     MISMATCHED_LINK_STATUS,
+    UNAVAILABLE_LINK_STATUS,
     RALPH_APPROVED_STOP_REASON,
     ChainTerminal,
     follow_run_chain,
@@ -56,6 +57,9 @@ class _FakeJobManager:
         delay = self._delays.get(job_id)
         if delay:
             await asyncio.sleep(delay)
+        if job_id not in self._timelines:
+            # Mirrors JobManager.get_snapshot for an unknown durable id.
+            raise ValueError(f"Job not found: {job_id}")
         timeline = self._timelines[job_id]
         return timeline.pop(0) if len(timeline) > 1 else timeline[0]
 
@@ -264,3 +268,29 @@ async def test_deadline_returns_handles_instead_of_losing_the_chain() -> None:
     assert terminal.status == "timed_out"
     assert terminal.followed_job_ids == ("job_run",)
     assert isinstance(terminal, ChainTerminal)
+
+
+@pytest.mark.asyncio
+async def test_a_successor_handle_naming_no_readable_job_fails_closed() -> None:
+    """A handle can outlive the job it names; that must not lose the chain.
+
+    Successor ids are cross-job references into durable state — pruned history,
+    a different store, or a mis-copied id all resolve to nothing, and
+    ``JobManager.get_snapshot`` raises for an unknown id. The walk must return a
+    non-approving terminal that keeps its handles rather than propagate that
+    exception to the caller.
+    """
+    manager = _FakeJobManager(
+        {
+            "job_run": [
+                _FakeSnapshot("job_run", "completed", "ran", {"chained_evaluate_job_id": "missing"})
+            ]
+        }
+    )
+
+    terminal = await follow_run_chain(manager, "job_run", poll_seconds=0.0)
+
+    assert terminal.status == UNAVAILABLE_LINK_STATUS
+    assert terminal.job_kind == "evaluate"
+    assert terminal.approved is False
+    assert terminal.followed_job_ids == ("job_run", "missing")
