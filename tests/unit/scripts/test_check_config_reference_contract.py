@@ -105,6 +105,76 @@ def generators(config):
     )
 
 
+def test_runtime_scan_evaluates_generator_expression_outer_iterable_eagerly(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "generator_outer_iter.py").write_text(
+        "pending = (item for item in settings.evaluation.stage1_enabled)\n",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_propagates_generator_expression_into_local_consumer(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "generator_consumer.py").write_text(
+        """
+def consume(items):
+    for _ in items:
+        pass
+
+consume(settings.evaluation.stage2_enabled for _ in [1])
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage2_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_one_turn_generator_consumers_stop_at_first_yield(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "one_turn.py").write_text(
+        """
+def reader(config):
+    yield config.evaluation.stage1_enabled
+    yield config.evaluation.stage2_enabled
+
+async def async_reader(config):
+    yield config.evaluation.stage3_enabled
+    yield config.evaluation.satisfaction_threshold
+
+next(reader(settings))
+
+async def advance_once():
+    await anext(async_reader(settings))
+
+advance_once()
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in (
+            "stage1_enabled",
+            "stage2_enabled",
+            "stage3_enabled",
+            "satisfaction_threshold",
+        )
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {
+            contract.ConfigField("evaluation", "stage1_enabled"),
+            contract.ConfigField("evaluation", "stage3_enabled"),
+        }
+    )
+
+
 def test_runtime_scan_tracks_consumed_generator_functions_and_closures(
     contract, tmp_path: Path
 ) -> None:

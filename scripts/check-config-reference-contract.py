@@ -191,6 +191,14 @@ class _CallableTarget:
     receiver: _AbstractValue | None = None
 
 
+@dataclass(frozen=True)
+class _DeferredGenerator:
+    """A generator body plus the bindings captured when it was created."""
+
+    node: _FunctionNode | ast.GeneratorExp
+    scoped: dict[str, _AbstractValue]
+
+
 _UNKNOWN_VALUE = _AbstractValue()
 _STATIC_UNKNOWN = object()
 
@@ -792,7 +800,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._function_body_depth = 0
         self._class_member_values: dict[int, tuple[_AbstractValue, ...]] = {}
         self._closure_bindings: dict[int, dict[str, _AbstractValue]] = {}
-        self._deferred_generators: dict[int, tuple[_FunctionNode, dict[str, _AbstractValue]]] = {}
+        self._deferred_generators: dict[int, _DeferredGenerator] = {}
+        self._one_turn_generator_depth = 0
         self.reads: set[ConfigField] = set()
 
     def _name_value(self, name: str) -> _AbstractValue:
@@ -941,7 +950,12 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         values.extend(self._default_argument_values(function).values())
         values.extend(self._closure_bindings.get(id(function), {}).values())
         tracked = TRACKED_SECTIONS | {_CONFIG_ROOT}
-        if any(_contained_origins(value) & tracked or value.callables for value in values):
+        if any(
+            _contained_origins(value) & tracked
+            or value.callables
+            or any(identity in self._deferred_generators for identity in value.identity)
+            for value in values
+        ):
             return True
         return bound_receiver is not None and bool(_contained_origins(bound_receiver) & tracked)
 
@@ -1351,6 +1365,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         cached = self._expression_cache.get(id(node))
         if cached is not None:
             return cached
+        if isinstance(node, ast.GeneratorExp):
+            self.visit_GeneratorExp(node)
+            return self._expression_cache[id(node)]
         if isinstance(node, ast.Constant):
             return _AbstractValue(
                 literal=_key_token(node),
@@ -1691,24 +1708,32 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         for value in self._reachable_bool_values(node):
             self.visit(value)
 
-    def _consume_deferred_generator(self, node: ast.AST) -> None:
+    def _consume_deferred_generator(self, node: ast.AST, *, one_turn: bool = False) -> None:
         value = self._expression_value(node)
         for identity in value.identity:
             deferred = self._deferred_generators.get(identity)
             if deferred is None:
                 continue
-            function, scoped = deferred
-            self._visit_function_body(function, scoped, consume_generator=True)
+            if isinstance(deferred.node, ast.GeneratorExp):
+                self._visit_comprehension(deferred.node)
+                continue
+            self._visit_function_body(
+                deferred.node,
+                deferred.scoped,
+                consume_generator=True,
+                one_turn=one_turn,
+            )
 
     def visit_Call(self, node: ast.Call) -> None:
         before = self._binding_snapshot()
         accessor = self._expression_value(node.func)
         if accessor.origins & _EAGER_BUILTIN_CONSUMER_ORIGINS:
+            one_turn = "<builtin-consumer:next>" in accessor.origins
             for argument in node.args:
                 if isinstance(argument, ast.GeneratorExp):
                     self._visit_comprehension(argument)
                 else:
-                    self._consume_deferred_generator(argument)
+                    self._consume_deferred_generator(argument, one_turn=one_turn)
         # Evaluate once even when the call is a standalone mutating
         # ``setdefault`` expression.
         self._expression_value(node)
@@ -1734,7 +1759,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             accessor = self._expression_value(node.value.func)
             if accessor.origins & _ASYNC_BUILTIN_CONSUMER_ORIGINS:
                 for argument in node.value.args:
-                    self._consume_deferred_generator(argument)
+                    self._consume_deferred_generator(argument, one_turn=True)
         self.generic_visit(node)
 
     def visit_Starred(self, node: ast.Starred) -> None:
@@ -2726,9 +2751,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._visit_comprehension(node)
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
-        # Creating a generator evaluates no element expression; reads become
-        # reachable only when a consumer iterates it.
-        self._expression_cache[id(node)] = _UNKNOWN_VALUE
+        # Python eagerly evaluates only the outermost iterable at generator
+        # construction.  The targets, filters, nested iterables and element
+        # expression stay deferred until a consumer advances the generator.
+        if id(node) in self._expression_cache:
+            return
+        self.visit(node.generators[0].iter)
+        self._deferred_generators[id(node)] = _DeferredGenerator(node, {})
+        self._expression_cache[id(node)] = _AbstractValue(identity=frozenset({id(node)}))
 
     def visit_DictComp(self, node: ast.DictComp) -> None:
         self._visit_comprehension(node)
@@ -3044,6 +3074,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         scoped: dict[str, _AbstractValue],
         *,
         consume_generator: bool = False,
+        one_turn: bool = False,
     ) -> tuple[_AbstractValue, ...]:
         scoped = {**self._closure_bindings.get(id(node), {}), **scoped}
         self._states.append(scoped)
@@ -3070,6 +3101,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._module = self._source_index.owner(node) or self._module
         self._expression_cache = {}
         self._function_body_depth += 1
+        if one_turn:
+            self._one_turn_generator_depth += 1
         try:
             if isinstance(node, ast.Lambda):
                 self.visit(node.body)
@@ -3083,6 +3116,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 if path.kind == "return"
             )
         finally:
+            if one_turn:
+                self._one_turn_generator_depth -= 1
             self._function_body_depth -= 1
             self._expression_cache = previous_cache
             self._module = previous_module
@@ -3100,7 +3135,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     ) -> _AbstractValue:
         scoped = self._bound_call_arguments(call, function, bound_receiver)
         if _is_generator_function(function):
-            self._deferred_generators[id(call)] = (function, scoped)
+            self._deferred_generators[id(call)] = _DeferredGenerator(function, scoped)
             return _AbstractValue(identity=frozenset({id(call)}))
         function_id = id(function)
         if function_id in self._active_calls:
@@ -3142,6 +3177,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             _AbruptPath("return", self._binding_snapshot(), return_value=value),
         )
         self._path_reachable = False
+
+    def visit_Yield(self, node: ast.Yield) -> None:
+        if node.value is not None:
+            self.visit(node.value)
+        if self._one_turn_generator_depth:
+            # ``next``/awaited ``anext`` suspends immediately after the first
+            # reached yield; later statements have not executed yet.
+            self._path_reachable = False
 
     def visit_Raise(self, node: ast.Raise) -> None:
         if node.exc is not None:
