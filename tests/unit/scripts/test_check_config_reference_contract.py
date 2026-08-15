@@ -157,6 +157,22 @@ advance_once()
 """,
         encoding="utf-8",
     )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in (
+            "stage1_enabled",
+            "stage2_enabled",
+            "stage3_enabled",
+            "satisfaction_threshold",
+        )
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {
+            contract.ConfigField("evaluation", "stage1_enabled"),
+            contract.ConfigField("evaluation", "stage3_enabled"),
+        }
+    )
 
 
 def test_runtime_scan_models_any_and_all_short_circuiting(contract, tmp_path: Path) -> None:
@@ -239,21 +255,95 @@ advance_once()
             contract.ConfigField("evaluation", "stage3_enabled"),
         }
     )
+
+
+def test_runtime_scan_preserves_generator_continuation_across_partial_consumers(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "continuations.py").write_text(
+        """
+def next_reader(config):
+    yield 0
+    yield config.evaluation.stage1_enabled
+
+def send_reader(config):
+    yield 0
+    yield config.evaluation.stage2_enabled
+
+def any_reader(config):
+    yield True
+    yield config.evaluation.stage3_enabled
+
+first = next_reader(settings)
+next(first)
+next(first)
+
+second = send_reader(settings)
+second.send(None)
+second.send(None)
+
+third = any_reader(settings)
+any(third)
+next(third)
+""",
+        encoding="utf-8",
+    )
     fields = frozenset(
         contract.ConfigField("evaluation", name)
-        for name in (
-            "stage1_enabled",
-            "stage2_enabled",
-            "stage3_enabled",
-            "satisfaction_threshold",
-        )
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_preserves_async_generator_continuation(contract, tmp_path: Path) -> None:
+    (tmp_path / "async_continuation.py").write_text(
+        """
+async def reader(config):
+    yield 0
+    yield config.evaluation.satisfaction_threshold
+
+async def advance():
+    stream = reader(settings)
+    await stream.asend(None)
+    await stream.asend(None)
+
+advance()
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "satisfaction_threshold")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_loop_break_consumes_only_first_generator_turn(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "break_once.py").write_text(
+        """
+def read_after(config):
+    yield 0
+    yield config.evaluation.stage1_enabled
+
+def read_before(config):
+    yield config.evaluation.stage2_enabled
+    yield 0
+
+for value in read_after(settings):
+    break
+
+for value in read_before(settings):
+    break
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
     )
 
     assert contract.runtime_reads(tmp_path, fields) == frozenset(
-        {
-            contract.ConfigField("evaluation", "stage1_enabled"),
-            contract.ConfigField("evaluation", "stage3_enabled"),
-        }
+        {contract.ConfigField("evaluation", "stage2_enabled")}
     )
 
 

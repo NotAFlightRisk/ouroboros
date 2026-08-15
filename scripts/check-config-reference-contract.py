@@ -801,7 +801,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._class_member_values: dict[int, tuple[_AbstractValue, ...]] = {}
         self._closure_bindings: dict[int, dict[str, _AbstractValue]] = {}
         self._deferred_generators: dict[int, _DeferredGenerator] = {}
+        self._deferred_generator_positions: dict[int, int] = {}
         self._generator_consumer_modes: list[str] = []
+        self._generator_skip_yields: list[int] = []
+        self._generator_advanced_yields: list[int] = []
         self.reads: set[ConfigField] = set()
 
     def _name_value(self, name: str) -> _AbstractValue:
@@ -1722,6 +1725,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 deferred.scoped,
                 consume_generator=True,
                 generator_consumer_mode=mode,
+                generator_identity=identity,
             )
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -2191,7 +2195,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         if isinstance(node.iter, ast.GeneratorExp):
             self._visit_comprehension(node.iter)
         else:
-            self._consume_deferred_generator(node.iter)
+            mode = "one_turn" if node.body and isinstance(node.body[0], ast.Break) else "full"
+            self._consume_deferred_generator(node.iter, mode=mode)
         self.visit(node.iter)
         iterable = self._expression_value(node.iter)
         zero_iterations_possible = self._static_truth(node.iter) is not True
@@ -3099,6 +3104,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         *,
         consume_generator: bool = False,
         generator_consumer_mode: str = "full",
+        generator_identity: int | None = None,
     ) -> tuple[_AbstractValue, ...]:
         scoped = {**self._closure_bindings.get(id(node), {}), **scoped}
         self._states.append(scoped)
@@ -3125,8 +3131,12 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._module = self._source_index.owner(node) or self._module
         self._expression_cache = {}
         self._function_body_depth += 1
-        if generator_consumer_mode != "full":
+        if generator_identity is not None:
             self._generator_consumer_modes.append(generator_consumer_mode)
+            self._generator_skip_yields.append(
+                self._deferred_generator_positions.get(generator_identity, 0)
+            )
+            self._generator_advanced_yields.append(0)
         try:
             if isinstance(node, ast.Lambda):
                 self.visit(node.body)
@@ -3140,7 +3150,12 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 if path.kind == "return"
             )
         finally:
-            if generator_consumer_mode != "full":
+            if generator_identity is not None:
+                advanced = self._generator_advanced_yields.pop()
+                self._deferred_generator_positions[generator_identity] = (
+                    self._deferred_generator_positions.get(generator_identity, 0) + advanced
+                )
+                self._generator_skip_yields.pop()
                 self._generator_consumer_modes.pop()
             self._function_body_depth -= 1
             self._expression_cache = previous_cache
@@ -3203,10 +3218,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._path_reachable = False
 
     def visit_Yield(self, node: ast.Yield) -> None:
+        if self._generator_skip_yields and self._generator_skip_yields[-1] > 0:
+            self._generator_skip_yields[-1] -= 1
+            return
         if node.value is not None:
             self.visit(node.value)
         if not self._generator_consumer_modes:
             return
+        self._generator_advanced_yields[-1] += 1
         mode = self._generator_consumer_modes[-1]
         truth = self._static_truth(node.value) if node.value is not None else False
         if (
