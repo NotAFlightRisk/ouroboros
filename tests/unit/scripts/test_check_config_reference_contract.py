@@ -157,6 +157,88 @@ advance_once()
 """,
         encoding="utf-8",
     )
+
+
+def test_runtime_scan_models_any_and_all_short_circuiting(contract, tmp_path: Path) -> None:
+    (tmp_path / "short_circuit.py").write_text(
+        """
+def any_stops(config):
+    yield True
+    yield config.evaluation.stage1_enabled
+
+def any_continues(config):
+    yield False
+    yield config.evaluation.stage2_enabled
+
+def all_stops(config):
+    yield False
+    yield config.evaluation.stage3_enabled
+
+def all_continues(config):
+    yield True
+    yield config.evaluation.satisfaction_threshold
+
+any(any_stops(settings))
+any(any_continues(settings))
+all(all_stops(settings))
+all(all_continues(settings))
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in (
+            "stage1_enabled",
+            "stage2_enabled",
+            "stage3_enabled",
+            "satisfaction_threshold",
+        )
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {
+            contract.ConfigField("evaluation", "stage2_enabled"),
+            contract.ConfigField("evaluation", "satisfaction_threshold"),
+        }
+    )
+
+
+def test_runtime_scan_send_and_asend_advance_exactly_one_turn(contract, tmp_path: Path) -> None:
+    (tmp_path / "send_once.py").write_text(
+        """
+def reader(config):
+    yield config.evaluation.stage1_enabled
+    yield config.evaluation.stage2_enabled
+
+async def async_reader(config):
+    yield config.evaluation.stage3_enabled
+    yield config.evaluation.satisfaction_threshold
+
+reader(settings).send(None)
+
+async def advance_once():
+    await async_reader(settings).asend(None)
+
+advance_once()
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in (
+            "stage1_enabled",
+            "stage2_enabled",
+            "stage3_enabled",
+            "satisfaction_threshold",
+        )
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {
+            contract.ConfigField("evaluation", "stage1_enabled"),
+            contract.ConfigField("evaluation", "stage3_enabled"),
+        }
+    )
     fields = frozenset(
         contract.ConfigField("evaluation", name)
         for name in (
