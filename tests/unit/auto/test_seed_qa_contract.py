@@ -156,6 +156,15 @@ def test_parent_seed_rejects_modal_or_optional_contracts() -> None:
         inherited_parent_seed_id(_seed("Inherit from seed_good for an optional migration note."))
         == "seed_good"
     )
+
+
+def test_parent_seed_handles_contracted_korean_and_corrected_lineage() -> None:
+    for goal in ("It doesn't inherit seed_bad.", "seed_bad를 상속하면 안 됩니다."):
+        assert inherited_parent_seed_id(_seed(goal)) is None
+    assert (
+        inherited_parent_seed_id(_seed("Inherit seed_old. Correction: inherit seed_new."))
+        == "seed_new"
+    )
     assert (
         inherited_parent_seed_id(_seed("Inherit seed_bad, but that requirement was rejected."))
         is None

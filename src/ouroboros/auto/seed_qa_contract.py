@@ -9,6 +9,7 @@ from ouroboros.core.seed import Seed
 from ouroboros.core.task_type import (
     _candidate_segment,
     _governor_scope_start,
+    _is_explicit_correction,
     explicit_task_type_from_goal,
     has_historical_governor,
     has_negative_governor,
@@ -112,7 +113,7 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
             re.IGNORECASE,
         ),
     )
-    matches: list[tuple[int, str]] = []
+    matches: list[tuple[int, int, str]] = []
     for pattern in patterns:
         for match in pattern.finditer(seed.goal):
             segment_start, segment_end = _candidate_segment(seed.goal, match.start(), match.end())
@@ -139,12 +140,15 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
                 )
             ):
                 continue
-            matches.append((match.start(), match.group("seed_id")))
+            matches.append((match.start(), match.end(), match.group("seed_id")))
     if not matches:
         return None
-    if len({seed_id for _, seed_id in matches}) > 1:
+    ordered = sorted(matches)
+    if len({seed_id for _, _, seed_id in ordered}) > 1 and not _is_explicit_correction(
+        seed.goal, ordered[-2][1], ordered[-1][0]
+    ):
         return None
-    return max(matches, key=lambda item: item[0])[1]
+    return ordered[-1][2]
 
 
 def requests_seed_qa_ambiguity_repair(qa_result: EvaluateResult) -> bool:

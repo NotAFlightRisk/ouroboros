@@ -174,6 +174,19 @@ def test_explicit_task_type_rejects_modal_contracts() -> None:
         explicit_task_type_from_goal("Use task_type: document for an optional appendix.")
         == "document"
     )
+
+
+def test_explicit_task_type_rejects_contracted_korean_and_conflicting_negatives() -> None:
+    for goal in (
+        "The system doesn't use task_type: document.",
+        "task_type은 document로 설정하지 마세요.",
+        "task_type: research and task_type: document.",
+    ):
+        assert explicit_task_type_from_goal(goal) is None
+    assert (
+        explicit_task_type_from_goal("task_type: research. Correction: task_type: document.")
+        == "document"
+    )
     assert (
         explicit_task_type_from_goal("task_type: document, but that requirement was rejected.")
         is None

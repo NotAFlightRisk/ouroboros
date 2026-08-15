@@ -50,7 +50,7 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
 
 _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"\b(?:ignore|discard|superseded|obsolete|example|literal|discussed|phrase|proposal)\b"
-    r"|\b(?:do(?:es)?\s+not|don't|never|avoid(?:ed|ing)?|cannot|can't|can\s+not|without)\b"
+    r"|\b(?:do(?:es)?\s+not|don't|doesn't|doesn’t|never|avoid(?:ed|ing)?|cannot|can't|can\s+not|without)\b"
     r"|\b(?:am|is|are|was|were)\s+not\b"
     r"|\bnot\s+true\b"
     r"|\b(?:must|should|may)\s+not\b"
@@ -59,7 +59,8 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"|\b(?:won’t|wouldn’t|shouldn’t|mustn’t|isn’t|aren’t|wasn’t|weren’t)\b"
     r"|\b(?:am|is|are|was|were)\s+no\s+longer\b"
     r"|\bnot\s+allowed\b"
-    r"|\b(?:explain(?:ed|ing)?|docs?\s+(?:say|says|said)|legacy\s+exports?)\b",
+    r"|\b(?:explain(?:ed|ing)?|docs?\s+(?:say|says|said)|legacy\s+exports?)\b"
+    r"|(?:설정하지\s*마세요|(?:상속|계승)하면\s*안\s*(?:됩니다|돼요))",
     re.IGNORECASE,
 )
 _HISTORICAL_GOVERNOR_PATTERN = re.compile(
@@ -122,7 +123,7 @@ def _governor_scope_start(text: str, start: int) -> int:
 def explicit_task_type_from_goal(goal: str) -> str | None:
     """Return the task type only when the goal states a binding contract."""
     normalized = goal
-    matches: list[tuple[int, str]] = []
+    matches: list[tuple[int, int, str]] = []
     for pattern in _TASK_TYPE_CONTRACT_PATTERNS:
         for match in pattern.finditer(normalized):
             line_start = normalized.rfind("\n", 0, match.start()) + 1
@@ -161,10 +162,15 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
                 )
             ):
                 continue
-            matches.append((match.start(), match.group("task_type").casefold()))
+            matches.append((match.start(), match.end(), match.group("task_type").casefold()))
     if not matches:
         return None
-    return max(matches, key=lambda item: item[0])[1]
+    ordered = sorted(matches)
+    if len({value for _, _, value in ordered}) > 1 and not _is_explicit_correction(
+        normalized, ordered[-2][1], ordered[-1][0]
+    ):
+        return None
+    return ordered[-1][2]
 
 
 def is_non_binding_contract_segment(segment: str) -> bool:
@@ -200,6 +206,18 @@ def is_ambiguous_contract_segment(segment: str) -> bool:
 def has_optional_contract_tail(text: str, end: int, segment_end: int) -> bool:
     """Reject optionality applied to the contract, not to a later output noun."""
     return re.match(r"\s+(?:is\s+)?optional\b", text[end:segment_end], re.IGNORECASE) is not None
+
+
+def _is_explicit_correction(text: str, prior_end: int, next_start: int) -> bool:
+    """Return whether the later surviving contract explicitly replaces the prior one."""
+    return (
+        re.search(
+            r"\b(?:correction|corrected|instead|supersed(?:e|ed|ing))\b|정정|대신",
+            text[prior_end:next_start],
+            re.IGNORECASE,
+        )
+        is not None
+    )
 
 
 def has_historical_governor(text: str, start: int, scope_start: int | None = None) -> bool:
