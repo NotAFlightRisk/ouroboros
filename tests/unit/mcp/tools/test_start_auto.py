@@ -1551,18 +1551,16 @@ class TestBackgroundJobPath:
         assert "evaluator" not in kwargs
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("complete_product", [False, True])
-    async def test_run_starter_owns_successors_only_in_complete_product_mode(
-        self, event_store, tmp_path, monkeypatch: pytest.MonkeyPatch, complete_product: bool
+    async def test_auto_never_suppresses_the_run_job_successors(
+        self, event_store, tmp_path
     ) -> None:
-        """Exactly one owner for the post-run evaluation.
+        """Auto has no post-run phase left, so the run job's chain is the only owner.
 
-        Complete-product Auto drives RALPH_HANDOFF → EVALUATE itself, so the run
-        job's own chain is suppressed. Default Auto has no such path — it stops
-        at COMPLETE once the run has a handle — so the run job keeps its
-        run → evaluate → ralph chain instead of finishing unevaluated.
+        The suppression flag existed for complete-product Auto, which drove
+        RALPH_HANDOFF -> EVALUATE itself. With that path retired there is no
+        second owner to protect against, and an override would leave the
+        finished run ungraded.
         """
-
         captured: dict[str, object] = {}
 
         class FakeAutoPipeline:
@@ -1576,14 +1574,12 @@ class TestBackgroundJobPath:
                     phase=str(state.phase.value),
                 )
 
-        monkeypatch.setattr("ouroboros.mcp.tools.auto_handler.AutoPipeline", FakeAutoPipeline)
+        with patch("ouroboros.mcp.tools.auto_handler.AutoPipeline", FakeAutoPipeline):
+            h = AutoHandler(store=AutoStore(tmp_path), event_store=event_store)
+            await h._run({"goal": "build a CLI"})
 
-        h = AutoHandler(store=AutoStore(tmp_path), event_store=event_store)
-
-        await h._run({"goal": "build a CLI", "complete_product": complete_product})
-
-        kwargs = captured["pipeline_kwargs"]
-        assert kwargs["run_starter"].owns_successors is complete_product
+        run_starter = captured["pipeline_kwargs"]["run_starter"]
+        assert not hasattr(run_starter, "owns_successors")
 
     @pytest.mark.asyncio
     async def test_plugin_mode_returns_subagent_without_enqueue(
