@@ -84,12 +84,28 @@ def requested_seed_qa_task_type(seed: Seed) -> str | None:
 
 def inherited_parent_seed_id(seed: Seed) -> str | None:
     """Return the inherited Seed ID explicitly named by the goal contract."""
-    match = re.search(
-        r"(?<![A-Za-z0-9_])seed_[A-Za-z0-9]+(?![A-Za-z0-9_])",
-        seed.goal,
-        re.IGNORECASE,
+    seed_id = r"(?P<seed_id>seed_[A-Za-z0-9]+)"
+    patterns = (
+        re.compile(
+            rf"\b(?:inherit|derive(?:d)?\s+from|parent(?:_seed_id)?\s*(?:is|=|:))\s+{seed_id}\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            rf"(?<![A-Za-z0-9_]){seed_id}(?![A-Za-z0-9_])(?:을|를)?\s*"
+            rf"(?:계승|상속)(?!하지)",
+            re.IGNORECASE,
+        ),
     )
-    return match.group(0) if match is not None else None
+    matches: list[tuple[int, str]] = []
+    for pattern in patterns:
+        for match in pattern.finditer(seed.goal):
+            prefix = seed.goal[max(0, match.start() - 24) : match.start()]
+            if re.search(r"\b(?:do\s+not|don't|never)\s*$", prefix, re.IGNORECASE):
+                continue
+            matches.append((match.start(), match.group("seed_id")))
+    if not matches:
+        return None
+    return max(matches, key=lambda item: item[0])[1]
 
 
 def requests_seed_qa_ambiguity_repair(qa_result: EvaluateResult) -> bool:

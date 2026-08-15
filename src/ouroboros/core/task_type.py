@@ -39,10 +39,33 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
 def explicit_task_type_from_goal(goal: str) -> str | None:
     """Return the task type only when the goal states a binding contract."""
     normalized = goal.replace("`", "").replace("'", "").replace('"', "")
+    matches: list[tuple[int, str]] = []
     for pattern in _TASK_TYPE_CONTRACT_PATTERNS:
-        if match := pattern.search(normalized):
-            return match.group("task_type").casefold()
-    return None
+        for match in pattern.finditer(normalized):
+            line_start = normalized.rfind("\n", 0, match.start()) + 1
+            line_end = normalized.find("\n", match.end())
+            if line_end < 0:
+                line_end = len(normalized)
+            line = normalized[line_start:line_end]
+            clause_start = max(
+                normalized.rfind(separator, line_start, match.start()) for separator in ".!?;"
+            )
+            clause_start = max(line_start, clause_start + 1)
+            prefix = normalized[clause_start : match.start()]
+            if re.match(r"\s*(?:q|question|interviewer)\s*:", line, re.IGNORECASE):
+                continue
+            if "?" in normalized[clause_start : match.end()]:
+                continue
+            if re.search(
+                r"\b(?:ignore|discard|superseded|obsolete)\b",
+                prefix,
+                re.IGNORECASE,
+            ):
+                continue
+            matches.append((match.start(), match.group("task_type").casefold()))
+    if not matches:
+        return None
+    return max(matches, key=lambda item: item[0])[1]
 
 
 def normalize_task_type(value: object) -> str:
