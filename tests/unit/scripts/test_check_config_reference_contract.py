@@ -41,6 +41,70 @@ def test_current_repository_passes_standalone_contract() -> None:
     assert "Config reference contract OK" in result.stdout
 
 
+def test_runtime_scan_honors_global_and_nonlocal_binding_updates(contract, tmp_path: Path) -> None:
+    (tmp_path / "scope_updates.py").write_text(
+        """
+reader = None
+
+def install_reader():
+    global reader
+    reader = lambda config: config.evaluation.stage1_enabled
+
+install_reader()
+reader(settings)
+
+erased = lambda config: config.evaluation.stage2_enabled
+def erase_reader():
+    global erased
+    erased = None
+erase_reader()
+
+def outer():
+    nested = lambda config: config.evaluation.stage3_enabled
+    def erase_nested():
+        nonlocal nested
+        nested = None
+    erase_nested()
+    return nested
+outer()
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {contract.ConfigField("evaluation", "stage1_enabled")}
+    )
+
+
+def test_runtime_scan_requires_generator_consumption(contract, tmp_path: Path) -> None:
+    (tmp_path / "deferred.py").write_text(
+        """
+def generators(config):
+    section = config.evaluation
+    pending = (section.stage1_enabled for _ in [1])
+    consumed = list(section.stage2_enabled for _ in [1])
+    for item in (section.stage3_enabled for _ in [1]):
+        pass
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {
+            contract.ConfigField("evaluation", "stage2_enabled"),
+            contract.ConfigField("evaluation", "stage3_enabled"),
+        }
+    )
+
+
 def test_runtime_scan_finds_attribute_alias_and_literal_getattr_reads(
     contract, tmp_path: Path
 ) -> None:

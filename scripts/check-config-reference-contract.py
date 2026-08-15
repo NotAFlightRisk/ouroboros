@@ -724,6 +724,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._states: list[dict[str, _AbstractValue]] = [{}]
         self._annotations: list[dict[str, _AbstractValue]] = [{}]
         self._functions: list[dict[str, _FunctionSet]] = [{}]
+        self._global_names: list[set[str]] = [set()]
+        self._nonlocal_names: list[set[str]] = [set()]
         self._active_calls: set[int] = set()
         self._expression_cache: dict[int, _AbstractValue] = {}
         self._flow_abrupts: list[list[_AbruptPath]] = [[]]
@@ -867,6 +869,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         bound_receiver: _AbstractValue | None,
     ) -> bool:
         if isinstance(function, ast.Lambda):
+            return True
+        if any(isinstance(child, (ast.Global, ast.Nonlocal)) for child in ast.walk(function)):
             return True
         values = [
             self._expression_value(
@@ -1617,6 +1621,20 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         before = self._binding_snapshot()
+        if isinstance(node.func, ast.Name) and node.func.id in {
+            "all",
+            "any",
+            "list",
+            "max",
+            "min",
+            "next",
+            "set",
+            "sum",
+            "tuple",
+        }:
+            for argument in node.args:
+                if isinstance(argument, ast.GeneratorExp):
+                    self._visit_comprehension(argument)
         # Evaluate once even when the call is a standalone mutating
         # ``setdefault`` expression.
         self._expression_value(node)
@@ -1761,9 +1779,25 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self._expression_cache = previous_cache
             self._path_reachable = previous_reachable
 
+    def _binding_scope_index(self, name: str) -> int:
+        """Resolve the lexical scope targeted by global/nonlocal assignment."""
+        if name in self._global_names[-1]:
+            return 0
+        if name in self._nonlocal_names[-1]:
+            for index in range(len(self._states) - 2, -1, -1):
+                if name in self._states[index] or index == 0:
+                    return index
+        return len(self._states) - 1
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self._global_names[-1].update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self._nonlocal_names[-1].update(node.names)
+
     def _bind_target_value(self, target: ast.expr, value: _AbstractValue) -> None:
         if isinstance(target, ast.Name):
-            self._states[-1][target.id] = value
+            self._states[self._binding_scope_index(target.id)][target.id] = value
         elif isinstance(target, ast.Starred):
             self._bind_target_value(target.value, value)
         elif isinstance(target, (ast.Tuple, ast.List)):
@@ -1772,7 +1806,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
     def _bind_annotation_target(self, target: ast.expr, value: _AbstractValue) -> None:
         if isinstance(target, ast.Name):
-            self._annotations[-1][target.id] = value
+            self._annotations[self._binding_scope_index(target.id)][target.id] = value
         elif isinstance(target, (ast.Tuple, ast.List)):
             for element in target.elts:
                 self._bind_annotation_target(element, _UNKNOWN_VALUE)
@@ -1783,14 +1817,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         functions: _FunctionSet,
     ) -> None:
         if isinstance(target, ast.Name):
-            self._functions[-1][target.id] = functions
+            self._functions[self._binding_scope_index(target.id)][target.id] = functions
         elif isinstance(target, (ast.Tuple, ast.List)):
             for element in target.elts:
                 self._bind_function_target(element, frozenset())
 
     def _bind_destructured(self, target: ast.expr, value: _AbstractValue) -> None:
         if isinstance(target, ast.Name):
-            self._states[-1][target.id] = value
+            self._states[self._binding_scope_index(target.id)][target.id] = value
             return
         if isinstance(target, ast.Starred):
             self._bind_target_value(target.value, value)
@@ -1913,9 +1947,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_Delete(self, node: ast.Delete) -> None:
         for target in node.targets:
             if isinstance(target, ast.Name):
-                self._states[-1].pop(target.id, None)
-                self._annotations[-1].pop(target.id, None)
-                self._functions[-1].pop(target.id, None)
+                index = self._binding_scope_index(target.id)
+                self._states[index].pop(target.id, None)
+                self._annotations[index].pop(target.id, None)
+                self._functions[index].pop(target.id, None)
             else:
                 self.visit(target)
 
@@ -1937,8 +1972,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self._replace_shared_value(owner, replacement, node.target)
             return
         if isinstance(node.target, ast.Name):
-            self._states[-1][node.target.id] = self._name_value(node.target.id)
-            self._functions[-1][node.target.id] = frozenset()
+            index = self._binding_scope_index(node.target.id)
+            self._states[index][node.target.id] = self._name_value(node.target.id)
+            self._functions[index][node.target.id] = frozenset()
 
     def visit_If(self, node: ast.If) -> None:
         self.visit(node.test)
@@ -1993,6 +2029,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         return True
 
     def visit_For(self, node: ast.For) -> None:
+        if isinstance(node.iter, ast.GeneratorExp):
+            self._visit_comprehension(node.iter)
         self.visit(node.iter)
         iterable = self._expression_value(node.iter)
         zero_iterations_possible = self._static_truth(node.iter) is not True
@@ -2526,6 +2564,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self.visit(first.iter)
         first_value = self._expression_value(first.iter)
         self._states.append({})
+        self._annotations.append({})
+        self._functions.append({})
+        self._global_names.append(set())
+        self._nonlocal_names.append(set())
         try:
             if not self._bind_iteration_target(first.target, first_value):
                 self._expression_cache[id(node)] = _UNKNOWN_VALUE
@@ -2559,6 +2601,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 result = _AbstractValue(items=(self._expression_value(node.elt),))
             self._expression_cache[id(node)] = result
         finally:
+            self._nonlocal_names.pop()
+            self._global_names.pop()
+            self._functions.pop()
+            self._annotations.pop()
             self._states.pop()
 
     def visit_ListComp(self, node: ast.ListComp) -> None:
@@ -2568,7 +2614,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._visit_comprehension(node)
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
-        self._visit_comprehension(node)
+        # Creating a generator evaluates no element expression; reads become
+        # reachable only when a consumer iterates it.
+        self._expression_cache[id(node)] = _UNKNOWN_VALUE
 
     def visit_DictComp(self, node: ast.DictComp) -> None:
         self._visit_comprehension(node)
@@ -2883,6 +2931,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     ) -> tuple[_AbstractValue, ...]:
         self._states.append(scoped)
         self._annotations.append({})
+        self._global_names.append(set())
+        self._nonlocal_names.append(set())
         function_bindings: dict[str, _FunctionSet] = {
             argument.arg: frozenset()
             for argument in (
@@ -2907,6 +2957,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if isinstance(node, ast.Lambda):
                 self.visit(node.body)
                 return (self._expression_value(node.body),)
+            if any(isinstance(child, (ast.Yield, ast.YieldFrom)) for child in ast.walk(node)):
+                return ()
             result = self._visit_binding_branch(node.body, self._binding_snapshot())
             return tuple(
                 path.return_value or _UNKNOWN_VALUE
@@ -2918,6 +2970,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self._expression_cache = previous_cache
             self._module = previous_module
             self._functions.pop()
+            self._nonlocal_names.pop()
+            self._global_names.pop()
             self._annotations.pop()
             self._states.pop()
 
@@ -3118,11 +3172,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._states.append({})
         self._annotations.append({})
         self._functions.append(self._declared_functions(node.body))
+        self._global_names.append(set())
+        self._nonlocal_names.append(set())
         try:
             for statement in node.body:
                 self.visit(statement)
             self._class_member_values[id(node)] = tuple(self._states[-1].values())
         finally:
+            self._nonlocal_names.pop()
+            self._global_names.pop()
             self._functions.pop()
             self._annotations.pop()
             self._states.pop()
