@@ -199,6 +199,14 @@ class _DeferredGenerator:
     scoped: dict[str, _AbstractValue]
 
 
+@dataclass(frozen=True)
+class _DeferredCoroutine:
+    """An async function body, deferred until its coroutine is awaited."""
+
+    node: ast.AsyncFunctionDef
+    scoped: dict[str, _AbstractValue]
+
+
 _UNKNOWN_VALUE = _AbstractValue()
 _STATIC_UNKNOWN = object()
 
@@ -232,6 +240,8 @@ _TRACKED_BUILTIN_CONSUMERS = (
 _EAGER_BUILTIN_CONSUMER_ORIGINS = frozenset(
     f"<builtin-consumer:{name}>" for name in _EAGER_BUILTIN_CONSUMERS
 )
+_EAGER_EXTERNAL_CONSUMER_ORIGINS = frozenset({"<external-consumer:collections.deque>"})
+_EAGER_CONSUMER_ORIGINS = _EAGER_BUILTIN_CONSUMER_ORIGINS | _EAGER_EXTERNAL_CONSUMER_ORIGINS
 _LAZY_BUILTIN_CONSUMER_ORIGINS = frozenset(
     f"<builtin-consumer:{name}>" for name in _LAZY_BUILTIN_CONSUMERS
 )
@@ -801,6 +811,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._class_member_values: dict[int, tuple[_AbstractValue, ...]] = {}
         self._closure_bindings: dict[int, dict[str, _AbstractValue]] = {}
         self._deferred_generators: dict[int, _DeferredGenerator] = {}
+        self._deferred_coroutines: dict[int, _DeferredCoroutine] = {}
         self._deferred_generator_positions: dict[int, int] = {}
         self._generator_consumer_modes: list[str] = []
         self._generator_skip_yields: list[int] = []
@@ -1351,6 +1362,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             test = self._static_truth(node.test)
             if test is not None:
                 return self._static_truth(node.body if test else node.orelse)
+        if isinstance(node, ast.Compare) and len(node.ops) == 1 and len(node.comparators) == 1:
+            left = self._expression_value(node.left)
+            right = self._expression_value(node.comparators[0])
+            if left.literal is not None and right.literal is not None:
+                equal = left.literal == right.literal
+                if isinstance(node.ops[0], ast.Eq):
+                    return equal
+                if isinstance(node.ops[0], ast.NotEq):
+                    return not equal
         return None
 
     def _reachable_bool_values(self, node: ast.BoolOp) -> tuple[ast.expr, ...]:
@@ -1429,6 +1449,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_GETATTR_BUILTIN)
             if _BUILTINS_MODULE in owner.origins and node.attr in _TRACKED_BUILTIN_CONSUMERS:
                 return _origin_value(f"<builtin-consumer:{node.attr}>")
+            if node.attr == "deque" and "collections" in owner.modules:
+                return _origin_value("<external-consumer:collections.deque>")
             resolved_modules = {
                 child.name
                 for module_name in owner.modules
@@ -1718,7 +1740,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if deferred is None:
                 continue
             if isinstance(deferred.node, ast.GeneratorExp):
-                self._visit_comprehension(deferred.node)
+                self._consume_generator_expression(deferred.node, identity, mode=mode)
                 continue
             self._visit_function_body(
                 deferred.node,
@@ -1728,10 +1750,17 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 generator_identity=identity,
             )
 
+    def _consume_deferred_coroutine(self, node: ast.AST) -> None:
+        value = self._expression_value(node)
+        for identity in value.identity:
+            deferred = self._deferred_coroutines.get(identity)
+            if deferred is not None:
+                self._visit_function_body(deferred.node, deferred.scoped)
+
     def visit_Call(self, node: ast.Call) -> None:
         before = self._binding_snapshot()
         accessor = self._expression_value(node.func)
-        if accessor.origins & _EAGER_BUILTIN_CONSUMER_ORIGINS:
+        if accessor.origins & _EAGER_CONSUMER_ORIGINS:
             mode = (
                 "one_turn"
                 if "<builtin-consumer:next>" in accessor.origins
@@ -1742,10 +1771,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 else "full"
             )
             for argument in node.args:
-                if isinstance(argument, ast.GeneratorExp):
-                    self._visit_comprehension(argument)
-                else:
-                    self._consume_deferred_generator(argument, mode=mode)
+                self._consume_deferred_generator(argument, mode=mode)
         if (
             isinstance(node.func, ast.Attribute)
             and node.func.attr == "send"
@@ -1775,6 +1801,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
     def visit_Await(self, node: ast.Await) -> None:
         """Awaiting ``anext`` consumes one turn of an async generator."""
+        self._consume_deferred_coroutine(node.value)
         if isinstance(node.value, ast.Call):
             accessor = self._expression_value(node.value.func)
             if accessor.origins & _ASYNC_BUILTIN_CONSUMER_ORIGINS:
@@ -2773,6 +2800,63 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self._annotations.pop()
             self._states.pop()
 
+    def _consume_generator_expression(
+        self, node: ast.GeneratorExp, identity: int, *, mode: str
+    ) -> None:
+        """Advance one generator-expression identity with runtime consumption semantics."""
+        first, *remaining = node.generators
+        candidates = self._iteration_values(self._expression_value(first.iter))
+        start = self._deferred_generator_positions.get(identity, 0)
+        consumed = 0
+        for candidate in candidates[start:]:
+            consumed += 1
+            self._states.append({})
+            self._annotations.append({})
+            self._functions.append({})
+            self._global_names.append(set())
+            self._nonlocal_names.append(set())
+            yielded = True
+            try:
+                self._bind_destructured(first.target, candidate)
+                for condition in first.ifs:
+                    self.visit(condition)
+                    if self._static_truth(condition) is False:
+                        yielded = False
+                        break
+                if yielded:
+                    for generator in remaining:
+                        self.visit(generator.iter)
+                        if not self._bind_iteration_target(
+                            generator.target, self._expression_value(generator.iter)
+                        ):
+                            yielded = False
+                            break
+                        for condition in generator.ifs:
+                            self.visit(condition)
+                            if self._static_truth(condition) is False:
+                                yielded = False
+                                break
+                        if not yielded:
+                            break
+                if yielded:
+                    self.visit(node.elt)
+                    truth = self._static_truth(node.elt)
+            finally:
+                self._nonlocal_names.pop()
+                self._global_names.pop()
+                self._functions.pop()
+                self._annotations.pop()
+                self._states.pop()
+            if yielded and (
+                mode == "one_turn"
+                or mode == "any"
+                and truth is True
+                or mode == "all"
+                and truth is False
+            ):
+                break
+        self._deferred_generator_positions[identity] = start + consumed
+
     def visit_ListComp(self, node: ast.ListComp) -> None:
         self._visit_comprehension(node)
 
@@ -2841,6 +2925,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if alias.name == "operator"
                     else _origin_value(_BUILTINS_MODULE)
                     if alias.name == "builtins"
+                    else _AbstractValue(modules=frozenset({"collections"}))
+                    if alias.name == "collections"
                     else _AbstractValue(
                         modules=frozenset({module.name}) if module is not None else frozenset()
                     )
@@ -2878,6 +2964,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "builtins" and alias.name == "getattr"
                     else _origin_value(f"<builtin-consumer:{alias.name}>")
                     if node.module == "builtins" and alias.name in _TRACKED_BUILTIN_CONSUMERS
+                    else _origin_value("<external-consumer:collections.deque>")
+                    if node.module == "collections" and alias.name == "deque"
                     else _AbstractValue(
                         classes=classes,
                         modules=(
@@ -3175,6 +3263,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         scoped = self._bound_call_arguments(call, function, bound_receiver)
         if _is_generator_function(function):
             self._deferred_generators[id(call)] = _DeferredGenerator(function, scoped)
+            return _AbstractValue(identity=frozenset({id(call)}))
+        if isinstance(function, ast.AsyncFunctionDef):
+            self._deferred_coroutines[id(call)] = _DeferredCoroutine(function, scoped)
             return _AbstractValue(identity=frozenset({id(call)}))
         function_id = id(function)
         if function_id in self._active_calls:

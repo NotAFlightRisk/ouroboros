@@ -105,6 +105,75 @@ def generators(config):
     )
 
 
+def test_runtime_scan_defers_coroutine_body_until_await(contract, tmp_path: Path) -> None:
+    (tmp_path / "coroutines.py").write_text(
+        """
+async def runtime(config):
+    async def ignored():
+        return config.evaluation.stage1_enabled
+    async def consumed():
+        return config.evaluation.stage2_enabled
+    ignored()
+    return await consumed()
+
+await runtime(settings)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {contract.ConfigField("evaluation", "stage2_enabled")}
+    )
+
+
+def test_runtime_scan_generator_expression_next_advances_one_item(contract, tmp_path: Path) -> None:
+    (tmp_path / "generator_expression_next.py").write_text(
+        """
+def runtime(settings):
+    generated = (
+        settings.evaluation.stage1_enabled
+        if index == 0
+        else settings.evaluation.stage2_enabled
+        for index in [0, 1]
+    )
+    next(generated)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {contract.ConfigField("evaluation", "stage1_enabled")}
+    )
+
+
+@pytest.mark.parametrize("import_form", ("from collections import deque", "import collections"))
+def test_runtime_scan_recognizes_collections_deque_as_eager_consumer(
+    contract, tmp_path: Path, import_form: str
+) -> None:
+    call = (
+        "deque(generated, maxlen=0)"
+        if import_form.startswith("from")
+        else ("collections.deque(generated, maxlen=0)")
+    )
+    (tmp_path / "deque_consumer.py").write_text(
+        f"""
+{import_form}
+generated = (settings.evaluation.stage2_enabled for _ in [1])
+{call}
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage2_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
 def test_runtime_scan_evaluates_generator_expression_outer_iterable_eagerly(
     contract, tmp_path: Path
 ) -> None:
