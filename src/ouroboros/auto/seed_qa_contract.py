@@ -12,6 +12,7 @@ from ouroboros.core.task_type import (
     explicit_task_type_from_goal,
     has_historical_governor,
     has_negative_governor,
+    has_optional_contract_tail,
     has_post_match_rejection,
     is_ambiguous_contract_segment,
     is_non_binding_contract_segment,
@@ -131,6 +132,7 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
                 )
                 or has_post_match_rejection(seed.goal, match.end())
                 or is_ambiguous_contract_segment(authority_scope)
+                or has_optional_contract_tail(seed.goal, match.end(), segment_end)
                 or (
                     is_ambiguous_contract_segment(governor_prefix)
                     and not re.search(r"\b(?:but|and)\b", governor_prefix, re.IGNORECASE)
@@ -139,6 +141,8 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
                 continue
             matches.append((match.start(), match.group("seed_id")))
     if not matches:
+        return None
+    if len({seed_id for _, seed_id in matches}) > 1:
         return None
     return max(matches, key=lambda item: item[0])[1]
 

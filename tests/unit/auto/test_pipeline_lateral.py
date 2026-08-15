@@ -182,6 +182,40 @@ def test_seed_qa_repair_persists_only_binding_mixed_clause_contracts() -> None:
 @pytest.mark.parametrize(
     "goal",
     (
+        "It does not inherit from seed_bad.",
+        "Inherit seed_one and inherit seed_two.",
+        "Inherit seed_one; inherit seed_two.",
+    ),
+)
+def test_seed_qa_repair_never_persists_negative_or_conflicting_parent(goal: str) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(update={"goal": goal})
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    assert repaired.metadata.parent_seed_id == "seed_current"
+
+
+def test_seed_qa_repair_preserves_parent_with_optional_output_modifier() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": "Inherit from seed_good for an optional migration note."}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    assert repaired.metadata.parent_seed_id == "seed_good"
+
+
+@pytest.mark.parametrize(
+    "goal",
+    (
         "Do not ever inherit seed_bad.",
         "Never directly inherit seed_bad.",
         "The Seed must not inherit seed_bad.",

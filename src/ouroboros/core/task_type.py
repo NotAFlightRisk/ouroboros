@@ -50,7 +50,7 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
 
 _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"\b(?:ignore|discard|superseded|obsolete|example|literal|discussed|phrase|proposal)\b"
-    r"|\b(?:do\s+not|don't|never|avoid(?:ed|ing)?|cannot|can't|can\s+not|without)\b"
+    r"|\b(?:do(?:es)?\s+not|don't|never|avoid(?:ed|ing)?|cannot|can't|can\s+not|without)\b"
     r"|\b(?:am|is|are|was|were)\s+not\b"
     r"|\bnot\s+true\b"
     r"|\b(?:must|should|may)\s+not\b"
@@ -91,7 +91,7 @@ _CANDIDATE_BOUNDARY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _AMBIGUOUS_CONTRACT_PATTERN = re.compile(
-    r"\b(?:if|unless|whether|either|otherwise|depending|choose\s+between|may|might|could|optional)\b"
+    r"\b(?:if|unless|whether|either|otherwise|depending|choose\s+between|may|might|could)\b"
     r"|\bor\b",
     re.IGNORECASE,
 )
@@ -154,6 +154,7 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
                 )
                 or has_post_match_rejection(normalized, match.end())
                 or is_ambiguous_contract_segment(authority_scope)
+                or has_optional_contract_tail(normalized, match.end(), segment_end)
                 or (
                     is_ambiguous_contract_segment(governor_prefix)
                     and not re.search(r"\b(?:but|and)\b", governor_prefix, re.IGNORECASE)
@@ -194,6 +195,11 @@ def is_quoted_contract(text: str, start: int, end: int) -> bool:
 def is_ambiguous_contract_segment(segment: str) -> bool:
     """Reject conditional or multi-option language at an authority boundary."""
     return _AMBIGUOUS_CONTRACT_PATTERN.search(segment) is not None
+
+
+def has_optional_contract_tail(text: str, end: int, segment_end: int) -> bool:
+    """Reject optionality applied to the contract, not to a later output noun."""
+    return re.match(r"\s+(?:is\s+)?optional\b", text[end:segment_end], re.IGNORECASE) is not None
 
 
 def has_historical_governor(text: str, start: int, scope_start: int | None = None) -> bool:
