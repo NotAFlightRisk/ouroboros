@@ -240,6 +240,9 @@ _PARTIAL_FACTORY = "<functools-partial-factory>"
 _ASYNCIO_MODULE = "<asyncio-module>"
 _ASYNCIO_CONSUMERS = frozenset({"create_task", "ensure_future", "gather", "run"})
 _ASYNCIO_CONSUMER_ORIGINS = frozenset(f"<asyncio-consumer:{name}>" for name in _ASYNCIO_CONSUMERS)
+_CONTEXTLIB_MODULE = "<contextlib-module>"
+_NULLCONTEXT_FACTORY = "<nullcontext-factory>"
+_NULLCONTEXT_VALUE = "<nullcontext-value>"
 _EAGER_BUILTIN_CONSUMERS = frozenset(
     {
         "all",
@@ -1482,9 +1485,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_PARTIAL_FACTORY)
             if _ASYNCIO_MODULE in owner.origins and node.attr in _ASYNCIO_CONSUMERS:
                 return _origin_value(f"<asyncio-consumer:{node.attr}>")
+            if _CONTEXTLIB_MODULE in owner.origins and node.attr == "nullcontext":
+                return _origin_value(_NULLCONTEXT_FACTORY)
             if node.attr == "deque" and "collections" in owner.modules:
                 return _origin_value("<external-consumer:collections.deque>")
             sections = owner.origins & TRACKED_SECTIONS
+            if node.attr == "__dict__" and sections:
+                return _AbstractValue(serialized_sections=sections)
             if node.attr == "model_dump" and sections:
                 return _AbstractValue(serialized_sections=sections)
             resolved_modules = {
@@ -1590,6 +1597,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
                     )
                 )
+            if _NULLCONTEXT_FACTORY in function_value.origins:
+                entry = self._expression_value(node.args[0]) if node.args else _UNKNOWN_VALUE
+                return _AbstractValue(origins=frozenset({_NULLCONTEXT_VALUE}), items=(entry,))
             if function_value.serialized_sections:
                 return _AbstractValue(serialized_sections=function_value.serialized_sections)
             if _VARS_BUILTIN in function_value.origins and node.args:
@@ -1657,6 +1667,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     instance_classes=constructor_classes,
                 )
             if isinstance(node.func, ast.Name) and node.func.id == "dict":
+                if node.args:
+                    sections = self._expression_value(node.args[0]).origins & TRACKED_SECTIONS
+                    if sections:
+                        return _AbstractValue(serialized_sections=sections)
                 entries: dict[str, _AbstractValue] = {}
                 if node.args:
                     source = self._expression_value(node.args[0])
@@ -1870,6 +1884,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             for argument in node.args:
                 self._consume_deferred_generator(argument, mode=mode)
                 self._consume_deferred_callable_iterator(argument, mode=mode)
+            key_keyword = next((keyword for keyword in node.keywords if keyword.arg == "key"), None)
+            if key_keyword is not None and node.args:
+                iterable = self._expression_value(node.args[0])
+                for item in iterable.items or ():
+                    for function, receiver in self._call_targets(key_keyword.value):
+                        values = ((receiver,) if receiver is not None else ()) + (item,)
+                        self._local_direct_call_value(function, values)
         if accessor.origins & _ASYNCIO_CONSUMER_ORIGINS:
             for argument in node.args:
                 self._consume_deferred_coroutine(argument)
@@ -3030,6 +3051,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if alias.name == "functools"
                     else _origin_value(_ASYNCIO_MODULE)
                     if alias.name == "asyncio"
+                    else _origin_value(_CONTEXTLIB_MODULE)
+                    if alias.name == "contextlib"
                     else _AbstractValue(modules=frozenset({"collections"}))
                     if alias.name == "collections"
                     else _AbstractValue(
@@ -3075,6 +3098,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "functools" and alias.name == "partial"
                     else _origin_value(f"<asyncio-consumer:{alias.name}>")
                     if node.module == "asyncio" and alias.name in _ASYNCIO_CONSUMERS
+                    else _origin_value(_NULLCONTEXT_FACTORY)
+                    if node.module == "contextlib" and alias.name == "nullcontext"
                     else _origin_value("<external-consumer:collections.deque>")
                     if node.module == "collections" and alias.name == "deque"
                     else _AbstractValue(
@@ -3096,9 +3121,26 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def _visit_with(self, node: ast.With | ast.AsyncWith) -> None:
         for item in node.items:
             self.visit(item.context_expr)
+            context_value = self._expression_value(item.context_expr)
+            for identity in context_value.identity:
+                deferred = self._deferred_generators.get(identity)
+                if (
+                    deferred is not None
+                    and isinstance(deferred.node, ast.FunctionDef)
+                    and any(
+                        _callable_name(decorator) == "contextmanager"
+                        for decorator in deferred.node.decorator_list
+                    )
+                ):
+                    self._consume_deferred_generator(item.context_expr, mode="one_turn")
             if item.optional_vars is not None:
                 self._visit_store_target(item.optional_vars)
-                self._bind_target_value(item.optional_vars, _UNKNOWN_VALUE)
+                entry_value = (
+                    context_value.items[0]
+                    if _NULLCONTEXT_VALUE in context_value.origins and context_value.items
+                    else _UNKNOWN_VALUE
+                )
+                self._bind_target_value(item.optional_vars, entry_value)
                 self._bind_function_target(item.optional_vars, frozenset())
                 self._bind_annotation_target(item.optional_vars, _UNKNOWN_VALUE)
         self._apply_flow_result(self._visit_binding_branch(node.body, self._binding_snapshot()))

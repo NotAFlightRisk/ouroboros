@@ -229,6 +229,60 @@ dump(settings.evaluation)["stage1_enabled"]
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
 
 
+def test_runtime_scan_tracks_concrete_mapping_serializers(contract, tmp_path: Path) -> None:
+    (tmp_path / "mapping_serializers.py").write_text(
+        """
+dict(settings.evaluation)["stage1_enabled"]
+settings.evaluation.__dict__["stage1_enabled"]
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_tracks_context_manager_entry_values(contract, tmp_path: Path) -> None:
+    (tmp_path / "context_entries.py").write_text(
+        """
+import contextlib
+from contextlib import contextmanager
+
+with contextlib.nullcontext(settings.evaluation) as section:
+    value = section.stage1_enabled
+
+@contextmanager
+def entered(config):
+    yield config.evaluation.stage2_enabled
+
+with entered(settings):
+    pass
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_executes_eager_key_callback_only_for_nonempty_input(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "key_callbacks.py").write_text(
+        """
+sorted([settings.evaluation], key=lambda section: section.stage1_enabled)
+sorted([], key=lambda section: section.stage2_enabled)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {contract.ConfigField("evaluation", "stage1_enabled")}
+    )
+
+
 def test_runtime_scan_consumes_coroutines_scheduled_by_asyncio_gather(
     contract, tmp_path: Path
 ) -> None:
