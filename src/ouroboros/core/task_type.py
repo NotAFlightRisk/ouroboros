@@ -43,7 +43,7 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _CANDIDATE_BOUNDARY_PATTERN = re.compile(
-    r"[,!?;.\n]|\b(?:and|but|instead)\b",
+    r"[,!?;.\n]|\b(?:and|but|instead|without|although|though|because|while|despite)\b",
     re.IGNORECASE,
 )
 
@@ -52,6 +52,19 @@ def _candidate_segment(text: str, start: int, end: int) -> tuple[int, int]:
     """Return the punctuation-or-conjunction-bounded candidate clause."""
     segment_start = 0
     for boundary in _CANDIDATE_BOUNDARY_PATTERN.finditer(text, 0, start):
+        # A leading ``without``/causal clause is itself often the negation
+        # governing the contract (``without using task_type``).  Keep it in
+        # the candidate so the non-binding guard can reject it; these words
+        # still delimit a positive contract when they occur after the match.
+        if boundary.group().strip().casefold() in {
+            "without",
+            "although",
+            "though",
+            "because",
+            "while",
+            "despite",
+        }:
+            continue
         segment_start = boundary.end()
     next_boundary = _CANDIDATE_BOUNDARY_PATTERN.search(text, end)
     segment_end = next_boundary.start() if next_boundary is not None else len(text)

@@ -45,3 +45,12 @@ def test_explicit_task_type_scopes_conjunction_negation_to_each_candidate() -> N
         "Do not use task_type: code and instead use task_type: document.",
     ):
         assert explicit_task_type_from_goal(goal) == "document"
+
+
+def test_explicit_task_type_survives_adjacent_negative_constraint() -> None:
+    for goal in (
+        "task_type must be document without changing repository files.",
+        "Use task_type: document although we must not produce code.",
+        "Use task_type: document because source code must not change.",
+    ):
+        assert explicit_task_type_from_goal(goal) == "document"

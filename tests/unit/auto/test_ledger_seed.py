@@ -78,11 +78,17 @@ class TestSynthesizeSeedFromLedgerUnchanged:
         assert seed.metadata.interview_id == "iv-1"
 
     def test_complete_ledger_preserves_explicit_document_task_type(self) -> None:
-        ledger = _populate_complete_ledger("Create a plan document; task_type must be document.")
+        for goal in (
+            "Create a plan document; task_type must be document.",
+            "task_type must be document without changing repository files.",
+            "Use task_type: document although we must not produce code.",
+            "Use task_type: document because source code must not change.",
+        ):
+            ledger = _populate_complete_ledger(goal)
 
-        seed = synthesize_seed_from_ledger(ledger)
+            seed = synthesize_seed_from_ledger(ledger)
 
-        assert seed.task_type == "document"
+            assert seed.task_type == "document"
 
     def test_incomplete_ledger_still_raises_on_strict_path(self) -> None:
         # Goal-only ledger is intentionally not Seed-ready; legacy contract is
@@ -113,11 +119,17 @@ class TestPartialSeedFromEvidence:
         assert seed.metadata.interview_id == "iv-partial"
 
     def test_partial_seed_preserves_explicit_document_task_type(self) -> None:
-        ledger = SeedDraftLedger.from_goal("문서형 계획을 만든다. task_type은 document여야 한다.")
+        for goal in (
+            "문서형 계획을 만든다. task_type은 document여야 한다.",
+            "task_type must be document without changing repository files.",
+            "Use task_type: document although we must not produce code.",
+            "Use task_type: document because source code must not change.",
+        ):
+            ledger = SeedDraftLedger.from_goal(goal)
 
-        seed = partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
+            seed = partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
 
-        assert seed.task_type == "document"
+            assert seed.task_type == "document"
 
     def test_unresolved_slots_match_open_gaps(self) -> None:
         ledger = SeedDraftLedger.from_goal("A bare goal.")

@@ -192,6 +192,8 @@ def test_seed_qa_repair_persists_positive_parent_after_negated_candidate() -> No
     (
         "Inherit seed_good and do not copy its obsolete constraints.",
         "Do not inherit seed_bad and instead inherit seed_good.",
+        "Inherit seed_good without copying obsolete constraints.",
+        "Derive from seed_good although we must not reuse its runtime settings.",
     ),
 )
 def test_seed_qa_repair_persists_conjunction_scoped_parent(goal: str) -> None:
