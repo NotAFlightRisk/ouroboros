@@ -170,6 +170,8 @@ _TYPE_CHECKING_FALSE = "<typing-type-checking-false>"
 _TYPING_MODULE = "<typing-module>"
 _OPERATOR_MODULE = "<operator-module>"
 _ATTRGETTER_FACTORY = "<attrgetter-factory>"
+_BUILTINS_MODULE = "<builtins-module>"
+_GETATTR_BUILTIN = "<getattr-builtin>"
 _SECTION_ANNOTATIONS: Mapping[str, str] = {
     "EvaluationConfig": "evaluation",
     "ConsensusConfig": "consensus",
@@ -1158,7 +1160,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 truth=bool(node.value),
             )
         if isinstance(node, ast.Name):
-            value = self._name_value(node.id)
+            value = (
+                _origin_value(_GETATTR_BUILTIN)
+                if node.id == "getattr" and not self._name_is_bound("getattr")
+                else self._name_value(node.id)
+            )
             if value.callables:
                 return value
             functions = self._local_functions(node.id)
@@ -1191,6 +1197,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 )
             if _OPERATOR_MODULE in owner.origins and node.attr == "attrgetter":
                 return _origin_value(_ATTRGETTER_FACTORY)
+            if _BUILTINS_MODULE in owner.origins and node.attr == "getattr":
+                return _origin_value(_GETATTR_BUILTIN)
             resolved_modules = {
                 child.name
                 for module_name in owner.modules
@@ -1280,15 +1288,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     and node.func.value.id in {"self", "cls"}
                 ):
                     return _origin_value(_CONFIG_ROOT)
-            if (
-                isinstance(node.func, ast.Name)
-                and node.func.id == "getattr"
-                and len(node.args) >= 2
-                and isinstance(node.args[1], ast.Constant)
-                and node.args[1].value in TRACKED_SECTIONS
-                and _CONFIG_ROOT in self._expression_value(node.args[0]).origins
-            ):
-                return _origin_value(node.args[1].value)
+            if _GETATTR_BUILTIN in function_value.origins and len(node.args) >= 2:
+                field_name = self._expression_value(node.args[1]).string_value
+                if (
+                    field_name in TRACKED_SECTIONS
+                    and _CONFIG_ROOT in self._expression_value(node.args[0]).origins
+                ):
+                    return _origin_value(field_name)
             values = [
                 self._local_call_value(node, function, bound_receiver)
                 for function, bound_receiver in self._call_targets(node.func)
@@ -1482,12 +1488,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 for section in value.origins & TRACKED_SECTIONS:
                     for name in accessor.accessed_attributes:
                         self._record(section, name.partition(".")[0])
-        if (
-            isinstance(node.func, ast.Name)
-            and node.func.id == "getattr"
-            and len(node.args) >= 2
-            and not self._name_is_bound("getattr")
-        ):
+        if _GETATTR_BUILTIN in accessor.origins and len(node.args) >= 2:
             field_name = self._expression_value(node.args[1]).string_value
             if field_name is not None:
                 for section in self._expression_value(node.args[0]).origins & TRACKED_SECTIONS:
@@ -2469,6 +2470,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if alias.name == "typing"
                     else _origin_value(_OPERATOR_MODULE)
                     if alias.name == "operator"
+                    else _origin_value(_BUILTINS_MODULE)
+                    if alias.name == "builtins"
                     else _AbstractValue(
                         modules=frozenset({module.name}) if module is not None else frozenset()
                     )
@@ -2502,6 +2505,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "typing" and alias.name == "TYPE_CHECKING"
                     else _origin_value(_ATTRGETTER_FACTORY)
                     if node.module == "operator" and alias.name == "attrgetter"
+                    else _origin_value(_GETATTR_BUILTIN)
+                    if node.module == "builtins" and alias.name == "getattr"
                     else _AbstractValue(
                         classes=classes,
                         modules=(

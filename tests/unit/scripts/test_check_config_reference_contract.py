@@ -1701,6 +1701,40 @@ getattr(config.evaluation, "stage2_enabled")
     )
 
 
+def test_runtime_scan_preserves_builtin_getattr_aliases(contract, tmp_path: Path) -> None:
+    (tmp_path / "assigned_alias.py").write_text(
+        """
+reader = getattr
+reader(config.evaluation, "stage2_enabled")
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "imported_alias.py").write_text(
+        """
+from builtins import getattr as reader
+reader(config.evaluation, "stage3_enabled")
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "module_alias.py").write_text(
+        """
+import builtins
+reader = builtins.getattr
+reader(config.evaluation, "satisfaction_threshold")
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        {
+            contract.ConfigField("evaluation", "stage2_enabled"),
+            contract.ConfigField("evaluation", "stage3_enabled"),
+            contract.ConfigField("evaluation", "satisfaction_threshold"),
+        }
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
 def test_runtime_scan_invokes_captured_property_getters(contract, tmp_path: Path) -> None:
     (tmp_path / "property_read.py").write_text(
         """
