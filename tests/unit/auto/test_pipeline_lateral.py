@@ -150,7 +150,14 @@ def test_seed_qa_feedback_repairs_explicit_document_task_type() -> None:
 
 
 @pytest.mark.parametrize(
-    "goal", ("Do not ever inherit seed_bad.", "Never directly inherit seed_bad.")
+    "goal",
+    (
+        "Do not ever inherit seed_bad.",
+        "Never directly inherit seed_bad.",
+        "The Seed must not inherit seed_bad.",
+        "Cannot inherit seed_bad.",
+        "Continue without inheriting seed_bad.",
+    ),
 )
 def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
     seed = _build_seed(seed_id="seed_current").model_copy(update={"goal": goal})
@@ -165,6 +172,22 @@ def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
 
     assert repaired.metadata.parent_seed_id == "seed_current"
     assert repaired.metadata.parent_seed_id != "seed_bad"
+
+
+def test_seed_qa_repair_persists_positive_parent_after_negated_candidate() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": "Do not inherit seed_bad, instead inherit seed_good."}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.metadata.parent_seed_id == "seed_good"
 
 
 def test_seed_qa_feedback_rejects_unmapped_reviewer_diagnostics() -> None:

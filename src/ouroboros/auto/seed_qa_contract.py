@@ -87,7 +87,7 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
     seed_id = r"(?P<seed_id>seed_[A-Za-z0-9]+)"
     patterns = (
         re.compile(
-            rf"\b(?:inherit|derive(?:d)?\s+from|parent(?:_seed_id)?\s*(?:is|=|:))\s+{seed_id}\b",
+            rf"\b(?:inherit(?:ing)?|derive(?:d)?\s+from|parent(?:_seed_id)?\s*(?:is|=|:))\s+{seed_id}\b",
             re.IGNORECASE,
         ),
         re.compile(
@@ -99,11 +99,23 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
     matches: list[tuple[int, str]] = []
     for pattern in patterns:
         for match in pattern.finditer(seed.goal):
-            clause_start = max(
-                seed.goal.rfind(separator, 0, match.start()) for separator in ".!?;\n"
+            segment_start = (
+                max(seed.goal.rfind(separator, 0, match.start()) for separator in ",.!?;\n") + 1
             )
-            prefix = seed.goal[clause_start + 1 : match.start()]
-            if re.search(r"\b(?:do\s+not|don't|never)\b", prefix, re.IGNORECASE):
+            segment_end_candidates = [
+                index
+                for separator in ",.!?;\n"
+                if (index := seed.goal.find(separator, match.end())) >= 0
+            ]
+            segment_end = min(segment_end_candidates) if segment_end_candidates else len(seed.goal)
+            segment = seed.goal[segment_start:segment_end]
+            if re.search(
+                r"\b(?:do\s+not|don't|never|cannot|can't|can\s+not|without)\b"
+                r"|\b(?:must|should|may)\s+not\b"
+                r"|\bnot\s+allowed\b",
+                segment,
+                re.IGNORECASE,
+            ):
                 continue
             matches.append((match.start(), match.group("seed_id")))
     if not matches:

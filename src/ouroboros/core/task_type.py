@@ -35,6 +35,24 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
     ),
 )
 
+_NON_BINDING_CONTRACT_PATTERN = re.compile(
+    r"\b(?:ignore|discard|superseded|obsolete|example|literal)\b"
+    r"|\b(?:do\s+not|don't|never|avoid|cannot|can't|can\s+not|without)\b"
+    r"|\b(?:must|should|may)\s+not\b"
+    r"|\bnot\s+allowed\b",
+    re.IGNORECASE,
+)
+
+
+def _candidate_segment(text: str, start: int, end: int) -> tuple[int, int]:
+    """Return the comma-or-sentence-bounded segment containing a candidate."""
+    segment_start = max(text.rfind(separator, 0, start) for separator in ",.!?;\n") + 1
+    segment_end_candidates = [
+        index for separator in ",.!?;\n" if (index := text.find(separator, end)) >= 0
+    ]
+    segment_end = min(segment_end_candidates) if segment_end_candidates else len(text)
+    return segment_start, segment_end
+
 
 def explicit_task_type_from_goal(goal: str) -> str | None:
     """Return the task type only when the goal states a binding contract."""
@@ -47,28 +65,14 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
             if line_end < 0:
                 line_end = len(normalized)
             line = normalized[line_start:line_end]
-            clause_start = max(
-                normalized.rfind(separator, line_start, match.start()) for separator in ".!?;"
-            )
-            clause_start = max(line_start, clause_start + 1)
-            prefix = normalized[clause_start : match.start()]
-            clause_end_candidates = [
-                index
-                for separator in ".!?;"
-                if (index := normalized.find(separator, match.end())) >= 0
-            ]
-            clause_end = min(clause_end_candidates) if clause_end_candidates else line_end
-            clause_terminator = normalized[clause_end : clause_end + 1]
+            segment_start, segment_end = _candidate_segment(normalized, match.start(), match.end())
+            segment = normalized[segment_start:segment_end]
+            segment_terminator = normalized[segment_end : segment_end + 1]
             if re.match(r"\s*(?:q|question|interviewer)\s*:", line, re.IGNORECASE):
                 continue
-            if "?" in normalized[clause_start : match.end()] or clause_terminator == "?":
+            if "?" in segment or segment_terminator == "?":
                 continue
-            if re.search(
-                r"\b(?:ignore|discard|superseded|obsolete|example|literal)\b"
-                r"|\b(?:do\s+not|don't|never|avoid)\b",
-                prefix,
-                re.IGNORECASE,
-            ):
+            if _NON_BINDING_CONTRACT_PATTERN.search(segment):
                 continue
             matches.append((match.start(), match.group("task_type").casefold()))
     if not matches:
