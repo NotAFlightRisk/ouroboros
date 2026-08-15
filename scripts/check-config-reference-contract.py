@@ -145,6 +145,7 @@ class _AbstractValue:
     attributes: tuple[tuple[str, _AbstractValue], ...] | None = None
     identity: frozenset[int] = frozenset()
     literal: str | None = None
+    string_value: str | None = None
     truth: bool | None = None
     classes: frozenset[ast.ClassDef] = frozenset()
     instance_classes: frozenset[ast.ClassDef] = frozenset()
@@ -275,6 +276,11 @@ def _join_values(*values: _AbstractValue) -> _AbstractValue:
         literal=(
             values[0].literal
             if all(value.literal == values[0].literal for value in values)
+            else None
+        ),
+        string_value=(
+            values[0].string_value
+            if all(value.string_value == values[0].string_value for value in values)
             else None
         ),
         truth=(
@@ -806,6 +812,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             attributes=attributes,
             identity=value.identity,
             literal=value.literal,
+            string_value=value.string_value,
             truth=value.truth,
             classes=value.classes,
             instance_classes=value.instance_classes,
@@ -852,6 +859,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             attributes=owner.attributes,
             identity=owner.identity,
             literal=owner.literal,
+            string_value=owner.string_value,
             truth=False if not normalized else None,
             classes=owner.classes,
             instance_classes=owner.instance_classes,
@@ -873,6 +881,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             attributes=owner.attributes,
             identity=owner.identity,
             literal=owner.literal,
+            string_value=owner.string_value,
             truth=False if not items else None,
             classes=owner.classes,
             instance_classes=owner.instance_classes,
@@ -894,6 +903,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             attributes=attributes,
             identity=owner.identity,
             literal=owner.literal,
+            string_value=owner.string_value,
             truth=owner.truth,
             classes=owner.classes,
             instance_classes=owner.instance_classes,
@@ -991,6 +1001,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 attributes=owner.attributes,
                 identity=frozenset({id(node)}),
                 literal=owner.literal,
+                string_value=owner.string_value,
                 truth=owner.truth,
             )
         if method == "values":
@@ -1141,7 +1152,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         if cached is not None:
             return cached
         if isinstance(node, ast.Constant):
-            return _AbstractValue(literal=_key_token(node), truth=bool(node.value))
+            return _AbstractValue(
+                literal=_key_token(node),
+                string_value=node.value if isinstance(node.value, str) else None,
+                truth=bool(node.value),
+            )
         if isinstance(node, ast.Name):
             value = self._name_value(node.id)
             if value.callables:
@@ -1471,11 +1486,12 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             isinstance(node.func, ast.Name)
             and node.func.id == "getattr"
             and len(node.args) >= 2
-            and isinstance(node.args[1], ast.Constant)
-            and isinstance(node.args[1].value, str)
+            and not self._name_is_bound("getattr")
         ):
-            for section in self._expression_value(node.args[0]).origins & TRACKED_SECTIONS:
-                self._record(section, node.args[1].value)
+            field_name = self._expression_value(node.args[1]).string_value
+            if field_name is not None:
+                for section in self._expression_value(node.args[0]).origins & TRACKED_SECTIONS:
+                    self._record(section, field_name)
         self.generic_visit(node)
         self._record_possible_exception(before)
 
@@ -2882,6 +2898,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return original
             replacement = _join_values(*replacements)
             if not replacement.callables and not replacement.instance_classes:
+                if replacement != _UNKNOWN_VALUE:
+                    return replacement
                 return original
             value = replacement
         return value
@@ -2900,7 +2918,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
         if self._function_body_depth != 0:
             return
-        targets = value.callables or (_CallableTarget(node),)
+        targets = value.callables
         visited: set[int] = set()
         for target in targets:
             if id(target.function) in visited:

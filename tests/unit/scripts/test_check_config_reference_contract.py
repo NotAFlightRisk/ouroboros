@@ -1670,6 +1670,37 @@ read_stage(config.evaluation)
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
+def test_runtime_scan_resolves_constant_indirected_getattr_and_ignores_shadowed_builtin(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "constant_getattr.py").write_text(
+        """
+FIELD = "semantic_model"
+getattr(config.evaluation, FIELD)
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "shadowed_getattr.py").write_text(
+        """
+def getattr(section, name):
+    return None
+
+getattr(config.evaluation, "stage2_enabled")
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        {
+            contract.ConfigField("evaluation", "semantic_model"),
+            contract.ConfigField("evaluation", "stage2_enabled"),
+        }
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {contract.ConfigField("evaluation", "semantic_model")}
+    )
+
+
 def test_runtime_scan_invokes_captured_property_getters(contract, tmp_path: Path) -> None:
     (tmp_path / "property_read.py").write_text(
         """
@@ -1742,6 +1773,25 @@ def read_stage(section: EvaluationConfig):
     return section.stage2_enabled
 
 read_stage(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage2_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+def test_runtime_scan_does_not_visit_erased_body_for_non_callable_decorator(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "non_callable_decorator.py").write_text(
+        """
+def erase(function):
+    return None
+
+@erase
+def read_stage(config):
+    return config.evaluation.stage2_enabled
 """,
         encoding="utf-8",
     )
