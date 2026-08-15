@@ -91,6 +91,9 @@ def test_explicit_task_type_rejects_ordinary_negative_contract_language() -> Non
         "Use the default code task instead of task_type: document.",
         "Rather than use task_type: document, keep the code task.",
         "We no longer use task_type: document.",
+        "In the previous proposal, task_type: document.",
+        "It is not true that task_type: document.",
+        "We are not using task_type: document.",
     ):
         assert explicit_task_type_from_goal(goal) is None
     assert explicit_task_type_from_goal("Use task_type: document rather than code.") == "document"

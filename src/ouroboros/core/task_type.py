@@ -38,6 +38,8 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
 _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"\b(?:ignore|discard|superseded|obsolete|example|literal|discussed|phrase|proposal)\b"
     r"|\b(?:do\s+not|don't|never|avoid|cannot|can't|can\s+not|without)\b"
+    r"|\b(?:am|is|are|was|were)\s+not\b"
+    r"|\bnot\s+true\b"
     r"|\b(?:must|should|may)\s+not\b"
     r"|\bnot\s+allowed\b",
     re.IGNORECASE,
@@ -47,6 +49,11 @@ _HISTORICAL_GOVERNOR_PATTERN = re.compile(
     r"|\b(?:rejected|superseded|obsolete)\b[^\n.!?]{0,50}\b(?:proposal|contract|reference|request)\b)"
     r"[^\n.!?]{0,120}?\b(?:but|and|while|although|though|because|despite)\b"
     r"[^\n.!?]{0,80}$",
+    re.IGNORECASE,
+)
+_HISTORICAL_PREFIX_PATTERN = re.compile(
+    r"\b(?:in|from|under)\s+(?:the\s+)?(?:previous|prior|historical)\s+"
+    r"(?:proposal|contract|reference|request)\b[^\n.!?]{0,120}$",
     re.IGNORECASE,
 )
 _NEGATIVE_GOVERNOR_PATTERN = re.compile(
@@ -128,7 +135,11 @@ def is_quoted_contract(text: str, start: int, end: int) -> bool:
 def has_historical_governor(text: str, start: int) -> bool:
     """Return whether a preceding clause marks this contract as historical."""
     line_start = text.rfind("\n", 0, start) + 1
-    return _HISTORICAL_GOVERNOR_PATTERN.search(text[line_start:start]) is not None
+    prefix = text[line_start:start]
+    return (
+        _HISTORICAL_GOVERNOR_PATTERN.search(prefix) is not None
+        or _HISTORICAL_PREFIX_PATTERN.search(prefix) is not None
+    )
 
 
 def has_negative_governor(text: str, start: int) -> bool:

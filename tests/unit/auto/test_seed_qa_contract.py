@@ -78,6 +78,8 @@ def test_parent_seed_rejects_ordinary_negative_inheritance_language() -> None:
         "Start fresh instead of inheriting seed_bad.",
         "Rather than inherit seed_bad, start fresh.",
         "We no longer inherit seed_bad.",
+        "In the previous proposal, inherit seed_bad.",
+        "It is not true that we inherit seed_bad.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
 

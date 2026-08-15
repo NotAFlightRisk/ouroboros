@@ -1834,7 +1834,13 @@ class SeedGenerator:
                 )
             )
         requirements = applied.requirements
-        if task_type := explicit_task_type_from_goal(self._build_interview_context(state)):
+        authoritative_task_type_context = "\n".join(
+            (
+                prompt_safe_initial_context(state),
+                *(item.answer for item in extraction_rounds(state) if item.answer),
+            )
+        )
+        if task_type := explicit_task_type_from_goal(authoritative_task_type_context):
             requirements["task_type"] = task_type
 
         # Create metadata

@@ -415,6 +415,27 @@ class TestSeedGeneratorAmbiguityGating:
         assert result.value.task_type == "code"
 
     @pytest.mark.asyncio
+    async def test_brownfield_reference_text_cannot_override_task_type(self) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds(initial_context="Extend the CLI implementation")
+        state.is_brownfield = True
+        state.codebase_context = "Legacy example: TASK_TYPE: document"
+        extraction_response = create_valid_extraction_response(task_type="code")
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, create_low_ambiguity_score(0.15))
+
+        assert result.is_ok
+        assert result.value.task_type == "code"
+
+    @pytest.mark.asyncio
     async def test_generate_requires_summary_for_large_initial_context(self) -> None:
         """SeedGenerator.generate() fails when long initial_context has no summary."""
         mock_adapter = AsyncMock()

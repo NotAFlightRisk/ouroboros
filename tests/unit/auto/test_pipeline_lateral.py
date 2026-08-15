@@ -160,6 +160,8 @@ def test_seed_qa_feedback_repairs_explicit_document_task_type() -> None:
         "Start fresh instead of inheriting seed_bad.",
         "Rather than inherit seed_bad, start fresh.",
         "We no longer inherit seed_bad.",
+        "In the previous proposal, inherit seed_bad.",
+        "It is not true that we inherit seed_bad.",
     ),
 )
 def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
@@ -184,6 +186,9 @@ def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
         "Use the default code task instead of task_type: document.",
         "Rather than use task_type: document, keep the code task.",
         "We no longer use task_type: document.",
+        "In the previous proposal, task_type: document.",
+        "It is not true that task_type: document.",
+        "We are not using task_type: document.",
     ),
 )
 def test_seed_qa_repair_does_not_apply_rejected_task_type(goal: str) -> None:
