@@ -188,6 +188,9 @@ def test_explicit_task_type_rejects_contracted_korean_and_conflicting_negatives(
         == "document"
     )
     assert (
+        explicit_task_type_from_goal("Use task_type: document, not task_type: code.") == "document"
+    )
+    assert (
         explicit_task_type_from_goal("task_type: document, but that requirement was rejected.")
         is None
     )

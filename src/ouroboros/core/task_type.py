@@ -53,6 +53,7 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"|\b(?:do(?:es)?\s+not|don't|doesn't|doesn’t|never|avoid(?:ed|ing)?|cannot|can't|can\s+not|without)\b"
     r"|\b(?:am|is|are|was|were)\s+not\b"
     r"|\bnot\s+true\b"
+    r"|\bnot\s+(?=(?:use\s+)?task[_\s-]*type\b|inherit\b|derive\b|parent\b)"
     r"|\b(?:must|should|may)\s+not\b"
     r"|\b(?:will|would)\s+not\b"
     r"|\b(?:won't|wouldn't|shouldn't|mustn't|isn't|aren't|wasn't|weren't)\b"
