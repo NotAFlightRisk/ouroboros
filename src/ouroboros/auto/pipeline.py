@@ -2855,8 +2855,10 @@ class AutoPipeline:
                 return await advisory("evaluator_error", f"Seed QA raised {type(exc).__name__}")
 
             if qa_result.error:
+                detail = _safe_seed_qa_error_detail(qa_result.error)
                 return await advisory(
-                    "evaluator_transient_error", "Seed QA reported a transient evaluator error"
+                    "evaluator_transient_error",
+                    f"Seed QA reported a transient evaluator error: {detail}",
                 )
 
             state.last_qa_score = float(qa_result.score)
@@ -2966,6 +2968,7 @@ class AutoPipeline:
             state=state,
             seed=seed,
             reason=reason,
+            detail=detail,
             attempts=attempts,
             score=score,
             emit=self._emit_runtime_event,
@@ -5128,6 +5131,28 @@ def _safe_seed_qa_verdict(verdict: str) -> str:
     if normalized in {"fail", "pass", "revise"}:
         return normalized
     return "unknown"
+
+
+def _safe_seed_qa_error_detail(error: object) -> str:
+    """Classify an evaluator error without persisting provider output.
+
+    Provider errors can embed stderr, paths, credentials, and user content in
+    their message. Only these allowlisted categories cross the durable event
+    and progress-message boundary.
+    """
+    lowered = str(error).casefold()
+    categories = (
+        (("rate limit", "too many requests", "429"), "provider rate limit"),
+        (
+            ("unauthorized", "authentication", "api key", "credential"),
+            "provider authentication failure",
+        ),
+        (("connection", "network", "unavailable", "timed out"), "provider connectivity failure"),
+    )
+    for markers, summary in categories:
+        if any(marker in lowered for marker in markers):
+            return summary
+    return "provider evaluator failure"
 
 
 def _first_nonempty(*values: str | None) -> str | None:
