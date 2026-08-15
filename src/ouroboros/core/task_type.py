@@ -30,7 +30,15 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
     ),
     re.compile(
         rf"\btask[_\s-]*type\b.{{0,80}}?\b(?:must|should|needs?\s+to)\s+"
-        rf"(?:be|use|equal)\s+{_TASK_TYPE_PATTERN}\b",
+        rf"(?:be|remain|use|equal)\s+{_TASK_TYPE_PATTERN}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bkeep\s+(?:the\s+)?task[_\s-]*type\b\s+(?:as\s+)?{_TASK_TYPE_PATTERN}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\buse\s+{_TASK_TYPE_PATTERN}\s+as\s+(?:the\s+)?task[_\s-]*type\b",
         re.IGNORECASE,
     ),
     re.compile(
@@ -42,12 +50,13 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
 
 _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"\b(?:ignore|discard|superseded|obsolete|example|literal|discussed|phrase|proposal)\b"
-    r"|\b(?:do\s+not|don't|never|avoid|cannot|can't|can\s+not|without)\b"
+    r"|\b(?:do\s+not|don't|never|avoid(?:ed|ing)?|cannot|can't|can\s+not|without)\b"
     r"|\b(?:am|is|are|was|were)\s+not\b"
     r"|\bnot\s+true\b"
     r"|\b(?:must|should|may)\s+not\b"
     r"|\b(?:will|would)\s+not\b"
     r"|\b(?:won't|wouldn't|shouldn't|mustn't|isn't|aren't|wasn't|weren't)\b"
+    r"|\b(?:won’t|wouldn’t|shouldn’t|mustn’t|isn’t|aren’t|wasn’t|weren’t)\b"
     r"|\b(?:am|is|are|was|were)\s+no\s+longer\b"
     r"|\bnot\s+allowed\b",
     re.IGNORECASE,
@@ -78,6 +87,11 @@ _POST_MATCH_REJECTION_PATTERN = re.compile(
 )
 _CANDIDATE_BOUNDARY_PATTERN = re.compile(
     r"[,!?;.\n]|\b(?:and|but|instead|without|although|though|because|while|despite)\b",
+    re.IGNORECASE,
+)
+_AMBIGUOUS_CONTRACT_PATTERN = re.compile(
+    r"\b(?:if|unless|whether|either|otherwise|depending|choose\s+between)\b"
+    r"|\bor\b",
     re.IGNORECASE,
 )
 
@@ -122,6 +136,8 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
                 continue
             if "?" in segment or segment_terminator == "?":
                 continue
+            if re.match(r"\s*\?", normalized[match.end() :]):
+                continue
             if (
                 is_non_binding_contract_segment(segment)
                 or is_quoted_contract(normalized, match.start(), match.end())
@@ -132,6 +148,7 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
                     normalized, match.start(), _governor_scope_start(normalized, match.start())
                 )
                 or has_post_match_rejection(normalized, match.end())
+                or is_ambiguous_contract_segment(segment)
             ):
                 continue
             matches.append((match.start(), match.group("task_type").casefold()))
@@ -147,9 +164,20 @@ def is_non_binding_contract_segment(segment: str) -> bool:
 
 def is_quoted_contract(text: str, start: int, end: int) -> bool:
     """Return whether the matched contract itself is enclosed in quotes."""
-    before = text[:start].rstrip()
-    after = text[end:].lstrip()
-    return any(before.endswith(quote) and after.startswith(quote) for quote in ('"', "'", "`"))
+    before = text[:start]
+    after = text[end:]
+    for quote in ('"', "`"):
+        if before.count(quote) % 2 == 1 and after.count(quote) > 0:
+            return True
+    for opening, closing in (("“", "”"), ("‘", "’")):
+        if before.count(opening) > before.count(closing) and after.count(closing) > 0:
+            return True
+    return False
+
+
+def is_ambiguous_contract_segment(segment: str) -> bool:
+    """Reject conditional or multi-option language at an authority boundary."""
+    return _AMBIGUOUS_CONTRACT_PATTERN.search(segment) is not None
 
 
 def has_historical_governor(text: str, start: int, scope_start: int | None = None) -> bool:

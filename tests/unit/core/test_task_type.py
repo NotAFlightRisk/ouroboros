@@ -113,5 +113,22 @@ def test_explicit_task_type_resets_governors_at_punctuation_boundary() -> None:
 
 
 def test_explicit_task_type_accepts_ordinary_positive_wording() -> None:
-    for goal in ("The task type is document.", "Set the task type to document."):
+    for goal in (
+        "The task type is document.",
+        "Set the task type to document.",
+        "The task type must remain document.",
+        "Keep the task type as document.",
+        "Use document as the task type.",
+    ):
         assert explicit_task_type_from_goal(goal) == "document"
+
+
+def test_explicit_task_type_rejects_typographic_quoted_and_conditional_language() -> None:
+    for goal in (
+        "We won’t use task_type: document.",
+        "task_type: document should be avoided.",
+        "If task_type is document, write a guide; otherwise keep code.",
+        "Choose between task_type: document or code later.",
+        'The docs currently say "Set task_type: document for exports." Replace that guidance.',
+    ):
+        assert explicit_task_type_from_goal(goal) is None

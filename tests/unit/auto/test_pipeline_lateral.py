@@ -270,6 +270,30 @@ def test_seed_qa_repair_persists_conjunction_scoped_parent(goal: str) -> None:
     assert repaired.metadata.parent_seed_id == "seed_good"
 
 
+@pytest.mark.parametrize(
+    "goal",
+    (
+        "We won’t inherit seed_bad.",
+        "Inherit seed_bad should be avoided.",
+        'The old docs say "Inherit seed_bad for migrations." Replace that guidance.',
+        "If we inherit seed_bad, copy settings; otherwise start fresh.",
+        "Inherit seed_one or seed_two after review.",
+    ),
+)
+def test_seed_qa_repair_never_persists_non_binding_parent(goal: str) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(update={"goal": goal})
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.metadata.parent_seed_id == "seed_current"
+
+
 def test_seed_qa_repair_scopes_historical_lineage_and_possessives() -> None:
     qa_result = EvaluateResult(
         passed=False,

@@ -13,6 +13,7 @@ from ouroboros.core.task_type import (
     has_historical_governor,
     has_negative_governor,
     has_post_match_rejection,
+    is_ambiguous_contract_segment,
     is_non_binding_contract_segment,
     is_quoted_contract,
 )
@@ -125,6 +126,7 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
                     seed.goal, match.start(), _governor_scope_start(seed.goal, match.start())
                 )
                 or has_post_match_rejection(seed.goal, match.end())
+                or is_ambiguous_contract_segment(segment)
             ):
                 continue
             matches.append((match.start(), match.group("seed_id")))

@@ -112,3 +112,14 @@ def test_parent_seed_preserves_korean_inheritance_contract() -> None:
     seed = _seed("seed_parent를 계승해 문서형 Seed로 명세한다.")
 
     assert inherited_parent_seed_id(seed) == "seed_parent"
+
+
+def test_parent_seed_rejects_typographic_quoted_conditional_and_ambiguous_language() -> None:
+    for goal in (
+        "We won’t inherit seed_bad.",
+        "Inherit seed_bad should be avoided.",
+        'The old docs say "Inherit seed_bad for migrations." Replace that guidance.',
+        "If we inherit seed_bad, copy settings; otherwise start fresh.",
+        "Inherit seed_one or seed_two after review.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) is None

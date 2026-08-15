@@ -1809,14 +1809,21 @@ class SeedGenerator:
                 )
             )
         state.requirement_distillation = distillation
-        if is_reference_aware_distillation(distillation):
-            return Result.ok(
-                build_promoted_reference_seed(
-                    state,
-                    distillation,
-                    ambiguity_score=ambiguity_score.overall_score,
-                )
+        authoritative_task_type_context = "\n".join(
+            (
+                prompt_safe_initial_context(state),
+                *(item.answer for item in extraction_rounds(state) if item.answer),
             )
+        )
+        if is_reference_aware_distillation(distillation):
+            reference_seed = build_promoted_reference_seed(
+                state,
+                distillation,
+                ambiguity_score=ambiguity_score.overall_score,
+            )
+            if task_type := explicit_task_type_from_goal(authoritative_task_type_context):
+                reference_seed = reference_seed.model_copy(update={"task_type": task_type})
+            return Result.ok(reference_seed)
 
         # Extract structured requirements from interview
         extraction_result = await self._extract_requirements(state)
@@ -1834,12 +1841,6 @@ class SeedGenerator:
                 )
             )
         requirements = applied.requirements
-        authoritative_task_type_context = "\n".join(
-            (
-                prompt_safe_initial_context(state),
-                *(item.answer for item in extraction_rounds(state) if item.answer),
-            )
-        )
         if task_type := explicit_task_type_from_goal(authoritative_task_type_context):
             requirements["task_type"] = task_type
 
