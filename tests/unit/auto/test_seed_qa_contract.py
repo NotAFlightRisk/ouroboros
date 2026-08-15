@@ -52,6 +52,16 @@ def test_parent_seed_survives_adjacent_negative_constraint() -> None:
         assert inherited_parent_seed_id(_seed(goal)) == "seed_good"
 
 
+def test_parent_seed_ignores_quoted_and_historical_references() -> None:
+    for goal in (
+        'The phrase "inherit seed_bad" is an example, not a requirement.',
+        "We discussed inherit seed_bad in the rejected proposal.",
+        "Do not copy obsolete constraints because this Seed should inherit seed_good.",
+    ):
+        expected = "seed_good" if "should inherit" in goal else None
+        assert inherited_parent_seed_id(_seed(goal)) == expected
+
+
 def test_parent_seed_requires_inheritance_semantics() -> None:
     seed = _seed("Compare seed_old with seed_candidate.")
 

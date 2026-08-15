@@ -36,7 +36,8 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
 )
 
 _NON_BINDING_CONTRACT_PATTERN = re.compile(
-    r"\b(?:ignore|discard|superseded|obsolete|example|literal)\b"
+    r"[\"'`]"
+    r"|\b(?:ignore|discard|superseded|obsolete|example|literal|rejected|prior|previous|historical|discussed|phrase|proposal)\b"
     r"|\b(?:do\s+not|don't|never|avoid|cannot|can't|can\s+not|without)\b"
     r"|\b(?:must|should|may)\s+not\b"
     r"|\bnot\s+allowed\b",
@@ -56,14 +57,7 @@ def _candidate_segment(text: str, start: int, end: int) -> tuple[int, int]:
         # governing the contract (``without using task_type``).  Keep it in
         # the candidate so the non-binding guard can reject it; these words
         # still delimit a positive contract when they occur after the match.
-        if boundary.group().strip().casefold() in {
-            "without",
-            "although",
-            "though",
-            "because",
-            "while",
-            "despite",
-        }:
+        if boundary.group().strip().casefold() in {"without", "despite"}:
             continue
         segment_start = boundary.end()
     next_boundary = _CANDIDATE_BOUNDARY_PATTERN.search(text, end)
@@ -89,12 +83,17 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
                 continue
             if "?" in segment or segment_terminator == "?":
                 continue
-            if _NON_BINDING_CONTRACT_PATTERN.search(segment):
+            if is_non_binding_contract_segment(segment):
                 continue
             matches.append((match.start(), match.group("task_type").casefold()))
     if not matches:
         return None
     return max(matches, key=lambda item: item[0])[1]
+
+
+def is_non_binding_contract_segment(segment: str) -> bool:
+    """Return whether a clause describes negated, historical, or quoted text."""
+    return _NON_BINDING_CONTRACT_PATTERN.search(segment) is not None
 
 
 def normalize_task_type(value: object) -> str:

@@ -154,6 +154,8 @@ def test_seed_qa_feedback_repairs_explicit_document_task_type() -> None:
         "The Seed must not inherit seed_bad.",
         "Cannot inherit seed_bad.",
         "Continue without inheriting seed_bad.",
+        'The phrase "inherit seed_bad" is an example, not a requirement.',
+        "We discussed inherit seed_bad in the rejected proposal.",
     ),
 )
 def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
@@ -194,6 +196,7 @@ def test_seed_qa_repair_persists_positive_parent_after_negated_candidate() -> No
         "Do not inherit seed_bad and instead inherit seed_good.",
         "Inherit seed_good without copying obsolete constraints.",
         "Derive from seed_good although we must not reuse its runtime settings.",
+        "Do not copy obsolete constraints because this Seed should inherit seed_good.",
     ),
 )
 def test_seed_qa_repair_persists_conjunction_scoped_parent(goal: str) -> None:

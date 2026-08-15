@@ -83,6 +83,7 @@ class TestSynthesizeSeedFromLedgerUnchanged:
             "task_type must be document without changing repository files.",
             "Use task_type: document although we must not produce code.",
             "Use task_type: document because source code must not change.",
+            "Do not modify source code because task_type must be document.",
         ):
             ledger = _populate_complete_ledger(goal)
 
@@ -124,12 +125,24 @@ class TestPartialSeedFromEvidence:
             "task_type must be document without changing repository files.",
             "Use task_type: document although we must not produce code.",
             "Use task_type: document because source code must not change.",
+            "Do not modify source code because task_type must be document.",
         ):
             ledger = SeedDraftLedger.from_goal(goal)
 
             seed = partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
 
             assert seed.task_type == "document"
+
+    def test_historical_task_type_does_not_override_ledger_default(self) -> None:
+        goal = "We discussed task_type: document in the rejected proposal. Build a CLI."
+
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+        )
+
+        assert complete.task_type == "code"
+        assert partial.task_type == "code"
 
     def test_unresolved_slots_match_open_gaps(self) -> None:
         ledger = SeedDraftLedger.from_goal("A bare goal.")

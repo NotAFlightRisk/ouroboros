@@ -54,3 +54,17 @@ def test_explicit_task_type_survives_adjacent_negative_constraint() -> None:
         "Use task_type: document because source code must not change.",
     ):
         assert explicit_task_type_from_goal(goal) == "document"
+
+
+def test_explicit_task_type_ignores_causal_prefix_and_historical_contracts() -> None:
+    assert (
+        explicit_task_type_from_goal(
+            "Do not modify source code because task_type must be document."
+        )
+        == "document"
+    )
+    for goal in (
+        "We discussed task_type: document in the rejected proposal. Build a CLI.",
+        'The phrase "task_type: document" is an example, not a requirement.',
+    ):
+        assert explicit_task_type_from_goal(goal) is None

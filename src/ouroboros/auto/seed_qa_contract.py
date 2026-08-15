@@ -6,7 +6,11 @@ import re
 
 from ouroboros.auto.adapters import EvaluateResult
 from ouroboros.core.seed import Seed
-from ouroboros.core.task_type import _candidate_segment, explicit_task_type_from_goal
+from ouroboros.core.task_type import (
+    _candidate_segment,
+    explicit_task_type_from_goal,
+    is_non_binding_contract_segment,
+)
 
 
 class SeedQaRepairMappingError(RuntimeError):
@@ -101,13 +105,7 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
         for match in pattern.finditer(seed.goal):
             segment_start, segment_end = _candidate_segment(seed.goal, match.start(), match.end())
             segment = seed.goal[segment_start:segment_end]
-            if re.search(
-                r"\b(?:do\s+not|don't|never|cannot|can't|can\s+not|without)\b"
-                r"|\b(?:must|should|may)\s+not\b"
-                r"|\bnot\s+allowed\b",
-                segment,
-                re.IGNORECASE,
-            ):
+            if is_non_binding_contract_segment(segment):
                 continue
             matches.append((match.start(), match.group("seed_id")))
     if not matches:
