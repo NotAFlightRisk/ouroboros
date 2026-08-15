@@ -1735,6 +1735,75 @@ reader(config.evaluation, "satisfaction_threshold")
     assert contract.runtime_reads(tmp_path, fields) == fields
 
 
+def test_static_comparisons_cannot_make_dead_reads_satisfy_the_contract(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "dead_comparison.py").write_text(
+        """
+if 1 == 2:
+    dead = config.evaluation.stage1_enabled
+if "stable" != "stable":
+    also_dead = config.evaluation.stage1_enabled
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    report = contract.audit_contract(
+        fields=frozenset({field}),
+        reads=reads,
+        rows={
+            field: contract.ReferenceRow(
+                "true", "Currently inert. Effective control: runtime.stage1_enabled."
+            )
+        },
+        markers={field: contract.InertMarker(field, "runtime.stage1_enabled")},
+        allowlist={},
+        documented_defaults={},
+    )
+
+    assert reads == frozenset()
+    assert report.violations == ()
+
+
+def test_constant_string_expressions_establish_getattr_reads_and_reject_stale_inert_docs(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "constant_string_getattr.py").write_text(
+        """
+FIELD = "semantic_" + "model"
+getattr(config.evaluation, FIELD)
+getattr(config.evaluation, f"stage{2}_enabled")
+getattr(config.evaluation, f"semantic_{dynamic_suffix}")
+""",
+        encoding="utf-8",
+    )
+    semantic = contract.ConfigField("evaluation", "semantic_model")
+    stage2 = contract.ConfigField("evaluation", "stage2_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({semantic, stage2}))
+
+    report = contract.audit_contract(
+        fields=frozenset({semantic}),
+        reads=reads & {semantic},
+        rows={
+            semantic: contract.ReferenceRow(
+                '"claude-opus-4-8"',
+                "Currently inert. Effective control: models.semantic.",
+            )
+        },
+        markers={semantic: contract.InertMarker(semantic, "models.semantic")},
+        allowlist={},
+        documented_defaults={},
+    )
+
+    assert reads == frozenset({semantic, stage2})
+    assert "evaluation.semantic_model: conflicting config-field dispositions" in (report.violations)
+    assert "evaluation.semantic_model: production-wired field is still documented inert" in (
+        report.violations
+    )
+
+
 def test_runtime_scan_invokes_captured_property_getters(contract, tmp_path: Path) -> None:
     (tmp_path / "property_read.py").write_text(
         """

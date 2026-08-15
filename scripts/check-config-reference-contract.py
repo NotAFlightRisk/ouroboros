@@ -164,6 +164,7 @@ class _CallableTarget:
 
 
 _UNKNOWN_VALUE = _AbstractValue()
+_STATIC_UNKNOWN = object()
 
 _ANNOTATION_MODULE = "<annotation-config-module>"
 _TYPE_CHECKING_FALSE = "<typing-type-checking-false>"
@@ -182,6 +183,135 @@ _CONFIG_ANNOTATION_MODULES = frozenset(
         "ouroboros.config.models",
     }
 )
+
+
+def _safe_constant_value(node: ast.AST) -> object:
+    """Evaluate a deliberately small, side-effect-free constant expression."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        values = [_safe_constant_value(item) for item in node.elts]
+        if any(value is _STATIC_UNKNOWN for value in values):
+            return _STATIC_UNKNOWN
+        if isinstance(node, ast.Tuple):
+            return tuple(values)
+        if isinstance(node, ast.List):
+            return values
+        try:
+            return set(values)
+        except TypeError:
+            return _STATIC_UNKNOWN
+    if isinstance(node, ast.UnaryOp):
+        operand = _safe_constant_value(node.operand)
+        if operand is _STATIC_UNKNOWN:
+            return _STATIC_UNKNOWN
+        try:
+            if isinstance(node.op, ast.Not):
+                return not operand
+            if isinstance(node.op, ast.UAdd) and isinstance(operand, (int, float, complex)):
+                return +operand
+            if isinstance(node.op, ast.USub) and isinstance(operand, (int, float, complex)):
+                return -operand
+            if isinstance(node.op, ast.Invert) and isinstance(operand, int):
+                return ~operand
+        except (TypeError, ValueError, OverflowError):
+            return _STATIC_UNKNOWN
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _safe_constant_value(node.left)
+        right = _safe_constant_value(node.right)
+        if left is _STATIC_UNKNOWN or right is _STATIC_UNKNOWN:
+            return _STATIC_UNKNOWN
+        if isinstance(left, str) and isinstance(right, str):
+            return left + right
+        if isinstance(left, bytes) and isinstance(right, bytes):
+            return left + right
+        if isinstance(left, tuple) and isinstance(right, tuple):
+            return left + right
+        if (
+            isinstance(left, (int, float, complex))
+            and not isinstance(left, bool)
+            and isinstance(right, (int, float, complex))
+            and not isinstance(right, bool)
+        ):
+            return left + right
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for part in node.values:
+            if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                parts.append(part.value)
+                continue
+            if not isinstance(part, ast.FormattedValue):
+                return _STATIC_UNKNOWN
+            value = _safe_constant_value(part.value)
+            if value is _STATIC_UNKNOWN:
+                return _STATIC_UNKNOWN
+            if part.conversion == 115:
+                value = str(value)
+            elif part.conversion == 114:
+                value = repr(value)
+            elif part.conversion == 97:
+                value = ascii(value)
+            elif part.conversion != -1:
+                return _STATIC_UNKNOWN
+            format_spec = ""
+            if part.format_spec is not None:
+                resolved_spec = _safe_constant_value(part.format_spec)
+                if not isinstance(resolved_spec, str):
+                    return _STATIC_UNKNOWN
+                format_spec = resolved_spec
+            try:
+                parts.append(format(value, format_spec))
+            except (TypeError, ValueError):
+                return _STATIC_UNKNOWN
+        return "".join(parts)
+    if isinstance(node, ast.Compare):
+        left = _safe_constant_value(node.left)
+        if left is _STATIC_UNKNOWN:
+            return _STATIC_UNKNOWN
+        for operator, comparator in zip(node.ops, node.comparators, strict=True):
+            right = _safe_constant_value(comparator)
+            if right is _STATIC_UNKNOWN:
+                return _STATIC_UNKNOWN
+            try:
+                if isinstance(operator, ast.Eq):
+                    matched = left == right
+                elif isinstance(operator, ast.NotEq):
+                    matched = left != right
+                elif isinstance(operator, ast.Lt):
+                    matched = left < right
+                elif isinstance(operator, ast.LtE):
+                    matched = left <= right
+                elif isinstance(operator, ast.Gt):
+                    matched = left > right
+                elif isinstance(operator, ast.GtE):
+                    matched = left >= right
+                elif isinstance(operator, ast.Is):
+                    if not (
+                        (left is None or type(left) is bool)
+                        and (right is None or type(right) is bool)
+                    ):
+                        return _STATIC_UNKNOWN
+                    matched = left is right
+                elif isinstance(operator, ast.IsNot):
+                    if not (
+                        (left is None or type(left) is bool)
+                        and (right is None or type(right) is bool)
+                    ):
+                        return _STATIC_UNKNOWN
+                    matched = left is not right
+                elif isinstance(operator, ast.In):
+                    matched = left in right
+                elif isinstance(operator, ast.NotIn):
+                    matched = left not in right
+                else:
+                    return _STATIC_UNKNOWN
+            except (TypeError, ValueError):
+                return _STATIC_UNKNOWN
+            if not matched:
+                return False
+            left = right
+        return True
+    return _STATIC_UNKNOWN
 
 
 def _origin_value(*origins: str) -> _AbstractValue:
@@ -1107,6 +1237,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def _static_truth(self, node: ast.AST) -> bool | None:
         """Return truth only when Python runtime behavior is statically certain."""
 
+        constant_value = _safe_constant_value(node)
+        if constant_value is not _STATIC_UNKNOWN:
+            return bool(constant_value)
         if isinstance(node, ast.Constant):
             return bool(node.value)
         if isinstance(node, ast.Dict):
@@ -1158,6 +1291,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 literal=_key_token(node),
                 string_value=node.value if isinstance(node.value, str) else None,
                 truth=bool(node.value),
+            )
+        constant_value = _safe_constant_value(node)
+        if isinstance(constant_value, str):
+            return _AbstractValue(
+                literal=_key_token(ast.Constant(constant_value)),
+                string_value=constant_value,
+                truth=bool(constant_value),
             )
         if isinstance(node, ast.Name):
             value = (
