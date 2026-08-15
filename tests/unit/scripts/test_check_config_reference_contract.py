@@ -182,6 +182,53 @@ runner()
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
+def test_runtime_scan_tracks_complete_partial_bindings(contract, tmp_path: Path) -> None:
+    (tmp_path / "partial_complete.py").write_text(
+        """
+from functools import partial
+
+def read(prefix, section):
+    return section.stage1_enabled
+
+partial(read, "x", settings.evaluation)()
+partial(read, section=settings.evaluation)()
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_tracks_aliased_and_qualified_serializers(contract, tmp_path: Path) -> None:
+    (tmp_path / "serializers.py").write_text(
+        """
+import builtins
+
+dump = vars
+dump(settings.evaluation)["stage1_enabled"]
+builtins.vars(settings.evaluation)["stage1_enabled"]
+dump_model = settings.evaluation.model_dump
+dump_model()["stage1_enabled"]
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_drops_overwritten_serializer_alias(contract, tmp_path: Path) -> None:
+    (tmp_path / "serializer_shadow.py").write_text(
+        """
+dump = vars
+dump = unrelated
+dump(settings.evaluation)["stage1_enabled"]
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
 def test_runtime_scan_consumes_coroutines_scheduled_by_asyncio_gather(
     contract, tmp_path: Path
 ) -> None:

@@ -215,6 +215,15 @@ class _DeferredCallableIterator:
     iterables: tuple[_AbstractValue, ...]
 
 
+@dataclass(frozen=True)
+class _DeferredPartial:
+    """A local callable with positional and keyword arguments pre-applied."""
+
+    targets: tuple[_CallableTarget, ...]
+    positional: tuple[_AbstractValue, ...]
+    keywords: tuple[tuple[str, _AbstractValue], ...]
+
+
 _UNKNOWN_VALUE = _AbstractValue()
 _STATIC_UNKNOWN = object()
 
@@ -225,6 +234,7 @@ _OPERATOR_MODULE = "<operator-module>"
 _ATTRGETTER_FACTORY = "<attrgetter-factory>"
 _BUILTINS_MODULE = "<builtins-module>"
 _GETATTR_BUILTIN = "<getattr-builtin>"
+_VARS_BUILTIN = "<vars-builtin>"
 _FUNCTOOLS_MODULE = "<functools-module>"
 _PARTIAL_FACTORY = "<functools-partial-factory>"
 _ASYNCIO_MODULE = "<asyncio-module>"
@@ -826,6 +836,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._deferred_generators: dict[int, _DeferredGenerator] = {}
         self._deferred_coroutines: dict[int, _DeferredCoroutine] = {}
         self._deferred_callable_iterators: dict[int, _DeferredCallableIterator] = {}
+        self._deferred_partials: dict[int, _DeferredPartial] = {}
         self._deferred_generator_positions: dict[int, int] = {}
         self._generator_consumer_modes: list[str] = []
         self._generator_skip_yields: list[int] = []
@@ -1422,6 +1433,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             value = (
                 _origin_value(_GETATTR_BUILTIN)
                 if node.id == "getattr" and not self._name_is_bound("getattr")
+                else _origin_value(_VARS_BUILTIN)
+                if node.id == "vars" and not self._name_is_bound("vars")
                 else _origin_value(f"<builtin-consumer:{node.id}>")
                 if node.id in _TRACKED_BUILTIN_CONSUMERS and not self._name_is_bound(node.id)
                 else self._name_value(node.id)
@@ -1461,6 +1474,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_ATTRGETTER_FACTORY)
             if _BUILTINS_MODULE in owner.origins and node.attr == "getattr":
                 return _origin_value(_GETATTR_BUILTIN)
+            if _BUILTINS_MODULE in owner.origins and node.attr == "vars":
+                return _origin_value(_VARS_BUILTIN)
             if _BUILTINS_MODULE in owner.origins and node.attr in _TRACKED_BUILTIN_CONSUMERS:
                 return _origin_value(f"<builtin-consumer:{node.attr}>")
             if _FUNCTOOLS_MODULE in owner.origins and node.attr == "partial":
@@ -1469,6 +1484,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(f"<asyncio-consumer:{node.attr}>")
             if node.attr == "deque" and "collections" in owner.modules:
                 return _origin_value("<external-consumer:collections.deque>")
+            sections = owner.origins & TRACKED_SECTIONS
+            if node.attr == "model_dump" and sections:
+                return _AbstractValue(serialized_sections=sections)
             resolved_modules = {
                 child.name
                 for module_name in owner.modules
@@ -1549,14 +1567,21 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _join_values(
                     *(self._expression_value(argument) for argument in iterable_arguments)
                 )
-            if _PARTIAL_FACTORY in function_value.origins and len(node.args) >= 2:
-                receiver = self._expression_value(node.args[1])
-                return _AbstractValue(
-                    callables=tuple(
+            if _PARTIAL_FACTORY in function_value.origins and node.args:
+                identity = id(node)
+                self._deferred_partials[identity] = _DeferredPartial(
+                    targets=tuple(
                         _CallableTarget(function, receiver)
-                        for function, _ in self._call_targets(node.args[0])
-                    )
+                        for function, receiver in self._call_targets(node.args[0])
+                    ),
+                    positional=tuple(self._expression_value(arg) for arg in node.args[1:]),
+                    keywords=tuple(
+                        (keyword.arg, self._expression_value(keyword.value))
+                        for keyword in node.keywords
+                        if keyword.arg is not None
+                    ),
                 )
+                return _AbstractValue(identity=frozenset({identity}))
             if _ATTRGETTER_FACTORY in function_value.origins:
                 return _AbstractValue(
                     accessed_attributes=frozenset(
@@ -1565,19 +1590,19 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
                     )
                 )
-            if isinstance(node.func, ast.Attribute) and node.func.attr == "model_dump":
-                sections = self._expression_value(node.func.value).origins & TRACKED_SECTIONS
-                if sections:
-                    return _AbstractValue(serialized_sections=sections)
-            if (
-                isinstance(node.func, ast.Name)
-                and node.func.id == "vars"
-                and not self._name_is_bound("vars")
-                and node.args
-            ):
+            if function_value.serialized_sections:
+                return _AbstractValue(serialized_sections=function_value.serialized_sections)
+            if _VARS_BUILTIN in function_value.origins and node.args:
                 sections = self._expression_value(node.args[0]).origins & TRACKED_SECTIONS
                 if sections:
                     return _AbstractValue(serialized_sections=sections)
+            partial_values = [
+                self._partial_call_value(node, partial)
+                for identity in function_value.identity
+                if (partial := self._deferred_partials.get(identity)) is not None
+            ]
+            if partial_values:
+                return _join_values(*partial_values)
             callable_name = _callable_name(node.func)
             if callable_name is not None and _CONFIG_FACTORY.search(callable_name):
                 if isinstance(node.func, ast.Name):
@@ -3042,6 +3067,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "operator" and alias.name == "attrgetter"
                     else _origin_value(_GETATTR_BUILTIN)
                     if node.module == "builtins" and alias.name == "getattr"
+                    else _origin_value(_VARS_BUILTIN)
+                    if node.module == "builtins" and alias.name == "vars"
                     else _origin_value(f"<builtin-consumer:{alias.name}>")
                     if node.module == "builtins" and alias.name in _TRACKED_BUILTIN_CONSUMERS
                     else _origin_value(_PARTIAL_FACTORY)
@@ -3381,6 +3408,35 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         finally:
             self._active_calls.remove(function_id)
         return _join_values(*returned)
+
+    def _partial_call_value(self, call: ast.Call, partial: _DeferredPartial) -> _AbstractValue:
+        """Execute a partial with every pre-bound positional/keyword argument."""
+        values = (*partial.positional, *(self._expression_value(arg) for arg in call.args))
+        results: list[_AbstractValue] = []
+        for target in partial.targets:
+            function_id = id(target.function)
+            if function_id in self._active_calls:
+                continue
+            scoped = self._bound_direct_arguments(
+                target.function,
+                ((target.receiver,) if target.receiver is not None else ()) + values,
+            )
+            for name, value in (
+                *partial.keywords,
+                *(
+                    (keyword.arg, self._expression_value(keyword.value))
+                    for keyword in call.keywords
+                    if keyword.arg is not None
+                ),
+            ):
+                scoped[name] = value
+            self._active_calls.add(function_id)
+            try:
+                returned = self._visit_function_body(target.function, scoped)
+            finally:
+                self._active_calls.remove(function_id)
+            results.extend(returned)
+        return _join_values(*results)
 
     def visit_Return(self, node: ast.Return) -> None:
         if node.value is not None:
