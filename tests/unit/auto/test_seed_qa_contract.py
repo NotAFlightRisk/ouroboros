@@ -132,3 +132,16 @@ def test_parent_seed_rejects_explanatory_optional_and_single_quoted_language() -
         "Only if approved, inherit seed_old.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
+
+
+def test_parent_seed_scopes_mixed_clause_authority_to_contract() -> None:
+    assert (
+        inherited_parent_seed_id(
+            _seed("Whether to copy settings or rebuild them is undecided, but inherit seed_good.")
+        )
+        == "seed_good"
+    )
+    assert (
+        inherited_parent_seed_id(_seed("Inherit seed_bad, but that requirement was rejected."))
+        is None
+    )

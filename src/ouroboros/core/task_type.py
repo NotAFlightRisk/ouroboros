@@ -80,7 +80,7 @@ _NEGATIVE_GOVERNOR_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _POST_MATCH_REJECTION_PATTERN = re.compile(
-    r"^(?:the\s+)?(?:requirement|contract|proposal)?\s*"
+    r"^(?:(?:the|that)\s+)?(?:requirement|contract|proposal)?\s*"
     r"(?:(?:was|is|has\s+been)?\s*(?:rejected|superseded|obsolete|discarded)"
     r"|(?:will|would)\s+not\s+(?:be\s+)?(?:used|required|adopted|applied)"
     r"|(?:am|is|are|was|were)\s+no\s+longer\s+(?:used|required|adopted|applied))\b",
@@ -132,8 +132,9 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
             line = normalized[line_start:line_end]
             segment_start, segment_end = _candidate_segment(normalized, match.start(), match.end())
             segment = normalized[segment_start:segment_end]
-            authority_scope = normalized[
-                _governor_scope_start(normalized, match.start()) : segment_end
+            authority_scope = normalized[segment_start:segment_end]
+            governor_prefix = normalized[
+                _governor_scope_start(normalized, match.start()) : match.start()
             ]
             segment_terminator = normalized[segment_end : segment_end + 1]
             if re.match(r"\s*(?:q|question|interviewer)\s*:", line, re.IGNORECASE):
@@ -153,6 +154,10 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
                 )
                 or has_post_match_rejection(normalized, match.end())
                 or is_ambiguous_contract_segment(authority_scope)
+                or (
+                    is_ambiguous_contract_segment(governor_prefix)
+                    and not re.search(r"\b(?:but|and)\b", governor_prefix, re.IGNORECASE)
+                )
             ):
                 continue
             matches.append((match.start(), match.group("task_type").casefold()))
@@ -215,7 +220,14 @@ def has_post_match_rejection(text: str, end: int) -> bool:
     tail = text[end:]
     sentence_end = re.search(r"[.!?\n]", tail)
     suffix = tail[: sentence_end.start()] if sentence_end is not None else tail
-    return _POST_MATCH_REJECTION_PATTERN.search(suffix.lstrip(" \t,;:")) is not None
+    candidate = suffix.lstrip(" \t,;:")
+    candidate = re.sub(
+        r"^(?:but|and|while|although|though|because|despite)\s+",
+        "",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    return _POST_MATCH_REJECTION_PATTERN.search(candidate) is not None
 
 
 def normalize_task_type(value: object) -> str:

@@ -148,3 +148,16 @@ def test_explicit_task_type_rejects_explanatory_optional_and_single_quoted_text(
         "The docs say 'task_type: code' for legacy exports.",
     ):
         assert explicit_task_type_from_goal(goal) is None
+
+
+def test_explicit_task_type_scopes_mixed_clause_authority_to_contract() -> None:
+    assert (
+        explicit_task_type_from_goal(
+            "Whether to include charts or tables is undecided, but task_type: document."
+        )
+        == "document"
+    )
+    assert (
+        explicit_task_type_from_goal("task_type: document, but that requirement was rejected.")
+        is None
+    )

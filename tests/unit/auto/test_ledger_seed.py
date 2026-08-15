@@ -92,6 +92,7 @@ class TestSynthesizeSeedFromLedgerUnchanged:
             "Use document as the task type.",
             "The task type must be a document.",
             "The task type should be a document.",
+            "Whether to include charts or tables is undecided, but task_type: document.",
         ):
             ledger = _populate_complete_ledger(goal)
 

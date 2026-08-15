@@ -116,8 +116,9 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
         for match in pattern.finditer(seed.goal):
             segment_start, segment_end = _candidate_segment(seed.goal, match.start(), match.end())
             segment = seed.goal[segment_start:segment_end]
-            authority_scope = seed.goal[
-                _governor_scope_start(seed.goal, match.start()) : segment_end
+            authority_scope = seed.goal[segment_start:segment_end]
+            governor_prefix = seed.goal[
+                _governor_scope_start(seed.goal, match.start()) : match.start()
             ]
             if (
                 is_non_binding_contract_segment(segment)
@@ -130,6 +131,10 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
                 )
                 or has_post_match_rejection(seed.goal, match.end())
                 or is_ambiguous_contract_segment(authority_scope)
+                or (
+                    is_ambiguous_contract_segment(governor_prefix)
+                    and not re.search(r"\b(?:but|and)\b", governor_prefix, re.IGNORECASE)
+                )
             ):
                 continue
             matches.append((match.start(), match.group("seed_id")))

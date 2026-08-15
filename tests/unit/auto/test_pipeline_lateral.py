@@ -144,6 +144,41 @@ def test_seed_qa_feedback_repairs_explicit_document_task_type() -> None:
     assert any("uncertainty and fallback rule" in item for item in repaired.constraints)
 
 
+def test_seed_qa_repair_persists_only_binding_mixed_clause_contracts() -> None:
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    rejected = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": (
+                "task_type: document, but that requirement was rejected. "
+                "Inherit seed_bad, but that requirement was rejected."
+            ),
+            "task_type": "code",
+        }
+    )
+    binding = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": (
+                "Whether to include charts is undecided, but task_type: document. "
+                "Whether to copy settings is undecided, but inherit seed_good."
+            ),
+            "task_type": "code",
+        }
+    )
+
+    rejected_repair = _seed_with_seed_qa_feedback(rejected, qa_result, attempt=1)
+    binding_repair = _seed_with_seed_qa_feedback(binding, qa_result, attempt=1)
+
+    assert rejected_repair.task_type == "code"
+    assert rejected_repair.metadata.parent_seed_id == "seed_current"
+    assert binding_repair.task_type == "document"
+    assert binding_repair.metadata.parent_seed_id == "seed_good"
+
+
 @pytest.mark.parametrize(
     "goal",
     (
