@@ -119,6 +119,8 @@ def test_explicit_task_type_accepts_ordinary_positive_wording() -> None:
         "The task type must remain document.",
         "Keep the task type as document.",
         "Use document as the task type.",
+        "The task type must be a document.",
+        "The task type should be a document.",
     ):
         assert explicit_task_type_from_goal(goal) == "document"
 
@@ -130,5 +132,19 @@ def test_explicit_task_type_rejects_typographic_quoted_and_conditional_language(
         "If task_type is document, write a guide; otherwise keep code.",
         "Choose between task_type: document or code later.",
         'The docs currently say "Set task_type: document for exports." Replace that guidance.',
+    ):
+        assert explicit_task_type_from_goal(goal) is None
+
+
+def test_explicit_task_type_rejects_explanatory_optional_and_single_quoted_text() -> None:
+    assert (
+        explicit_task_type_from_goal(
+            "Set the task type to document. Add a section explaining task_type: code."
+        )
+        == "document"
+    )
+    for goal in (
+        "Only if approved, use task_type: document.",
+        "The docs say 'task_type: code' for legacy exports.",
     ):
         assert explicit_task_type_from_goal(goal) is None

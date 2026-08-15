@@ -30,7 +30,7 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
     ),
     re.compile(
         rf"\btask[_\s-]*type\b.{{0,80}}?\b(?:must|should|needs?\s+to)\s+"
-        rf"(?:be|remain|use|equal)\s+{_TASK_TYPE_PATTERN}\b",
+        rf"(?:be|remain|use|equal)\s+(?:an?\s+)?{_TASK_TYPE_PATTERN}\b",
         re.IGNORECASE,
     ),
     re.compile(
@@ -58,7 +58,8 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"|\b(?:won't|wouldn't|shouldn't|mustn't|isn't|aren't|wasn't|weren't)\b"
     r"|\b(?:won’t|wouldn’t|shouldn’t|mustn’t|isn’t|aren’t|wasn’t|weren’t)\b"
     r"|\b(?:am|is|are|was|were)\s+no\s+longer\b"
-    r"|\bnot\s+allowed\b",
+    r"|\bnot\s+allowed\b"
+    r"|\b(?:explain(?:ed|ing)?|documentation|docs?\s+(?:say|says|said)|legacy\s+exports?)\b",
     re.IGNORECASE,
 )
 _HISTORICAL_GOVERNOR_PATTERN = re.compile(
@@ -131,6 +132,9 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
             line = normalized[line_start:line_end]
             segment_start, segment_end = _candidate_segment(normalized, match.start(), match.end())
             segment = normalized[segment_start:segment_end]
+            authority_scope = normalized[
+                _governor_scope_start(normalized, match.start()) : segment_end
+            ]
             segment_terminator = normalized[segment_end : segment_end + 1]
             if re.match(r"\s*(?:q|question|interviewer)\s*:", line, re.IGNORECASE):
                 continue
@@ -148,7 +152,7 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
                     normalized, match.start(), _governor_scope_start(normalized, match.start())
                 )
                 or has_post_match_rejection(normalized, match.end())
-                or is_ambiguous_contract_segment(segment)
+                or is_ambiguous_contract_segment(authority_scope)
             ):
                 continue
             matches.append((match.start(), match.group("task_type").casefold()))
@@ -168,6 +172,13 @@ def is_quoted_contract(text: str, start: int, end: int) -> bool:
     after = text[end:]
     for quote in ('"', "`"):
         if before.count(quote) % 2 == 1 and after.count(quote) > 0:
+            return True
+    left = before.rfind("'")
+    right = after.find("'")
+    if left >= 0 and right >= 0:
+        left_boundary = left == 0 or not before[left - 1].isalnum()
+        right_boundary = right + 1 == len(after) or not after[right + 1].isalnum()
+        if left_boundary and right_boundary:
             return True
     for opening, closing in (("“", "”"), ("‘", "’")):
         if before.count(opening) > before.count(closing) and after.count(closing) > 0:

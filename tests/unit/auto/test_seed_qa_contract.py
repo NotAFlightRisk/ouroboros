@@ -123,3 +123,12 @@ def test_parent_seed_rejects_typographic_quoted_conditional_and_ambiguous_langua
         "Inherit seed_one or seed_two after review.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
+
+
+def test_parent_seed_rejects_explanatory_optional_and_single_quoted_language() -> None:
+    for goal in (
+        "Add migration notes explaining how to inherit seed_old.",
+        "The docs say 'inherit seed_old' for migrations.",
+        "Only if approved, inherit seed_old.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) is None

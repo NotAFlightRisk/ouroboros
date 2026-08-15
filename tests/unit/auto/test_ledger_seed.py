@@ -90,6 +90,8 @@ class TestSynthesizeSeedFromLedgerUnchanged:
             "The task type must remain document.",
             "Keep the task type as document.",
             "Use document as the task type.",
+            "The task type must be a document.",
+            "The task type should be a document.",
         ):
             ledger = _populate_complete_ledger(goal)
 
@@ -135,6 +137,8 @@ class TestPartialSeedFromEvidence:
             "The task type must remain document.",
             "Keep the task type as document.",
             "Use document as the task type.",
+            "The task type must be a document.",
+            "The task type should be a document.",
         ):
             ledger = SeedDraftLedger.from_goal(goal)
 
