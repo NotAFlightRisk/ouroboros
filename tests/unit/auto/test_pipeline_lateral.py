@@ -116,9 +116,7 @@ def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> Non
 def test_seed_qa_feedback_repairs_explicit_document_task_type() -> None:
     seed = _build_seed(seed_id="seed_wrong_task_type").model_copy(
         update={
-            "goal": (
-                "seed_6619d294d5c7을 계승해 문서형 Seed로 명세한다. task_type은 document여야 한다."
-            ),
+            "goal": ("Inherit from seed_6619d294d5c7. Set the task type to document."),
             "task_type": "code",
         }
     )
@@ -164,6 +162,7 @@ def test_seed_qa_feedback_repairs_explicit_document_task_type() -> None:
         "It is not true that we inherit seed_bad.",
         "Inherit seed_bad will not be used.",
         "Inherit seed_bad is no longer required.",
+        "We won't inherit seed_bad.",
     ),
 )
 def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
@@ -193,6 +192,7 @@ def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
         "We are not using task_type: document.",
         "task_type: document will not be used.",
         "task_type: document is no longer required.",
+        "We won't use task_type: document.",
     ),
 )
 def test_seed_qa_repair_does_not_apply_rejected_task_type(goal: str) -> None:
@@ -251,6 +251,9 @@ def test_seed_qa_repair_resets_prefix_governor_at_punctuation_boundary() -> None
         "Inherit seed_good without copying obsolete constraints.",
         "Derive from seed_good although we must not reuse its runtime settings.",
         "Do not copy obsolete constraints because this Seed should inherit seed_good.",
+        "Inherit from seed_good.",
+        "Set parent_seed_id to seed_good.",
+        "Use seed_good as the parent seed.",
     ),
 )
 def test_seed_qa_repair_persists_conjunction_scoped_parent(goal: str) -> None:

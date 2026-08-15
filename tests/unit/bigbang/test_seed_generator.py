@@ -361,7 +361,7 @@ class TestSeedGeneratorAmbiguityGating:
         state = create_interview_state_with_rounds(
             initial_context=(
                 "Rather than change source code, write the requested plan; "
-                "task_type must be document."
+                "set the task type to document."
             )
         )
         low_ambiguity = create_low_ambiguity_score(0.15)
@@ -396,6 +396,7 @@ class TestSeedGeneratorAmbiguityGating:
             "We no longer use task_type: document.",
             "task_type: document will not be used.",
             "task_type: document is no longer required.",
+            "We won't use task_type: document.",
         ),
     )
     @pytest.mark.asyncio

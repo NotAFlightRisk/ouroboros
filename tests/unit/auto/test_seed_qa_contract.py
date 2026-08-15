@@ -82,6 +82,7 @@ def test_parent_seed_rejects_ordinary_negative_inheritance_language() -> None:
         "It is not true that we inherit seed_bad.",
         "Inherit seed_bad will not be used.",
         "Inherit seed_bad is no longer required.",
+        "We won't inherit seed_bad.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
 
@@ -90,6 +91,15 @@ def test_parent_seed_resets_governors_at_punctuation_boundary() -> None:
     goal = "Rather than copy old constraints, start the repair; inherit seed_good."
 
     assert inherited_parent_seed_id(_seed(goal)) == "seed_good"
+
+
+def test_parent_seed_accepts_ordinary_positive_wording() -> None:
+    for goal in (
+        "Inherit from seed_parent.",
+        "Set parent_seed_id to seed_parent.",
+        "Use seed_parent as the parent seed.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) == "seed_parent"
 
 
 def test_parent_seed_requires_inheritance_semantics() -> None:

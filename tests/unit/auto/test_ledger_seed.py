@@ -85,6 +85,8 @@ class TestSynthesizeSeedFromLedgerUnchanged:
             "Use task_type: document because source code must not change.",
             "Do not modify source code because task_type must be document.",
             "Rather than change source code, write a plan; task_type: document.",
+            "The task type is document.",
+            "Set the task type to document.",
         ):
             ledger = _populate_complete_ledger(goal)
 
@@ -146,6 +148,7 @@ class TestPartialSeedFromEvidence:
             "We are not using task_type: document.",
             "task_type: document will not be used.",
             "task_type: document is no longer required.",
+            "We won't use task_type: document.",
         ):
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
             partial = partial_seed_from_evidence(
@@ -160,6 +163,8 @@ class TestPartialSeedFromEvidence:
             "We'll use task_type: document for the final plan.",
             "Use task_type: document for the historical archive.",
             "Rather than change source code, write a plan; task_type: document.",
+            "The task type is document.",
+            "Set the task type to document.",
         )
         for goal in positive_goals:
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
@@ -187,6 +192,7 @@ class TestPartialSeedFromEvidence:
         rejected = (
             "task_type: document will not be used.",
             "task_type: document is no longer required.",
+            "We won't use task_type: document.",
         )
         for goal in rejected:
             assert synthesize_seed_from_ledger(_populate_complete_ledger(goal)).task_type == "code"

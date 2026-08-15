@@ -96,7 +96,12 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
     seed_id = r"(?P<seed_id>seed_[A-Za-z0-9]+)"
     patterns = (
         re.compile(
-            rf"\b(?:inherit(?:ing)?|derive(?:d)?\s+from|parent(?:_seed_id)?\s*(?:is|=|:))\s+{seed_id}\b",
+            rf"\b(?:inherit(?:ing)?(?:\s+from)?|derive(?:d)?\s+from|"
+            rf"(?:set\s+)?parent(?:_seed_id|\s+seed)?\s*(?:is|=|:|to))\s+{seed_id}\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            rf"\buse\s+{seed_id}\s+as\s+(?:the\s+)?parent(?:_seed|\s+seed)\b",
             re.IGNORECASE,
         ),
         re.compile(

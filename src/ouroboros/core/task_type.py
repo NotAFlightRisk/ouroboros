@@ -24,6 +24,11 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
+        rf"\b(?:set\s+(?:the\s+)?)?task[_\s-]*type\b\s+(?:is|equals?|to)\s+"
+        rf"{_TASK_TYPE_PATTERN}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
         rf"\btask[_\s-]*type\b.{{0,80}}?\b(?:must|should|needs?\s+to)\s+"
         rf"(?:be|use|equal)\s+{_TASK_TYPE_PATTERN}\b",
         re.IGNORECASE,
@@ -42,6 +47,7 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"|\bnot\s+true\b"
     r"|\b(?:must|should|may)\s+not\b"
     r"|\b(?:will|would)\s+not\b"
+    r"|\b(?:won't|wouldn't|shouldn't|mustn't|isn't|aren't|wasn't|weren't)\b"
     r"|\b(?:am|is|are|was|were)\s+no\s+longer\b"
     r"|\bnot\s+allowed\b",
     re.IGNORECASE,
