@@ -19,6 +19,11 @@ def test_parent_seed_ignores_negated_reference() -> None:
     assert inherited_parent_seed_id(seed) == "seed_parent"
 
 
+def test_parent_seed_ignores_adverb_qualified_negation() -> None:
+    for goal in ("Do not ever inherit seed_bad.", "Never directly inherit seed_bad."):
+        assert inherited_parent_seed_id(_seed(goal)) is None
+
+
 def test_parent_seed_requires_inheritance_semantics() -> None:
     seed = _seed("Compare seed_old with seed_candidate.")
 

@@ -17,3 +17,12 @@ def test_explicit_task_type_ignores_superseded_clause() -> None:
     goal = "Ignore superseded task_type: code. task_type: research."
 
     assert explicit_task_type_from_goal(goal) == "research"
+
+
+def test_explicit_task_type_ignores_non_binding_mentions() -> None:
+    for goal in (
+        "Should task_type: document?",
+        "Document the literal example `task_type: code` for users.",
+        "Do not use task_type: document.",
+    ):
+        assert explicit_task_type_from_goal(goal) is None

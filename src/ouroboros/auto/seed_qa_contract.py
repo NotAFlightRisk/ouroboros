@@ -99,8 +99,11 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
     matches: list[tuple[int, str]] = []
     for pattern in patterns:
         for match in pattern.finditer(seed.goal):
-            prefix = seed.goal[max(0, match.start() - 24) : match.start()]
-            if re.search(r"\b(?:do\s+not|don't|never)\s*$", prefix, re.IGNORECASE):
+            clause_start = max(
+                seed.goal.rfind(separator, 0, match.start()) for separator in ".!?;\n"
+            )
+            prefix = seed.goal[clause_start + 1 : match.start()]
+            if re.search(r"\b(?:do\s+not|don't|never)\b", prefix, re.IGNORECASE):
                 continue
             matches.append((match.start(), match.group("seed_id")))
     if not matches:

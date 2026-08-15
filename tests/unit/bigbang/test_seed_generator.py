@@ -381,6 +381,35 @@ class TestSeedGeneratorAmbiguityGating:
         assert result.is_ok
         assert result.value.task_type == "document"
 
+    @pytest.mark.parametrize(
+        "initial_context",
+        (
+            "Should task_type: document?",
+            "Document the literal example `task_type: code` for users.",
+            "Do not use task_type: document.",
+        ),
+    )
+    @pytest.mark.asyncio
+    async def test_generate_preserves_extracted_type_for_non_binding_mentions(
+        self, initial_context: str
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds(initial_context=initial_context)
+        extraction_response = create_valid_extraction_response(task_type="code")
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, create_low_ambiguity_score(0.15))
+
+        assert result.is_ok
+        assert result.value.task_type == "code"
+
     @pytest.mark.asyncio
     async def test_generate_requires_summary_for_large_initial_context(self) -> None:
         """SeedGenerator.generate() fails when long initial_context has no summary."""
