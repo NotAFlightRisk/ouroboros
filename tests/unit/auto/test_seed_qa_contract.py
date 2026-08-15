@@ -62,6 +62,16 @@ def test_parent_seed_ignores_quoted_and_historical_references() -> None:
         assert inherited_parent_seed_id(_seed(goal)) == expected
 
 
+def test_parent_seed_scopes_possessives_and_historical_governors() -> None:
+    assert (
+        inherited_parent_seed_id(
+            _seed("The previous proposal was rejected, but it said inherit seed_bad for reference.")
+        )
+        is None
+    )
+    assert inherited_parent_seed_id(_seed("Inherit seed_good for John's project.")) == ("seed_good")
+
+
 def test_parent_seed_requires_inheritance_semantics() -> None:
     seed = _seed("Compare seed_old with seed_candidate.")
 

@@ -144,6 +144,34 @@ class TestPartialSeedFromEvidence:
         assert complete.task_type == "code"
         assert partial.task_type == "code"
 
+    def test_contract_scope_is_preserved_through_complete_and_partial_ledgers(self) -> None:
+        positive_goals = (
+            "We'll use task_type: document for the final plan.",
+            "Use task_type: document for the historical archive.",
+        )
+        for goal in positive_goals:
+            complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+            partial = partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            )
+            assert complete.task_type == "document"
+            assert partial.task_type == "document"
+
+        historical = (
+            "The previous proposal was rejected, but its task_type: document "
+            "should be recorded for audit."
+        )
+        assert (
+            synthesize_seed_from_ledger(_populate_complete_ledger(historical)).task_type == "code"
+        )
+        assert (
+            partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(historical),
+                reason="interview_phase_deadline",
+            ).task_type
+            == "code"
+        )
+
     def test_unresolved_slots_match_open_gaps(self) -> None:
         ledger = SeedDraftLedger.from_goal("A bare goal.")
         # ``from_goal`` only resolves the goal section; every other required

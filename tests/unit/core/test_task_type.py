@@ -68,3 +68,18 @@ def test_explicit_task_type_ignores_causal_prefix_and_historical_contracts() -> 
         'The phrase "task_type: document" is an example, not a requirement.',
     ):
         assert explicit_task_type_from_goal(goal) is None
+
+
+def test_explicit_task_type_scopes_quotes_and_historical_governors_to_contract() -> None:
+    assert (
+        explicit_task_type_from_goal(
+            "The previous proposal was rejected, but its task_type: document "
+            "should be recorded for audit."
+        )
+        is None
+    )
+    for goal in (
+        "We'll use task_type: document for the final plan.",
+        "Use task_type: document for the historical archive.",
+    ):
+        assert explicit_task_type_from_goal(goal) == "document"

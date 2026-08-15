@@ -213,6 +213,34 @@ def test_seed_qa_repair_persists_conjunction_scoped_parent(goal: str) -> None:
     assert repaired.metadata.parent_seed_id == "seed_good"
 
 
+def test_seed_qa_repair_scopes_historical_lineage_and_possessives() -> None:
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    historical = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": (
+                "The previous proposal was rejected, but it said inherit seed_bad for reference."
+            )
+        }
+    )
+    positive = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": "Inherit seed_good for John's project."}
+    )
+
+    assert (
+        _seed_with_seed_qa_feedback(historical, qa_result, attempt=1).metadata.parent_seed_id
+        == "seed_current"
+    )
+    assert (
+        _seed_with_seed_qa_feedback(positive, qa_result, attempt=1).metadata.parent_seed_id
+        == "seed_good"
+    )
+
+
 def test_seed_qa_feedback_rejects_unmapped_reviewer_diagnostics() -> None:
     seed = _build_seed().model_copy(
         update={"metadata": SeedMetadata(seed_id="seed_generic_feedback", ambiguity_score=0.12)}

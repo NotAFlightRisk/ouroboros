@@ -9,7 +9,9 @@ from ouroboros.core.seed import Seed
 from ouroboros.core.task_type import (
     _candidate_segment,
     explicit_task_type_from_goal,
+    has_historical_governor,
     is_non_binding_contract_segment,
+    is_quoted_contract,
 )
 
 
@@ -105,7 +107,11 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
         for match in pattern.finditer(seed.goal):
             segment_start, segment_end = _candidate_segment(seed.goal, match.start(), match.end())
             segment = seed.goal[segment_start:segment_end]
-            if is_non_binding_contract_segment(segment):
+            if (
+                is_non_binding_contract_segment(segment)
+                or is_quoted_contract(seed.goal, match.start(), match.end())
+                or has_historical_governor(seed.goal, match.start())
+            ):
                 continue
             matches.append((match.start(), match.group("seed_id")))
     if not matches:

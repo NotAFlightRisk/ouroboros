@@ -36,11 +36,17 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
 )
 
 _NON_BINDING_CONTRACT_PATTERN = re.compile(
-    r"[\"'`]"
-    r"|\b(?:ignore|discard|superseded|obsolete|example|literal|rejected|prior|previous|historical|discussed|phrase|proposal)\b"
+    r"\b(?:ignore|discard|superseded|obsolete|example|literal|discussed|phrase|proposal)\b"
     r"|\b(?:do\s+not|don't|never|avoid|cannot|can't|can\s+not|without)\b"
     r"|\b(?:must|should|may)\s+not\b"
     r"|\bnot\s+allowed\b",
+    re.IGNORECASE,
+)
+_HISTORICAL_GOVERNOR_PATTERN = re.compile(
+    r"(?:\b(?:the\s+)?(?:previous|prior|historical)\b"
+    r"|\b(?:rejected|superseded|obsolete)\b[^\n.!?]{0,50}\b(?:proposal|contract|reference|request)\b)"
+    r"[^\n.!?]{0,120}?\b(?:but|and|while|although|though|because|despite)\b"
+    r"[^\n.!?]{0,80}$",
     re.IGNORECASE,
 )
 _CANDIDATE_BOUNDARY_PATTERN = re.compile(
@@ -83,7 +89,11 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
                 continue
             if "?" in segment or segment_terminator == "?":
                 continue
-            if is_non_binding_contract_segment(segment):
+            if (
+                is_non_binding_contract_segment(segment)
+                or is_quoted_contract(normalized, match.start(), match.end())
+                or has_historical_governor(normalized, match.start())
+            ):
                 continue
             matches.append((match.start(), match.group("task_type").casefold()))
     if not matches:
@@ -94,6 +104,19 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
 def is_non_binding_contract_segment(segment: str) -> bool:
     """Return whether a clause describes negated, historical, or quoted text."""
     return _NON_BINDING_CONTRACT_PATTERN.search(segment) is not None
+
+
+def is_quoted_contract(text: str, start: int, end: int) -> bool:
+    """Return whether the matched contract itself is enclosed in quotes."""
+    before = text[:start].rstrip()
+    after = text[end:].lstrip()
+    return any(before.endswith(quote) and after.startswith(quote) for quote in ('"', "'", "`"))
+
+
+def has_historical_governor(text: str, start: int) -> bool:
+    """Return whether a preceding clause marks this contract as historical."""
+    line_start = text.rfind("\n", 0, start) + 1
+    return _HISTORICAL_GOVERNOR_PATTERN.search(text[line_start:start]) is not None
 
 
 def normalize_task_type(value: object) -> str:
