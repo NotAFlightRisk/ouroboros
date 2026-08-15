@@ -129,6 +129,80 @@ await runtime(settings)
     )
 
 
+def test_runtime_scan_executes_map_callback_only_when_eagerly_consumed(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "map_callback.py").write_text(
+        """
+def read(section):
+    return section.stage1_enabled
+
+pending = map(read, [settings.evaluation])
+list(pending)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_does_not_execute_unconsumed_or_empty_map_callbacks(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "map_callback_negative.py").write_text(
+        """
+def read(section):
+    return section.stage1_enabled
+
+pending = map(read, [settings.evaluation])
+consumed_empty = list(map(read, []))
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+def test_runtime_scan_tracks_functools_partial_callable_provenance(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "partial_callback.py").write_text(
+        """
+import functools
+
+def read(section):
+    return section.stage1_enabled
+
+runner = functools.partial(read, settings.evaluation)
+runner()
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_consumes_coroutines_scheduled_by_asyncio_gather(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "asyncio_scheduler.py").write_text(
+        """
+import asyncio
+
+async def read(config):
+    return config.evaluation.stage1_enabled
+
+async def main():
+    await asyncio.gather(read(settings))
+
+asyncio.run(main())
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
 def test_runtime_scan_generator_expression_next_advances_one_item(contract, tmp_path: Path) -> None:
     (tmp_path / "generator_expression_next.py").write_text(
         """

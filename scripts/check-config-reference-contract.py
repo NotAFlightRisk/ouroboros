@@ -207,6 +207,14 @@ class _DeferredCoroutine:
     scoped: dict[str, _AbstractValue]
 
 
+@dataclass(frozen=True)
+class _DeferredCallableIterator:
+    """A lazy map/filter adapter and the values captured at construction."""
+
+    callbacks: tuple[_CallableTarget, ...]
+    iterables: tuple[_AbstractValue, ...]
+
+
 _UNKNOWN_VALUE = _AbstractValue()
 _STATIC_UNKNOWN = object()
 
@@ -217,6 +225,11 @@ _OPERATOR_MODULE = "<operator-module>"
 _ATTRGETTER_FACTORY = "<attrgetter-factory>"
 _BUILTINS_MODULE = "<builtins-module>"
 _GETATTR_BUILTIN = "<getattr-builtin>"
+_FUNCTOOLS_MODULE = "<functools-module>"
+_PARTIAL_FACTORY = "<functools-partial-factory>"
+_ASYNCIO_MODULE = "<asyncio-module>"
+_ASYNCIO_CONSUMERS = frozenset({"create_task", "ensure_future", "gather", "run"})
+_ASYNCIO_CONSUMER_ORIGINS = frozenset(f"<asyncio-consumer:{name}>" for name in _ASYNCIO_CONSUMERS)
 _EAGER_BUILTIN_CONSUMERS = frozenset(
     {
         "all",
@@ -812,6 +825,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._closure_bindings: dict[int, dict[str, _AbstractValue]] = {}
         self._deferred_generators: dict[int, _DeferredGenerator] = {}
         self._deferred_coroutines: dict[int, _DeferredCoroutine] = {}
+        self._deferred_callable_iterators: dict[int, _DeferredCallableIterator] = {}
         self._deferred_generator_positions: dict[int, int] = {}
         self._generator_consumer_modes: list[str] = []
         self._generator_skip_yields: list[int] = []
@@ -1449,6 +1463,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_GETATTR_BUILTIN)
             if _BUILTINS_MODULE in owner.origins and node.attr in _TRACKED_BUILTIN_CONSUMERS:
                 return _origin_value(f"<builtin-consumer:{node.attr}>")
+            if _FUNCTOOLS_MODULE in owner.origins and node.attr == "partial":
+                return _origin_value(_PARTIAL_FACTORY)
+            if _ASYNCIO_MODULE in owner.origins and node.attr in _ASYNCIO_CONSUMERS:
+                return _origin_value(f"<asyncio-consumer:{node.attr}>")
             if node.attr == "deque" and "collections" in owner.modules:
                 return _origin_value("<external-consumer:collections.deque>")
             resolved_modules = {
@@ -1513,8 +1531,31 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 iterable_arguments = (
                     node.args[1:] if _callable_name(node.func) in {"filter", "map"} else node.args
                 )
+                if (
+                    _callable_name(node.func) in {"filter", "map"}
+                    and node.args
+                    and (callbacks := self._call_targets(node.args[0]))
+                ):
+                    identity = id(node)
+                    self._deferred_callable_iterators[identity] = _DeferredCallableIterator(
+                        callbacks=tuple(
+                            _CallableTarget(function, receiver) for function, receiver in callbacks
+                        ),
+                        iterables=tuple(
+                            self._expression_value(argument) for argument in iterable_arguments
+                        ),
+                    )
+                    return _AbstractValue(identity=frozenset({identity}))
                 return _join_values(
                     *(self._expression_value(argument) for argument in iterable_arguments)
+                )
+            if _PARTIAL_FACTORY in function_value.origins and len(node.args) >= 2:
+                receiver = self._expression_value(node.args[1])
+                return _AbstractValue(
+                    callables=tuple(
+                        _CallableTarget(function, receiver)
+                        for function, _ in self._call_targets(node.args[0])
+                    )
                 )
             if _ATTRGETTER_FACTORY in function_value.origins:
                 return _AbstractValue(
@@ -1757,6 +1798,37 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if deferred is not None:
                 self._visit_function_body(deferred.node, deferred.scoped)
 
+    def _consume_deferred_callable_iterator(self, node: ast.AST, *, mode: str = "full") -> None:
+        """Execute callbacks only when their lazy map/filter is consumed."""
+
+        for identity in self._expression_value(node).identity:
+            deferred = self._deferred_callable_iterators.get(identity)
+            if deferred is None:
+                continue
+            if any(
+                iterable.items == () or iterable.truth is False for iterable in deferred.iterables
+            ):
+                continue
+            item_groups = [iterable.items for iterable in deferred.iterables]
+            if all(items is not None for items in item_groups):
+                count = min(len(items) for items in item_groups if items is not None)
+                if mode == "one_turn":
+                    count = min(count, 1)
+                argument_sets = tuple(
+                    tuple(items[index] for items in item_groups if items is not None)
+                    for index in range(count)
+                )
+            else:
+                argument_sets = (
+                    tuple(_conservative_value(iterable) for iterable in deferred.iterables),
+                )
+            for arguments in argument_sets:
+                for target in deferred.callbacks:
+                    values = (
+                        (target.receiver, *arguments) if target.receiver is not None else arguments
+                    )
+                    self._local_direct_call_value(target.function, values)
+
     def visit_Call(self, node: ast.Call) -> None:
         before = self._binding_snapshot()
         accessor = self._expression_value(node.func)
@@ -1772,6 +1844,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             )
             for argument in node.args:
                 self._consume_deferred_generator(argument, mode=mode)
+                self._consume_deferred_callable_iterator(argument, mode=mode)
+        if accessor.origins & _ASYNCIO_CONSUMER_ORIGINS:
+            for argument in node.args:
+                self._consume_deferred_coroutine(argument)
         if (
             isinstance(node.func, ast.Attribute)
             and node.func.attr == "send"
@@ -2925,6 +3001,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if alias.name == "operator"
                     else _origin_value(_BUILTINS_MODULE)
                     if alias.name == "builtins"
+                    else _origin_value(_FUNCTOOLS_MODULE)
+                    if alias.name == "functools"
+                    else _origin_value(_ASYNCIO_MODULE)
+                    if alias.name == "asyncio"
                     else _AbstractValue(modules=frozenset({"collections"}))
                     if alias.name == "collections"
                     else _AbstractValue(
@@ -2964,6 +3044,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "builtins" and alias.name == "getattr"
                     else _origin_value(f"<builtin-consumer:{alias.name}>")
                     if node.module == "builtins" and alias.name in _TRACKED_BUILTIN_CONSUMERS
+                    else _origin_value(_PARTIAL_FACTORY)
+                    if node.module == "functools" and alias.name == "partial"
+                    else _origin_value(f"<asyncio-consumer:{alias.name}>")
+                    if node.module == "asyncio" and alias.name in _ASYNCIO_CONSUMERS
                     else _origin_value("<external-consumer:collections.deque>")
                     if node.module == "collections" and alias.name == "deque"
                     else _AbstractValue(
