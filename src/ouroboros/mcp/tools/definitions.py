@@ -655,6 +655,7 @@ def get_ouroboros_tools(
             agent_runtime_backend=runtime_backend,
             opencode_mode=opencode_mode,
             fanout_registry=fanout_registry,
+            project_dir=Path(project_dir) if project_dir is not None else None,
         ),
         QAHandler(
             llm_backend=llm_backend,

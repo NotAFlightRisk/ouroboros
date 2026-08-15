@@ -233,9 +233,9 @@ def _pm_examined_repository_schema(*, max_claims: int) -> dict[str, Any]:
         "required": ["repo_id", "policy_claims"],
         "properties": {
             "repo_id": _pm_repo_id_property(
-                "Roster identifier of a repository this lane read. An identifier "
-                "outside the roster, or one repeated in another entry, is "
-                "rejected at re-entry."
+                "Roster identifier of a repository this answer stands on. An "
+                "identifier outside the roster, or one repeated in another "
+                "entry, is rejected at re-entry."
             ),
             "policy_claims": {
                 "type": "array",
@@ -311,6 +311,17 @@ def _pm_code_context_answer_contract() -> dict[str, Any]:
     silently reading as "searched everywhere and found nothing". A repository
     the lane never opened simply has no entry, which is what makes stopping
     early -- the behaviour the lane brief asks for -- reportable honestly.
+
+    **The reading it reports is the session's, not the turn's.** A lane may
+    answer from what an earlier question of the same session already found, so
+    an entry means "this answer stands on this repository" rather than "I opened
+    it in this turn". The session was already the time envelope here -- it is
+    why ``data_context`` carries no ``observed_at`` -- and nothing in the shape
+    changes: the entry still names a roster repository, the claim still carries
+    a real path in it, and neither is spellable for a repository nobody read.
+    What deliberately has no field is which turn did the reading. That would be
+    bookkeeping about the lane's own completeness, and completeness is not what
+    this contract holds; it holds that the answer cannot lie about its sources.
     """
     identity_property = {
         "type": "string",
@@ -333,9 +344,12 @@ def _pm_code_context_answer_contract() -> dict[str, Any]:
             "maxItems": _PM_EXAMINED_MAX_REPOSITORIES,
             "items": _pm_examined_repository_schema(max_claims=max_claims),
             "description": (
-                "Repositories this lane read, one entry each, carrying what it "
-                "found there. A repository it did not open has no entry; an "
-                "entry with no claims was read and had nothing."
+                "Repositories this answer stands on, one entry each, carrying "
+                "what was found there. Reading may have happened on an earlier "
+                "question of this same session -- the session is the time "
+                "envelope, as it already is for a measurement's age. A "
+                "repository nobody read has no entry; an entry with no claims "
+                "was read and had nothing."
             ),
         }
         if max_claims:

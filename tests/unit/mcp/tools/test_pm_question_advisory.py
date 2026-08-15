@@ -143,6 +143,7 @@ def _attach(
     *,
     session_id: str = "pm-1",
     question: str = QUESTION,
+    project_dir: Path | None = None,
 ) -> dict[str, Any]:
     meta: dict[str, Any] = {}
     attach_question_advisory(
@@ -152,6 +153,7 @@ def _attach(
         question=question,
         repository_roster=roster,
         fanout_registry=registry,
+        project_dir=project_dir,
     )
     return meta
 
@@ -1254,3 +1256,129 @@ def test_no_constant_names_a_synthetic_round_any_more() -> None:
     import ouroboros.orchestrator.capabilities.pm_schemas as pm_schemas
 
     assert [name for name in dir(pm_schemas) if "EVIDENCE_ROUND" in name] == []
+
+
+# ── Decision 16: a lane may answer from what this session already found ───
+
+
+def _lane_prompts(meta: dict[str, Any]) -> dict[str, str]:
+    """Return the emitted prompt for every lane of one question turn."""
+    return {
+        payload.context["lane_id"]: payload.to_dict()["prompt"]
+        for payload in build_question_advisory_subagents(meta["question_advisory_request"])
+    }
+
+
+def test_a_later_round_is_told_where_this_sessions_earlier_answers_are(
+    registry: FanoutRegistry,
+    roster: list[dict[str, str]],
+    tmp_path: Path,
+) -> None:
+    """Both lanes get the addresses, because both can be answered from them.
+
+    The pair is what reaches the child: a root with no ids names a directory
+    holding other sessions' work, and ids with no root are addresses with
+    nowhere to resolve them.
+    """
+    first = _attach(registry, roster, project_dir=tmp_path)
+    later = _attach(registry, roster, question="Second question?", project_dir=tmp_path)
+
+    prompts = _lane_prompts(later)
+    assert set(prompts) == {"code_context", "data_context"}
+    for prompt in prompts.values():
+        assert "## Prior Findings" in prompt
+        assert str(tmp_path.resolve() / ".ouroboros" / "artifacts") in prompt
+        assert first["question_advisory_fanout_id"] in prompt
+
+
+def test_the_first_question_of_a_session_is_told_nothing_about_prior_findings(
+    registry: FanoutRegistry,
+    roster: list[dict[str, str]],
+    tmp_path: Path,
+) -> None:
+    """An empty place is worse than no place: looking there costs a tool call.
+
+    The turn's own fan-out is registered after its payloads are built, so a
+    child is never sent to fetch the answer it is being asked to write.
+    """
+    first = _attach(registry, roster, project_dir=tmp_path)
+    for prompt in _lane_prompts(first).values():
+        assert "## Prior Findings" not in prompt
+        assert first["question_advisory_fanout_id"] not in prompt
+
+
+def test_a_lane_with_no_project_to_resolve_against_is_told_nothing(
+    registry: FanoutRegistry,
+    roster: list[dict[str, str]],
+) -> None:
+    """Without a project the ids have no store behind them, so they stay unsent.
+
+    The lanes still run. Losing the shortcut costs a child the places it could
+    have looked; it does not cost the user their question.
+    """
+    _attach(registry, roster)
+    later = _attach(registry, roster, question="Second question?")
+    for prompt in _lane_prompts(later).values():
+        assert "## Prior Findings" not in prompt
+
+
+def test_another_sessions_findings_are_never_offered(
+    registry: FanoutRegistry,
+    roster: list[dict[str, str]],
+    tmp_path: Path,
+) -> None:
+    """One registry serves every session, so the filter is the whole boundary.
+
+    Sessions share a directory and a roster can differ between them, so an id
+    from a neighbouring session would send a child to read a system it was
+    never asked about.
+    """
+    theirs = _attach(registry, roster, session_id="pm-other", project_dir=tmp_path)
+    mine = _attach(registry, roster, session_id="pm-mine", project_dir=tmp_path)
+    later = _attach(
+        registry,
+        roster,
+        session_id="pm-mine",
+        question="Second question?",
+        project_dir=tmp_path,
+    )
+
+    prompt = _lane_prompts(later)["code_context"]
+    assert mine["question_advisory_fanout_id"] in prompt
+    assert theirs["question_advisory_fanout_id"] not in prompt
+
+
+def test_the_producer_hands_over_addresses_and_never_what_a_child_found(
+    registry: FanoutRegistry,
+    roster: list[dict[str, str]],
+    tmp_path: Path,
+) -> None:
+    """The prompt cannot grow with what earlier rounds found, only with ids.
+
+    This is the whole reason the lookup is the child's rather than the server's.
+    Inlining findings would make every round pay for every earlier round, and
+    would make this server pick which of them matter without having read the
+    question. It also keeps the producer side free of child-authored text, which
+    is the obligation RFC #1754 deferred along with durable result state.
+    """
+    claim = "a sentence only the child could have written"
+    first = _attach(registry, roster, project_dir=tmp_path)
+    _submit(
+        registry,
+        first,
+        _found_policy(
+            roster,
+            examined=[
+                {
+                    "repo_id": roster[0]["repo_id"],
+                    "policy_claims": [{"path": "src/billing.py", "policy_claim": claim}],
+                }
+            ],
+        ),
+    )
+
+    later = _attach(registry, roster, question="Second question?", project_dir=tmp_path)
+    prompt = _lane_prompts(later)["code_context"]
+    assert first["question_advisory_fanout_id"] in prompt
+    assert claim not in prompt
+    assert claim not in json.dumps(later["question_advisory_request"])

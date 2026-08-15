@@ -369,6 +369,7 @@ class PMInterviewHandler:
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
     fanout_registry: FanoutRegistry | None = field(default=None, repr=False)
+    project_dir: Path | None = field(default=None, repr=False)
 
     def _attach_advisory(self, meta: dict[str, Any], session_id: str, question: str) -> None:
         """Attach the evidence lanes to one PM turn that shows ``question``.
@@ -382,6 +383,11 @@ class PMInterviewHandler:
         because two of the four question turns run on a session loaded from disk
         and have no engine state to read it from. Reading one source on all four
         is what keeps the roster from depending on how the turn was reached.
+
+        ``project_dir`` travels the same way and for the same reason: every one
+        of the four turns can have earlier rounds behind it, so a turn that
+        reached the question by resume must be able to say where their answers
+        are just as the turn that asked it directly can.
         """
         pm_meta = _load_pm_meta(session_id, data_dir=self.data_dir)
         attach_question_advisory(
@@ -396,6 +402,7 @@ class PMInterviewHandler:
             runtime_backend=self.agent_runtime_backend,
             opencode_mode=self.opencode_mode,
             fanout_registry=self.fanout_registry,
+            project_dir=self.project_dir,
         )
 
     @property

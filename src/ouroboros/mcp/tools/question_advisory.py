@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -38,7 +39,11 @@ from ouroboros.mcp.tools.advisory_prompts import (
     _data_context_lane_brief,
     _data_context_lane_task,
 )
-from ouroboros.mcp.tools.fanout import FanoutRegistry, stamp_question_advisory_fanout
+from ouroboros.mcp.tools.fanout import (
+    FANOUT_KIND_QUESTION_ADVISORY,
+    FanoutRegistry,
+    stamp_question_advisory_fanout,
+)
 from ouroboros.mcp.tools.subagent import (
     _INTERVIEW_ADVISORY_MAX_JSON_CHARS,
     _INTERVIEW_ADVISORY_MAX_QUESTION_CHARS,
@@ -285,6 +290,48 @@ def _lane_agent(raw_lane: Mapping[str, Any], persona: str, capability: str) -> s
     return "researcher" if capability in {"inspect_code", "web_research"} else "general"
 
 
+def _prior_findings_section(request: Mapping[str, Any]) -> str:
+    """Return the block telling a child where this session's earlier answers are.
+
+    Rendered by presence, like ``ambiguity_score`` above it: a session with no
+    earlier round carries neither field and its child is handed no line about a
+    place with nothing in it.
+
+    **The child is told where to look, not what was found.** Inlining the
+    findings themselves would grow the prompt with every round and would make
+    this server choose, without reading the question, which of them matter. The
+    child has read the question, so it chooses — and pays for reading only what
+    it chose. That is also what keeps the parent's context flat: the search
+    happens inside a subagent that is discarded when the round ends.
+
+    What it must not become is a second set of rules. A lane is help beside a
+    question the user still answers themselves, so there is nothing here about
+    proving a stored answer sufficient, reporting what a reuse left unsettled,
+    or marking an answer as reused. Those would be bookkeeping about
+    incompleteness, and incompleteness is not what this fan-out is guarding
+    against — the guards that matter are the contract's, and they hold whatever
+    the child read: a claim still carries a real path, a roster ``repo_id``, and
+    this question's identity, and still cannot spell itself pre-confirmed.
+    """
+    root = str(request.get("prior_findings_root") or "")
+    raw_ids = request.get("prior_fanout_ids")
+    ids = [str(item) for item in raw_ids] if isinstance(raw_ids, (list, tuple)) else []
+    if not root or not ids:
+        return ""
+    return f"""## Prior Findings
+Earlier rounds of this same session already ran these lanes, and each completed
+run stored its answers as JSON under:
+
+- root: {root}
+- this session's fan-out ids: {", ".join(ids)}
+
+Those files hold answers in the same shape you must return, keyed by `lane_id`
+under `result.aggregated_outputs`, so a finding in one can be reported directly.
+Look there before you read code or take a measurement, and investigate for
+yourself whatever you still need. Grep for a fan-out id or a `lane_id` to find
+the file worth opening rather than reading them all."""
+
+
 def build_question_advisory_subagents(request: Mapping[str, Any]) -> list[SubagentPayload]:
     """Build one advisory subagent payload per lane the catalog declares.
 
@@ -333,6 +380,11 @@ def build_question_advisory_subagents(request: Mapping[str, Any]) -> list[Subage
         if label in request:
             session_lines.append(f"- {label}: {request[label]}")
     session_block = "\n".join(session_lines)
+    # One block for every lane of this turn: where to look is a property of the
+    # session, not of the lane, and a per-lane copy would be one text to keep in
+    # step for no difference in what it says.
+    prior_findings = _prior_findings_section(request)
+    prior_findings_section = f"\n{prior_findings}\n" if prior_findings else ""
 
     payloads: list[SubagentPayload] = []
     seen: set[str] = set()
@@ -381,7 +433,7 @@ def build_question_advisory_subagents(request: Mapping[str, Any]) -> list[Subage
 {lane_task}
 
 {extra}
-
+{prior_findings_section}
 ## Synthesis Contract
 ```json
 {synthesis_contract_json}
@@ -427,6 +479,8 @@ def build_question_advisory_request(
     code_investigation_request: Mapping[str, Any] | None = None,
     repository_roster: list[dict[str, str]] | None = None,
     last_question: str | None = None,
+    prior_findings_root: str | None = None,
+    prior_fanout_ids: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the per-question advisory request for one tool's question turn.
 
@@ -436,6 +490,13 @@ def build_question_advisory_request(
     tool-shaped inputs, and each is attached only when its caller supplies one —
     the interview has a code-fact request and no roster; PM has a roster and no
     code-fact request, because a code fact cannot become a PRD answer.
+
+    ``prior_findings_root`` and ``prior_fanout_ids`` are the third such input and
+    travel together: a root with no ids is a directory with nothing in it for
+    this session, and ids with no root are addresses with nowhere to resolve
+    them. Both are values this server wrote — a path and a list of ids — so
+    carrying them costs the request nothing that grows with what the children
+    found, and puts no child-authored text on the producer side at all.
     """
     mcp_tool_capability = ouroboros_tool_capability_metadata(tool_name)
     advisory = mcp_tool_capability["orchestration"]["question_advisory_fanout"]
@@ -465,7 +526,45 @@ def build_question_advisory_request(
         request["code_investigation_request"] = dict(code_investigation_request)
     if repository_roster is not None:
         request["repository_roster"] = repository_roster
+    # Attached only as a pair, and only when the pair points at something. The
+    # first question of a session has no earlier round, and a child told to look
+    # somewhere empty spends a tool call learning that.
+    if prior_findings_root and prior_fanout_ids:
+        request["prior_findings_root"] = prior_findings_root
+        request["prior_fanout_ids"] = list(prior_fanout_ids)
     return request
+
+
+def _prior_findings_root(project_dir: Path | str | None) -> str | None:
+    """Return where this project's fan-out artifacts live, or ``None``.
+
+    Derived from the project rather than passed in ready-made, so this and the
+    store that writes there cannot disagree about the address:
+    ``ContentAddressedArtifactStore.for_project`` builds the same path from the
+    same input.
+    """
+    if project_dir is None:
+        return None
+    try:
+        return str(Path(project_dir).expanduser().resolve() / ".ouroboros" / "artifacts")
+    except OSError:
+        return None
+
+
+def _prior_fanout_ids(registry: FanoutRegistry | None, session_id: str) -> tuple[str, ...]:
+    """Return this session's earlier question-advisory ids, newest first.
+
+    Advisory, in the sense the whole lane is: a registry that cannot answer
+    leaves the child with one fewer place to look, which is a smaller loss than
+    the turn it would cost to raise here. The contract is unchanged either way —
+    nothing downstream reads this list.
+    """
+    if registry is None or not session_id:
+        return ()
+    try:
+        return registry.session_fanout_ids(session_id, kind=FANOUT_KIND_QUESTION_ADVISORY)
+    except OSError:
+        return ()
 
 
 def attach_question_advisory(
@@ -484,6 +583,7 @@ def attach_question_advisory(
     runtime_backend: str | None = None,
     opencode_mode: str | None = None,
     fanout_registry: FanoutRegistry | None = None,
+    project_dir: Path | str | None = None,
 ) -> None:
     """Attach the advisory fan-out to a turn that shows a question to the user.
 
@@ -495,6 +595,11 @@ def attach_question_advisory(
     A build failure leaves the turn otherwise intact. The question is what the
     user needs; losing the lanes costs them evidence, while raising here would
     cost them the question.
+
+    ``project_dir`` is what makes this session's earlier findings reachable: the
+    artifacts a submission publishes live under it, and without it a child is
+    told about ids it has nowhere to resolve. A caller that does not have one
+    still gets its lanes, and they investigate the way they always did.
     """
     if not question:
         return
@@ -508,6 +613,8 @@ def attach_question_advisory(
         code_investigation_request=code_investigation_request,
         repository_roster=repository_roster,
         last_question=last_question,
+        prior_findings_root=_prior_findings_root(project_dir),
+        prior_fanout_ids=_prior_fanout_ids(fanout_registry, session_id),
     )
     try:
         payloads = build_question_advisory_subagents(request)

@@ -73,6 +73,11 @@ _DEFAULT_FANOUT_DIR = Path.home() / ".ouroboros" / "data" / "fanout"
 #: ``/tmp/forged.json``, and a check placed after that join is already too late.
 _FANOUT_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
+#: How many of a session's earlier fan-out ids a producer may hand a child.
+#: A cap rather than the whole history: the list is read by a subagent, and an
+#: hour-long interview should not spend its child's attention on round one.
+_SESSION_FANOUT_ID_LIMIT = 12
+
 # Fan-out re-entry kinds — each routes to one revived synthesizer.
 FANOUT_KIND_LATERAL_PERSONA_PANEL = "lateral_persona_panel"
 FANOUT_KIND_CODE_INVESTIGATION = "code_investigation"
@@ -306,6 +311,54 @@ class FanoutRegistry:
         # it was written to part of a promise. See ``rebase_default``.
         self._issued = True
         return resolved_id
+
+    def session_fanout_ids(
+        self,
+        session_id: str,
+        *,
+        kind: str,
+        limit: int = _SESSION_FANOUT_ID_LIMIT,
+    ) -> tuple[str, ...]:
+        """Return this session's fan-out ids of one kind, most recent first.
+
+        The join this walks already existed and was never traversed: a record
+        holds ``session_id``, and the artifact a submission publishes holds the
+        ``fanout_id`` the record is named by. So "what did this session's lanes
+        already find" needs no new index and no second copy of child output --
+        only these ids, which are the addresses the two sides meet at.
+
+        Returned to a *producer*, never to a submitter. Nothing here decides
+        whether a fan-out completes, so a record this misses costs a child one
+        place it could have looked rather than costing the fan-out its gate.
+        That is also why a corrupt or unreadable record is skipped rather than
+        raised on: the caller's turn is the question, and losing the lookup must
+        not cost the user their question.
+
+        Ordered by write time so "most recent first" means most recent round
+        first, and bounded, because the child reads this list and a session that
+        ran long should not hand it a longer one.
+        """
+        try:
+            entries = list(self._dir.glob("*.json"))
+        except OSError:
+            return ()
+        found: list[tuple[float, str]] = []
+        for path in entries:
+            try:
+                written = path.stat().st_mtime
+            except OSError:
+                continue
+            record = self.load(path.stem)
+            if record is None or record.kind != kind:
+                continue
+            if record.session_id != session_id:
+                continue
+            found.append((written, record.fanout_id))
+        # ``fanout_id`` breaks a same-timestamp tie, so two records written in
+        # one clock tick order the same way on every call rather than by
+        # whatever order the directory happened to be read in.
+        found.sort(key=lambda item: (-item[0], item[1]))
+        return tuple(fanout_id for _, fanout_id in found[:limit])
 
     def load(self, fanout_id: str) -> FanoutRecord | None:
         """Load a persisted fan-out record, or ``None`` if unknown/corrupt."""

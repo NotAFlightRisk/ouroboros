@@ -242,6 +242,52 @@ def test_registry_load_unknown_returns_none(tmp_path: Any) -> None:
     assert FanoutRegistry(tmp_path).load("nope") is None
 
 
+def test_registry_lists_one_sessions_ids_of_one_kind(tmp_path: Any) -> None:
+    """The lookup a producer uses to tell a child where this session has been.
+
+    Both filters are load-bearing and neither substitutes for the other: one
+    directory holds every session, and one session can run a persona panel
+    beside its advisory lanes. An id that passed only the session filter would
+    send a child to read a panel's output as though it were a lane's.
+    """
+    registry = FanoutRegistry(tmp_path)
+
+    def _register(kind: str, session_id: str) -> str:
+        fanout_id = registry.register(
+            kind=kind,
+            session_id=session_id,
+            correlation_key="context.lane_id",
+            expected_keys=["code_context"],
+            synthesizer_input={"request": {}},
+        )
+        assert fanout_id is not None
+        return fanout_id
+
+    mine_first = _register(FANOUT_KIND_QUESTION_ADVISORY, "s1")
+    mine_second = _register(FANOUT_KIND_QUESTION_ADVISORY, "s1")
+    other_session = _register(FANOUT_KIND_QUESTION_ADVISORY, "s2")
+    other_kind = _register(FANOUT_KIND_LATERAL_PERSONA_PANEL, "s1")
+
+    listed = registry.session_fanout_ids("s1", kind=FANOUT_KIND_QUESTION_ADVISORY)
+    assert set(listed) == {mine_first, mine_second}
+    assert other_session not in listed
+    assert other_kind not in listed
+
+
+def test_registry_lists_nothing_for_a_session_that_has_not_run(tmp_path: Any) -> None:
+    """A directory that does not exist yet is an empty history, not a failure.
+
+    The producer calls this while building a question turn, so anything raised
+    here would cost the user their question to save a child one shortcut.
+    """
+    assert (
+        FanoutRegistry(tmp_path / "absent").session_fanout_ids(
+            "s1", kind=FANOUT_KIND_QUESTION_ADVISORY
+        )
+        == ()
+    )
+
+
 # --------------------------------------------------------------------------- #
 # submit_fanout_results routing
 # --------------------------------------------------------------------------- #
