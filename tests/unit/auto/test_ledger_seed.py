@@ -134,15 +134,20 @@ class TestPartialSeedFromEvidence:
             assert seed.task_type == "document"
 
     def test_historical_task_type_does_not_override_ledger_default(self) -> None:
-        goal = "We discussed task_type: document in the rejected proposal. Build a CLI."
+        for goal in (
+            "We discussed task_type: document in the rejected proposal. Build a CLI.",
+            "The task_type: document requirement was rejected.",
+            "Use the default code task instead of task_type: document.",
+            "Rather than use task_type: document, keep the code task.",
+            "We no longer use task_type: document.",
+        ):
+            complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+            partial = partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            )
 
-        complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
-        partial = partial_seed_from_evidence(
-            SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
-        )
-
-        assert complete.task_type == "code"
-        assert partial.task_type == "code"
+            assert complete.task_type == "code"
+            assert partial.task_type == "code"
 
     def test_contract_scope_is_preserved_through_complete_and_partial_ledgers(self) -> None:
         positive_goals = (

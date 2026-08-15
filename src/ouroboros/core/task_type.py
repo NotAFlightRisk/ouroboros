@@ -49,6 +49,16 @@ _HISTORICAL_GOVERNOR_PATTERN = re.compile(
     r"[^\n.!?]{0,80}$",
     re.IGNORECASE,
 )
+_NEGATIVE_GOVERNOR_PATTERN = re.compile(
+    r"\b(?:instead\s+of|rather\s+than|it\s+is\s+false\s+that|false\s+that|no\s+longer)\b"
+    r"[^\n.!?]{0,120}$",
+    re.IGNORECASE,
+)
+_POST_MATCH_REJECTION_PATTERN = re.compile(
+    r"^(?:the\s+)?(?:requirement|contract|proposal)?\s*"
+    r"(?:was|is|has\s+been)?\s*(?:rejected|superseded|obsolete|discarded)\b",
+    re.IGNORECASE,
+)
 _CANDIDATE_BOUNDARY_PATTERN = re.compile(
     r"[,!?;.\n]|\b(?:and|but|instead|without|although|though|because|while|despite)\b",
     re.IGNORECASE,
@@ -93,6 +103,8 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
                 is_non_binding_contract_segment(segment)
                 or is_quoted_contract(normalized, match.start(), match.end())
                 or has_historical_governor(normalized, match.start())
+                or has_negative_governor(normalized, match.start())
+                or has_post_match_rejection(normalized, match.end())
             ):
                 continue
             matches.append((match.start(), match.group("task_type").casefold()))
@@ -117,6 +129,20 @@ def has_historical_governor(text: str, start: int) -> bool:
     """Return whether a preceding clause marks this contract as historical."""
     line_start = text.rfind("\n", 0, start) + 1
     return _HISTORICAL_GOVERNOR_PATTERN.search(text[line_start:start]) is not None
+
+
+def has_negative_governor(text: str, start: int) -> bool:
+    """Return whether a preceding phrase explicitly negates this contract."""
+    line_start = text.rfind("\n", 0, start) + 1
+    return _NEGATIVE_GOVERNOR_PATTERN.search(text[line_start:start]) is not None
+
+
+def has_post_match_rejection(text: str, end: int) -> bool:
+    """Return whether the current sentence immediately rejects the contract."""
+    tail = text[end:]
+    sentence_end = re.search(r"[.!?\n]", tail)
+    suffix = tail[: sentence_end.start()] if sentence_end is not None else tail
+    return _POST_MATCH_REJECTION_PATTERN.search(suffix.lstrip(" \t,;:")) is not None
 
 
 def normalize_task_type(value: object) -> str:

@@ -387,6 +387,10 @@ class TestSeedGeneratorAmbiguityGating:
             "Should task_type: document?",
             "Document the literal example `task_type: code` for users.",
             "Do not use task_type: document.",
+            "The task_type: document requirement was rejected.",
+            "Use the default code task instead of task_type: document.",
+            "Rather than use task_type: document, keep the code task.",
+            "We no longer use task_type: document.",
         ),
     )
     @pytest.mark.asyncio

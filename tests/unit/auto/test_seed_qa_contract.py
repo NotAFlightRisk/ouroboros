@@ -72,6 +72,16 @@ def test_parent_seed_scopes_possessives_and_historical_governors() -> None:
     assert inherited_parent_seed_id(_seed("Inherit seed_good for John's project.")) == ("seed_good")
 
 
+def test_parent_seed_rejects_ordinary_negative_inheritance_language() -> None:
+    for goal in (
+        "It is false that we inherit seed_bad.",
+        "Start fresh instead of inheriting seed_bad.",
+        "Rather than inherit seed_bad, start fresh.",
+        "We no longer inherit seed_bad.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) is None
+
+
 def test_parent_seed_requires_inheritance_semantics() -> None:
     seed = _seed("Compare seed_old with seed_candidate.")
 

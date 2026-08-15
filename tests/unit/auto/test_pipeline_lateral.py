@@ -156,6 +156,10 @@ def test_seed_qa_feedback_repairs_explicit_document_task_type() -> None:
         "Continue without inheriting seed_bad.",
         'The phrase "inherit seed_bad" is an example, not a requirement.',
         "We discussed inherit seed_bad in the rejected proposal.",
+        "It is false that we inherit seed_bad.",
+        "Start fresh instead of inheriting seed_bad.",
+        "Rather than inherit seed_bad, start fresh.",
+        "We no longer inherit seed_bad.",
     ),
 )
 def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
@@ -171,6 +175,31 @@ def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
 
     assert repaired.metadata.parent_seed_id == "seed_current"
     assert repaired.metadata.parent_seed_id != "seed_bad"
+
+
+@pytest.mark.parametrize(
+    "goal",
+    (
+        "The task_type: document requirement was rejected.",
+        "Use the default code task instead of task_type: document.",
+        "Rather than use task_type: document, keep the code task.",
+        "We no longer use task_type: document.",
+    ),
+)
+def test_seed_qa_repair_does_not_apply_rejected_task_type(goal: str) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": goal, "task_type": "code"}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.task_type == "code"
 
 
 def test_seed_qa_repair_persists_positive_parent_after_negated_candidate() -> None:

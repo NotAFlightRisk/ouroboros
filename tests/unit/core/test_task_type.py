@@ -83,3 +83,14 @@ def test_explicit_task_type_scopes_quotes_and_historical_governors_to_contract()
         "Use task_type: document for the historical archive.",
     ):
         assert explicit_task_type_from_goal(goal) == "document"
+
+
+def test_explicit_task_type_rejects_ordinary_negative_contract_language() -> None:
+    for goal in (
+        "The task_type: document requirement was rejected.",
+        "Use the default code task instead of task_type: document.",
+        "Rather than use task_type: document, keep the code task.",
+        "We no longer use task_type: document.",
+    ):
+        assert explicit_task_type_from_goal(goal) is None
+    assert explicit_task_type_from_goal("Use task_type: document rather than code.") == "document"
