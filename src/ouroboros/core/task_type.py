@@ -41,6 +41,8 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"|\b(?:am|is|are|was|were)\s+not\b"
     r"|\bnot\s+true\b"
     r"|\b(?:must|should|may)\s+not\b"
+    r"|\b(?:will|would)\s+not\b"
+    r"|\b(?:am|is|are|was|were)\s+no\s+longer\b"
     r"|\bnot\s+allowed\b",
     re.IGNORECASE,
 )
@@ -63,7 +65,9 @@ _NEGATIVE_GOVERNOR_PATTERN = re.compile(
 )
 _POST_MATCH_REJECTION_PATTERN = re.compile(
     r"^(?:the\s+)?(?:requirement|contract|proposal)?\s*"
-    r"(?:was|is|has\s+been)?\s*(?:rejected|superseded|obsolete|discarded)\b",
+    r"(?:(?:was|is|has\s+been)?\s*(?:rejected|superseded|obsolete|discarded)"
+    r"|(?:will|would)\s+not\s+(?:be\s+)?(?:used|required|adopted|applied)"
+    r"|(?:am|is|are|was|were)\s+no\s+longer\s+(?:used|required|adopted|applied))\b",
     re.IGNORECASE,
 )
 _CANDIDATE_BOUNDARY_PATTERN = re.compile(
@@ -88,6 +92,12 @@ def _candidate_segment(text: str, start: int, end: int) -> tuple[int, int]:
     return segment_start, segment_end
 
 
+def _governor_scope_start(text: str, start: int) -> int:
+    """Return the nearest hard clause boundary before a contract."""
+    boundary = max(text.rfind(token, 0, start) for token in (";", ".", "!", "?", "\n"))
+    return boundary + 1
+
+
 def explicit_task_type_from_goal(goal: str) -> str | None:
     """Return the task type only when the goal states a binding contract."""
     normalized = goal
@@ -109,8 +119,12 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
             if (
                 is_non_binding_contract_segment(segment)
                 or is_quoted_contract(normalized, match.start(), match.end())
-                or has_historical_governor(normalized, match.start())
-                or has_negative_governor(normalized, match.start())
+                or has_historical_governor(
+                    normalized, match.start(), _governor_scope_start(normalized, match.start())
+                )
+                or has_negative_governor(
+                    normalized, match.start(), _governor_scope_start(normalized, match.start())
+                )
                 or has_post_match_rejection(normalized, match.end())
             ):
                 continue
@@ -132,20 +146,23 @@ def is_quoted_contract(text: str, start: int, end: int) -> bool:
     return any(before.endswith(quote) and after.startswith(quote) for quote in ('"', "'", "`"))
 
 
-def has_historical_governor(text: str, start: int) -> bool:
+def has_historical_governor(text: str, start: int, scope_start: int | None = None) -> bool:
     """Return whether a preceding clause marks this contract as historical."""
     line_start = text.rfind("\n", 0, start) + 1
-    prefix = text[line_start:start]
+    prefix = text[max(line_start, scope_start or line_start) : start]
     return (
         _HISTORICAL_GOVERNOR_PATTERN.search(prefix) is not None
         or _HISTORICAL_PREFIX_PATTERN.search(prefix) is not None
     )
 
 
-def has_negative_governor(text: str, start: int) -> bool:
+def has_negative_governor(text: str, start: int, scope_start: int | None = None) -> bool:
     """Return whether a preceding phrase explicitly negates this contract."""
     line_start = text.rfind("\n", 0, start) + 1
-    return _NEGATIVE_GOVERNOR_PATTERN.search(text[line_start:start]) is not None
+    return (
+        _NEGATIVE_GOVERNOR_PATTERN.search(text[max(line_start, scope_start or line_start) : start])
+        is not None
+    )
 
 
 def has_post_match_rejection(text: str, end: int) -> bool:

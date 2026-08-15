@@ -359,7 +359,10 @@ class TestSeedGeneratorAmbiguityGating:
         """A document contract must not silently fall back to code execution."""
         mock_adapter = AsyncMock()
         state = create_interview_state_with_rounds(
-            initial_context="Create the requested plan; task_type must be document."
+            initial_context=(
+                "Rather than change source code, write the requested plan; "
+                "task_type must be document."
+            )
         )
         low_ambiguity = create_low_ambiguity_score(0.15)
         extraction_response = create_valid_extraction_response(
@@ -391,6 +394,8 @@ class TestSeedGeneratorAmbiguityGating:
             "Use the default code task instead of task_type: document.",
             "Rather than use task_type: document, keep the code task.",
             "We no longer use task_type: document.",
+            "task_type: document will not be used.",
+            "task_type: document is no longer required.",
         ),
     )
     @pytest.mark.asyncio

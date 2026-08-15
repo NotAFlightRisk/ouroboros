@@ -162,6 +162,8 @@ def test_seed_qa_feedback_repairs_explicit_document_task_type() -> None:
         "We no longer inherit seed_bad.",
         "In the previous proposal, inherit seed_bad.",
         "It is not true that we inherit seed_bad.",
+        "Inherit seed_bad will not be used.",
+        "Inherit seed_bad is no longer required.",
     ),
 )
 def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
@@ -189,6 +191,8 @@ def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
         "In the previous proposal, task_type: document.",
         "It is not true that task_type: document.",
         "We are not using task_type: document.",
+        "task_type: document will not be used.",
+        "task_type: document is no longer required.",
     ),
 )
 def test_seed_qa_repair_does_not_apply_rejected_task_type(goal: str) -> None:
@@ -210,6 +214,22 @@ def test_seed_qa_repair_does_not_apply_rejected_task_type(goal: str) -> None:
 def test_seed_qa_repair_persists_positive_parent_after_negated_candidate() -> None:
     seed = _build_seed(seed_id="seed_current").model_copy(
         update={"goal": "Do not inherit seed_bad, instead inherit seed_good."}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.metadata.parent_seed_id == "seed_good"
+
+
+def test_seed_qa_repair_resets_prefix_governor_at_punctuation_boundary() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": "Rather than copy old constraints, start the repair; inherit seed_good."}
     )
     qa_result = EvaluateResult(
         passed=False,

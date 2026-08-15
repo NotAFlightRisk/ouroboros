@@ -94,6 +94,17 @@ def test_explicit_task_type_rejects_ordinary_negative_contract_language() -> Non
         "In the previous proposal, task_type: document.",
         "It is not true that task_type: document.",
         "We are not using task_type: document.",
+        "task_type: document will not be used.",
+        "task_type: document is no longer required.",
     ):
         assert explicit_task_type_from_goal(goal) is None
     assert explicit_task_type_from_goal("Use task_type: document rather than code.") == "document"
+
+
+def test_explicit_task_type_resets_governors_at_punctuation_boundary() -> None:
+    assert (
+        explicit_task_type_from_goal(
+            "Rather than change source code, write a plan; task_type: document."
+        )
+        == "document"
+    )
