@@ -157,6 +157,18 @@ def test_explicit_task_type_scopes_mixed_clause_authority_to_contract() -> None:
         )
         == "document"
     )
+
+
+def test_explicit_task_type_accepts_documentation_as_a_supported_value() -> None:
+    assert explicit_task_type_from_goal("Set the task type to documentation.") == "documentation"
+    assert (
+        explicit_task_type_from_goal("Use task_type: document to create documentation.")
+        == "document"
+    )
+
+
+def test_explicit_task_type_rejects_modal_contracts() -> None:
+    assert explicit_task_type_from_goal("We may use task_type: document.") is None
     assert (
         explicit_task_type_from_goal("task_type: document, but that requirement was rejected.")
         is None

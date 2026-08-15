@@ -141,6 +141,11 @@ def test_parent_seed_scopes_mixed_clause_authority_to_contract() -> None:
         )
         == "seed_good"
     )
+
+
+def test_parent_seed_rejects_modal_or_optional_contracts() -> None:
+    for goal in ("We may inherit seed_bad.", "Inheriting from seed_bad is optional."):
+        assert inherited_parent_seed_id(_seed(goal)) is None
     assert (
         inherited_parent_seed_id(_seed("Inherit seed_bad, but that requirement was rejected."))
         is None

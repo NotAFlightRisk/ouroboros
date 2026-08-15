@@ -59,7 +59,7 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"|\b(?:won’t|wouldn’t|shouldn’t|mustn’t|isn’t|aren’t|wasn’t|weren’t)\b"
     r"|\b(?:am|is|are|was|were)\s+no\s+longer\b"
     r"|\bnot\s+allowed\b"
-    r"|\b(?:explain(?:ed|ing)?|documentation|docs?\s+(?:say|says|said)|legacy\s+exports?)\b",
+    r"|\b(?:explain(?:ed|ing)?|docs?\s+(?:say|says|said)|legacy\s+exports?)\b",
     re.IGNORECASE,
 )
 _HISTORICAL_GOVERNOR_PATTERN = re.compile(
@@ -91,7 +91,7 @@ _CANDIDATE_BOUNDARY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _AMBIGUOUS_CONTRACT_PATTERN = re.compile(
-    r"\b(?:if|unless|whether|either|otherwise|depending|choose\s+between)\b"
+    r"\b(?:if|unless|whether|either|otherwise|depending|choose\s+between|may|might|could|optional)\b"
     r"|\bor\b",
     re.IGNORECASE,
 )
