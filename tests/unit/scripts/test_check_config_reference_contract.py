@@ -1863,6 +1863,46 @@ def dispatch(config):
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
 
 
+def test_erased_definitions_cannot_satisfy_full_config_audit(contract, tmp_path: Path) -> None:
+    (tmp_path / "erased_definitions.py").write_text(
+        """
+def overwritten(config):
+    return config.evaluation.stage1_enabled
+overwritten = None
+
+def deleted(config):
+    return config.evaluation.stage1_enabled
+del deleted
+
+class Readers:
+    def replaced(self, config):
+        return config.evaluation.stage1_enabled
+    replaced = None
+
+    def duplicate(self, config):
+        return config.evaluation.stage1_enabled
+    def duplicate(self, report):
+        return report.evaluation.stage1_enabled
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset()
+    report = contract.audit_contract(
+        fields=frozenset({field}),
+        reads=reads,
+        rows={field: contract.ReferenceRow("true", "Runtime control.")},
+        markers={},
+        allowlist={},
+        documented_defaults={},
+    )
+    assert report.violations == (
+        "evaluation.stage1_enabled: no production read, inert documentation, or schema-only rationale",
+    )
+
+
 def test_runtime_scan_honors_exact_local_replacement_decorator(contract, tmp_path: Path) -> None:
     (tmp_path / "replacement_decorator.py").write_text(
         """

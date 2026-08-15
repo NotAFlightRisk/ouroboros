@@ -731,6 +731,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._exception_capture_depth = 0
         self._caught_exception_stack: list[tuple[_AbruptPath, ...]] = []
         self._function_body_depth = 0
+        self._class_member_values: dict[int, tuple[_AbstractValue, ...]] = {}
         self.reads: set[ConfigField] = set()
 
     def _name_value(self, name: str) -> _AbstractValue:
@@ -1909,6 +1910,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._bind_destructured(node.target, self._expression_value(node.value))
         self._bind_function_target(node.target, self._function_value(node.value))
 
+    def visit_Delete(self, node: ast.Delete) -> None:
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                self._states[-1].pop(target.id, None)
+                self._annotations[-1].pop(target.id, None)
+                self._functions[-1].pop(target.id, None)
+            else:
+                self.visit(target)
+
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         owner = self._expression_value(node.target)
         self.visit(node.target)
@@ -3061,18 +3071,32 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._functions[-1][node.name] = functions
         self._annotations[-1][node.name] = _UNKNOWN_VALUE
 
-        if self._function_body_depth != 0:
-            return
-        targets = value.callables
+    def _visit_reachable_values(self, values: Iterable[_AbstractValue]) -> None:
+        """Scan bodies that remain reachable from final scope bindings.
+
+        Calls executed while walking a scope are already scanned at their call
+        sites. Deferred scanning here covers exported definitions without
+        letting a later overwrite or deletion keep an erased body alive.
+        """
         visited: set[int] = set()
-        for target in targets:
-            if id(target.function) in visited:
-                continue
-            visited.add(id(target.function))
-            scoped = self._scoped_function_arguments(target.function)
-            if target.receiver is not None:
-                scoped.update(self._bound_direct_arguments(target.function, (target.receiver,)))
-            self._visit_function_body(target.function, scoped)
+        pending = list(values)
+        while pending:
+            value = pending.pop()
+            for target in value.callables:
+                function_id = id(target.function)
+                if function_id in visited:
+                    continue
+                visited.add(function_id)
+                scoped = self._scoped_function_arguments(target.function)
+                if target.receiver is not None:
+                    scoped.update(self._bound_direct_arguments(target.function, (target.receiver,)))
+                self._visit_function_body(target.function, scoped)
+            for class_node in value.classes:
+                class_id = id(class_node)
+                if class_id in visited:
+                    continue
+                visited.add(class_id)
+                pending.extend(self._class_member_values.get(class_id, ()))
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._visit_function_definition(node)
@@ -3084,6 +3108,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._functions[-1].update(self._declared_functions(node.body))
         for statement in node.body:
             self.visit(statement)
+        self._visit_reachable_values(self._states[-1].values())
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         for expression in (*node.decorator_list, *node.bases):
@@ -3096,6 +3121,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         try:
             for statement in node.body:
                 self.visit(statement)
+            self._class_member_values[id(node)] = tuple(self._states[-1].values())
         finally:
             self._functions.pop()
             self._annotations.pop()
