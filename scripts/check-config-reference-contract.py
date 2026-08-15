@@ -201,6 +201,28 @@ _OPERATOR_MODULE = "<operator-module>"
 _ATTRGETTER_FACTORY = "<attrgetter-factory>"
 _BUILTINS_MODULE = "<builtins-module>"
 _GETATTR_BUILTIN = "<getattr-builtin>"
+_BUILTIN_CONSUMERS = frozenset(
+    {
+        "all",
+        "any",
+        "enumerate",
+        "filter",
+        "frozenset",
+        "iter",
+        "list",
+        "map",
+        "max",
+        "min",
+        "next",
+        "reversed",
+        "set",
+        "sorted",
+        "sum",
+        "tuple",
+        "zip",
+    }
+)
+_BUILTIN_CONSUMER_ORIGINS = frozenset(f"<builtin-consumer:{name}>" for name in _BUILTIN_CONSUMERS)
 _SECTION_ANNOTATIONS: Mapping[str, str] = {
     "EvaluationConfig": "evaluation",
     "ConsensusConfig": "consensus",
@@ -1339,6 +1361,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             value = (
                 _origin_value(_GETATTR_BUILTIN)
                 if node.id == "getattr" and not self._name_is_bound("getattr")
+                else _origin_value(f"<builtin-consumer:{node.id}>")
+                if node.id in _BUILTIN_CONSUMERS and not self._name_is_bound(node.id)
                 else self._name_value(node.id)
             )
             if value.callables:
@@ -1662,17 +1686,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         before = self._binding_snapshot()
-        if isinstance(node.func, ast.Name) and node.func.id in {
-            "all",
-            "any",
-            "list",
-            "max",
-            "min",
-            "next",
-            "set",
-            "sum",
-            "tuple",
-        }:
+        accessor = self._expression_value(node.func)
+        if accessor.origins & _BUILTIN_CONSUMER_ORIGINS:
             for argument in node.args:
                 if isinstance(argument, ast.GeneratorExp):
                     self._visit_comprehension(argument)
@@ -1681,7 +1696,6 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         # Evaluate once even when the call is a standalone mutating
         # ``setdefault`` expression.
         self._expression_value(node)
-        accessor = self._expression_value(node.func)
         if accessor.accessed_attributes:
             for argument in node.args:
                 value = self._expression_value(
@@ -1697,6 +1711,16 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     self._record(section, field_name)
         self.generic_visit(node)
         self._record_possible_exception(before)
+
+    def visit_Starred(self, node: ast.Starred) -> None:
+        """Iterable unpacking eagerly consumes a deferred generator."""
+        self._consume_deferred_generator(node.value)
+        self.generic_visit(node)
+
+    def visit_YieldFrom(self, node: ast.YieldFrom) -> None:
+        """``yield from`` eagerly consumes its delegated iterable."""
+        self._consume_deferred_generator(node.value)
+        self.generic_visit(node)
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
         before = self._binding_snapshot()
@@ -2768,6 +2792,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "operator" and alias.name == "attrgetter"
                     else _origin_value(_GETATTR_BUILTIN)
                     if node.module == "builtins" and alias.name == "getattr"
+                    else _origin_value(f"<builtin-consumer:{alias.name}>")
+                    if node.module == "builtins" and alias.name in _BUILTIN_CONSUMERS
                     else _AbstractValue(
                         classes=classes,
                         modules=(

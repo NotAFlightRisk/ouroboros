@@ -140,6 +140,65 @@ outer_with_nested_generator(settings)
     assert contract.runtime_reads(tmp_path, fields) == fields
 
 
+def test_runtime_scan_resolves_generator_consumers_by_builtin_identity(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "shadowed.py").write_text(
+        """
+def reader(config):
+    yield config.evaluation.stage1_enabled
+
+def list(value):
+    return None
+
+list(reader(settings))
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "consumed.py").write_text(
+        """
+from builtins import list as builtin_list
+
+def reader_two(config):
+    yield config.evaluation.stage2_enabled
+
+def reader_three(config):
+    yield config.evaluation.stage3_enabled
+
+consume = list
+consume(reader_two(settings))
+builtin_list(reader_three(settings))
+
+def delegated(config):
+    def inner():
+        yield config.evaluation.satisfaction_threshold
+    yield from inner()
+
+list(delegated(settings))
+
+def unpacked(config):
+    yield config.evaluation.uncertainty_threshold
+
+[*unpacked(settings)]
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in (
+            "stage1_enabled",
+            "stage2_enabled",
+            "stage3_enabled",
+            "satisfaction_threshold",
+            "uncertainty_threshold",
+        )
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        fields - {contract.ConfigField("evaluation", "stage1_enabled")}
+    )
+
+
 def test_runtime_scan_finds_attribute_alias_and_literal_getattr_reads(
     contract, tmp_path: Path
 ) -> None:
