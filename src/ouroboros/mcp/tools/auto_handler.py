@@ -14,6 +14,8 @@ import re
 from typing import Any
 from uuid import uuid4
 
+import structlog
+
 from ouroboros.auto.adapters import (
     HandlerInterviewBackend,
     HandlerLateralThinker,
@@ -63,7 +65,6 @@ from ouroboros.auto.state import (
     AutoResumeCapability,
     AutoStore,
     parse_auto_worktree_policy,
-    validate_complete_product_timeout,
 )
 from ouroboros.auto.worktree import (
     auto_worktree_cleanup_eligible,
@@ -370,7 +371,17 @@ class AutoHandler:
         store = self.store or AutoStore()
         resume = arguments.get("resume")
         requested_skip_run = bool(arguments.get("skip_run", False))
-        complete_product = bool(arguments.get("complete_product", False))
+        # Accepted so existing callers do not hard-fail. It is read here and
+        # nowhere else: no validation, no persisted state, no resume merging —
+        # passing it must behave exactly like omitting it.
+        if arguments.get("complete_product"):
+            structlog.get_logger(__name__).info(
+                "auto.complete_product.ignored",
+                detail=(
+                    "complete_product is deprecated and ignored: the run job owns "
+                    "run -> evaluate -> ralph"
+                ),
+            )
         attach_execution = _optional_text_arg(arguments, "attach_execution")
         attach_job = _optional_text_arg(arguments, "attach_job")
         attach_session = _optional_text_arg(arguments, "attach_session")
@@ -390,10 +401,6 @@ class AutoHandler:
                 "pipeline_timeout_seconds cannot be changed on resume; the "
                 "original deadline is preserved across process restarts"
             )
-        validate_complete_product_timeout(
-            complete_product=complete_product and not (isinstance(resume, str) and resume),
-            pipeline_timeout_seconds=pipeline_timeout_seconds,
-        )
         # Distinguish "caller did not pass user_preferences" from "caller
         # passed an empty mapping". Only validate/parse when the caller
         # actually supplied the arg so a resume call can defer to persisted
@@ -439,15 +446,6 @@ class AutoHandler:
                     state.ledger,
                     state.user_preferences,
                 ).to_dict()
-            # Q00/ouroboros#773 (review-3): ``complete_product`` is durable
-            # session intent, not a per-invocation flag. Honor the persisted
-            # value so MCP callers that omit ``complete_product`` on resume
-            # still chain RUN → RALPH_HANDOFF for sessions that originally
-            # opted in. Mirrors the CLI policy in ``cli/commands/auto.py``.
-            if state.complete_product and not complete_product:
-                complete_product = True
-            elif complete_product and not state.complete_product:
-                state.complete_product = True
         else:
             supplied_user_preferences = (
                 _parse_user_preferences(arguments.get("user_preferences"))
@@ -481,7 +479,6 @@ class AutoHandler:
             ).to_dict()
             state.max_interview_rounds = max_interview_rounds
             state.max_repair_rounds = max_repair_rounds
-            state.complete_product = complete_product
             if pipeline_timeout_seconds is not None:
                 state.pipeline_timeout_seconds = pipeline_timeout_seconds
         state.runtime_backend = runtime_backend
@@ -715,10 +712,6 @@ class StartAutoHandler:
             requested_pipeline_timeout = _optional_pipeline_timeout(arguments)
             requested_efficiency_mode = _optional_text_arg(arguments, "efficiency_mode")
             requested_frugality_assurance = _optional_text_arg(arguments, "frugality_assurance")
-            validate_complete_product_timeout(
-                complete_product=bool(arguments.get("complete_product", False)) and not has_resume,
-                pipeline_timeout_seconds=requested_pipeline_timeout,
-            )
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_auto"))
         if attach_requested and not has_resume:
@@ -999,7 +992,6 @@ class StartAutoHandler:
         state.max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 50)
         state.max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
         state.skip_run = bool(arguments.get("skip_run", False))
-        state.complete_product = bool(arguments.get("complete_product", False))
         supplied_user_preferences: dict[str, str | None] = {}
         if "user_preferences" in arguments and arguments.get("user_preferences") is not None:
             supplied_user_preferences = _parse_user_preferences(arguments.get("user_preferences"))

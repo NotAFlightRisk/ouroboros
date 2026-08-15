@@ -1454,32 +1454,6 @@ class TestBackgroundJobPath:
         assert state.worktree_policy is AutoWorktreePolicy.ALWAYS
 
     @pytest.mark.asyncio
-    async def test_complete_product_with_short_timeout_fails_fast(
-        self, event_store, tmp_path, fake_inner_auto
-    ) -> None:
-        job_manager = MagicMock()
-        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
-        store = AutoStore(tmp_path / "store")
-        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
-        h._inner_auto = fake_inner_auto
-
-        result = await h.handle(
-            {
-                "goal": "build a product",
-                "cwd": str(tmp_path),
-                "complete_product": True,
-                "pipeline_timeout_seconds": 100,
-            }
-        )
-
-        assert result.is_err
-        assert "complete_product=true requires pipeline_timeout_seconds >= 1800" in str(
-            result.error
-        )
-        job_manager.start_job.assert_not_called()
-        fake_inner_auto.handle.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_fresh_structured_goal_runner_resumes_without_preference_override(
         self, event_store, tmp_path
     ) -> None:

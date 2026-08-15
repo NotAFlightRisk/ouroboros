@@ -54,6 +54,7 @@ from ouroboros.auto.recovery_plan import (
 from ouroboros.auto.reference_candidate_bridge import (
     apply_requirement_distillation_to_ledger,
 )
+from ouroboros.auto.retired_phases import mark_retired_phase
 from ouroboros.auto.seed_qa_advisory import (
     clear_seed_qa_verdict,
     publish_advisory,
@@ -228,12 +229,6 @@ _RALPH_BLOCKED_STOP_REASONS: frozenset[str] = frozenset(
 # recovery decisions and surfaces can detect "deadline-expired" vs ordinary
 # per-tool blockers without scanning the error message.
 PIPELINE_DEADLINE_TOOL_NAME = "pipeline_deadline"
-# Phases that only the retired complete-product path could enter. The enum
-# members survive so sessions persisted in them still deserialize; nothing
-# transitions into them any more.
-_RETIRED_PHASES = frozenset(
-    {AutoPhase.RALPH_HANDOFF, AutoPhase.EVALUATE, AutoPhase.UNSTUCK_LATERAL}
-)
 DETACHED_STATUS = "detached"
 _RESUME_EXPIRED_MESSAGE = "pipeline_timeout (deadline expired before resume)"
 # Mirrors RalphHandler.MIN_MAX_TOTAL_SECONDS. The auto layer checks this before
@@ -585,6 +580,9 @@ class AutoPipeline:
         # BLOCKED state via ``_enforce_deadline``. Same exception applies
         # to the second ``_enforce_deadline`` gate after the BLOCKED/FAILED
         # recovery branch below.
+        if mark_retired_phase(state):  # before the generic deadline gate
+            self._save(state)
+            return self._result(state, ledger, blocker=state.last_error)
         if (
             state.deadline_at is not None
             and not state.is_terminal()
@@ -1075,17 +1073,7 @@ class AutoPipeline:
         *,
         review: SeedReview | None,
     ) -> AutoPipelineResult | None:
-        if state.phase in _RETIRED_PHASES:
-            # Sessions persisted mid complete-product cannot be driven further:
-            # the private RALPH_HANDOFF -> EVALUATE path they were parked in no
-            # longer exists. Say so plainly instead of pretending a phase
-            # handler is still there.
-            state.mark_blocked(
-                f"auto phase {state.phase.value} was retired with --complete-product; "
-                "the run job now owns evaluate/ralph. Start a new session, or follow "
-                "the run job's own chain with ouroboros_job_status.",
-                tool_name="run_starter",
-            )
+        if mark_retired_phase(state):
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
 
