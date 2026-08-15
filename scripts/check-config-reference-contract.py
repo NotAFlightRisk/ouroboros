@@ -201,28 +201,35 @@ _OPERATOR_MODULE = "<operator-module>"
 _ATTRGETTER_FACTORY = "<attrgetter-factory>"
 _BUILTINS_MODULE = "<builtins-module>"
 _GETATTR_BUILTIN = "<getattr-builtin>"
-_BUILTIN_CONSUMERS = frozenset(
+_EAGER_BUILTIN_CONSUMERS = frozenset(
     {
         "all",
         "any",
-        "enumerate",
-        "filter",
         "frozenset",
-        "iter",
         "list",
-        "map",
         "max",
         "min",
         "next",
-        "reversed",
         "set",
         "sorted",
         "sum",
         "tuple",
-        "zip",
     }
 )
-_BUILTIN_CONSUMER_ORIGINS = frozenset(f"<builtin-consumer:{name}>" for name in _BUILTIN_CONSUMERS)
+_LAZY_BUILTIN_CONSUMERS = frozenset({"enumerate", "filter", "iter", "map", "reversed", "zip"})
+_ASYNC_BUILTIN_CONSUMERS = frozenset({"anext"})
+_TRACKED_BUILTIN_CONSUMERS = (
+    _EAGER_BUILTIN_CONSUMERS | _LAZY_BUILTIN_CONSUMERS | _ASYNC_BUILTIN_CONSUMERS
+)
+_EAGER_BUILTIN_CONSUMER_ORIGINS = frozenset(
+    f"<builtin-consumer:{name}>" for name in _EAGER_BUILTIN_CONSUMERS
+)
+_LAZY_BUILTIN_CONSUMER_ORIGINS = frozenset(
+    f"<builtin-consumer:{name}>" for name in _LAZY_BUILTIN_CONSUMERS
+)
+_ASYNC_BUILTIN_CONSUMER_ORIGINS = frozenset(
+    f"<builtin-consumer:{name}>" for name in _ASYNC_BUILTIN_CONSUMERS
+)
 _SECTION_ANNOTATIONS: Mapping[str, str] = {
     "EvaluationConfig": "evaluation",
     "ConsensusConfig": "consensus",
@@ -1362,7 +1369,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 _origin_value(_GETATTR_BUILTIN)
                 if node.id == "getattr" and not self._name_is_bound("getattr")
                 else _origin_value(f"<builtin-consumer:{node.id}>")
-                if node.id in _BUILTIN_CONSUMERS and not self._name_is_bound(node.id)
+                if node.id in _TRACKED_BUILTIN_CONSUMERS and not self._name_is_bound(node.id)
                 else self._name_value(node.id)
             )
             if value.callables:
@@ -1400,6 +1407,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_ATTRGETTER_FACTORY)
             if _BUILTINS_MODULE in owner.origins and node.attr == "getattr":
                 return _origin_value(_GETATTR_BUILTIN)
+            if _BUILTINS_MODULE in owner.origins and node.attr in _TRACKED_BUILTIN_CONSUMERS:
+                return _origin_value(f"<builtin-consumer:{node.attr}>")
             resolved_modules = {
                 child.name
                 for module_name in owner.modules
@@ -1458,6 +1467,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 self._expression_cache[id(node)] = dict_method_value
                 return dict_method_value
             function_value = self._expression_value(node.func)
+            if function_value.origins & _LAZY_BUILTIN_CONSUMER_ORIGINS:
+                iterable_arguments = (
+                    node.args[1:] if _callable_name(node.func) in {"filter", "map"} else node.args
+                )
+                return _join_values(
+                    *(self._expression_value(argument) for argument in iterable_arguments)
+                )
             if _ATTRGETTER_FACTORY in function_value.origins:
                 return _AbstractValue(
                     accessed_attributes=frozenset(
@@ -1687,7 +1703,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         before = self._binding_snapshot()
         accessor = self._expression_value(node.func)
-        if accessor.origins & _BUILTIN_CONSUMER_ORIGINS:
+        if accessor.origins & _EAGER_BUILTIN_CONSUMER_ORIGINS:
             for argument in node.args:
                 if isinstance(argument, ast.GeneratorExp):
                     self._visit_comprehension(argument)
@@ -1711,6 +1727,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     self._record(section, field_name)
         self.generic_visit(node)
         self._record_possible_exception(before)
+
+    def visit_Await(self, node: ast.Await) -> None:
+        """Awaiting ``anext`` consumes one turn of an async generator."""
+        if isinstance(node.value, ast.Call):
+            accessor = self._expression_value(node.value.func)
+            if accessor.origins & _ASYNC_BUILTIN_CONSUMER_ORIGINS:
+                for argument in node.value.args:
+                    self._consume_deferred_generator(argument)
+        self.generic_visit(node)
 
     def visit_Starred(self, node: ast.Starred) -> None:
         """Iterable unpacking eagerly consumes a deferred generator."""
@@ -2793,7 +2818,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     else _origin_value(_GETATTR_BUILTIN)
                     if node.module == "builtins" and alias.name == "getattr"
                     else _origin_value(f"<builtin-consumer:{alias.name}>")
-                    if node.module == "builtins" and alias.name in _BUILTIN_CONSUMERS
+                    if node.module == "builtins" and alias.name in _TRACKED_BUILTIN_CONSUMERS
                     else _AbstractValue(
                         classes=classes,
                         modules=(

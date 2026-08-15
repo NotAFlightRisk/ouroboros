@@ -199,6 +199,56 @@ def unpacked(config):
     )
 
 
+def test_runtime_scan_defers_lazy_builtin_generator_wrappers(contract, tmp_path: Path) -> None:
+    (tmp_path / "lazy.py").write_text(
+        """
+def reader(config):
+    yield config.evaluation.stage1_enabled
+
+pending_iter = iter(reader(settings))
+pending_enumerate = enumerate(reader(settings))
+pending_filter = filter(None, reader(settings))
+pending_map = map(str, reader(settings))
+pending_reversed = reversed(reader(settings))
+pending_zip = zip(reader(settings))
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+def test_runtime_scan_consumes_qualified_and_awaited_builtins(contract, tmp_path: Path) -> None:
+    (tmp_path / "qualified.py").write_text(
+        """
+import builtins
+
+def sync_reader(config):
+    yield config.evaluation.semantic_model
+
+builtins.list(sync_reader(settings))
+
+async def async_reader(config):
+    yield config.consensus.advocate_model
+
+async def consume_async():
+    await anext(async_reader(settings))
+
+consume_async()
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        {
+            contract.ConfigField("evaluation", "semantic_model"),
+            contract.ConfigField("consensus", "advocate_model"),
+        }
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
 def test_runtime_scan_finds_attribute_alias_and_literal_getattr_reads(
     contract, tmp_path: Path
 ) -> None:
