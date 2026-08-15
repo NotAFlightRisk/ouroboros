@@ -135,6 +135,34 @@ def _callable_name(node: ast.AST) -> str | None:
 _FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
 
 
+def _is_generator_function(node: _FunctionNode) -> bool:
+    if isinstance(node, ast.Lambda):
+        return False
+
+    class Finder(ast.NodeVisitor):
+        found = False
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            return
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            return
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return
+
+        def visit_Yield(self, node: ast.Yield) -> None:
+            self.found = True
+
+        def visit_YieldFrom(self, node: ast.YieldFrom) -> None:
+            self.found = True
+
+    finder = Finder()
+    for statement in node.body:
+        finder.visit(statement)
+    return finder.found
+
+
 @dataclass(frozen=True)
 class _AbstractValue:
     """Possible config provenance plus bounded container/object shape."""
@@ -734,6 +762,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._caught_exception_stack: list[tuple[_AbruptPath, ...]] = []
         self._function_body_depth = 0
         self._class_member_values: dict[int, tuple[_AbstractValue, ...]] = {}
+        self._closure_bindings: dict[int, dict[str, _AbstractValue]] = {}
+        self._deferred_generators: dict[int, tuple[_FunctionNode, dict[str, _AbstractValue]]] = {}
         self.reads: set[ConfigField] = set()
 
     def _name_value(self, name: str) -> _AbstractValue:
@@ -880,6 +910,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         ]
         values.extend(self._expression_value(keyword.value) for keyword in node.keywords)
         values.extend(self._default_argument_values(function).values())
+        values.extend(self._closure_bindings.get(id(function), {}).values())
         tracked = TRACKED_SECTIONS | {_CONFIG_ROOT}
         if any(_contained_origins(value) & tracked or value.callables for value in values):
             return True
@@ -1322,6 +1353,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 )
             return value
         if isinstance(node, ast.Lambda):
+            self._capture_function_closure(node)
             return _AbstractValue(callables=(_CallableTarget(node),))
         if isinstance(node, ast.Attribute):
             owner = self._expression_value(node.value)
@@ -1619,6 +1651,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         for value in self._reachable_bool_values(node):
             self.visit(value)
 
+    def _consume_deferred_generator(self, node: ast.AST) -> None:
+        value = self._expression_value(node)
+        for identity in value.identity:
+            deferred = self._deferred_generators.get(identity)
+            if deferred is None:
+                continue
+            function, scoped = deferred
+            self._visit_function_body(function, scoped, consume_generator=True)
+
     def visit_Call(self, node: ast.Call) -> None:
         before = self._binding_snapshot()
         if isinstance(node.func, ast.Name) and node.func.id in {
@@ -1635,6 +1676,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             for argument in node.args:
                 if isinstance(argument, ast.GeneratorExp):
                     self._visit_comprehension(argument)
+                else:
+                    self._consume_deferred_generator(argument)
         # Evaluate once even when the call is a standalone mutating
         # ``setdefault`` expression.
         self._expression_value(node)
@@ -1788,6 +1831,24 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 if name in self._states[index] or index == 0:
                     return index
         return len(self._states) - 1
+
+    def _capture_function_closure(self, node: _FunctionNode) -> None:
+        visible: dict[str, _AbstractValue] = {}
+        if len(self._states) <= 1:
+            return
+        for scope in self._states:
+            visible.update(scope)
+        visible = {
+            name: value
+            for name, value in visible.items()
+            if _contained_origins(value) & (TRACKED_SECTIONS | {_CONFIG_ROOT})
+        }
+        if not visible:
+            return
+        existing = self._closure_bindings.get(id(node))
+        self._closure_bindings[id(node)] = (
+            self._join_states(existing, visible) if existing is not None else visible
+        )
 
     def visit_Global(self, node: ast.Global) -> None:
         self._global_names[-1].update(node.names)
@@ -2031,6 +2092,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_For(self, node: ast.For) -> None:
         if isinstance(node.iter, ast.GeneratorExp):
             self._visit_comprehension(node.iter)
+        else:
+            self._consume_deferred_generator(node.iter)
         self.visit(node.iter)
         iterable = self._expression_value(node.iter)
         zero_iterations_possible = self._static_truth(node.iter) is not True
@@ -2928,7 +2991,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self,
         node: _FunctionNode,
         scoped: dict[str, _AbstractValue],
+        *,
+        consume_generator: bool = False,
     ) -> tuple[_AbstractValue, ...]:
+        scoped = {**self._closure_bindings.get(id(node), {}), **scoped}
         self._states.append(scoped)
         self._annotations.append({})
         self._global_names.append(set())
@@ -2957,7 +3023,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if isinstance(node, ast.Lambda):
                 self.visit(node.body)
                 return (self._expression_value(node.body),)
-            if any(isinstance(child, (ast.Yield, ast.YieldFrom)) for child in ast.walk(node)):
+            if _is_generator_function(node) and not consume_generator:
                 return ()
             result = self._visit_binding_branch(node.body, self._binding_snapshot())
             return tuple(
@@ -2981,6 +3047,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         function: _FunctionNode,
         bound_receiver: _AbstractValue | None = None,
     ) -> _AbstractValue:
+        scoped = self._bound_call_arguments(call, function, bound_receiver)
+        if _is_generator_function(function):
+            self._deferred_generators[id(call)] = (function, scoped)
+            return _AbstractValue(identity=frozenset({id(call)}))
         function_id = id(function)
         if function_id in self._active_calls:
             return _UNKNOWN_VALUE
@@ -2988,7 +3058,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         try:
             returned = self._visit_function_body(
                 function,
-                self._bound_call_arguments(call, function, bound_receiver),
+                scoped,
             )
         finally:
             self._active_calls.remove(function_id)
@@ -3119,6 +3189,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         for default in (*node.args.defaults, *node.args.kw_defaults):
             if default is not None:
                 self.visit(default)
+        self._capture_function_closure(node)
         value = self._decorated_function_value(node)
         functions = frozenset(target.function for target in value.callables)
         self._states[-1][node.name] = value

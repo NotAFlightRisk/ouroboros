@@ -105,6 +105,41 @@ def generators(config):
     )
 
 
+def test_runtime_scan_tracks_consumed_generator_functions_and_closures(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "deferred_callables.py").write_text(
+        """
+def reader(config):
+    yield config.evaluation.stage1_enabled
+
+list(reader(settings))
+
+def make_reader(config):
+    section = config.evaluation
+    def inner():
+        return section.stage2_enabled
+    return inner
+
+make_reader(settings)()
+
+def outer_with_nested_generator(config):
+    def nested():
+        yield config.evaluation.stage1_enabled
+    return config.evaluation.stage3_enabled
+
+outer_with_nested_generator(settings)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
 def test_runtime_scan_finds_attribute_alias_and_literal_getattr_reads(
     contract, tmp_path: Path
 ) -> None:
