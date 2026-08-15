@@ -6,7 +6,7 @@ import re
 
 from ouroboros.auto.adapters import EvaluateResult
 from ouroboros.core.seed import Seed
-from ouroboros.core.task_type import explicit_task_type_from_goal
+from ouroboros.core.task_type import _candidate_segment, explicit_task_type_from_goal
 
 
 class SeedQaRepairMappingError(RuntimeError):
@@ -99,15 +99,7 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
     matches: list[tuple[int, str]] = []
     for pattern in patterns:
         for match in pattern.finditer(seed.goal):
-            segment_start = (
-                max(seed.goal.rfind(separator, 0, match.start()) for separator in ",.!?;\n") + 1
-            )
-            segment_end_candidates = [
-                index
-                for separator in ",.!?;\n"
-                if (index := seed.goal.find(separator, match.end())) >= 0
-            ]
-            segment_end = min(segment_end_candidates) if segment_end_candidates else len(seed.goal)
+            segment_start, segment_end = _candidate_segment(seed.goal, match.start(), match.end())
             segment = seed.goal[segment_start:segment_end]
             if re.search(
                 r"\b(?:do\s+not|don't|never|cannot|can't|can\s+not|without)\b"

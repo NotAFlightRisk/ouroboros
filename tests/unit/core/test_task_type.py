@@ -37,3 +37,11 @@ def test_explicit_task_type_uses_positive_correction_after_negated_candidate() -
     goal = "Do not use task_type: code, instead use task_type: document."
 
     assert explicit_task_type_from_goal(goal) == "document"
+
+
+def test_explicit_task_type_scopes_conjunction_negation_to_each_candidate() -> None:
+    for goal in (
+        "Use task_type: document and do not modify source code.",
+        "Do not use task_type: code and instead use task_type: document.",
+    ):
+        assert explicit_task_type_from_goal(goal) == "document"

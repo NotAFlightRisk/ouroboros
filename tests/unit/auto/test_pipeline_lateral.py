@@ -190,6 +190,27 @@ def test_seed_qa_repair_persists_positive_parent_after_negated_candidate() -> No
     assert repaired.metadata.parent_seed_id == "seed_good"
 
 
+@pytest.mark.parametrize(
+    "goal",
+    (
+        "Inherit seed_good and do not copy its obsolete constraints.",
+        "Do not inherit seed_bad and instead inherit seed_good.",
+    ),
+)
+def test_seed_qa_repair_persists_conjunction_scoped_parent(goal: str) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(update={"goal": goal})
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.metadata.parent_seed_id == "seed_good"
+
+
 def test_seed_qa_feedback_rejects_unmapped_reviewer_diagnostics() -> None:
     seed = _build_seed().model_copy(
         update={"metadata": SeedMetadata(seed_id="seed_generic_feedback", ambiguity_score=0.12)}

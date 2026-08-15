@@ -42,15 +42,19 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"|\bnot\s+allowed\b",
     re.IGNORECASE,
 )
+_CANDIDATE_BOUNDARY_PATTERN = re.compile(
+    r"[,!?;.\n]|\b(?:and|but|instead)\b",
+    re.IGNORECASE,
+)
 
 
 def _candidate_segment(text: str, start: int, end: int) -> tuple[int, int]:
-    """Return the comma-or-sentence-bounded segment containing a candidate."""
-    segment_start = max(text.rfind(separator, 0, start) for separator in ",.!?;\n") + 1
-    segment_end_candidates = [
-        index for separator in ",.!?;\n" if (index := text.find(separator, end)) >= 0
-    ]
-    segment_end = min(segment_end_candidates) if segment_end_candidates else len(text)
+    """Return the punctuation-or-conjunction-bounded candidate clause."""
+    segment_start = 0
+    for boundary in _CANDIDATE_BOUNDARY_PATTERN.finditer(text, 0, start):
+        segment_start = boundary.end()
+    next_boundary = _CANDIDATE_BOUNDARY_PATTERN.search(text, end)
+    segment_end = next_boundary.start() if next_boundary is not None else len(text)
     return segment_start, segment_end
 
 

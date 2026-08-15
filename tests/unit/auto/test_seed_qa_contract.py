@@ -36,6 +36,14 @@ def test_parent_seed_uses_positive_correction_after_negated_candidate() -> None:
     assert inherited_parent_seed_id(seed) == "seed_good"
 
 
+def test_parent_seed_scopes_conjunction_negation_to_each_candidate() -> None:
+    for goal in (
+        "Inherit seed_good and do not copy its obsolete constraints.",
+        "Do not inherit seed_bad and instead inherit seed_good.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) == "seed_good"
+
+
 def test_parent_seed_requires_inheritance_semantics() -> None:
     seed = _seed("Compare seed_old with seed_candidate.")
 
