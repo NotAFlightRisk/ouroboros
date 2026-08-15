@@ -835,10 +835,41 @@ if [ "$IS_LOCAL" = false ] && command -v curl &>/dev/null; then
   fi
 fi
 
+# Optional install-channel attribution. A docs page or listing can prepend
+# OUROBOROS_INSTALL_REF=<channel> to the install command so install_started /
+# install_completed carry which surface the install came from. Same privacy
+# contract as every other property here: a short opaque token chosen by us,
+# never derived from the machine. Token-constrained like os/arch above so a
+# hostile value cannot ride into the payload; anything else becomes "direct".
+INSTALL_REF="${OUROBOROS_INSTALL_REF:-direct}"
+[[ "$INSTALL_REF" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || INSTALL_REF="direct"
+
+# Preserve a coarse onboarding hint for the first MCP session. This is not a
+# user identifier and is never sent as an install property; telemetry reads
+# only the fixed enum after install, until setup creates config.yaml. Existing
+# setup or an existing hint wins, so re-running the installer cannot
+# relabel a user's first documented install surface.
+_persist_first_command_surface_hint() {
+  local surface=""
+  case "$INSTALL_REF" in
+    readme|readme-*) surface="readme_quickstart" ;;
+    getting-started|getting_started|getting-started-*|docs-getting-started) surface="getting_started" ;;
+    *) return 0 ;;
+  esac
+  local dir="$HOME/.ouroboros" tmp="$HOME/.ouroboros/first_command_surface.$$"
+  [ -f "$dir/config.yaml" ] && return 0
+  [ -s "$dir/first_command_surface" ] && return 0
+  if mkdir -p "$dir" 2>/dev/null; then
+    (umask 077; printf '%s\n' "$surface" > "$tmp" && mv -f "$tmp" "$dir/first_command_surface") \
+      2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+  fi
+}
+_persist_first_command_surface_hint
+
 _banner
 
 _telemetry_notice
-_telemetry_ping install_started "is_local=$IS_LOCAL" "pre=${PRE_FLAG:-no}" "version=${LATEST:-unknown}"
+_telemetry_ping install_started "is_local=$IS_LOCAL" "pre=${PRE_FLAG:-no}" "version=${LATEST:-unknown}" "ref=$INSTALL_REF"
 
 # 1. Detect installer: uv > pipx > pip (determines Python requirement)
 HAS_UV=false
@@ -1349,7 +1380,7 @@ if command -v claude &>/dev/null; then
 fi
 
 _telemetry_ping install_completed "method=${INSTALL_METHOD:-unknown}" "runtime=${RUNTIME:-none}" \
-  "detected_runtimes=${RUNTIME_COUNT:-0}" "version=${LATEST:-unknown}"
+  "detected_runtimes=${RUNTIME_COUNT:-0}" "version=${LATEST:-unknown}" "ref=$INSTALL_REF"
 
 _blank
 _say "${GREEN}${BOLD}Done! Ouroboros is ready.${RESET}"

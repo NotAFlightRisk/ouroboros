@@ -1,3 +1,4 @@
+<!-- mcp-name: io.github.Q00/ouroboros -->
 <p align="right">
   <strong>English</strong> | <a href="./README.ko.md">한국어</a> | <a href="./README.zh-CN.md">简体中文</a>
 </p>
@@ -6,7 +7,7 @@
   <br/>
   ◯ ─────────── ◯
   <br/><br/>
-  <img src="./docs/images/ouroboros.png" width="520" alt="Ouroboros">
+  <img src="./docs/images/ouroboros.png" width="420" alt="Ouroboros">
   <br/><br/>
   <strong>O U R O B O R O S</strong>
   <br/><br/>
@@ -16,9 +17,11 @@
 
 
 <p align="center">
-  <strong>Stop prompting. Start specifying.</strong>
+  <strong>It gets smarter on its own. We just hold the line.</strong>
   <br/>
-  <sub>The <strong>Agent OS</strong> for replayable, specification-first AI coding workflows</sub>
+  <sub>Skip the prompt engineering. The agent runs, fails, and gets smarter every generation. The grading command and expected result never make it into the success contract we hand it.</sub>
+  <br/>
+  <sub>The <strong>Agent OS</strong> for replayable AI coding workflows</sub>
 </p>
 
 <p align="center">
@@ -39,8 +42,28 @@
   <a href="#what-you-get">Results</a> ·
   <a href="#the-loop">How It Works</a> ·
   <a href="#commands">Commands</a> ·
-  <a href="#from-wonder-to-ontology">Philosophy</a>
+  <a href="#from-wonder-to-ontology">Philosophy</a> ·
+  <a href="https://ouroboros.page/learn/en/">Guide</a>
 </p>
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-hero bash
+```
+
+<p align="center"><sub>One command installs it. Then run <code>ooo setup</code> once inside your coding agent — details in <a href="#quick-start">Quick Start</a>.</sub></p>
+
+<p align="center"><sub><b>Four separate runs, four hosts. Different tasks on purpose — the engine is what is shared, not the prompt</b></sub></p>
+
+<table align="center">
+<tr>
+<td align="center" width="50%"><img src="./docs/images/ooo-interview.gif" width="440" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>Terminal CLI</b> — a task-management CLI: <code>ouroboros init start</code> asking about ordering and scope, then reporting an ambiguity score</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-codex.gif" width="440" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b> — called as an integration, on a video-publishing harness: the interview, its advisory lanes, and the ambiguity ledger</sub></td>
+</tr>
+<tr>
+<td align="center" width="50%"><img src="./docs/images/host-claude.gif" width="440" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b> — a YouTube automation task, with the six advisory lanes running in parallel before the interview submits</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-hermes.gif" width="440" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — a kart-racing game, run as a chat bot, ending at <code>Final ambiguity: 0.15</code></sub></td>
+</tr>
+</table>
 
 **Turn a vague idea into a verified, working codebase -- across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, Zcode, Goose, GJC, Antigravity, and Grok.**
 
@@ -90,6 +113,12 @@ workflows, or install `ourocode` when you want a unified terminal cockpit.
 > is an open-source developer tool. We do not issue, endorse, or hold any
 > coins. Any token claiming association with this project is unauthorized.
 
+> **Naming note.** A separate, unaffiliated open-source project also uses the
+> name "Ouroboros" — Anton Razzhigaev's self-modifying, autonomous-memory agent
+> at `github.com/razzant/ouroboros`. No shared code, no relationship. This
+> project locks a specification before executing rather than rewriting its own
+> architecture; if you're looking for the latter, that's the other one.
+
 ---
 
 ## Why Ouroboros?
@@ -109,26 +138,22 @@ Most AI coding fails at the **input**, not the output. The bottleneck is not AI 
 **Install** — one command, everything auto-detected:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme bash
 ```
 
-**First use** — open your AI coding agent and type:
+**First command** — open your AI coding agent and run these in order:
 
 ```
-> ooo
-```
-
-If a one-time setup is needed, Ouroboros asks before it makes changes. After
-setup, Codex follows its currently selected model and Claude Code starts with
-its recommended model settings. Choose **Directly configure models** only when
-you want to pin a stage to a specific model; it opens the local settings screen
-in your browser. You can return to those settings any time with `ooo config`.
-
-**Build** — then go:
-
-```
+> ooo setup
 > ooo interview "I want to build a task management CLI"
 ```
+
+`ooo setup` is a one-time configuration step. `ooo interview` is the first
+workflow command and starts the Socratic interview. After setup, Codex follows
+its currently selected model and Claude Code starts with its recommended model
+settings. Choose **Directly configure models** only when you want to pin a
+stage to a specific model; it opens the local settings screen in your browser.
+You can return to those settings any time with `ooo config`.
 
 Or from a plain terminal, without an agent host:
 
@@ -137,11 +162,7 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 ```
 
 <p align="center">
-  <img src="./docs/images/ooo-interview.gif" width="760" alt="Terminal recording of ouroboros init start asking about ordering, crash durability, v1 scope, and how tasks get identified, then reporting an ambiguity score of 0.31 and offering to continue, force, or cancel">
-</p>
-
-<p align="center">
-  <sub>Recorded from the terminal CLI. Four rounds in, ambiguity is 0.31 against a threshold of 0.2, so the CLI warns and asks whether to keep interviewing, force a Seed anyway, or cancel. The <code>ooo interview</code> command above runs inside your agent host, gates on the same 0.2 ambiguity threshold, and adds its own closure and restate gates before a Seed is generated.</sub>
+  <sub>That recording is this exact command. It is at the top of this page so you can see the tool before installing it.</sub>
 </p>
 
 <p align="center">
@@ -166,10 +187,16 @@ codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
 ```
 
-Start a new Codex session, then enter `ooo`. On first use, Ouroboros offers to
-prepare the runtime before it changes anything. Once ready, it follows Codex's
-current default model; choose **Directly configure models** only when you want
-to pin a specific model for a pipeline stage.
+Start a new Codex session, then run these commands in order:
+
+```
+ooo setup
+ooo interview "Build a task management CLI"
+```
+
+`ooo setup` is the one-time runtime preparation. Once ready, Ouroboros follows
+Codex's current default model; choose **Directly configure models** only when
+you want to pin a specific model for a pipeline stage.
 
 </details>
 
@@ -241,6 +268,14 @@ Claude is the host. Never install `[mcp,claude]`, `[mcp,claude-sdk]`, or
 
 Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op; it does not install dashboard runtime payload. `ouroboros-ai[all]` includes that no-op alias only for compatibility.
 
+**Homebrew (macOS/Linux)**:
+```bash
+brew tap q00/tap
+brew install ouroboros-ai
+ouroboros setup                         # configure runtime
+```
+Self-hosted tap, not yet in homebrew-core. Installs the same package published to PyPI.
+
 See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [Goose](./docs/runtime-guides/goose.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
 
 </details>
@@ -302,7 +337,7 @@ AI coding tools are powerful -- but they solve the **wrong problem** when the in
 |                     | Vanilla AI Coding                        | Ouroboros                                                                       |
 | :------------------ | :--------------------------------------- | :------------------------------------------------------------------------------ |
 | **Vague prompt**    | AI guesses intent, builds on assumptions | Socratic interview forces clarity *before* code                                 |
-| **Spec validation** | No spec -- architecture drifts mid-build | Immutable seed spec locks intent; Ambiguity gate (<= 0.2) blocks premature code |
+| **Spec validation** | No spec -- architecture drifts mid-build | Immutable seed spec locks intent; ambiguity gate (<= 0.2) blocks premature code without explicit `force` |
 | **Evaluation**      | "Looks good" / manual QA                 | 3-stage automated gate: Mechanical -> Semantic -> Multi-Model Consensus         |
 | **Rework rate**     | High -- wrong assumptions surface late   | Low -- assumptions surface in the interview, not in the PR review               |
 
@@ -498,7 +533,7 @@ Each dimension is scored 0.0-1.0 by the LLM (temperature 0.1 for reproducibility
 | **Success Criteria** -- *Are outcomes measurable?*            |    30%     |    25%     |
 | **Context Clarity** -- *Is the existing codebase understood?* |     --     |    15%     |
 
-**Threshold: Ambiguity <= 0.2** -- only then can a Seed be generated.
+**Threshold: Ambiguity <= 0.2.** A score above that blocks Seed generation. Passing `force` explicitly is what gets past it, and the CLI puts that choice on screen next to continue and cancel. The gate is a default worth arguing with, not a lock.
 
 ```
 Example (Greenfield):

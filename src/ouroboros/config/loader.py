@@ -1103,6 +1103,28 @@ def get_auto_evolve_enabled() -> bool:
         return True
 
 
+def default_execution_efficiency_mode() -> str | None:
+    """Map ``execution.default_policy`` to a fresh-start efficiency mode.
+
+    ``None`` — for ``ask`` or an unreadable config — preserves the
+    interactive-prompt contract exactly (#1733). ``efficient`` and
+    ``quality_first`` return the efficiency mode whose documented coupling
+    supplies the paired frugality default (adaptive/observe and
+    quality_first/off); strict assurance never derives from here. Explicit
+    invocation arguments take precedence at the call sites, and resumed
+    sessions never consult this.
+    """
+    try:
+        policy = load_config().execution.default_policy
+    except ConfigError:
+        return None
+    if policy == "efficient":
+        return "adaptive"
+    if policy == "quality_first":
+        return "quality_first"
+    return None
+
+
 def get_auto_evolve_max_generations() -> int:
     """Return the bounded generation budget for automatic Ralph chaining."""
 
@@ -2030,34 +2052,23 @@ def _normalize_configured_model_for_backend(
     if not candidate:
         return _default_model_for_backend(default_model, backend=backend)
 
-    resolved = _resolve_llm_backend_for_models(backend)
     # Recognize the current shipped default AND prior-release shipped defaults
     # (#1324): a config persisted before a pin bump still holds the old literal,
-    # and for Claude-incapable backends it must normalize to the sentinel just
-    # like the current default would. Genuinely explicit, never-shipped ids are
-    # absent from this set and fall through to be preserved verbatim.
+    # and it must normalize exactly like the current default would. Genuinely
+    # explicit, never-shipped ids are absent from this set and are preserved
+    # verbatim.
     is_shipped_default = candidate in (
         *recognized_shipped_defaults(default_model),
         *extra_shipped_defaults,
     )
-    if resolved in _CODEX_LLM_BACKENDS and is_shipped_default:
-        return _CODEX_DEFAULT_MODEL
-    if resolved in _KIRO_LLM_BACKENDS and is_shipped_default:
-        return _KIRO_DEFAULT_MODEL
-    if resolved in _COPILOT_LLM_BACKENDS and is_shipped_default:
-        return _COPILOT_DEFAULT_MODEL
-    if resolved in _HERMES_LLM_BACKENDS and is_shipped_default:
-        return _HERMES_DEFAULT_MODEL
-    if resolved in _PI_LLM_BACKENDS and is_shipped_default:
-        return _PI_DEFAULT_MODEL
-    if resolved in _GJC_LLM_BACKENDS and is_shipped_default:
-        return _GJC_DEFAULT_MODEL
-    if resolved in _ANTIGRAVITY_LLM_BACKENDS and is_shipped_default:
-        return _ANTIGRAVITY_DEFAULT_MODEL
-    if resolved in _GROK_LLM_BACKENDS and is_shipped_default:
-        return _GROK_DEFAULT_MODEL
-    if resolved in _ZCODE_LLM_BACKENDS and is_shipped_default:
-        return _ZCODE_DEFAULT_MODEL
+    if is_shipped_default:
+        # A recognized shipped default — current or prior-release — is a pin
+        # the user never chose, so every backend maps it to its own default:
+        # Claude-incapable backends keep their sentinel as before, and
+        # Claude-capable backends now take the current default pin instead of
+        # leaking a retired id to the API (#2069). Never-shipped ids are
+        # deliberate user pins and fall through verbatim.
+        return _default_model_for_backend(default_model, backend=backend)
 
     return candidate
 
