@@ -163,8 +163,9 @@ _STANDALONE_RETRACTION_PATTERN = re.compile(
     r"(?:scratch\s+that(?=\s*(?:[;.!?\n]|$))|"
     r"we\s+decided\s+against\s+it(?=\s*(?:[;.!?\n]|$))|"
     r"never\s+mind(?=\s*(?:[;.!?\n]|$))|"
-    r"forget\s+that(?=\s*(?:[;.!?\n]|$))|"
-    r"i\s+take\s+that\s+back(?=\s*(?:[;.!?\n]|$))|"
+    r"forget\s+(?:that|it)(?=\s*(?:[;.!?\n]|$))|"
+    r"i\s+take\s+(?:that|it)\s+back(?=\s*(?:[;.!?\n]|$))|"
+    r"cancel\s+it(?=\s*(?:[;.!?\n]|$))|"
     r"(?:that|it|the\s+(?:requirement|contract|proposal|value))\s+"
     r"(?:was|is)\s+(?:only\s+)?an?\s+example|"
     r"(?:i|we)\s+(?:am|are|was|were)\s+(?:only\s+)?giving\s+an?\s+example|"
@@ -192,6 +193,7 @@ _CONTRACT_TAIL_AMBIGUITY_PATTERN = re.compile(
     r"^\s*(?:,\s*)?(?:(?:only\s+)?(?:if|when|whenever|unless|whether)\b"
     r"|depending\b|otherwise\b|provided(?:\s+that)?\b|as\s+long\s+as\b"
     r"|pending\b|after\b|once\b|upon\b|assuming\b|contingent\s+on\b|subject\s+to\b)"
+    r"|^\s*,?\s*but\s+(?:maybe|possibly|perhaps|alternatively)\b"
     rf"|^\s*(?:,\s*)?or\s+(?:{_TASK_TYPE_PATTERN}|{_SEED_ID_PATTERN})"
     rf"(?!{_SEED_ID_CONTINUATION_PATTERN})",
     re.IGNORECASE,
@@ -512,7 +514,10 @@ def has_post_match_rejection(text: str, end: int) -> bool:
 
 def _has_contract_local_ambiguity(text: str, end: int, segment_end: int) -> bool:
     """Reject ambiguity immediately attached to the matched contract only."""
-    return _CONTRACT_TAIL_AMBIGUITY_PATTERN.search(text[end:segment_end]) is not None
+    del segment_end
+    hard_boundary = re.search(r"[;.!?\n]", text[end:])
+    tail_end = end + hard_boundary.start() if hard_boundary is not None else len(text)
+    return _CONTRACT_TAIL_AMBIGUITY_PATTERN.search(text[end:tail_end]) is not None
 
 
 def normalize_task_type(value: object) -> str:
