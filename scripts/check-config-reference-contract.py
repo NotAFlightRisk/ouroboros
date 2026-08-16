@@ -267,6 +267,8 @@ _HEAPQ_KEY_CONSUMERS = frozenset({"nsmallest", "nlargest"})
 _HEAPQ_KEY_CONSUMER_ORIGINS = frozenset(
     f"<heapq-key-consumer:{name}>" for name in _HEAPQ_KEY_CONSUMERS
 )
+_ATEXIT_MODULE = "<atexit-module>"
+_ATEXIT_REGISTER = "<atexit-register>"
 _ASYNCIO_MODULE = "<asyncio-module>"
 _ASYNCIO_CONSUMERS = frozenset({"create_task", "ensure_future", "gather", "run"})
 _ASYNCIO_CONSUMER_ORIGINS = frozenset(f"<asyncio-consumer:{name}>" for name in _ASYNCIO_CONSUMERS)
@@ -1678,6 +1680,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_VARS_BUILTIN)
             if _BUILTINS_MODULE in owner.origins and node.attr == "range":
                 return _origin_value(_RANGE_BUILTIN)
+            if _ATEXIT_MODULE in owner.origins and node.attr == "register":
+                return _origin_value(_ATEXIT_REGISTER)
             if _BUILTINS_MODULE in owner.origins and node.attr in _TRACKED_BUILTIN_CONSUMERS:
                 return _origin_value(f"<builtin-consumer:{node.attr}>")
             if _FUNCTOOLS_MODULE in owner.origins and node.attr == "partial":
@@ -2253,8 +2257,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         for value in self._reachable_bool_values(node):
             self.visit(value)
 
-    def _consume_deferred_generator(self, node: ast.AST, *, mode: str = "full") -> None:
-        value = self._expression_value(node)
+    def _consume_deferred_generator_value(
+        self, value: _AbstractValue, *, mode: str = "full"
+    ) -> None:
         for identity in value.identity:
             deferred = self._deferred_generators.get(identity)
             if deferred is None:
@@ -2269,6 +2274,28 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 generator_consumer_mode=mode,
                 generator_identity=identity,
             )
+
+    def _consume_deferred_generator(self, node: ast.AST, *, mode: str = "full") -> None:
+        self._consume_deferred_generator_value(self._expression_value(node), mode=mode)
+
+    def _consume_local_iterator(self, node: ast.AST, *, mode: str = "full") -> None:
+        owner = self._expression_value(node)
+        for function in self._source_index.methods(owner.instance_classes, "__iter__"):
+            scoped = self._bound_direct_arguments(function, (self._descriptor_receiver(owner),))
+            if _is_generator_function(function):
+                self._visit_function_body(
+                    function,
+                    scoped,
+                    consume_generator=True,
+                    generator_consumer_mode=mode,
+                    generator_identity=id(node) ^ id(function),
+                )
+                continue
+            returned = self._local_direct_call_value(
+                function,
+                (self._descriptor_receiver(owner),),
+            )
+            self._consume_deferred_generator_value(returned, mode=mode)
 
     def _consume_deferred_coroutine(self, node: ast.AST) -> None:
         value = self._expression_value(node)
@@ -2356,6 +2383,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             for argument in node.args:
                 self._consume_deferred_generator(argument, mode=mode)
                 self._consume_deferred_callable_iterator(argument, mode=mode)
+                self._consume_local_iterator(argument, mode=mode)
             key_keyword = next((keyword for keyword in node.keywords if keyword.arg == "key"), None)
             if key_keyword is not None and node.args:
                 if accessor.origins & _HEAPQ_KEY_CONSUMER_ORIGINS:
@@ -2416,6 +2444,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         if accessor.origins & _ASYNCIO_CONSUMER_ORIGINS:
             for argument in node.args:
                 self._consume_deferred_coroutine(argument)
+        if _ATEXIT_REGISTER in accessor.origins and node.args:
+            callback_arguments = tuple(
+                self._expression_value(argument) for argument in node.args[1:]
+            )
+            for function, receiver in self._call_targets(node.args[0]):
+                values = ((receiver,) if receiver is not None else ()) + callback_arguments
+                self._local_direct_call_value(function, values)
         if (
             isinstance(node.func, ast.Attribute)
             and node.func.attr == "send"
@@ -3650,6 +3685,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if alias.name == "itertools"
                     else _origin_value(_HEAPQ_MODULE)
                     if alias.name == "heapq"
+                    else _origin_value(_ATEXIT_MODULE)
+                    if alias.name == "atexit"
                     else _origin_value(_ASYNCIO_MODULE)
                     if alias.name == "asyncio"
                     else _origin_value(_CONTEXTLIB_MODULE)
@@ -3739,6 +3776,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "itertools" and alias.name in _ITERTOOLS_CALLBACK_FACTORIES
                     else _origin_value(f"<heapq-key-consumer:{alias.name}>")
                     if node.module == "heapq" and alias.name in _HEAPQ_KEY_CONSUMERS
+                    else _origin_value(_ATEXIT_REGISTER)
+                    if node.module == "atexit" and alias.name == "register"
                     else _origin_value(f"<asyncio-consumer:{alias.name}>")
                     if node.module == "asyncio" and alias.name in _ASYNCIO_CONSUMERS
                     else _origin_value(_NULLCONTEXT_FACTORY)
@@ -4465,7 +4504,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         try:
             for statement in node.body:
                 self.visit(statement)
-            self._class_member_values[id(node)] = tuple(self._states[-1].values())
+            self._class_member_values[id(node)] = tuple(
+                value for name, value in self._states[-1].items() if not name.startswith("_")
+            )
         finally:
             self._nonlocal_names.pop()
             self._global_names.pop()

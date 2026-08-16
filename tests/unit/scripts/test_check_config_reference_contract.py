@@ -383,6 +383,39 @@ heapq.nsmallest(1, [settings.evaluation], key=lambda section: section.stage3_ena
     assert contract.runtime_reads(tmp_path, fields) == fields
 
 
+def test_runtime_scan_consumes_local_iterator_protocols(contract, tmp_path: Path) -> None:
+    (tmp_path / "local_iterator.py").write_text(
+        """
+class _Reader:
+    def __iter__(self):
+        yield settings.evaluation.stage1_enabled
+
+list(_Reader())
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_executes_registered_exit_callbacks(contract, tmp_path: Path) -> None:
+    (tmp_path / "exit_callback.py").write_text(
+        """
+import atexit
+
+def _reader(section):
+    return section.stage2_enabled
+
+atexit.register(_reader, settings.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage2_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
 def test_runtime_scan_models_min_max_and_heap_key_callback_cardinality(
     contract, tmp_path: Path
 ) -> None:
@@ -3601,6 +3634,20 @@ def test_runtime_scan_ignores_uninvoked_private_helpers(contract, tmp_path: Path
         """
 def _never_called(config):
     return config.evaluation.stage1_enabled
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+def test_runtime_scan_ignores_uninvoked_private_class_members(contract, tmp_path: Path) -> None:
+    (tmp_path / "uninvoked_private_member.py").write_text(
+        """
+class PublicReader:
+    def _never_called(self, config):
+        return config.evaluation.stage1_enabled
 """,
         encoding="utf-8",
     )
