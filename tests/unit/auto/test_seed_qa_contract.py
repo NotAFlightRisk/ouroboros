@@ -177,6 +177,14 @@ def test_parent_seed_requires_inheritance_semantics() -> None:
     assert inherited_parent_seed_id(seed) is None
 
 
+def test_parent_seed_ignores_descriptive_mentions_and_comparisons() -> None:
+    for goal in (
+        "Inherit seed_good. Mention parent_seed_id: seed_bad in the appendix.",
+        "Inherit seed_good. Compare with parent_seed_id: seed_bad.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) == "seed_good"
+
+
 def test_parent_seed_preserves_korean_inheritance_contract() -> None:
     seed = _seed("seed_parent를 계승해 문서형 Seed로 명세한다.")
 

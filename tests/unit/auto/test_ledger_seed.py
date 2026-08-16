@@ -95,6 +95,8 @@ class TestSynthesizeSeedFromLedgerUnchanged:
             "Whether to include charts or tables is undecided, but task_type: document.",
             "Use task_type: document for an optional appendix.",
             "task_type must be code. Actually, task_type must be document.",
+            "Use task_type: document. Mention task_type: code in the appendix.",
+            "Use task_type: document. Compare it with task_type: code.",
         ):
             ledger = _populate_complete_ledger(goal)
 
@@ -143,6 +145,8 @@ class TestPartialSeedFromEvidence:
             "The task type must be a document.",
             "The task type should be a document.",
             "task_type must be code. Actually, task_type must be document.",
+            "Use task_type: document. Mention task_type: code in the appendix.",
+            "Use task_type: document. Compare it with task_type: code.",
         ):
             ledger = SeedDraftLedger.from_goal(goal)
 

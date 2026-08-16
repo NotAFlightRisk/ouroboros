@@ -304,3 +304,11 @@ def test_explicit_task_type_rejects_contracted_korean_and_conflicting_negatives(
         explicit_task_type_from_goal("task_type: document, but that requirement was rejected.")
         is None
     )
+
+
+def test_explicit_task_type_ignores_descriptive_mentions_and_comparisons() -> None:
+    for goal in (
+        "Use task_type: document. Mention task_type: code in the appendix.",
+        "Use task_type: document. Compare it with task_type: code.",
+    ):
+        assert explicit_task_type_from_goal(goal) == "document"

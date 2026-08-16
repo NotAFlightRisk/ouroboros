@@ -215,6 +215,10 @@ def test_seed_qa_repairs_preserve_descriptive_and_reference_contracts() -> None:
     for goal in (
         "Create a guide explaining setup with task_type: document. Inherit seed_good.",
         "Summarize the rejected proposal with task_type: document. Inherit seed_good.",
+        "Use task_type: document. Mention task_type: code in the appendix. "
+        "Inherit seed_good. Mention parent_seed_id: seed_bad in the appendix.",
+        "Use task_type: document. Compare it with task_type: code. "
+        "Inherit seed_good. Compare with parent_seed_id: seed_bad.",
         "Use task_type: document. As a reference, task_type: code appears in old docs. "
         "Inherit seed_good. As a reference, inherit seed_bad appears in old docs.",
     ):
