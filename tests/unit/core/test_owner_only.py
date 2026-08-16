@@ -558,7 +558,9 @@ def test_fanout_registry_register_is_owner_only(tmp_path: Path) -> None:
         expected_keys=["code_facts"],
         synthesizer_input={"request": {"question": "which module owns auth?"}},
     )
-    saved = tmp_path / "fanout" / f"{fanout_id}.json"
+    # Found by listing: a record's filename carries the session that owns it,
+    # so rebuilding the name from the id would be a second copy of the layout.
+    (saved,) = (tmp_path / "fanout").glob(f"*{fanout_id}.json")
 
     assert _mode(saved) == 0o600
     assert registry.load(fanout_id) is not None
@@ -576,7 +578,9 @@ def test_fanout_registry_narrows_a_record_left_at_0644(tmp_path: Path) -> None:
         expected_keys=["code_facts"],
         synthesizer_input={},
     )
-    saved = tmp_path / "fanout" / f"{fanout_id}.json"
+    # Found by listing: a record's filename carries the session that owns it,
+    # so rebuilding the name from the id would be a second copy of the layout.
+    (saved,) = (tmp_path / "fanout").glob(f"*{fanout_id}.json")
     saved.chmod(0o644)
 
     registry.register(

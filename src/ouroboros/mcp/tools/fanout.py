@@ -73,6 +73,23 @@ _DEFAULT_FANOUT_DIR = Path.home() / ".ouroboros" / "data" / "fanout"
 #: ``/tmp/forged.json``, and a check placed after that join is already too late.
 _FANOUT_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
+#: A session id may be written into a record's filename, so it is constrained
+#: exactly as ``_FANOUT_ID_RE`` constrains the id: both end up joined to the
+#: registry directory, and a separator, a parent segment or an absolute form
+#: must be unspellable rather than detected after the join.
+_SESSION_SEGMENT_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+#: Between the session and the id. Doubled so the boundary survives both sides
+#: containing single underscores, which they do -- ``interview_20260809_055623``
+#: and ``fanout_<hex>``. The id is the tail, so a name is read from the right
+#: whatever the session happens to contain.
+_SESSION_SEPARATOR = "__"
+
+#: How many of a session's ids one lookup returns. A cap rather than the whole
+#: history: the list is read by whatever asked for it, and an hour-long session
+#: should not hand its caller a longer one.
+_SESSION_FANOUT_ID_LIMIT = 12
+
 # Fan-out re-entry kinds — each routes to one revived synthesizer.
 FANOUT_KIND_LATERAL_PERSONA_PANEL = "lateral_persona_panel"
 FANOUT_KIND_CODE_INVESTIGATION = "code_investigation"
@@ -216,7 +233,7 @@ class FanoutRegistry:
             return
         self._dir = directory
 
-    def _path(self, fanout_id: str) -> Path | None:
+    def _path(self, fanout_id: str, session_id: str = "") -> Path | None:
         """Return the record path for ``fanout_id``, or ``None`` if it is not one.
 
         The registry directory is the whole of where a record may live, so an id
@@ -224,9 +241,23 @@ class FanoutRegistry:
         rather than raising keeps the existing read contract: an unredeemable id
         is reported as an unknown fan-out, which is what a caller holding a
         forged one should learn.
+
+        A spellable ``session_id`` is written into the name. One directory holds
+        every session this machine has run, and the session is otherwise only
+        inside the file, so "which of these are mine" could be answered only by
+        opening all of them. The name is where that answer belongs: it makes the
+        question a directory listing rather than a read of the whole history.
+
+        The session segment is held to the same alphabet as the id and for the
+        same reason -- both are joined to a directory, so a separator or a
+        parent segment must have no spelling rather than being detected after
+        the join. A session that cannot be spelled falls back to the flat name,
+        which is also the shape every record written before this had.
         """
         if not _FANOUT_ID_RE.fullmatch(fanout_id):
             return None
+        if session_id and _SESSION_SEGMENT_RE.fullmatch(session_id):
+            return self._dir / f"{session_id}{_SESSION_SEPARATOR}{fanout_id}.json"
         return self._dir / f"{fanout_id}.json"
 
     def register(
@@ -261,7 +292,7 @@ class FanoutRegistry:
         # where it was written -- raised rather than returned as ``None``, which
         # says "this write did not happen" about a caller that asked for the
         # impossible.
-        record_path = self._path(resolved_id)
+        record_path = self._path(resolved_id, session_id)
         if record_path is None:
             raise ValueError(
                 "fanout_id must be 1-128 characters of [A-Za-z0-9_-]; "
@@ -307,11 +338,96 @@ class FanoutRegistry:
         self._issued = True
         return resolved_id
 
+    def _prefixed_path(self, fanout_id: str) -> Path | None:
+        """Return the session-prefixed record path for ``fanout_id``, if one exists.
+
+        The id is the tail of the name, so it is matched from the right and the
+        session in front may contain anything its own alphabet allows. An id
+        matching more than once cannot happen -- ids are unique and the suffix
+        pins the whole tail -- but if the directory ever holds two, neither is
+        chosen: picking by listing order would decide a redemption by filesystem
+        accident.
+        """
+        try:
+            matches = list(self._dir.glob(f"*{_SESSION_SEPARATOR}{fanout_id}.json"))
+        except OSError:
+            return None
+        return matches[0] if len(matches) == 1 else None
+
+    def session_fanout_ids(
+        self,
+        session_id: str,
+        *,
+        kind: str,
+        limit: int = _SESSION_FANOUT_ID_LIMIT,
+    ) -> tuple[str, ...]:
+        """Return this session's fan-out ids of one kind, most recent first.
+
+        A directory listing, not a scan. The session is in the name, so the
+        files that are not this session's are never opened -- which is what
+        keeps the cost of asking independent of how much history the machine
+        has kept. Only the matches are read, and only to check ``kind``, since
+        one session can run a persona panel beside its advisory lanes and an id
+        that passed the session filter alone would send a caller to read one as
+        though it were the other.
+
+        **Records written before the session was in the name are not found.**
+        Their filename cannot answer the question and reading every flat file to
+        ask would restore the cost this exists to remove. A session that
+        predates the layout is a finished one, and the degradation for a session
+        straddling the change is that its earlier rounds are not offered --
+        fewer results, never another session's.
+
+        Advisory in the sense the caller is: nothing here decides whether a
+        fan-out completes, so an unreadable directory returns nothing rather
+        than raising into a turn that only wanted a shortcut.
+        """
+        if not session_id or not _SESSION_SEGMENT_RE.fullmatch(session_id):
+            return ()
+        try:
+            entries = list(self._dir.glob(f"{session_id}{_SESSION_SEPARATOR}*.json"))
+        except OSError:
+            return ()
+        stamped: list[tuple[float, str]] = []
+        for path in entries:
+            try:
+                stamped.append((path.stat().st_mtime, path.stem))
+            except OSError:
+                continue
+        # ``stem`` breaks a same-timestamp tie, so two records written in one
+        # clock tick order the same way on every call rather than by whatever
+        # order the directory happened to be read in.
+        stamped.sort(key=lambda item: (-item[0], item[1]))
+        found: list[str] = []
+        for _, stem in stamped:
+            if len(found) >= limit:
+                break
+            _, _, fanout_id = stem.partition(_SESSION_SEPARATOR)
+            record = self.load(fanout_id)
+            if record is None or record.kind != kind:
+                continue
+            if record.session_id != session_id:
+                continue
+            found.append(record.fanout_id)
+        return tuple(found)
+
     def load(self, fanout_id: str) -> FanoutRecord | None:
-        """Load a persisted fan-out record, or ``None`` if unknown/corrupt."""
+        """Load a persisted fan-out record, or ``None`` if unknown/corrupt.
+
+        Resolved by id alone, because that is all a submission carries. The flat
+        name is tried first and a session-prefixed one is found by listing,
+        which is what lets records written on either side of this layout be read
+        by the same call -- no migration, and no id that stops being redeemable
+        because the name it was written under changed.
+        """
         path = self._path(fanout_id)
         if path is None:
             return None
+        if not path.exists():
+            prefixed = self._prefixed_path(fanout_id)
+            if prefixed is None:
+                return None
+            path = prefixed
         try:
             content = path.read_text(encoding="utf-8")
         except OSError:

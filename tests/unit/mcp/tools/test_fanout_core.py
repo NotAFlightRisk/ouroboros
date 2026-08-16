@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -995,8 +996,12 @@ async def test_submit_tool_rejects_forged_ids_and_still_redeems_issued_ones(
     assert produced.is_ok, produced
     issued_id = produced.unwrap().meta["fanout_id"]
 
+    # Located by listing rather than by spelling the name: a record's filename
+    # carries the session that owns it, and a test that rebuilds the name is a
+    # second place the layout is written down.
+    (record_path,) = (state_dir / "fanout").glob(f"*{issued_id}.json")
     outside = tmp_path / "forged.json"
-    outside.write_text((state_dir / "fanout" / f"{issued_id}.json").read_text(), encoding="utf-8")
+    outside.write_text(record_path.read_text(), encoding="utf-8")
 
     submit, disposable = _bounded_submit(registry, tmp_path)
     results = [{"key": persona, "content": f"{persona}-out"} for persona in personas]
@@ -1213,3 +1218,136 @@ def test_distinct_correlation_keys_still_complete(tmp_path: Any) -> None:
     )
 
     assert out["status"] == "complete"
+
+
+# --------------------------------------------------------------------------- #
+# Session-addressed record names (#2150)
+# --------------------------------------------------------------------------- #
+
+
+def _register(registry: FanoutRegistry, session_id: str, kind: str) -> str:
+    fanout_id = registry.register(
+        kind=kind,
+        session_id=session_id,
+        correlation_key="context.lane_id",
+        expected_keys=["code_context"],
+        synthesizer_input={"request": {}},
+    )
+    assert fanout_id is not None
+    return fanout_id
+
+
+def test_a_records_name_says_which_session_owns_it(tmp_path: Any) -> None:
+    """The filename is the index. Without it the session is only inside the file.
+
+    One directory holds every session the machine has run — 192 records across
+    155 sessions when this was written — so a lookup that reads to find out
+    costs the whole history to learn what a listing could have said.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = _register(registry, "sess-1", FANOUT_KIND_QUESTION_ADVISORY)
+
+    (written,) = tmp_path.glob("*.json")
+    assert written.name == f"sess-1__{fanout_id}.json"
+
+
+def test_a_session_lookup_opens_only_that_sessions_records(tmp_path: Any) -> None:
+    """The cost of asking must not grow with what other sessions left behind."""
+    registry = FanoutRegistry(tmp_path)
+    mine = [_register(registry, "mine", FANOUT_KIND_QUESTION_ADVISORY) for _ in range(3)]
+    for index in range(40):
+        _register(registry, f"other-{index}", FANOUT_KIND_QUESTION_ADVISORY)
+
+    opened: list[str] = []
+    original = FanoutRegistry.load
+
+    def _counting_load(self: FanoutRegistry, fanout_id: str) -> Any:
+        opened.append(fanout_id)
+        return original(self, fanout_id)
+
+    FanoutRegistry.load = _counting_load  # type: ignore[method-assign]
+    try:
+        listed = registry.session_fanout_ids("mine", kind=FANOUT_KIND_QUESTION_ADVISORY)
+    finally:
+        FanoutRegistry.load = original  # type: ignore[method-assign]
+
+    assert set(listed) == set(mine)
+    assert set(opened) == set(mine), "a record outside the session was opened"
+
+
+def test_a_session_lookup_separates_kinds(tmp_path: Any) -> None:
+    """One session can run a persona panel beside its advisory lanes.
+
+    Both filters are load-bearing: an id that passed the session filter alone
+    would send a caller to read a panel's output as though it were a lane's.
+    """
+    registry = FanoutRegistry(tmp_path)
+    advisory = _register(registry, "sess-1", FANOUT_KIND_QUESTION_ADVISORY)
+    panel = _register(registry, "sess-1", FANOUT_KIND_LATERAL_PERSONA_PANEL)
+
+    listed = registry.session_fanout_ids("sess-1", kind=FANOUT_KIND_QUESTION_ADVISORY)
+    assert listed == (advisory,)
+    assert panel not in listed
+
+
+def test_a_record_written_before_the_session_was_in_its_name_still_loads(
+    tmp_path: Any,
+) -> None:
+    """No migration, and no id that stops being redeemable because a name changed.
+
+    A submission carries an id and nothing else, so the read path has to find a
+    record under either shape. The 192 records already on disk when this landed
+    are the reason it is a fallback rather than a rewrite.
+    """
+    registry = FanoutRegistry(tmp_path)
+    legacy = FanoutRecord(
+        fanout_id="fanout_legacy",
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="sess-old",
+        correlation_key="context.lane_id",
+        expected_keys=("code_context",),
+        synthesizer_input={"request": {}},
+    )
+    (tmp_path / "fanout_legacy.json").write_text(json.dumps(legacy.to_dict()), encoding="utf-8")
+
+    loaded = registry.load("fanout_legacy")
+    assert loaded is not None
+    assert loaded.session_id == "sess-old"
+
+    # It is not offered by a session lookup, and that is the honest trade: its
+    # name cannot answer the question, and reading every flat file to ask would
+    # restore the cost the name exists to remove.
+    assert registry.session_fanout_ids("sess-old", kind=FANOUT_KIND_QUESTION_ADVISORY) == ()
+
+
+def test_a_session_that_cannot_be_spelled_falls_back_to_the_flat_name(
+    tmp_path: Any,
+) -> None:
+    """A separator or a parent segment has no spelling, so nothing escapes here.
+
+    The record is still written and still redeemable — the session simply does
+    not reach the filename, which is the pre-existing shape rather than a
+    failure. Refusing to register would cost a turn its re-entry over a name.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = _register(registry, "../escape", FANOUT_KIND_QUESTION_ADVISORY)
+
+    (written,) = tmp_path.glob("*.json")
+    assert written.name == f"{fanout_id}.json"
+    assert written.parent == tmp_path
+    loaded = registry.load(fanout_id)
+    assert loaded is not None and loaded.session_id == "../escape"
+    assert registry.session_fanout_ids("../escape", kind=FANOUT_KIND_QUESTION_ADVISORY) == ()
+
+
+def test_a_session_lookup_returns_the_newest_first_and_caps_them(tmp_path: Any) -> None:
+    """The caller reads this list, so a long session must not hand it a long one."""
+    registry = FanoutRegistry(tmp_path)
+    ids = [_register(registry, "sess-1", FANOUT_KIND_QUESTION_ADVISORY) for _ in range(20)]
+    for index, fanout_id in enumerate(ids):
+        (written,) = tmp_path.glob(f"*{fanout_id}.json")
+        os.utime(written, (1_700_000_000 + index, 1_700_000_000 + index))
+
+    listed = registry.session_fanout_ids("sess-1", kind=FANOUT_KIND_QUESTION_ADVISORY)
+    assert len(listed) == 12
+    assert list(listed) == list(reversed(ids[-12:]))

@@ -15,6 +15,7 @@ required lane that can always answer.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -41,6 +42,17 @@ from ouroboros.orchestrator.capabilities.interview_schemas import (
 )
 
 QUESTION = "How many enterprise accounts asked for SSO last quarter?"
+
+
+def _record_path(directory: Any, fanout_id: str) -> Path:
+    """Return the on-disk record for ``fanout_id``, found by listing.
+
+    A record's filename carries the session that owns it, so a test that
+    rebuilds the name from the id is a second place the layout is written down
+    -- and the one that goes stale first.
+    """
+    (path,) = directory.glob(f"*{fanout_id}.json")
+    return path
 
 
 def _advisory_payloads() -> list[dict[str, Any]]:
@@ -852,7 +864,7 @@ def test_the_record_never_holds_what_a_child_said(tmp_path: Any) -> None:
     outcome = _submit(registry, fanout_id, results)
     assert outcome["status"] == "complete"
 
-    on_disk = (tmp_path / f"{fanout_id}.json").read_text(encoding="utf-8")
+    on_disk = _record_path(tmp_path, fanout_id).read_text(encoding="utf-8")
     assert secret not in on_disk
     assert "advice" not in on_disk
     record = registry.load(fanout_id)
@@ -1179,7 +1191,7 @@ def test_the_record_carries_no_contract_to_lose(tmp_path: Any) -> None:
     registry = FanoutRegistry(tmp_path)
     fanout_id, _lane_ids, _identity = _registered_advisory(registry)
 
-    persisted = json.loads((tmp_path / f"{fanout_id}.json").read_text(encoding="utf-8"))
+    persisted = json.loads(_record_path(tmp_path, fanout_id).read_text(encoding="utf-8"))
 
     assert "answer_contracts" not in persisted
     assert not hasattr(registry.load(fanout_id), "answer_contracts")
@@ -1195,7 +1207,7 @@ def test_no_record_state_can_switch_a_lane_contract_off(tmp_path: Any) -> None:
     """
     registry = FanoutRegistry(tmp_path)
     fanout_id, lane_ids, identity = _registered_advisory(registry)
-    path = tmp_path / f"{fanout_id}.json"
+    path = _record_path(tmp_path, fanout_id)
     persisted = json.loads(path.read_text(encoding="utf-8"))
     persisted["answer_contracts"] = {}
     path.write_text(json.dumps(persisted, ensure_ascii=False), encoding="utf-8")
