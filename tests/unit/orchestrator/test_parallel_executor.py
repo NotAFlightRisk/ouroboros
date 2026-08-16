@@ -5006,10 +5006,9 @@ async def test_attempt_budget_exhaustion_skips_provider_recovery_paths() -> None
     )
 
     assert result.success is False
-    assert result.attempt_budget_exhaustion is not None
-    assert result.attempt_budget_exhaustion.kind is AttemptBudgetKind.AGENTIC_STEPS
-    assert result.attempt_budget_exhaustion.limit == 1
-    assert result.attempt_budget_exhaustion.observed == 2
+    assert result.attempt_budget_exhaustion is None
+    assert result.outcome is ACExecutionOutcome.BLOCKED
+    assert "provider stream closure failed" in (result.error or "")
     assert retry_hints.is_retryable_failure(result) is False
     assert runtime.call_count == 1
     assert runtime.finalized is True
@@ -5020,7 +5019,82 @@ async def test_attempt_budget_exhaustion_skips_provider_recovery_paths() -> None
         for call in event_store.append.await_args_list
         if call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
     ]
-    assert len(budget_events) == 1
+    assert budget_events == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("termination_confirmed", (False, True))
+async def test_atomic_exhaustion_requires_confirmed_runtime_termination(
+    termination_confirmed: bool,
+) -> None:
+    """Atomic exhaustion is publishable only after its live handle confirms termination."""
+
+    termination_calls: list[RuntimeHandle] = []
+
+    async def terminate(handle: RuntimeHandle) -> bool:
+        termination_calls.append(handle)
+        return termination_confirmed
+
+    controlled_handle = RuntimeHandle(
+        backend="opencode",
+        native_session_id="atomic-controlled",
+    ).bind_controls(terminate_callback=terminate)
+
+    class _ControlledStepRuntime(_FinalMessageRuntime):
+        def __init__(self) -> None:
+            super().__init__("must not reach terminal", native_session_id="unused")
+            self.closed = False
+
+        async def execute_task(self, **_kwargs: Any):
+            try:
+                for index in range(2):
+                    yield AgentMessage(
+                        type="assistant",
+                        content=f"tool {index}",
+                        tool_name="Read",
+                        resume_handle=controlled_handle,
+                    )
+            finally:
+                self.closed = True
+
+    runtime = _ControlledStepRuntime()
+    event_store = AsyncMock()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=event_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        max_iterations_per_ac=1,
+    )
+
+    result = await executor._execute_atomic_ac(
+        ac_index=0,
+        ac_content="Bound a controlled runtime",
+        session_id="sess_atomic_controlled",
+        execution_id="exec_atomic_controlled",
+        tools=["Read"],
+        system_prompt="system",
+        seed_goal="Require confirmed runtime termination",
+        depth=0,
+        start_time=datetime.now(UTC),
+    )
+
+    assert result.success is False
+    assert runtime.closed is True
+    assert len(termination_calls) == (1 if termination_confirmed else 2)
+    budget_events = [
+        call.args[0]
+        for call in event_store.append.await_args_list
+        if call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
+    ]
+    if termination_confirmed:
+        assert result.attempt_budget_exhaustion is not None
+        assert len(budget_events) == 1
+    else:
+        assert result.attempt_budget_exhaustion is None
+        assert result.outcome is ACExecutionOutcome.BLOCKED
+        assert "runtime termination is confirmed" in (result.error or "")
+        assert budget_events == []
 
 
 @pytest.mark.asyncio
@@ -5160,7 +5234,7 @@ async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity(
 async def test_atomic_wall_clock_exhaustion_bounds_nonreturning_finalizer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A wedged parallel finalizer cannot keep an exhausted attempt alive."""
+    """A wedged parallel finalizer prevents false exhaustion publication."""
 
     class _NonreturningFinalizerRuntime:
         _runtime_handle_backend = "opencode"
@@ -5212,9 +5286,10 @@ async def test_atomic_wall_clock_exhaustion_bounds_nonreturning_finalizer(
         0.01,
     )
     runtime = _NonreturningFinalizerRuntime()
+    event_store = AsyncMock()
     executor = ParallelACExecutor(
         adapter=runtime,
-        event_store=AsyncMock(),
+        event_store=event_store,
         console=MagicMock(),
         enable_decomposition=False,
         max_iterations_per_ac=100,
@@ -5237,11 +5312,14 @@ async def test_atomic_wall_clock_exhaustion_bounds_nonreturning_finalizer(
 
     try:
         assert result.success is False
-        assert result.attempt_budget_exhaustion is not None
-        assert result.attempt_budget_exhaustion.kind is AttemptBudgetKind.WALL_CLOCK
-        assert retry_hints.is_retryable_failure(result) is False
+        assert result.attempt_budget_exhaustion is None
+        assert "provider stream closure" in (result.error or "")
         assert runtime.close_started.is_set()
         assert not runtime.close_finished.is_set()
+        assert not any(
+            call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
+            for call in event_store.append.await_args_list
+        )
         assert elapsed < 0.5
     finally:
         runtime.allow_close.set()

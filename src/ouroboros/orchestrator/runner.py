@@ -9228,7 +9228,7 @@ class OrchestratorRunner:
                 async with (
                     bounded_stream.lifetime(),
                     shielded_aclosing(
-                        message_stream,
+                        bounded_stream,
                         close_error_is_observe_only=lambda: bounded_stream.exhaustion is not None,
                     ),
                 ):
@@ -11249,7 +11249,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                 async with (
                     bounded_stream.lifetime(),
                     shielded_aclosing(
-                        message_stream,
+                        bounded_stream,
                         close_error_is_observe_only=lambda: bounded_stream.exhaustion is not None,
                     ),
                 ):
@@ -11524,7 +11524,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     async with (
                         bounded_successor_stream.lifetime(),
                         shielded_aclosing(
-                            successor_stream,
+                            bounded_successor_stream,
                             close_error_is_observe_only=lambda: (
                                 bounded_successor_stream.exhaustion is not None
                             ),

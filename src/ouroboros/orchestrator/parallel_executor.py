@@ -114,6 +114,7 @@ from ouroboros.orchestrator.atomic_prompt_builder import (
 )
 from ouroboros.orchestrator.attempt_budget_runtime import (
     AtomicAttemptTerminalizer,
+    ProviderStreamCloseTimeout,
     build_decomposition_trace_summary,
     terminalize_bounded_route_exhaustion,
 )
@@ -3541,8 +3542,8 @@ class ParallelACExecutor:
         runtime_handle: RuntimeHandle | None,
         *,
         runtime_scope_id: str,
-    ) -> None:
-        await self._ac_runtime_handle_manager._terminate_runtime_handle(
+    ) -> bool:
+        return await self._ac_runtime_handle_manager._terminate_runtime_handle(
             runtime_handle,
             runtime_scope_id=runtime_scope_id,
         )
@@ -9530,6 +9531,11 @@ Respond with either ATOMIC or the structured JSON object only.
                 depth=depth,
                 runtime_handle=dispatch_state.runtime_handle,
                 route_candidate=observed_route_candidate,
+                outcome=(
+                    ACExecutionOutcome.BLOCKED
+                    if isinstance(e, ProviderStreamCloseTimeout)
+                    else ACExecutionOutcome.FAILED
+                ),
             )
         finally:
             try:

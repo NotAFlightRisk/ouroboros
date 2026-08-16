@@ -45,6 +45,7 @@ from ouroboros.orchestrator.adapter import (
 from ouroboros.orchestrator.attempt_budget_runtime import (
     AttemptBudgetedMessageStream,
     DirectAttemptBudget,
+    ProviderStreamCloseTimeout,
     direct_bounded_route_runtime_active,
     shielded_aclosing,
 )
@@ -321,7 +322,7 @@ async def test_direct_attempt_resume_preserves_exact_near_max_remaining_time(
 
 @pytest.mark.asyncio
 async def test_direct_exhaustion_bounds_nonreturning_provider_finalizer() -> None:
-    """A wedged direct finalizer cannot retain exhausted provider authority."""
+    """A wedged direct finalizer prevents false exhaustion publication."""
 
     close_started = asyncio.Event()
     close_cancelled = asyncio.Event()
@@ -342,11 +343,13 @@ async def test_direct_exhaustion_bounds_nonreturning_provider_finalizer() -> Non
             close_finished.set()
 
     source = nonreturning_provider()
-    stream = AttemptBudgetedMessageStream(
-        source,
+    budget = DirectAttemptBudget(
         max_agentic_steps=1,
         timeout_seconds=10,
+        root_ac_count=1,
     )
+    stream = budget.wrap(source)
+    event_store = AsyncMock()
 
     with (
         patch(
@@ -359,25 +362,93 @@ async def test_direct_exhaustion_bounds_nonreturning_provider_finalizer() -> Non
         ),
     ):
         started = asyncio.get_running_loop().time()
-        async with (
-            stream.lifetime(),
-            shielded_aclosing(
-                source,
-                close_error_is_observe_only=lambda: stream.exhaustion is not None,
-            ),
-        ):
-            async for _message in stream:
-                pass
+        with pytest.raises(ProviderStreamCloseTimeout):
+            async with (
+                stream.lifetime(),
+                shielded_aclosing(
+                    stream,
+                    close_error_is_observe_only=lambda: stream.exhaustion is not None,
+                ),
+            ):
+                async for _message in stream:
+                    pass
         elapsed = asyncio.get_running_loop().time() - started
+
+        with pytest.raises(ProviderStreamCloseTimeout, match="closure is confirmed"):
+            await budget.terminalize(
+                stream=stream,
+                event_store=event_store,
+                execution_id="exec_unconfirmed_close",
+                session_id="sess_unconfirmed_close",
+                runtime_handle=None,
+                context="test_direct",
+            )
 
     try:
         assert stream.exhaustion is not None
         assert close_started.is_set()
         assert close_cancelled.is_set()
+        assert stream.closure_confirmed is False
+        event_store.append.assert_not_awaited()
         assert elapsed < 0.5
     finally:
         allow_close.set()
         await asyncio.wait_for(close_finished.wait(), timeout=0.5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("termination_confirmed", (False, True))
+async def test_direct_exhaustion_requires_confirmed_runtime_termination(
+    termination_confirmed: bool,
+) -> None:
+    """Direct exhaustion is publishable only after its live handle confirms termination."""
+
+    async def over_budget_provider() -> AsyncIterator[AgentMessage]:
+        yield AgentMessage(type="assistant", content="tool 1", tool_name="Read")
+        yield AgentMessage(type="assistant", content="tool 2", tool_name="Read")
+
+    termination_calls: list[RuntimeHandle] = []
+
+    async def terminate(handle: RuntimeHandle) -> bool:
+        termination_calls.append(handle)
+        return termination_confirmed
+
+    budget = DirectAttemptBudget(max_agentic_steps=1, timeout_seconds=10, root_ac_count=1)
+    stream = budget.wrap(over_budget_provider())
+    async with stream.lifetime(), shielded_aclosing(stream):
+        async for _message in stream:
+            pass
+    assert stream.closure_confirmed is True
+    event_store = AsyncMock()
+    runtime_handle = RuntimeHandle(
+        backend="opencode",
+        native_session_id="direct-controlled",
+    ).bind_controls(terminate_callback=terminate)
+
+    if termination_confirmed:
+        result = await budget.terminalize(
+            stream=stream,
+            event_store=event_store,
+            execution_id="exec_direct_controlled",
+            session_id="sess_direct_controlled",
+            runtime_handle=runtime_handle,
+            context="test_direct",
+        )
+        assert "attempt budget exhausted" in result
+        event_store.append.assert_awaited_once()
+    else:
+        with pytest.raises(ProviderStreamCloseTimeout, match="termination is confirmed"):
+            await budget.terminalize(
+                stream=stream,
+                event_store=event_store,
+                execution_id="exec_direct_uncontrolled",
+                session_id="sess_direct_uncontrolled",
+                runtime_handle=runtime_handle,
+                context="test_direct",
+            )
+        event_store.append.assert_not_awaited()
+
+    assert termination_calls == [runtime_handle]
 
 
 def _attach_live_process_local_contract(
@@ -1340,6 +1411,11 @@ class TestOrchestratorRunner:
         ):
             result = await runner.execute_seed(sample_seed, parallel=False)
 
+        if provider_close_fails:
+            assert result.is_err
+            assert "provider stream closure failed" in str(result.error)
+            assert terminate_calls == 0
+            return
         assert result.is_ok and result.value.success is False
         assert produced == 4  # 3 root ACs x 1 admitted step, then the boundary turn
         assert terminate_calls == 1
@@ -1514,6 +1590,16 @@ class TestOrchestratorRunner:
             result = await runner.execute_seed(sample_seed, parallel=False)
             elapsed = asyncio.get_running_loop().time() - started
 
+        if provider_close_outcome != "ok":
+            assert result.is_err
+            assert "closure" in str(result.error)
+            assert terminate_calls == 0
+            assert not any(
+                call.args
+                and getattr(call.args[0], "type", None) == "execution.ac.attempt_budget_exhausted"
+                for call in mock_event_store.append.await_args_list
+            )
+            return
         assert result.is_ok and result.value.success is False
         assert elapsed < 0.9
         assert provider_close_started.is_set()

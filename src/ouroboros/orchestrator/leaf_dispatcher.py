@@ -86,12 +86,13 @@ async def _close_runtime_stream(
     try:
         with anyio.CancelScope(shield=True):
             await close_provider_stream_bounded(stream)
+        state.provider_closed = True
     except Exception as exc:
         exhaustion = state.attempt_budget_exhaustion
         if exhaustion is None and not timeout_exhausted():
             raise
         log.warning(
-            "parallel_executor.provider_stream.close_failed_after_exhaustion",
+            "parallel_executor.provider_stream.close_unconfirmed_after_exhaustion",
             budget_kind=(
                 exhaustion.kind.value
                 if exhaustion is not None
@@ -99,6 +100,7 @@ async def _close_runtime_stream(
             ),
             error=str(exc),
         )
+        raise
 
 
 async def _iterate_runtime_stream(
@@ -162,6 +164,8 @@ class LeafDispatchState:
     attempt_budget_snapshot: AttemptBudgetProgress | None = None
     attempt_started_at: float | None = None
     attempt_budget_exhaustion: AttemptBudgetExhaustion | None = None
+    provider_entered: bool = False
+    provider_closed: bool = False
 
     def prepare_attempt_budget(
         self,
@@ -866,6 +870,7 @@ class LeafDispatcher:
                     **execute_effort_kwargs,
                 ),
             )
+            state.provider_entered = True
             attempt_scope: anyio.CancelScope | None = None
             stream_stack.push_async_callback(
                 _close_runtime_stream,

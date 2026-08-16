@@ -147,7 +147,12 @@ async def close_provider_stream_bounded(
         )
         raise
     if done:
-        await close_task
+        try:
+            await close_task
+        except Exception as exc:
+            raise ProviderStreamCloseTimeout(
+                f"provider stream closure failed before convergence: {exc}"
+            ) from exc
         return
 
     await _cancel_provider_task_bounded(
@@ -169,7 +174,11 @@ def terminalize_bounded_route_exhaustion[T](value: T) -> T:
 
 
 class AttemptBudgetedMessageStream:
-    """Stop one provider stream at its first portable step/time boundary."""
+    """Own and stop one provider stream at its first portable boundary.
+
+    The wrapper is created before the first provider read, so the attempt has
+    a single cleanup authority before any external effect can begin.
+    """
 
     def __init__(
         self,
@@ -202,9 +211,15 @@ class AttemptBudgetedMessageStream:
         # consume the exact integer remainder in ``_progress_at_start``.
         self._elapsed_before_start = progress.elapsed_timeout_seconds()
         self.exhaustion: AttemptBudgetExhaustion | None = None
+        self.closure_confirmed = False
 
     def __aiter__(self) -> AttemptBudgetedMessageStream:
         return self
+
+    async def aclose(self) -> None:
+        """Close the owned provider stream and record confirmed convergence."""
+        await close_provider_stream_bounded(self._source)
+        self.closure_confirmed = True
 
     @property
     def elapsed_seconds(self) -> float:
@@ -290,7 +305,7 @@ async def shielded_aclosing[T](
     *,
     close_error_is_observe_only: Callable[[], bool] | None = None,
 ) -> AsyncIterator[T]:
-    """Close an async provider without replacing an authoritative exhaustion."""
+    """Close an async provider before allowing terminal state publication."""
 
     try:
         yield stream
@@ -307,12 +322,12 @@ async def shielded_aclosing[T](
         try:
             await close_provider_stream_bounded(stream)
         except Exception as exc:
-            if close_error_is_observe_only is None or not close_error_is_observe_only():
-                raise
-            log.warning(
-                "orchestrator.provider_stream.close_failed_after_exhaustion",
-                error=str(exc),
-            )
+            if close_error_is_observe_only is not None and close_error_is_observe_only():
+                log.warning(
+                    "orchestrator.provider_stream.close_unconfirmed_after_exhaustion",
+                    error=str(exc),
+                )
+            raise
 
 
 @dataclass(slots=True)
@@ -399,11 +414,19 @@ class DirectAttemptBudget:
         exhaustion = stream.exhaustion
         if exhaustion is None:  # pragma: no cover - guarded by callers
             raise RuntimeError("direct attempt terminalization requires exhaustion data")
-        await terminate_runtime_handle(
+        if not stream.closure_confirmed:
+            raise ProviderStreamCloseTimeout(
+                "refusing direct exhaustion publication before provider closure is confirmed"
+            )
+        terminated = await terminate_runtime_handle(
             runtime_handle,
             session_id=session_id,
             context=f"{context}_attempt_budget_exhausted",
         )
+        if not terminated:
+            raise ProviderStreamCloseTimeout(
+                "refusing direct exhaustion publication before runtime termination is confirmed"
+            )
         event = create_ac_attempt_budget_exhausted_event(
             session_id=session_id,
             ac_index=None,
@@ -454,11 +477,11 @@ async def terminate_runtime_handle(
     *,
     session_id: str,
     context: str,
-) -> None:
-    """Best-effort live runtime termination for controllable handles."""
+) -> bool:
+    """Terminate a controllable runtime and report whether closure is confirmed."""
 
     if runtime_handle is None or not runtime_handle.can_terminate:
-        return
+        return True
     try:
         terminated = await runtime_handle.terminate()
     except Exception as exc:
@@ -469,7 +492,7 @@ async def terminate_runtime_handle(
             backend=runtime_handle.backend,
             error=str(exc),
         )
-        return
+        return False
     if terminated:
         log.info(
             "orchestrator.runner.runtime_handle_terminated",
@@ -477,6 +500,7 @@ async def terminate_runtime_handle(
             context=context,
             backend=runtime_handle.backend,
         )
+    return terminated
 
 
 def should_emit_progress_event(message: AgentMessage, messages_processed: int) -> bool:
@@ -634,6 +658,21 @@ class AtomicAttemptTerminalizer:
         exhaustion = self.dispatch_state.attempt_budget_exhaustion
         if exhaustion is None:  # pragma: no cover - guarded by callers
             raise RuntimeError("atomic attempt terminalization requires exhaustion data")
+        if self.dispatch_state.provider_entered and not self.dispatch_state.provider_closed:
+            raise ProviderStreamCloseTimeout(
+                "refusing atomic exhaustion publication before provider closure is confirmed"
+            )
+        runtime_handle = self.dispatch_state.runtime_handle
+        if runtime_handle is not None and runtime_handle.can_terminate:
+            terminated = await self.executor._terminate_runtime_handle(
+                runtime_handle,
+                runtime_scope_id=self.runtime_identity.session_scope_id,
+            )
+            if not terminated:
+                raise ProviderStreamCloseTimeout(
+                    "refusing atomic exhaustion publication before runtime termination is confirmed"
+                )
+            self.dispatch_state.runtime_handle = None
         duration = (datetime.now(UTC) - self.start_time).total_seconds()
         log.warning(
             "parallel_executor.ac.attempt_budget_exhausted",
