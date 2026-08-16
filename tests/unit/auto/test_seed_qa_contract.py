@@ -224,6 +224,11 @@ def test_parent_seed_ignores_validation_content_and_field_specific_retraction() 
         inherited_parent_seed_id(_seed("Write a validator that parses parent_seed_id: seed_bad."))
         is None
     )
+    for goal in (
+        "Write unit tests asserting parent_seed_id: seed_bad.",
+        "Create documentation showing how to set parent_seed_id: seed_bad.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) is None
     assert (
         inherited_parent_seed_id(
             _seed("Inherit seed_old. task_type: document. Cancel the parent requirement.")
@@ -241,6 +246,14 @@ def test_parent_seed_ignores_validation_content_and_field_specific_retraction() 
         "Inherit seed_old. A test fixture contains parent_seed_id: seed_fake.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) == "seed_old"
+
+
+def test_parent_seed_ignores_unrelated_bare_retraction_details() -> None:
+    for goal in (
+        "Inherit seed_good. Never mind the earlier color choice.",
+        "Inherit seed_good. Scratch that old heading.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) == "seed_good"
 
 
 def test_parent_seed_scopes_retraction_to_nearest_contract() -> None:

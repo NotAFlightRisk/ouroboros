@@ -398,6 +398,11 @@ def test_explicit_task_type_ignores_unrelated_cancellation_and_output_prose() ->
         explicit_task_type_from_goal("Build a parser that validates task_type: document.") is None
     )
     for goal in (
+        "Write unit tests asserting task_type: document.",
+        "Create documentation showing how to set task_type: document.",
+    ):
+        assert explicit_task_type_from_goal(goal) is None
+    for goal in (
         "Use task_type: document. The report should say task_type: code.",
         "Use task_type: document. A test fixture contains task_type: code.",
     ):
@@ -408,3 +413,11 @@ def test_explicit_task_type_ignores_unrelated_cancellation_and_output_prose() ->
         )
         == "document"
     )
+
+
+def test_explicit_task_type_ignores_unrelated_bare_retraction_details() -> None:
+    for goal in (
+        "Use task_type: document. Never mind the earlier color choice.",
+        "Use task_type: document. Scratch that old heading.",
+    ):
+        assert explicit_task_type_from_goal(goal) == "document"

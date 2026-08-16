@@ -266,6 +266,8 @@ class TestPartialSeedFromEvidence:
         goals = (
             "Build a parser that validates task_type: document.",
             "Write a validator that parses parent_seed_id: seed_bad.",
+            "Write unit tests asserting task_type: document.",
+            "Create documentation showing how to set task_type: document.",
         )
         for goal in goals:
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
@@ -274,6 +276,17 @@ class TestPartialSeedFromEvidence:
             )
             assert complete.task_type == "code"
             assert partial.task_type == "code"
+
+    def test_complete_and_partial_ledgers_ignore_unrelated_bare_retractions(self) -> None:
+        goal = "Use task_type: document. Never mind the earlier color choice."
+
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+        )
+
+        assert complete.task_type == "document"
+        assert partial.task_type == "document"
 
     def test_complete_and_partial_ledgers_preserve_binding_before_content_example(self) -> None:
         for goal in (

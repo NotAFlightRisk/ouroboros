@@ -513,8 +513,8 @@ def test_seed_qa_repairs_fail_closed_on_validation_content_and_field_retractions
     seed = _build_seed(seed_id="seed_current").model_copy(
         update={
             "goal": (
-                "Build a parser that validates task_type: document. "
-                "Write a validator that parses parent_seed_id: seed_bad. "
+                "Write unit tests asserting task_type: document. "
+                "Create documentation showing how to set parent_seed_id: seed_bad. "
                 "Inherit seed_parent. Cancel the task type requirement."
             ),
             "task_type": "code",
@@ -540,6 +540,38 @@ def test_seed_qa_repairs_fail_closed_on_validation_content_and_field_retractions
     for candidate in repaired:
         assert candidate.task_type == "code"
         assert candidate.metadata.parent_seed_id == "seed_parent"
+
+
+def test_seed_qa_repairs_ignore_unrelated_bare_retraction_details() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": (
+                "Use task_type: document. Never mind the earlier color choice. "
+                "Inherit seed_good. Scratch that old heading."
+            ),
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Keep only contract-scoped retractions.",
+        text="Ignore unrelated corrections.",
+    )
+
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.task_type == "document"
+        assert candidate.metadata.parent_seed_id == "seed_good"
 
 
 def test_seed_qa_repairs_preserve_parent_before_content_example() -> None:
