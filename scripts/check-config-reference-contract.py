@@ -231,6 +231,7 @@ class _DeferredPartial:
 
 _UNKNOWN_VALUE = _AbstractValue()
 _STATIC_UNKNOWN = object()
+_NOT_IMPLEMENTED = "<not-implemented>"
 
 _ANNOTATION_MODULE = "<annotation-config-module>"
 _TYPE_CHECKING_FALSE = "<typing-type-checking-false>"
@@ -992,6 +993,21 @@ class _SourceIndex:
 
         return frozenset().union(*(inherited(class_node, frozenset()) for class_node in classes))
 
+    def is_strict_subclass(self, child: ast.ClassDef, parent: ast.ClassDef) -> bool:
+        """Return whether an indexed class is a strict descendant of another."""
+
+        pending = list(self._class_bases.get(id(child), ()))
+        seen: set[int] = set()
+        while pending:
+            candidate = pending.pop()
+            if candidate is parent:
+                return True
+            if id(candidate) in seen:
+                continue
+            seen.add(id(candidate))
+            pending.extend(self._class_bases.get(id(candidate), ()))
+        return False
+
 
 @dataclass(frozen=True)
 class _AbruptPath:
@@ -1055,6 +1071,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._caught_exception_stack: list[tuple[_AbruptPath, ...]] = []
         self._function_body_depth = 0
         self._class_member_values: dict[int, tuple[_AbstractValue, ...]] = {}
+        self._class_attributes: dict[int, tuple[tuple[str, _AbstractValue], ...]] = {}
         self._closure_bindings: dict[int, dict[str, _AbstractValue]] = {}
         self._deferred_generators: dict[int, _DeferredGenerator] = {}
         self._deferred_coroutines: dict[int, _DeferredCoroutine] = {}
@@ -1762,7 +1779,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             )
         if isinstance(node, ast.Name):
             value = (
-                _origin_value(_GETATTR_BUILTIN)
+                _origin_value(_NOT_IMPLEMENTED)
+                if node.id == "NotImplemented" and not self._name_is_bound("NotImplemented")
+                else _origin_value(_GETATTR_BUILTIN)
                 if node.id == "getattr" and not self._name_is_bound("getattr")
                 else _origin_value(_HASATTR_BUILTIN)
                 if node.id == "hasattr" and not self._name_is_bound("hasattr")
@@ -1806,8 +1825,44 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 (_AbstractValue(string_value=node.attr, string_values=frozenset({node.attr})),),
             )
             attribute = self._named_value(owner.attributes, node.attr)
+            class_attribute = _join_values(
+                *(
+                    value
+                    for class_node in owner.instance_classes
+                    if (
+                        value := self._named_value(
+                            self._class_attributes.get(id(class_node)), node.attr
+                        )
+                    )
+                    is not None
+                )
+            )
+            descriptor_methods = self._source_index.methods(
+                class_attribute.instance_classes, "__get__"
+            )
+            data_descriptor = bool(
+                self._source_index.methods(class_attribute.instance_classes, "__set__")
+                or self._source_index.methods(class_attribute.instance_classes, "__delete__")
+            )
+            if descriptor_methods and (attribute is None or data_descriptor):
+                descriptor = self._descriptor_receiver(class_attribute)
+                return _join_values(
+                    *(
+                        self._local_direct_call_value(
+                            function,
+                            (
+                                descriptor,
+                                self._descriptor_receiver(owner),
+                                _AbstractValue(classes=owner.instance_classes),
+                            ),
+                        )
+                        for function in descriptor_methods
+                    )
+                )
             if attribute is not None:
                 return attribute
+            if class_attribute != _UNKNOWN_VALUE:
+                return class_attribute
             property_getters = tuple(
                 function
                 for function in self._source_index.methods(owner.instance_classes, node.attr)
@@ -2832,6 +2887,21 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_Await(self, node: ast.Await) -> None:
         """Awaiting ``anext`` consumes one turn of an async generator."""
         self._consume_deferred_coroutine(node.value)
+        owner = self._expression_value(node.value)
+        receiver = self._descriptor_receiver(owner)
+        for function in self._source_index.methods(owner.instance_classes, "__await__"):
+            if _is_generator_function(function):
+                self._visit_function_body(
+                    function,
+                    self._bound_direct_arguments(function, (receiver,)),
+                    consume_generator=True,
+                    generator_consumer_mode="full",
+                    generator_identity=id(node) ^ id(function),
+                )
+                continue
+            returned = self._local_direct_call_value(function, (receiver,))
+            self._consume_deferred_generator_value(returned)
+            self._consume_deferred_callable_iterator_value(returned)
         if isinstance(node.value, ast.Call):
             accessor = self._expression_value(node.value.func)
             if accessor.origins & _ASYNC_BUILTIN_CONSUMER_ORIGINS:
@@ -2864,11 +2934,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         for operator, comparator in zip(node.ops, node.comparators, strict=True):
             if isinstance(operator, (ast.In, ast.NotIn)):
                 self._consume_deferred_callable_iterator(comparator, mode="one_turn")
-                self._invoke_implicit_protocol(
-                    self._expression_value(comparator),
-                    "__contains__",
-                    (self._expression_value(node.left),),
-                )
+                owner = self._expression_value(comparator)
+                if self._source_index.methods(owner.instance_classes, "__contains__"):
+                    self._invoke_implicit_protocol(
+                        owner,
+                        "__contains__",
+                        (self._expression_value(node.left),),
+                    )
+                else:
+                    self._consume_local_iterator(comparator, mode="one_turn")
         self.generic_visit(node)
 
     def visit_BinOp(self, node: ast.BinOp) -> None:
@@ -2891,8 +2965,21 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         direct, reflected = protocols[type(node.op)]
         left = self._expression_value(node.left)
         right = self._expression_value(node.right)
-        self._invoke_implicit_protocol(left, direct, (right,))
-        self._invoke_implicit_protocol(right, reflected, (left,))
+        direct_methods = self._source_index.methods(left.instance_classes, direct)
+        reflected_methods = self._source_index.methods(right.instance_classes, reflected)
+        reflected_precedes = any(
+            self._source_index.is_strict_subclass(right_class, left_class)
+            for right_class in right.instance_classes
+            for left_class in left.instance_classes
+        )
+        if reflected_precedes and reflected_methods:
+            result = self._invoke_implicit_protocol(right, reflected, (left,))
+            if _NOT_IMPLEMENTED in result.origins and direct_methods:
+                self._invoke_implicit_protocol(left, direct, (right,))
+        else:
+            result = self._invoke_implicit_protocol(left, direct, (right,))
+            if (not direct_methods or _NOT_IMPLEMENTED in result.origins) and reflected_methods:
+                self._invoke_implicit_protocol(right, reflected, (left,))
         self.generic_visit(node)
 
     def visit_FormattedValue(self, node: ast.FormattedValue) -> None:
@@ -4954,6 +5041,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self._class_member_values[id(node)] = tuple(
                 value for name, value in self._states[-1].items() if not name.startswith("_")
             )
+            self._class_attributes[id(node)] = class_attributes
         finally:
             self._nonlocal_names.pop()
             self._global_names.pop()

@@ -3197,6 +3197,190 @@ unused = Reader(config.consensus)
     }
 
 
+def test_runtime_scan_executes_descriptors_only_when_attribute_resolution_selects_them(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "descriptor_protocol.py").write_text(
+        """
+class Descriptor:
+    def __init__(self, section):
+        self.section = section
+
+    def __get__(self, instance, owner):
+        return self.section.stage1_enabled
+
+class Active:
+    value = Descriptor(config.evaluation)
+
+class Unused:
+    value = Descriptor(config.consensus)
+
+class Shadowed:
+    value = Descriptor(config.consensus)
+
+Active().value
+Unused()
+shadowed = Shadowed()
+shadowed.value = object()
+shadowed.value
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        {
+            contract.ConfigField("evaluation", "stage1_enabled"),
+            contract.ConfigField("consensus", "models"),
+        }
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {contract.ConfigField("evaluation", "stage1_enabled")}
+    )
+
+
+def test_runtime_scan_models_membership_fallback_order_without_overreach(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "membership_fallback.py").write_text(
+        """
+class IterReader:
+    def __init__(self, section):
+        self.section = section
+
+    def __iter__(self):
+        if self.section.stage1_enabled:
+            yield 1
+
+class ItemReader:
+    def __init__(self, section):
+        self.section = section
+
+    def __getitem__(self, index):
+        if self.section.stage2_enabled:
+            return index
+        raise IndexError
+
+class ContainsReader:
+    def __init__(self, section):
+        self.section = section
+
+    def __contains__(self, item):
+        return self.section.stage3_enabled
+
+    def __iter__(self):
+        return iter((self.section.stage4_enabled,))
+
+1 in IterReader(config.evaluation)
+1 in ItemReader(config.evaluation)
+1 in ContainsReader(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in (
+            "stage1_enabled",
+            "stage2_enabled",
+            "stage3_enabled",
+            "stage4_enabled",
+        )
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields - {
+        contract.ConfigField("evaluation", "stage4_enabled")
+    }
+
+
+def test_runtime_scan_executes_custom_awaitables_only_when_awaited(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "custom_awaitable.py").write_text(
+        """
+import asyncio
+
+class Awaitable:
+    def __init__(self, section):
+        self.section = section
+
+    def __await__(self):
+        if self.section.stage1_enabled:
+            yield
+        return None
+
+async def consume():
+    await Awaitable(config.evaluation)
+    pending = Awaitable(config.consensus)
+    pending = object()
+
+Awaitable(config.consensus)
+asyncio.run(consume())
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        {
+            contract.ConfigField("evaluation", "stage1_enabled"),
+            contract.ConfigField("consensus", "models"),
+        }
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {contract.ConfigField("evaluation", "stage1_enabled")}
+    )
+
+
+def test_runtime_scan_dispatches_reflected_operators_only_when_python_would(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "reflected_operator.py").write_text(
+        """
+class Left:
+    def __add__(self, other):
+        return 1
+
+class Fallback:
+    def __add__(self, other):
+        return NotImplemented
+
+class Right:
+    def __init__(self, section):
+        self.section = section
+
+    def __radd__(self, other):
+        return self.section.stage1_enabled
+
+class Base:
+    def __init__(self, section):
+        self.section = section
+
+    def __add__(self, other):
+        return self.section.stage2_enabled
+
+class Child(Base):
+    def __radd__(self, other):
+        return self.section.stage3_enabled
+
+Left() + Right(config.consensus)
+Fallback() + Right(config.evaluation)
+Base(config.evaluation) + Child(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        {
+            *(contract.ConfigField("evaluation", f"stage{index}_enabled") for index in range(1, 4)),
+            contract.ConfigField("consensus", "models"),
+        }
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {
+            contract.ConfigField("evaluation", "stage1_enabled"),
+            contract.ConfigField("evaluation", "stage3_enabled"),
+        }
+    )
+
+
 def test_runtime_scan_executes_numeric_and_getattribute_protocols(contract, tmp_path: Path) -> None:
     (tmp_path / "implicit_numeric_protocols.py").write_text(
         """
