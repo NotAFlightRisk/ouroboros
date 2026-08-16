@@ -266,6 +266,7 @@ _CONTEXTLIB_MODULE = "<contextlib-module>"
 _CONTEXTMANAGER_DECORATORS = frozenset(
     {"<contextmanager-decorator>", "<asynccontextmanager-decorator>"}
 )
+_IDENTITY_DECORATOR = "<identity-decorator>"
 _NULLCONTEXT_FACTORY = "<nullcontext-factory>"
 _NULLCONTEXT_VALUE = "<nullcontext-value>"
 _CLOSING_FACTORY = "<closing-factory>"
@@ -1429,7 +1430,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         entries = dict(owner.entries or ())
         if owner.serialized_sections:
             field_name = key.value if isinstance(key, ast.Constant) else None
-            if isinstance(field_name, str):
+            if isinstance(field_name, str) and (
+                owner.entries is None or token in entries or _DYNAMIC_KEY in entries
+            ):
                 for section in owner.serialized_sections:
                     self._record(section, field_name)
         selected = entries.get(token)
@@ -1632,6 +1635,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_PARTIALMETHOD_FACTORY)
             if _FUNCTOOLS_MODULE in owner.origins and node.attr == "reduce":
                 return _origin_value(_REDUCE_CONSUMER)
+            if _FUNCTOOLS_MODULE in owner.origins and node.attr in {"cache", "lru_cache"}:
+                return _origin_value(_IDENTITY_DECORATOR)
             if _ITERTOOLS_MODULE in owner.origins and node.attr == "starmap":
                 return _origin_value(_STARMAP_FACTORY)
             if _ITERTOOLS_MODULE in owner.origins and node.attr in _ITERTOOLS_CALLBACK_FACTORIES:
@@ -1734,6 +1739,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 self._expression_cache[id(node)] = dict_method_value
                 return dict_method_value
             function_value = self._expression_value(node.func)
+            if _IDENTITY_DECORATOR in function_value.origins:
+                return _origin_value(_IDENTITY_DECORATOR)
             if function_value.origins & _LAZY_BUILTIN_CONSUMER_ORIGINS:
                 iterable_arguments = (
                     node.args[1:] if _callable_name(node.func) in {"filter", "map"} else node.args
@@ -1863,6 +1870,34 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         return _AbstractValue(items=(_UNKNOWN_VALUE,) if nonempty else ())
                 return _UNKNOWN_VALUE
             if function_value.serialized_sections:
+                if isinstance(node.func, ast.Attribute) and node.func.attr == "model_dump":
+                    include = next((kw.value for kw in node.keywords if kw.arg == "include"), None)
+                    exclude = next((kw.value for kw in node.keywords if kw.arg == "exclude"), None)
+                    if include is not None or exclude is not None:
+                        selected = _safe_constant_value(include) if include is not None else None
+                        omitted = _safe_constant_value(exclude) if exclude is not None else None
+                        if include is not None and not isinstance(selected, (set, list, tuple)):
+                            return _UNKNOWN_VALUE
+                        if exclude is not None and not isinstance(omitted, (set, list, tuple)):
+                            return _UNKNOWN_VALUE
+                        keys = (
+                            set(selected or ())
+                            if selected is not None
+                            else {
+                                field.name
+                                for field in self._fields
+                                if field.section in function_value.serialized_sections
+                            }
+                        )
+                        keys -= set(omitted or ()) if omitted is not None else set()
+                        return _AbstractValue(
+                            entries=tuple(
+                                (_key_token(ast.Constant(key)), _UNKNOWN_VALUE)
+                                for key in sorted(keys)
+                                if isinstance(key, str)
+                            ),
+                            serialized_sections=function_value.serialized_sections,
+                        )
                 return _AbstractValue(serialized_sections=function_value.serialized_sections)
             if _VARS_BUILTIN in function_value.origins and node.args:
                 argument_origins = self._expression_value(node.args[0]).origins
@@ -2183,6 +2218,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     else _UNKNOWN_VALUE
                 )
                 for item in iterable.items or ():
+                    for function, receiver in self._call_targets(key_keyword.value):
+                        values = ((receiver,) if receiver is not None else ()) + (item,)
+                        self._local_direct_call_value(function, values)
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "sort":
+            key_keyword = next((keyword for keyword in node.keywords if keyword.arg == "key"), None)
+            owner = self._expression_value(node.func.value)
+            if key_keyword is not None:
+                for item in owner.items or ():
                     for function, receiver in self._call_targets(key_keyword.value):
                         values = ((receiver,) if receiver is not None else ()) + (item,)
                         self._local_direct_call_value(function, values)
@@ -3498,6 +3541,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "functools" and alias.name == "partialmethod"
                     else _origin_value(_REDUCE_CONSUMER)
                     if node.module == "functools" and alias.name == "reduce"
+                    else _origin_value(_IDENTITY_DECORATOR)
+                    if node.module == "functools" and alias.name in {"cache", "lru_cache"}
                     else _origin_value(_STARMAP_FACTORY)
                     if node.module == "itertools" and alias.name == "starmap"
                     else _origin_value(f"<itertools-callback-factory:{alias.name}>")
@@ -4121,7 +4166,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         original = _AbstractValue(callables=(_CallableTarget(node),))
         value = original
         for decorator in reversed(node.decorator_list):
-            if self._expression_value(decorator).origins & _CONTEXTMANAGER_DECORATORS:
+            decorator_value = self._expression_value(decorator)
+            if decorator_value.origins & (_CONTEXTMANAGER_DECORATORS | {_IDENTITY_DECORATOR}):
                 continue
             targets = self._call_targets(decorator)
             if not targets:

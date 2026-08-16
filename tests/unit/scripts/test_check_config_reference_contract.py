@@ -2717,6 +2717,57 @@ def test_runtime_scan_tracks_model_copy_identity(contract, tmp_path: Path) -> No
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
+def test_runtime_scan_respects_model_dump_include_and_exclude(contract, tmp_path: Path) -> None:
+    (tmp_path / "model_dump_filters.py").write_text(
+        """
+config.evaluation.model_dump(include={"semantic_model"}).get("stage1_enabled")
+config.evaluation.model_dump(exclude={"stage1_enabled"}).get("stage2_enabled")
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {contract.ConfigField("evaluation", "stage2_enabled")}
+    )
+
+
+def test_runtime_scan_tracks_identity_decorated_callable(contract, tmp_path: Path) -> None:
+    (tmp_path / "decorated_reader.py").write_text(
+        """
+import functools
+
+@functools.cache
+def read(config):
+    return config.evaluation.stage1_enabled
+
+read(settings)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_tracks_list_sort_callback(contract, tmp_path: Path) -> None:
+    (tmp_path / "sort_callback.py").write_text(
+        """
+def read(section):
+    return section.stage1_enabled
+
+sections = [settings.evaluation]
+sections.sort(key=read)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
 def test_runtime_scan_tracks_operator_attrgetter_reads(contract, tmp_path: Path) -> None:
     (tmp_path / "attrgetter_read.py").write_text(
         """
