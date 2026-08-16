@@ -332,7 +332,9 @@ with entered(settings):
     fields = frozenset(
         contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
     )
-    assert contract.runtime_reads(tmp_path, fields) == fields
+    assert contract.runtime_reads(tmp_path, fields) == fields - {
+        contract.ConfigField("evaluation", "semantic_model")
+    }
 
 
 def test_runtime_scan_executes_eager_key_callback_only_for_nonempty_input(
@@ -3691,6 +3693,33 @@ methodcaller("__getattribute__", "semantic_model")(settings.evaluation)
     }
 
 
+def test_runtime_scan_tracks_constant_keys_for_serialized_mapping_accessors(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "constant_mapping_keys.py").write_text(
+        """
+SUBSCRIPT_FIELD = "stage1_enabled"
+GET_FIELD = "stage2_enabled"
+
+settings.evaluation.model_dump()[SUBSCRIPT_FIELD]
+settings.evaluation.model_dump().get(GET_FIELD)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    reads = contract.runtime_reads(tmp_path, fields)
+    assert reads == fields
+    for field in fields:
+        report = _audit_as_documented_inert(contract, field, reads)
+        assert (
+            f"{field.section}.{field.name}: production-wired field is still documented inert"
+            in (report.violations)
+        )
+
+
 def test_runtime_scan_tracks_class_pattern_keyword_attributes(contract, tmp_path: Path) -> None:
     (tmp_path / "class_patterns.py").write_text(
         """
@@ -3742,9 +3771,7 @@ imported_getitem(settings.evaluation.model_dump(), "semantic_model")
         for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled", "semantic_model")
     )
 
-    assert contract.runtime_reads(tmp_path, fields) == fields - {
-        contract.ConfigField("evaluation", "semantic_model")
-    }
+    assert contract.runtime_reads(tmp_path, fields) == fields
 
 
 def test_runtime_scan_resolves_constant_indirected_getattr_and_ignores_shadowed_builtin(

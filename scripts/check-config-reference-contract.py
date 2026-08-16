@@ -1558,19 +1558,17 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         if not node.args:
             return default
         key = node.args[0]
-        if not isinstance(key, ast.Constant):
+        key_value = self._expression_value(key).string_value
+        if key_value is None:
             if method == "setdefault":
                 return self._dynamic_setdefault_value(node)
             return _join_values(*values, default)
-        token = _key_token(key)
+        token = _key_token(ast.Constant(key_value))
         entries = dict(owner.entries or ())
         if owner.serialized_sections:
-            field_name = key.value if isinstance(key, ast.Constant) else None
-            if isinstance(field_name, str) and (
-                owner.entries is None or token in entries or _DYNAMIC_KEY in entries
-            ):
+            if owner.entries is None or token in entries or _DYNAMIC_KEY in entries:
                 for section in owner.serialized_sections:
-                    self._record(section, field_name)
+                    self._record(section, key_value)
         selected = entries.get(token)
         wildcard = entries.get(_DYNAMIC_KEY)
         if method == "get":
@@ -2674,11 +2672,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 for section in self._expression_value(node.args[0]).origins & TRACKED_SECTIONS:
                     self._record(section, field_name)
         if _OPERATOR_GETITEM in accessor.origins and len(node.args) >= 2:
-            field_name = (
-                node.args[1].value
-                if isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str)
-                else None
-            )
+            field_name = self._expression_value(node.args[1]).string_value
             if field_name is not None:
                 for section in self._expression_value(node.args[0]).serialized_sections:
                     self._record(section, field_name)
@@ -2740,14 +2734,12 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
         before = self._binding_snapshot()
-        if (
-            isinstance(node.ctx, ast.Load)
-            and isinstance(node.slice, ast.Constant)
-            and isinstance(node.slice.value, str)
-        ):
+        if isinstance(node.ctx, ast.Load):
             owner = self._expression_value(node.value)
-            for section in owner.serialized_sections | (owner.origins & TRACKED_SECTIONS):
-                self._record(section, node.slice.value)
+            field_name = self._expression_value(node.slice).string_value
+            if field_name is not None:
+                for section in owner.serialized_sections | (owner.origins & TRACKED_SECTIONS):
+                    self._record(section, field_name)
         self.generic_visit(node)
         if isinstance(node.ctx, ast.Load):
             self._record_possible_exception(before)
