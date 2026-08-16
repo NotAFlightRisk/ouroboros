@@ -173,6 +173,9 @@ class TestPartialSeedFromEvidence:
             "The requirement to use task_type: document was declined.",
             "We rejected task_type: document.",
             "We abandoned task_type: document.",
+            "task_type: document, which was rejected.",
+            "We ruled out task_type: document.",
+            "We opted not to use task_type: document.",
         ):
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
             partial = partial_seed_from_evidence(

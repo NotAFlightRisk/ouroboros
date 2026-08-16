@@ -406,6 +406,9 @@ class TestSeedGeneratorAmbiguityGating:
             "The requirement to use task_type: document was declined.",
             "We rejected task_type: document.",
             "We abandoned task_type: document.",
+            "task_type: document, which was rejected.",
+            "We ruled out task_type: document.",
+            "We opted not to use task_type: document.",
         ),
     )
     @pytest.mark.asyncio

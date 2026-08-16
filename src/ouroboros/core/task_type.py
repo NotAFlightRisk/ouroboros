@@ -64,6 +64,8 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"|\bnot\s+allowed\b"
     r"|\b(?:declin(?:e|ed)|refus(?:e|ed))\s+to\b"
     r"|\b(?:rejected|abandoned|declined)\b"
+    r"|\bruled\s+out\b"
+    r"|\bopted\s+not\s+to\b"
     r"|\bchose\s+not\s+to\b"
     r"|\bthere\s+(?:is|was)\s+no\s+(?:requirement|contract|need)\b"
     r"|\b(?:explain(?:ed|ing)?|docs?\s+(?:say|says|said)|legacy\s+exports?)\b"
@@ -90,6 +92,7 @@ _NEGATIVE_GOVERNOR_PATTERN = re.compile(
 _POST_MATCH_REJECTION_PATTERN = re.compile(
     r"^(?:(?:the|that)\s+)?(?:requirement|contract|proposal)?\s*"
     r"(?:(?:was|is|has\s+been)?\s*(?:rejected|superseded|obsolete|discarded)"
+    r"|(?:which\s+)?(?:was|is|has\s+been)\s+(?:rejected|declined|abandoned)"
     r"|(?:will|would)\s+not\s+(?:be\s+)?(?:used|required|adopted|applied)"
     r"|(?:am|is|are|was|were)\s+no\s+longer\s+(?:used|required|adopted|applied))\b",
     re.IGNORECASE,
