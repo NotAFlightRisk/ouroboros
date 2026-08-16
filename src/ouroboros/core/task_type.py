@@ -49,7 +49,7 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
 )
 
 _NON_BINDING_CONTRACT_PATTERN = re.compile(
-    r"\b(?:ignore|discard|superseded|obsolete|literal|discussed|phrase|"
+    r"\b(?:ignore|discard|disregard|superseded|obsolete|literal|discussed|phrase|"
     r"mention(?:s|ed|ing)?|compare(?:d|s|ing)?)\b"
     r"|\b(?:do(?:es)?|did|have|has|had)\s+not\b"
     r"|\b(?:don't|doesn't|doesn’t|didn't|didn’t|never|avoid(?:ed|ing)?|cannot|can't|can\s+not|without)\b"
@@ -111,6 +111,9 @@ _POST_MATCH_REJECTION_PATTERN = re.compile(
     r"|(?:value|requirement|contract|proposal)\s+(?:should|must|may)\s+not\s+(?:be\s+)?(?:used|required|adopted|applied|avoided)"
     r"|(?:value|requirement|contract|proposal)\s+(?:is|was)\s+not\s+allowed"
     r"|(?:is|was)\s+an?\s+example"
+    r"|(?:is|was)\s+only\s+an?\s+example"
+    r"|(?:am|is|are|was|were)\s+(?:only\s+)?giving\s+an?\s+example"
+    r"|(?:please\s+)?disregard\s+(?:that|it|the\s+(?:requirement|contract|proposal|value))"
     r"|as\s+an?\s+example"
     r"|(?:하지\s*마세요|하면\s*안\s*(?:됩니다|돼요)))\b",
     re.IGNORECASE,
@@ -119,6 +122,10 @@ _STANDALONE_RETRACTION_PATTERN = re.compile(
     r"(?:^|[.!?\n])\s*(?:(?:actually|but|however)\s*,?\s*)?"
     r"(?:scratch\s+that|we\s+decided\s+against\s+it|"
     r"never\s+mind|forget\s+that|i\s+take\s+that\s+back|"
+    r"(?:that|it|the\s+(?:requirement|contract|proposal|value))\s+"
+    r"(?:was|is)\s+(?:only\s+)?an?\s+example|"
+    r"(?:i|we)\s+(?:am|are|was|were)\s+(?:only\s+)?giving\s+an?\s+example|"
+    r"(?:please\s+)?disregard\s+(?:that|it|the\s+(?:requirement|contract|proposal|value))|"
     r"cancel\s+(?:that\s+)?(?:requirement|contract|proposal|value)?|"
     r"(?:that|the)\s+(?:requirement|contract|proposal|value)\s+"
     r"(?:was|is)\s+(?:rejected|superseded|obsolete|discarded)|"

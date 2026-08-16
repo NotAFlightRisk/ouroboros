@@ -373,6 +373,12 @@ def test_seed_qa_repair_preserves_clause_local_document_contract() -> None:
         "task_type: document. I take that back. Inherit seed_bad. I take that back.",
         "task_type: document. However, cancel that requirement. Inherit seed_bad. "
         "But cancel that requirement.",
+        "task_type: document. That was only an example. Inherit seed_bad. "
+        "That was only an example.",
+        "task_type: document. I was only giving an example. Inherit seed_bad. "
+        "I was only giving an example.",
+        "task_type: document. Please disregard that requirement. Inherit seed_bad. "
+        "Please disregard that requirement.",
     ),
 )
 def test_seed_qa_repair_never_persists_retracted_task_type_or_parent(
@@ -388,10 +394,19 @@ def test_seed_qa_repair_never_persists_retracted_task_type_or_parent(
         differences=("metadata.ambiguity_score must be <= 0.20.",),
     )
 
-    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Preserve only active contracts.",
+        text="Do not restore retracted contracts.",
+    )
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
 
-    assert repaired.task_type == "code"
-    assert repaired.metadata.parent_seed_id == "seed_current"
+    for candidate in repaired:
+        assert candidate.task_type == "code"
+        assert candidate.metadata.parent_seed_id == "seed_current"
 
 
 def test_seed_qa_repairs_scope_mixed_contract_retractions() -> None:
