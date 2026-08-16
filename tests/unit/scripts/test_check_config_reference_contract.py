@@ -3488,6 +3488,66 @@ _READERS = {"stage": read_stage}
     assert _audit_as_documented_inert(contract, field, reads).violations == ()
 
 
+def test_runtime_scan_resolves_module_qualified_data_values(contract, tmp_path: Path) -> None:
+    (tmp_path / "names.py").write_text('FIELD = "stage1_enabled"\n', encoding="utf-8")
+    (tmp_path / "callbacks.py").write_text(
+        """
+def read_stage(section):
+    return section.stage2_enabled
+
+READERS = {"stage": read_stage}
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "qualified_values.py").write_text(
+        """
+import names
+import callbacks as cb
+
+getattr(settings.evaluation, names.FIELD)
+cb.READERS["stage"](settings.evaluation)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    reads = contract.runtime_reads(tmp_path, fields)
+    assert reads == fields
+    for field in fields:
+        report = _audit_as_documented_inert(contract, field, reads)
+        assert f"{field.section}.{field.name}: conflicting config-field dispositions" in (
+            report.violations
+        )
+        assert (
+            f"{field.section}.{field.name}: production-wired field is still documented inert"
+            in (report.violations)
+        )
+
+
+def test_runtime_scan_keeps_module_qualified_data_lazy_when_unused(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "callbacks.py").write_text(
+        """
+def read_stage(section):
+    return section.stage3_enabled
+
+READERS = {"stage": read_stage}
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "unused_qualified_values.py").write_text(
+        "import callbacks\npending = callbacks.READERS\n", encoding="utf-8"
+    )
+    field = contract.ConfigField("evaluation", "stage3_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert reads == frozenset()
+    assert _audit_as_documented_inert(contract, field, reads).violations == ()
+
+
 def test_runtime_scan_tracks_unshadowed_classmethod_and_rejects_shadowing(
     contract, tmp_path: Path
 ) -> None:

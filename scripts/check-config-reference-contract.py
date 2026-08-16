@@ -1841,6 +1841,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 and node.attr == "section"
             ):
                 return _origin_value("evaluation")
+            imported_data = tuple(
+                value
+                for module_name in owner.modules
+                if (module := self._source_index.resolve_module(module_name, self._module))
+                is not None
+                if (value := self._imported_data_value(module, node.attr)) is not None
+            )
+            if imported_data:
+                return _join_values(*imported_data)
             resolved_modules = {
                 child.name
                 for module_name in owner.modules
