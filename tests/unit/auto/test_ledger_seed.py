@@ -470,6 +470,7 @@ class TestPartialSeedFromEvidence:
             "Use document as the task type.",
             "Use task_type: document for the final proposal.",
             "task_type: document. For reference, task_type: code is an example.",
+            "Implement the requested document with task_type: document.",
         )
         for goal in positive_goals:
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
@@ -500,6 +501,13 @@ class TestPartialSeedFromEvidence:
             "task_type: document isn't required for this Seed.",
             "task_type: document is unnecessary for this Seed.",
             "task_type: document need not be used.",
+            "Use task_type: document pending approval.",
+            "Use task_type: document after approval.",
+            "Use task_type: document once approved.",
+            "Use task_type: document upon approval.",
+            "Use task_type: document assuming approval.",
+            "Use task_type: document contingent on approval.",
+            "Use task_type: document subject to approval.",
             "The task type is document only if requested.",
             "The task type is document only when explicitly requested.",
             "task_type: document is no longer required.",

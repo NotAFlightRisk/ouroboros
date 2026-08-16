@@ -116,7 +116,10 @@ def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> Non
 def test_seed_qa_feedback_repairs_explicit_document_task_type() -> None:
     seed = _build_seed(seed_id="seed_wrong_task_type").model_copy(
         update={
-            "goal": ("Inherit from seed_6619d294d5c7. Set the task type to document."),
+            "goal": (
+                "Inherit from seed_6619d294d5c7. "
+                "Implement the requested document with task_type: document."
+            ),
             "task_type": "code",
         }
     )
@@ -615,6 +618,9 @@ def test_seed_qa_repairs_fail_closed_on_validation_content_and_field_retractions
         "Deprecate task_type: document.",
         "Rename parent_seed_id: seed_old to predecessor_id.",
         "Remove parent_seed_id: seed_old from the API.",
+        "Implement support for inheriting from seed_demo.",
+        "Add support for inheriting from seed_demo.",
+        "Test inheriting from seed_demo.",
     ),
 )
 def test_seed_qa_repairs_ignore_artifact_payload_contract_fields(goal: str) -> None:
@@ -797,6 +803,13 @@ def test_seed_qa_repairs_scope_modal_clause_and_semicolon_retraction() -> None:
         "Inherit seed_bad need not be used.",
         "Inherit seed_bad only if requested.",
         "Use seed_bad as the parent seed only when resuming an interrupted run.",
+        "Inherit seed_bad pending approval.",
+        "Inherit seed_bad after approval.",
+        "Inherit seed_bad once approved.",
+        "Inherit seed_bad upon approval.",
+        "Inherit seed_bad assuming approval.",
+        "Inherit seed_bad contingent on approval.",
+        "Inherit seed_bad subject to approval.",
         "Inherit seed_bad is no longer required.",
         "We won't inherit seed_bad.",
         "There is no requirement to inherit seed_bad.",
@@ -821,11 +834,20 @@ def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
         verdict="revise",
         differences=("metadata.ambiguity_score must be <= 0.20.",),
     )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Preserve only authoritative lineage.",
+        text="Keep unresolved lineage conditions out of durable metadata.",
+    )
 
-    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
 
-    assert repaired.metadata.parent_seed_id == "seed_current"
-    assert repaired.metadata.parent_seed_id != "seed_bad"
+    for candidate in repaired:
+        assert candidate.metadata.parent_seed_id == "seed_current"
+        assert candidate.metadata.parent_seed_id != "seed_bad"
 
 
 @pytest.mark.parametrize(
@@ -845,6 +867,13 @@ def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
         "task_type: document need not be used.",
         "The task type is document only if requested.",
         "The task type is document only when explicitly requested.",
+        "Use task_type: document pending approval.",
+        "Use task_type: document after approval.",
+        "Use task_type: document once approved.",
+        "Use task_type: document upon approval.",
+        "Use task_type: document assuming approval.",
+        "Use task_type: document contingent on approval.",
+        "Use task_type: document subject to approval.",
         "task_type: document is no longer required.",
         "We won't use task_type: document.",
         "We did not select task_type: document.",
@@ -871,10 +900,19 @@ def test_seed_qa_repair_does_not_apply_rejected_task_type(goal: str) -> None:
         verdict="revise",
         differences=("metadata.ambiguity_score must be <= 0.20.",),
     )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Preserve only authoritative task routing.",
+        text="Keep unresolved routing conditions out of the repaired Seed.",
+    )
 
-    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
 
-    assert repaired.task_type == "code"
+    for candidate in repaired:
+        assert candidate.task_type == "code"
 
 
 def test_seed_qa_repair_persists_positive_parent_after_negated_candidate() -> None:

@@ -187,7 +187,8 @@ _PARENT_CONTRACT_PATTERN = re.compile(
 )
 _CONTRACT_TAIL_AMBIGUITY_PATTERN = re.compile(
     r"^\s*(?:,\s*)?(?:(?:only\s+)?(?:if|when|whenever|unless|whether)\b"
-    r"|depending\b|otherwise\b|provided(?:\s+that)?\b|as\s+long\s+as\b)"
+    r"|depending\b|otherwise\b|provided(?:\s+that)?\b|as\s+long\s+as\b"
+    r"|pending\b|after\b|once\b|upon\b|assuming\b|contingent\s+on\b|subject\s+to\b)"
     rf"|^\s*(?:,\s*)?or\s+(?:{_TASK_TYPE_PATTERN}|{_SEED_ID_PATTERN})"
     rf"(?!{_SEED_ID_CONTINUATION_PATTERN})",
     re.IGNORECASE,
@@ -260,7 +261,9 @@ _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN = re.compile(
 )
 _EXPLICIT_TASK_TYPE_BINDING_PATTERN = re.compile(
     r"\b(?:implement|build|create|deliver|produce)\b\s+"
-    r"(?:this|it|the\s+(?:seed|task|result|output))\s+as\s+"
+    r"(?:this|it|the\s+(?:seed|task|result|output|requested\s+"
+    r"(?:seed|task|result|output|document|artifact|presentation|research|analysis)))\s+"
+    r"(?:as|with)\s+"
     r"(?:task[_\s-]*type|task\s+type)\s*(?:is|=|:|to)?\s*"
     rf"{_TASK_TYPE_PATTERN}\b",
     re.IGNORECASE,

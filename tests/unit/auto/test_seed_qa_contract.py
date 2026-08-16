@@ -245,6 +245,9 @@ def test_parent_seed_ignores_validation_content_and_field_specific_retraction() 
         "Explain how the schema stores parent_seed_id: seed_old.",
         "Rename parent_seed_id: seed_old to predecessor_id.",
         "Remove parent_seed_id: seed_old from the API.",
+        "Implement support for inheriting from seed_demo.",
+        "Add support for inheriting from seed_demo.",
+        "Test inheriting from seed_demo.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
     assert (
@@ -326,6 +329,13 @@ def test_parent_seed_rejects_typographic_quoted_conditional_and_ambiguous_langua
         'The old docs say "Inherit seed_bad for migrations." Replace that guidance.',
         "If we inherit seed_bad, copy settings; otherwise start fresh.",
         "Inherit seed_one or seed_two after review.",
+        "Inherit seed_bad pending approval.",
+        "Inherit seed_bad after approval.",
+        "Inherit seed_bad once approved.",
+        "Inherit seed_bad upon approval.",
+        "Inherit seed_bad assuming approval.",
+        "Inherit seed_bad contingent on approval.",
+        "Inherit seed_bad subject to approval.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
 

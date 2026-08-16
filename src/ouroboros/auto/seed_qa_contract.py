@@ -135,6 +135,15 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
                 re.match(r"\s*(?:the\s+)?parent(?:_seed_id|\s+seed)\b", match.group(), re.I)
                 is not None
             )
+            current_seed_binding = (
+                re.search(
+                    r"\b(?:this|the\s+current)\s+seed\s+"
+                    r"(?:must|should|will|is\s+to)\s*$",
+                    contract_prefix,
+                    re.IGNORECASE,
+                )
+                is not None
+            )
             prior_data_plane_governor = (
                 bare_parent_field
                 and re.search(
@@ -147,8 +156,10 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
             if (
                 is_non_binding_contract_segment(contract_prefix)
                 or is_non_binding_contract_segment(seed.goal[segment_start : match.end()])
-                or bare_parent_field
-                and not has_affirmative_contract_prefix(contract_prefix)
+                or not has_affirmative_contract_prefix(
+                    contract_prefix, allow_task_linker=not bare_parent_field
+                )
+                and not current_seed_binding
                 or prior_data_plane_governor
                 or _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(seed.goal[segment_start : match.end()])
                 is not None
