@@ -272,6 +272,8 @@ _HEAPQ_KEY_CONSUMER_ORIGINS = frozenset(
 )
 _ATEXIT_MODULE = "<atexit-module>"
 _ATEXIT_REGISTER = "<atexit-register>"
+_SYS_MODULE = "<sys-module>"
+_SYS_EXIT = "<sys-exit>"
 _ASYNCIO_MODULE = "<asyncio-module>"
 _ASYNCIO_CONSUMERS = frozenset({"create_task", "ensure_future", "gather", "run"})
 _ASYNCIO_CONSUMER_ORIGINS = frozenset(f"<asyncio-consumer:{name}>" for name in _ASYNCIO_CONSUMERS)
@@ -1914,6 +1916,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_RANGE_BUILTIN)
             if _ATEXIT_MODULE in owner.origins and node.attr == "register":
                 return _origin_value(_ATEXIT_REGISTER)
+            if _SYS_MODULE in owner.origins and node.attr == "exit":
+                return _origin_value(_SYS_EXIT)
             if _BUILTINS_MODULE in owner.origins and node.attr in _TRACKED_BUILTIN_CONSUMERS:
                 return _origin_value(f"<builtin-consumer:{node.attr}>")
             if _FUNCTOOLS_MODULE in owner.origins and node.attr == "partial":
@@ -2897,6 +2901,17 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 for section in accessor_arguments[0].serialized_sections:
                     self._record(section, field_name)
         self.generic_visit(node)
+        if _SYS_EXIT in accessor.origins:
+            self._append_abrupt(
+                self._flow_abrupts[-1],
+                _AbruptPath(
+                    "raise",
+                    self._binding_snapshot(),
+                    exception_type="SystemExit",
+                ),
+            )
+            self._path_reachable = False
+            return
         executions = self._call_executions.pop(id(node), [])
         if executions and all(not execution.returns_to_caller for execution in executions):
             for execution in executions:
@@ -3304,6 +3319,41 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         elif isinstance(target, ast.Starred):
             self._visit_store_target(target.value)
 
+    def _invoke_subscription_store(self, target: ast.expr, value: _AbstractValue) -> None:
+        """Execute local ``__setitem__`` implementations selected by assignment."""
+        if isinstance(target, ast.Subscript):
+            self._invoke_implicit_protocol(
+                self._expression_value(target.value),
+                "__setitem__",
+                (self._expression_value(target.slice), value),
+            )
+            return
+        if isinstance(target, ast.Starred):
+            self._invoke_subscription_store(target.value, value)
+            return
+        if not isinstance(target, (ast.Tuple, ast.List)):
+            return
+        child_values = (
+            value.items
+            if value.items is not None and len(value.items) == len(target.elts)
+            else tuple(_conservative_value(value) for _ in target.elts)
+        )
+        for child, child_value in zip(target.elts, child_values, strict=True):
+            self._invoke_subscription_store(child, child_value)
+
+    def _invoke_subscription_delete(self, target: ast.expr) -> None:
+        """Execute local ``__delitem__`` implementations selected by deletion."""
+        if isinstance(target, ast.Subscript):
+            self._invoke_implicit_protocol(
+                self._expression_value(target.value),
+                "__delitem__",
+                (self._expression_value(target.slice),),
+            )
+            return
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for child in target.elts:
+                self._invoke_subscription_delete(child)
+
     def _assign_store_target(self, target: ast.expr, value: _AbstractValue) -> None:
         if isinstance(target, ast.Attribute):
             owner = self._expression_value(target.value)
@@ -3317,6 +3367,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         if not isinstance(target, ast.Subscript):
             return
         owner = self._expression_value(target.value)
+        if self._source_index.methods(owner.instance_classes, "__setitem__"):
+            # The local implementation above owns mutation semantics. Constructor
+            # arguments stored in ``items`` are call provenance, not sequence slots.
+            return
         if owner.entries is None and not owner.identity:
             return
         if owner.items is not None:
@@ -3349,6 +3403,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         function = self._function_value(node.value)
         for target in node.targets:
             self._visit_store_target(target)
+            self._invoke_subscription_store(target, value)
             self._assign_store_target(target, value)
             self._bind_destructured(target, value)
             self._bind_annotation_target(target, annotation_value)
@@ -3362,6 +3417,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self.visit(node.value)
             self._visit_store_target(node.target)
             value = self._expression_value(node.value)
+            self._invoke_subscription_store(node.target, value)
             self._assign_store_target(node.target, value)
             self._bind_destructured(node.target, value)
             self._bind_annotation_target(node.target, self._annotation_value(node.value))
@@ -3380,7 +3436,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 self._annotations[index].pop(target.id, None)
                 self._functions[index].pop(target.id, None)
             else:
-                self.visit(target)
+                self._visit_store_target(target)
+                self._invoke_subscription_delete(target)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         owner = self._expression_value(node.target)
@@ -4243,6 +4300,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if alias.name == "heapq"
                     else _origin_value(_ATEXIT_MODULE)
                     if alias.name == "atexit"
+                    else _origin_value(_SYS_MODULE)
+                    if alias.name == "sys"
                     else _origin_value(_ASYNCIO_MODULE)
                     if alias.name == "asyncio"
                     else _origin_value(_CONTEXTLIB_MODULE)
@@ -4337,6 +4396,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "heapq" and alias.name in _HEAPQ_KEY_CONSUMERS
                     else _origin_value(_ATEXIT_REGISTER)
                     if node.module == "atexit" and alias.name == "register"
+                    else _origin_value(_SYS_EXIT)
+                    if node.module == "sys" and alias.name == "exit"
                     else _origin_value(f"<asyncio-consumer:{alias.name}>")
                     if node.module == "asyncio" and alias.name in _ASYNCIO_CONSUMERS
                     else _origin_value(_NULLCONTEXT_FACTORY)

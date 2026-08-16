@@ -3323,6 +3323,44 @@ reader += 1
     assert contract.runtime_reads(tmp_path, fields) == fields
 
 
+def test_runtime_scan_models_subscription_store_and_delete_protocols_without_overreach(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "subscription_mutation_protocols.py").write_text(
+        """
+class Writer:
+    def __init__(self, section):
+        self.section = section
+
+    def __setitem__(self, key, value):
+        return self.section.stage1_enabled
+
+    def __delitem__(self, key):
+        return self.section.stage2_enabled
+
+writer = Writer(config.evaluation)
+writer[0] = 1
+del writer[0]
+
+overwritten = Writer(config.consensus)
+overwritten = {}
+overwritten[0] = 1
+del overwritten[0]
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField(section, f"stage{index}_enabled")
+        for section in ("evaluation", "consensus")
+        for index in (1, 2)
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == {
+        contract.ConfigField("evaluation", "stage1_enabled"),
+        contract.ConfigField("evaluation", "stage2_enabled"),
+    }
+
+
 def test_runtime_scan_selects_context_manager_protocol_by_syntax(contract, tmp_path: Path) -> None:
     (tmp_path / "context_protocols.py").write_text(
         """
@@ -5686,6 +5724,54 @@ def terminating_alias_path(config, report, enabled):
     assert contract.runtime_reads(tmp_path, fields) == frozenset(
         {contract.ConfigField("evaluation", "uncertainty_threshold")}
     )
+
+
+def test_runtime_scan_models_exact_sys_exit_aliases_without_shadowing_overreach(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "sys_exit_paths.py").write_text(
+        """
+import sys
+import sys as system
+from sys import exit as stop
+
+def module_exit(config):
+    sys.exit(0)
+    return config.evaluation.stage1_enabled
+
+def aliased_module_exit(config):
+    system.exit(0)
+    return config.evaluation.stage2_enabled
+
+def imported_exit(config):
+    stop(0)
+    return config.evaluation.stage3_enabled
+
+def shadowed_module(config, sys):
+    sys.exit(0)
+    return config.evaluation.stage4_enabled
+
+def shadowed_import(config):
+    stop = lambda code: code
+    stop(0)
+    return config.evaluation.stage5_enabled
+
+try:
+    sys.exit(0)
+except SystemExit:
+    caught = config.evaluation.stage6_enabled
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", f"stage{index}_enabled") for index in range(1, 7)
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == {
+        contract.ConfigField("evaluation", "stage4_enabled"),
+        contract.ConfigField("evaluation", "stage5_enabled"),
+        contract.ConfigField("evaluation", "stage6_enabled"),
+    }
 
 
 def test_every_schema_field_needs_exactly_one_disposition(contract) -> None:
