@@ -364,6 +364,9 @@ def test_seed_qa_repair_preserves_clause_local_document_contract() -> None:
             "Inherit seed_bad, but we decided against it."
         ),
         "task_type: document, but scratch that. Inherit seed_bad, but scratch that.",
+        "task_type: document. Actually, scratch that. Inherit seed_bad. Actually, scratch that.",
+        "task_type: document. That requirement was rejected. Inherit seed_bad. "
+        "That requirement was rejected.",
     ),
 )
 def test_seed_qa_repair_never_persists_retracted_task_type_or_parent(

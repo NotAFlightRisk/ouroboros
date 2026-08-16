@@ -115,6 +115,15 @@ _POST_MATCH_REJECTION_PATTERN = re.compile(
     r"|(?:하지\s*마세요|하면\s*안\s*(?:됩니다|돼요)))\b",
     re.IGNORECASE,
 )
+_STANDALONE_RETRACTION_PATTERN = re.compile(
+    r"(?:^|[.!?\n])\s*(?:actually\s*,?\s*)?"
+    r"(?:scratch\s+that|we\s+decided\s+against\s+it|"
+    r"(?:that|the)\s+(?:requirement|contract|proposal|value)\s+"
+    r"(?:was|is)\s+(?:rejected|superseded|obsolete|discarded)|"
+    r"(?:the\s+)?(?:requirement|contract|proposal|value)\s+"
+    r"(?:is|was)\s+not\s+allowed)",
+    re.IGNORECASE,
+)
 _CONTRACT_TAIL_AMBIGUITY_PATTERN = re.compile(
     r"^\s*(?:,\s*)?(?:if|unless|whether|depending|otherwise)\b"
     rf"|^\s*(?:,\s*)?or\s+(?:{_TASK_TYPE_PATTERN}|seed_[A-Za-z0-9]+)\b",
@@ -278,6 +287,8 @@ def _resolve_authoritative_matches(text: str, matches: list[tuple[int, int, str]
             return None
         current = value
         prior_end = end
+    if _STANDALONE_RETRACTION_PATTERN.search(text[prior_end:]) is not None:
+        return None
     return current
 
 

@@ -196,6 +196,15 @@ def test_parent_seed_keeps_affirmative_tail_and_rejects_conditional_conjunction(
     )
 
 
+def test_parent_seed_honors_later_standalone_retractions() -> None:
+    for goal in (
+        "Inherit seed_old. Actually, scratch that.",
+        "Inherit seed_old. We decided against it.",
+        "Inherit seed_old. That requirement was rejected.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) is None
+
+
 def test_parent_seed_preserves_korean_inheritance_contract() -> None:
     seed = _seed("seed_parent를 계승해 문서형 Seed로 명세한다.")
 

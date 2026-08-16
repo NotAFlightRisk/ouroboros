@@ -323,3 +323,12 @@ def test_explicit_task_type_keeps_affirmative_tail_and_rejects_conditional_conju
         )
         is None
     )
+
+
+def test_explicit_task_type_honors_later_standalone_retractions() -> None:
+    for goal in (
+        "task_type: document. Actually, scratch that.",
+        "task_type: document. We decided against it.",
+        "task_type: document. That requirement was rejected.",
+    ):
+        assert explicit_task_type_from_goal(goal) is None
