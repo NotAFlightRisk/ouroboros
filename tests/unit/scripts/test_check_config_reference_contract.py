@@ -3066,6 +3066,63 @@ read_stage(config.evaluation)
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
+def test_runtime_scan_executes_accessor_callbacks_in_eager_consumers(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "accessor_callbacks.py").write_text(
+        """
+import operator
+
+list(map(operator.attrgetter("stage1_enabled"), [config.evaluation]))
+key = operator.attrgetter("stage2_enabled")
+sorted([config.evaluation], key=key)
+list(map(getattr, [config.evaluation], ["stage3_enabled"]))
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    reads = contract.runtime_reads(tmp_path, fields)
+
+    assert reads == fields
+    for field in fields:
+        assert _audit_as_documented_inert(contract, field, reads).violations
+
+
+def test_runtime_scan_does_not_execute_stale_or_shadowed_accessor_callbacks(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "inactive_accessor_callbacks.py").write_text(
+        """
+import operator
+
+pending = map(operator.attrgetter("stage1_enabled"), [config.evaluation])
+key = operator.attrgetter("stage2_enabled")
+key = lambda section: None
+sorted([config.evaluation], key=key)
+
+def getattr(section, name):
+    return None
+
+list(map(getattr, [config.evaluation], ["stage3_enabled"]))
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    reads = contract.runtime_reads(tmp_path, fields)
+
+    assert reads == frozenset()
+    for field in fields:
+        assert _audit_as_documented_inert(contract, field, reads).violations == ()
+
+
 def test_runtime_scan_tracks_constant_and_dotted_operator_getters(contract, tmp_path: Path) -> None:
     (tmp_path / "operator_constants.py").write_text(
         """

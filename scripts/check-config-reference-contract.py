@@ -212,6 +212,7 @@ class _DeferredCallableIterator:
     """A lazy map/filter adapter and the values captured at construction."""
 
     callbacks: tuple[_CallableTarget, ...]
+    callback_value: _AbstractValue
     iterables: tuple[_AbstractValue, ...]
     star_arguments: bool = False
     accumulate: bool = False
@@ -1128,6 +1129,29 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             targets.extend((function, None) for function in self._function_value(node))
         return tuple(targets)
 
+    @staticmethod
+    def _is_accessor_callback(value: _AbstractValue) -> bool:
+        return bool(value.accessed_attributes or _GETATTR_BUILTIN in value.origins)
+
+    def _consume_accessor_callback(
+        self, callback: _AbstractValue, arguments: tuple[_AbstractValue, ...]
+    ) -> None:
+        """Apply modeled builtin/accessor callbacks to their runtime arguments."""
+        if _GETATTR_BUILTIN in callback.origins and len(arguments) >= 2:
+            field_name = arguments[1].string_value
+            if field_name is not None:
+                for section in arguments[0].origins & TRACKED_SECTIONS:
+                    self._record(section, field_name)
+        for field_name in callback.accessed_attributes:
+            first = field_name.partition(".")[0]
+            for argument in arguments:
+                if _CONFIG_ROOT in argument.origins and "." in field_name:
+                    section, _, field = field_name.partition(".")
+                    if section in TRACKED_SECTIONS:
+                        self._record(section, field)
+                for section in argument.origins & TRACKED_SECTIONS:
+                    self._record(section, first)
+
     def _call_has_relevant_provenance(
         self,
         node: ast.Call,
@@ -1832,21 +1856,22 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 iterable_arguments = (
                     node.args[1:] if _callable_name(node.func) in {"filter", "map"} else node.args
                 )
-                if (
-                    _callable_name(node.func) in {"filter", "map"}
-                    and node.args
-                    and (callbacks := self._call_targets(node.args[0]))
-                ):
-                    identity = id(node)
-                    self._deferred_callable_iterators[identity] = _DeferredCallableIterator(
-                        callbacks=tuple(
-                            _CallableTarget(function, receiver) for function, receiver in callbacks
-                        ),
-                        iterables=tuple(
-                            self._expression_value(argument) for argument in iterable_arguments
-                        ),
-                    )
-                    return _AbstractValue(identity=frozenset({identity}))
+                if _callable_name(node.func) in {"filter", "map"} and node.args:
+                    callback_value = self._expression_value(node.args[0])
+                    callbacks = self._call_targets(node.args[0])
+                    if callbacks or self._is_accessor_callback(callback_value):
+                        identity = id(node)
+                        self._deferred_callable_iterators[identity] = _DeferredCallableIterator(
+                            callbacks=tuple(
+                                _CallableTarget(function, receiver)
+                                for function, receiver in callbacks
+                            ),
+                            callback_value=callback_value,
+                            iterables=tuple(
+                                self._expression_value(argument) for argument in iterable_arguments
+                            ),
+                        )
+                        return _AbstractValue(identity=frozenset({identity}))
                 return _join_values(
                     *(self._expression_value(argument) for argument in iterable_arguments)
                 )
@@ -1873,18 +1898,28 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         _CallableTarget(function, receiver)
                         for function, receiver in self._call_targets(node.args[0])
                     ),
+                    callback_value=self._expression_value(node.args[0]),
                     iterables=(self._expression_value(node.args[1]),),
                     star_arguments=True,
                 )
                 return _AbstractValue(identity=frozenset({identity}))
             if _ACCUMULATE_FACTORY in function_value.origins and node.args:
                 callback_node = node.args[1] if len(node.args) >= 2 else None
-                if callback_node is not None and (callbacks := self._call_targets(callback_node)):
+                callback_value = (
+                    self._expression_value(callback_node)
+                    if callback_node is not None
+                    else _UNKNOWN_VALUE
+                )
+                callbacks = self._call_targets(callback_node) if callback_node is not None else ()
+                if callback_node is not None and (
+                    callbacks or self._is_accessor_callback(callback_value)
+                ):
                     identity = id(node)
                     self._deferred_callable_iterators[identity] = _DeferredCallableIterator(
                         callbacks=tuple(
                             _CallableTarget(function, receiver) for function, receiver in callbacks
                         ),
+                        callback_value=callback_value,
                         iterables=(self._expression_value(node.args[0]),),
                         accumulate=True,
                     )
@@ -1907,19 +1942,20 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     callback_node = key
                 elif len(node.args) >= 2:
                     callback_node, iterable_node = node.args[:2]
-                if (
-                    callback_node is not None
-                    and iterable_node is not None
-                    and (callbacks := self._call_targets(callback_node))
-                ):
-                    identity = id(node)
-                    self._deferred_callable_iterators[identity] = _DeferredCallableIterator(
-                        callbacks=tuple(
-                            _CallableTarget(function, receiver) for function, receiver in callbacks
-                        ),
-                        iterables=(self._expression_value(iterable_node),),
-                    )
-                    return _AbstractValue(identity=frozenset({identity}))
+                if callback_node is not None and iterable_node is not None:
+                    callback_value = self._expression_value(callback_node)
+                    callbacks = self._call_targets(callback_node)
+                    if callbacks or self._is_accessor_callback(callback_value):
+                        identity = id(node)
+                        self._deferred_callable_iterators[identity] = _DeferredCallableIterator(
+                            callbacks=tuple(
+                                _CallableTarget(function, receiver)
+                                for function, receiver in callbacks
+                            ),
+                            callback_value=callback_value,
+                            iterables=(self._expression_value(iterable_node),),
+                        )
+                        return _AbstractValue(identity=frozenset({identity}))
                 return (
                     self._expression_value(iterable_node)
                     if iterable_node is not None
@@ -2324,6 +2360,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         continue
                     accumulated = iterable.items[0]
                     for item in iterable.items[1:]:
+                        self._consume_accessor_callback(
+                            deferred.callback_value, (accumulated, item)
+                        )
                         for target in deferred.callbacks:
                             values = (
                                 (target.receiver, accumulated, item)
@@ -2343,6 +2382,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         else (_conservative_value(iterable), _conservative_value(iterable))
                     )
                     self._local_direct_call_value(target.function, values)
+                self._consume_accessor_callback(
+                    deferred.callback_value,
+                    (_conservative_value(iterable), _conservative_value(iterable)),
+                )
                 continue
             item_groups = [iterable.items for iterable in deferred.iterables]
             if all(items is not None for items in item_groups):
@@ -2361,6 +2404,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 if deferred.star_arguments and len(arguments) == 1:
                     item = arguments[0]
                     arguments = item.items or (_conservative_value(item),)
+                self._consume_accessor_callback(deferred.callback_value, arguments)
                 for target in deferred.callbacks:
                     values = (
                         (target.receiver, *arguments) if target.receiver is not None else arguments
@@ -2401,6 +2445,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         self._expression_value(argument).items is None for argument in node.args
                     ):
                         for argument in node.args:
+                            self._consume_accessor_callback(
+                                self._expression_value(key_keyword.value),
+                                (self._expression_value(argument),),
+                            )
                             for function, receiver in self._call_targets(key_keyword.value):
                                 values = ((receiver,) if receiver is not None else ()) + (
                                     self._expression_value(argument),
@@ -2415,6 +2463,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     else _UNKNOWN_VALUE
                 )
                 for item in iterable.items or ():
+                    self._consume_accessor_callback(
+                        self._expression_value(key_keyword.value), (item,)
+                    )
                     for function, receiver in self._call_targets(key_keyword.value):
                         values = ((receiver,) if receiver is not None else ()) + (item,)
                         self._local_direct_call_value(function, values)
@@ -2423,6 +2474,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             owner = self._expression_value(node.func.value)
             if key_keyword is not None:
                 for item in owner.items or ():
+                    self._consume_accessor_callback(
+                        self._expression_value(key_keyword.value), (item,)
+                    )
                     for function, receiver in self._call_targets(key_keyword.value):
                         values = ((receiver,) if receiver is not None else ()) + (item,)
                         self._local_direct_call_value(function, values)
