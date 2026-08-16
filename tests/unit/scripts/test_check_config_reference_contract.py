@@ -3063,6 +3063,97 @@ attributes.setdefault("stage3_enabled", False)
     assert contract.runtime_reads(tmp_path, fields) == fields
 
 
+def test_runtime_scan_fails_closed_for_unknown_serialized_mapping_keys(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "dynamic_serialized_keys.py").write_text(
+        """
+def runtime_key():
+    return external_key()
+
+key = runtime_key()
+config.evaluation.model_dump().get(key)
+config.evaluation.model_dump()[key]
+""",
+        encoding="utf-8",
+    )
+    fields = contract.schema_fields()
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        field for field in fields if field.section == "evaluation"
+    )
+
+
+def test_runtime_scan_executes_implicit_local_special_method_protocols(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "implicit_protocols.py").write_text(
+        """
+class Wrapper:
+    def __init__(self, section):
+        self.section = section
+
+    def __str__(self):
+        return self.section.stage1_enabled
+
+    def __len__(self):
+        return self.section.stage2_enabled
+
+    def __bool__(self):
+        return self.section.stage3_enabled
+
+wrapped = Wrapper(config.evaluation)
+str(wrapped)
+len(wrapped)
+bool(wrapped)
+
+str = external_str
+len = external_len
+bool = external_bool
+str(Wrapper(config.consensus))
+len(Wrapper(config.consensus))
+bool(Wrapper(config.consensus))
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        {
+            *(
+                contract.ConfigField("evaluation", name)
+                for name in (
+                    "stage1_enabled",
+                    "stage2_enabled",
+                    "stage3_enabled",
+                )
+            ),
+            contract.ConfigField("consensus", "models"),
+        }
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields - {
+        contract.ConfigField("consensus", "models")
+    }
+
+
+def test_runtime_scan_skips_statically_unreachable_assert_messages(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "assert_messages.py").write_text(
+        """
+assert True, config.evaluation.stage1_enabled
+assert False, config.evaluation.stage2_enabled
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {contract.ConfigField("evaluation", "stage2_enabled")}
+    )
+
+
 def test_runtime_scan_tracks_bound_getattribute_reads(contract, tmp_path: Path) -> None:
     (tmp_path / "bound_getattribute.py").write_text(
         """

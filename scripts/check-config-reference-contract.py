@@ -1596,6 +1596,16 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         key = node.args[0]
         key_value = self._expression_value(key).string_value
         if key_value is None:
+            # A runtime-computed key can select any serialized field.  Do not
+            # silently treat this as no read: fail closed by recording the
+            # complete section contract (or the bounded string candidates).
+            candidates = self._expression_value(key).string_values
+            names = candidates or {
+                field.name for field in self._fields if field.section in owner.serialized_sections
+            }
+            for section in owner.serialized_sections:
+                for name in names:
+                    self._record(section, name)
             if method == "setdefault":
                 return self._dynamic_setdefault_value(node)
             return _join_values(*values, default)
@@ -2302,6 +2312,16 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 if entry is not None:
                     return entry
                 return entries.get(_DYNAMIC_KEY, _UNKNOWN_VALUE)
+            if owner.serialized_sections:
+                candidates = self._expression_value(node.slice).string_values
+                names = candidates or {
+                    field.name
+                    for field in self._fields
+                    if field.section in owner.serialized_sections
+                }
+                for section in owner.serialized_sections:
+                    for name in names:
+                        self._record(section, name)
             candidates = [*(owner.items or ()), *(value for _, value in owner.entries or ())]
             return _join_values(*candidates)
         if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
@@ -2567,6 +2587,23 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         before = self._binding_snapshot()
         accessor = self._expression_value(node.func)
+        # ``str(value)``, ``len(value)``, and ``bool(value)`` dispatch through
+        # implicit special-method lookup.  Attribute resolution alone cannot
+        # see those calls, so execute the exact local protocol implementation
+        # when the builtin has not been shadowed.
+        protocol = (
+            {"str": "__str__", "len": "__len__", "bool": "__bool__"}.get(node.func.id)
+            if isinstance(node.func, ast.Name) and not self._name_is_bound(node.func.id)
+            else None
+        )
+        if protocol is not None and node.args:
+            owner = self._expression_value(node.args[0])
+            receiver = self._descriptor_receiver(owner)
+            for function in self._source_index.methods(owner.instance_classes, protocol):
+                self._local_direct_call_value(
+                    function,
+                    () if self._method_is_static(function) else (receiver,),
+                )
         accessor_arguments: list[_AbstractValue] = []
         accessor_arguments_exact = True
         for argument in node.args:
@@ -2800,6 +2837,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self.generic_visit(node)
         if isinstance(node.ctx, ast.Load):
             self._record_possible_exception(before)
+
+    def visit_Assert(self, node: ast.Assert) -> None:
+        """Visit the assertion message only on paths where it can execute."""
+
+        self.visit(node.test)
+        if node.msg is not None and self._static_truth(node.test) is not True:
+            self.visit(node.msg)
 
     @staticmethod
     def _join_states(
