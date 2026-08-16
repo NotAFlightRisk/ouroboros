@@ -2373,13 +2373,26 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             )
             self._consume_deferred_generator_value(returned, mode=mode)
             self._consume_deferred_callable_iterator_value(returned, mode=mode)
+            for next_function in self._source_index.methods(returned.instance_classes, "__next__"):
+                self._local_direct_call_value(
+                    next_function,
+                    (self._descriptor_receiver(returned),),
+                )
         if iterator_methods:
             return
         for function in self._source_index.methods(owner.instance_classes, "__getitem__"):
-            self._local_direct_call_value(
+            first = self._local_direct_call_execution(
                 function,
-                (self._descriptor_receiver(owner), _UNKNOWN_VALUE),
+                (
+                    self._descriptor_receiver(owner),
+                    _AbstractValue(literal=_key_token(ast.Constant(0)), truth=False),
+                ),
             )
+            if first.returns_to_caller:
+                self._local_direct_call_value(
+                    function,
+                    (self._descriptor_receiver(owner), _UNKNOWN_VALUE),
+                )
 
     def _consume_deferred_coroutine(self, node: ast.AST) -> None:
         value = self._expression_value(node)
@@ -4080,9 +4093,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         return _join_values(*entries)
 
     def _visit_with(self, node: ast.With | ast.AsyncWith) -> None:
+        context_values: list[_AbstractValue] = []
         for item in node.items:
             self.visit(item.context_expr)
             context_value = self._expression_value(item.context_expr)
+            context_values.append(context_value)
             for identity in context_value.identity:
                 deferred = self._deferred_generators.get(identity)
                 if (
@@ -4094,13 +4109,25 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     )
                 ):
                     self._consume_deferred_generator(item.context_expr, mode="one_turn")
+            entry_value = self._context_entry_value(context_value)
             if item.optional_vars is not None:
                 self._visit_store_target(item.optional_vars)
-                entry_value = self._context_entry_value(context_value)
                 self._bind_target_value(item.optional_vars, entry_value)
                 self._bind_function_target(item.optional_vars, frozenset())
                 self._bind_annotation_target(item.optional_vars, _UNKNOWN_VALUE)
-        self._apply_flow_result(self._visit_binding_branch(node.body, self._binding_snapshot()))
+        body_result = self._visit_binding_branch(node.body, self._binding_snapshot())
+        for context_value in reversed(context_values):
+            receiver = self._descriptor_receiver(context_value)
+            for method_name in ("__exit__", "__aexit__"):
+                for function in self._source_index.methods(
+                    context_value.instance_classes, method_name
+                ):
+                    self._local_direct_call_value(
+                        function,
+                        (receiver, _UNKNOWN_VALUE, _UNKNOWN_VALUE, _UNKNOWN_VALUE),
+                    )
+            self._consume_deferred_generator_value(context_value, mode="full")
+        self._apply_flow_result(body_result)
 
     def visit_With(self, node: ast.With) -> None:
         self._visit_with(node)
@@ -4402,9 +4429,16 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         function: _FunctionNode,
         values: tuple[_AbstractValue, ...],
     ) -> _AbstractValue:
+        return _join_values(*self._local_direct_call_execution(function, values).values)
+
+    def _local_direct_call_execution(
+        self,
+        function: _FunctionNode,
+        values: tuple[_AbstractValue, ...],
+    ) -> _FunctionExecution:
         function_id = id(function)
         if function_id in self._active_calls:
-            return _UNKNOWN_VALUE
+            return _FunctionExecution((_UNKNOWN_VALUE,), True)
         self._active_calls.add(function_id)
         try:
             execution = self._visit_function_body(
@@ -4413,7 +4447,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             )
         finally:
             self._active_calls.remove(function_id)
-        return _join_values(*execution.values)
+        return execution
 
     def _partial_call_value(self, call: ast.Call, partial: _DeferredPartial) -> _AbstractValue:
         """Execute a partial with every pre-bound positional/keyword argument."""

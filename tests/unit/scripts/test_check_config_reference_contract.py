@@ -399,6 +399,65 @@ list(_Reader())
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
+def test_runtime_scan_consumes_local_next_but_not_unconsumed_iterators(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "local_next.py").write_text(
+        """
+class Reader:
+    def __init__(self, section):
+        self.section = section
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.section.stage1_enabled
+
+class Pending:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return settings.evaluation.stage2_enabled
+
+list(Reader(settings.evaluation))
+pending = Pending()
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {contract.ConfigField("evaluation", "stage1_enabled")}
+    )
+
+
+def test_runtime_scan_stops_sequence_fallback_after_first_index_error(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "empty_sequence.py").write_text(
+        """
+class Empty:
+    def __init__(self, section):
+        self.section = section
+
+    def __getitem__(self, index):
+        if index == 0:
+            raise IndexError
+        return self.section.stage1_enabled
+
+list(Empty(settings.evaluation))
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
 def test_runtime_scan_executes_registered_exit_callbacks(contract, tmp_path: Path) -> None:
     (tmp_path / "exit_callback.py").write_text(
         """
@@ -575,6 +634,66 @@ closing(settings.evaluation)
     field = contract.ConfigField("evaluation", "stage1_enabled")
 
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+def test_runtime_scan_executes_context_exit_and_generator_continuation(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "context_cleanup.py").write_text(
+        """
+from contextlib import contextmanager
+
+class Box:
+    def __init__(self, section):
+        self.section = section
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return self.section.stage1_enabled
+
+@contextmanager
+def managed(section):
+    yield None
+    section.stage2_enabled
+
+class PendingBox:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        settings.evaluation.stage3_enabled
+
+@contextmanager
+def pending_managed():
+    yield None
+    settings.evaluation.semantic_model
+
+with Box(settings.evaluation):
+    pass
+
+with managed(settings.evaluation):
+    pass
+
+Box(settings.evaluation)
+managed(settings.evaluation)
+PendingBox()
+pending_managed()
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled", "semantic_model")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {
+            contract.ConfigField("evaluation", "stage1_enabled"),
+            contract.ConfigField("evaluation", "stage2_enabled"),
+        }
+    )
 
 
 def test_runtime_scan_invokes_cached_property_getters(contract, tmp_path: Path) -> None:
