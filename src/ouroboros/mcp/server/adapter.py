@@ -2486,6 +2486,11 @@ def create_ouroboros_server(
             agent_runtime_backend=interview_runtime_backend,
             opencode_mode=opencode_mode,
             fanout_registry=fanout_registry,
+            # The same workspace ``create_fanout_handlers`` builds the artifact
+            # store from, below. A lane is told where this session's earlier
+            # answers are, and one composition passing a different path than the
+            # one that wrote them would send it somewhere empty.
+            project_dir=effective_cwd,
         ),
         BrownfieldHandler(_store=brownfield_store),
         evaluate_handler,

@@ -1382,3 +1382,50 @@ def test_the_producer_hands_over_addresses_and_never_what_a_child_found(
     assert first["question_advisory_fanout_id"] in prompt
     assert claim not in prompt
     assert claim not in json.dumps(later["question_advisory_request"])
+
+
+def test_the_shipped_server_hands_pm_the_workspace_its_artifacts_live_under(
+    tmp_path: Path,
+) -> None:
+    """Two turns through the composed server, not through the helper directly.
+
+    The lane-level tests above all build their own request, so every one of them
+    passes while the composition that actually ships passes no workspace at all
+    — and a feature nothing constructs is dead in production while its unit
+    tests stay green. This drives the handler the server registered: turn one
+    registers a fan-out, turn two must be told where turn one's answers went.
+
+    The path is asserted against the artifact store's own, resolved from the
+    same workspace, because two compositions agreeing that a path exists is not
+    the same as them agreeing on which one.
+    """
+    from ouroboros.mcp.server.adapter import create_ouroboros_server
+    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server = create_ouroboros_server(
+        project_dir=workspace,
+        state_dir=tmp_path / "state",
+        durable_jobs=False,
+    )
+    handler = next(
+        candidate
+        for candidate in server._tool_handlers.values()
+        if isinstance(candidate, PMInterviewHandler)
+    )
+
+    first: dict[str, Any] = {}
+    handler._attach_advisory(first, "pm-server", QUESTION)
+    later: dict[str, Any] = {}
+    handler._attach_advisory(later, "pm-server", "Second question?")
+
+    prompts = {
+        payload.context["lane_id"]: payload.to_dict()["prompt"]
+        for payload in build_question_advisory_subagents(later["question_advisory_request"])
+    }
+    assert prompts, "the composed handler attached no lanes"
+    expected_root = str(ContentAddressedArtifactStore.for_project(workspace).root)
+    for prompt in prompts.values():
+        assert expected_root in prompt
+        assert first["question_advisory_fanout_id"] in prompt
