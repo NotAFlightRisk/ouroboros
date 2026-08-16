@@ -46,6 +46,7 @@ from ouroboros.cli.commands.claude_setup import (
 from ouroboros.cli.commands.claude_setup import (
     setup_claude_sdk as _setup_claude_sdk,
 )
+from ouroboros.cli.commands.setup_atomic_restore import restore_hermes, restore_hermes_receipt
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_error,
@@ -2275,7 +2276,9 @@ class _ConcurrentSetupMutationError(OSError):
     """A managed path no longer matches the generation setup read."""
 
 
-def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _PathSnapshot:
+def _snapshot_path(
+    path: Path, *, _seen: frozenset[Path] = frozenset(), follow_links: bool = True
+) -> _PathSnapshot:
     """Snapshot a managed file or directory without following symlinks."""
     try:
         stat_result = path.lstat()
@@ -2286,15 +2289,22 @@ def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _Path
     mode = stat.S_IMODE(stat_result.st_mode)
     if stat.S_ISLNK(stat_result.st_mode):
         link_target = os.readlink(path)
+        if not follow_links:
+            return _PathSnapshot(kind="symlink", mode=mode, link_target=link_target)
         target_path = Path(link_target)
         if not target_path.is_absolute():
             target_path = path.parent / target_path
         normalized_target = target_path.expanduser().absolute()
         if normalized_target in _seen:
             return _PathSnapshot(kind="symlink", mode=mode, link_target=link_target)
-        target_snapshot = _snapshot_path(
-            target_path,
-            _seen=_seen | {current_path},
+        target_snapshot = (
+            _snapshot_path(target_path, _seen=_seen | {current_path})
+            if follow_links
+            else _snapshot_path(
+                target_path,
+                _seen=_seen | {current_path},
+                follow_links=False,
+            )
         )
         try:
             target_stat = target_path.lstat()
@@ -2328,7 +2338,20 @@ def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _Path
 
     children: list[tuple[str, _PathSnapshot]] = []
     for child in sorted(path.iterdir(), key=lambda item: item.name):
-        children.append((child.name, _snapshot_path(child, _seen=_seen | {current_path})))
+        children.append(
+            (
+                child.name,
+                (
+                    _snapshot_path(child, _seen=_seen | {current_path})
+                    if follow_links
+                    else _snapshot_path(
+                        child,
+                        _seen=_seen | {current_path},
+                        follow_links=False,
+                    )
+                ),
+            )
+        )
     return _PathSnapshot(kind="directory", mode=mode, children=tuple(children))
 
 
@@ -2401,9 +2424,13 @@ def _restore_path_snapshot_if_current_matches(
     expected_current: _PathSnapshot | None,
     *,
     restore_link_targets: bool = True,
+    follow_links: bool = True,
 ) -> bool:
     """Restore only when the current path still matches setup's last known write."""
-    if expected_current is not None and _snapshot_path(path) != expected_current:
+    if (
+        expected_current is not None
+        and _snapshot_path(path, follow_links=follow_links) != expected_current
+    ):
         print_warning(f"Preserved concurrently changed setup path during rollback: {path}")
         return False
     _restore_path_snapshot(
@@ -2872,20 +2899,26 @@ def _setup_codex(
     return True
 
 
-def _install_hermes_artifacts() -> None:
+def _install_hermes_artifacts() -> object | bool:
     """Install packaged Ouroboros skills into ~/.hermes/."""
     from ouroboros.hermes.artifacts import install_hermes_skills
 
     hermes_dir = Path.home() / ".hermes"
 
     try:
-        skill_path = install_hermes_skills(hermes_dir=hermes_dir, prune=True)
-        print_success(f"Installed Hermes skills → {skill_path}")
-    except FileNotFoundError:
-        print_error("Could not locate packaged skills for Hermes.")
+        publication = install_hermes_skills(
+            hermes_dir=hermes_dir,
+            prune=True,
+            return_receipt=True,
+        )
+        print_success(f"Installed Hermes skills → {publication.target}")
+    except OSError as exc:
+        print_error(f"Could not install packaged skills for Hermes: {exc}")
+        return False
+    return publication
 
 
-def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> None:
+def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> bool:
     """Install a setup-owned runtime instruction artifact when supported."""
     from ouroboros.runtime_instruction_artifacts import (
         install_copilot_instruction_artifact,
@@ -2904,13 +2937,14 @@ def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> Non
     }
     installer = installers.get(backend)
     if installer is None:
-        return
+        return False
     try:
         artifact = installer(**kwargs)
     except OSError as exc:
         print_warning(f"Could not install {backend} instruction artifact: {exc}")
-        return
+        return False
     print_success(f"Installed {backend.title()} instruction guide → {artifact.path}")
+    return True
 
 
 def _register_hermes_mcp_server(*, detected: dict[str, object] | None = None) -> bool:
@@ -2996,6 +3030,56 @@ def _setup_hermes(hermes_path: str) -> bool:
         config_dict["orchestrator"] = orch
     orch["runtime_backend"] = "hermes"
     orch["hermes_cli_path"] = hermes_path
+    from ouroboros.hermes.artifacts import (
+        HERMES_SKILL_CATEGORY,
+        HERMES_SKILL_NAME,
+        HermesPublicationReceipt,
+    )
+
+    hermes_skill_target = (
+        Path.home() / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / HERMES_SKILL_NAME
+    )
+    if hermes_skill_target.is_symlink():
+        print_error(f"Hermes activation refused symlinked skill target: {hermes_skill_target}")
+        return False
+    hermes_skill_snapshot = _snapshot_path(hermes_skill_target, follow_links=False)
+    hermes_publication = _install_hermes_artifacts()
+    if not hermes_publication:
+        print_error("Hermes runtime activation incomplete: required skills were not installed.")
+        return False
+
+    try:
+        hermes_skill_published = _snapshot_path(hermes_skill_target, follow_links=False)
+    except OSError as exc:
+        print_error(f"Hermes activation could not snapshot published skills: {exc}")
+        try:
+            restored = isinstance(
+                hermes_publication, HermesPublicationReceipt
+            ) and restore_hermes_receipt(
+                hermes_skill_target,
+                hermes_skill_snapshot,
+                hermes_publication,
+            )
+            if not restored:
+                print_warning("Preserved concurrent Hermes skill changes during rollback.")
+        except OSError as rollback_exc:
+            print_error(f"Hermes activation rollback could not restore skills: {rollback_exc}")
+        return False
+
+    def rollback_hermes_skills() -> None:
+        try:
+            if isinstance(
+                hermes_publication, HermesPublicationReceipt
+            ) and not hermes_publication.matches(hermes_skill_target):
+                print_warning("Preserved concurrent Hermes skill changes during rollback.")
+                return
+            restored = restore_hermes(
+                hermes_skill_target, hermes_skill_snapshot, hermes_skill_published
+            )
+            if not restored:
+                print_warning("Preserved concurrent Hermes skill changes during rollback.")
+        except OSError as exc:
+            print_error(f"Hermes activation rollback could not restore skills: {exc}")
 
     if not _commit_runtime_activation(
         runtime_name="Hermes",
@@ -3010,13 +3094,11 @@ def _setup_hermes(hermes_path: str) -> bool:
         register_host=lambda: _register_hermes_mcp_server(detected=detected),
         create_defaults=create_default_config,
     ):
+        rollback_hermes_skills()
         return False
 
     print_success(f"Configured Hermes runtime (CLI: {hermes_path})")
     print_info(f"Config saved to: {config_path}")
-
-    # Install Ouroboros skills for Hermes
-    _install_hermes_artifacts()
     return True
 
 
@@ -5003,94 +5085,10 @@ def _opencode_bridge_dest() -> Path:
 
 @app.command("refresh")
 def refresh_artifacts() -> None:
-    """Refresh installed Ouroboros artifacts for every detected runtime.
+    """Refresh artifacts installed by a previous setup."""
+    from ouroboros.cli.commands.setup_refresh import refresh_runtime_artifacts
 
-    Rewrites rules, skills, bridges, and instruction guides that a previous
-    setup already installed — without changing MCP registrations, the runtime
-    selection, or ~/.ouroboros/config.yaml. Codex follows ``ouroboros codex
-    refresh`` semantics and refreshes whenever Codex is present; every other
-    artifact refreshes only when it already exists, so a deliberately removed
-    integration (e.g. OpenCode subprocess mode) is never resurrected.
-    """
-    from ouroboros.hermes.artifacts import HERMES_SKILL_CATEGORY, HERMES_SKILL_NAME
-    from ouroboros.runtime_instruction_artifacts import (
-        copilot_instruction_path,
-        gemini_instruction_path,
-        gjc_agent_dir,
-        gjc_instruction_path,
-        has_managed_section,
-        kiro_instruction_path,
-        opencode_instruction_path,
-    )
-
-    refreshed: list[str] = []
-
-    codex_dir = _codex_home_candidate_for_setup()
-    if codex_dir.exists() or shutil.which("codex"):
-        from ouroboros.codex import install_codex_artifacts
-
-        try:
-            result = install_codex_artifacts(codex_dir=codex_dir, prune=False)
-        except OSError as exc:
-            # One runtime failing must not leave the remaining ones stale.
-            print_warning(f"Could not refresh Codex artifacts: {exc}")
-        else:
-            print_success(f"Installed Codex rules → {result.rules_path}")
-            print_success(
-                f"Installed {len(result.skill_paths)} Codex skills → {codex_dir / 'skills'}"
-            )
-            refreshed.append("codex")
-
-    hermes_skill_dir = Path.home() / ".hermes" / "skills" / HERMES_SKILL_CATEGORY
-    if (hermes_skill_dir / HERMES_SKILL_NAME).exists():
-        try:
-            _install_hermes_artifacts()
-        except OSError as exc:
-            print_warning(f"Could not refresh Hermes artifacts: {exc}")
-        else:
-            refreshed.append("hermes")
-
-    opencode_dir = opencode_config_dir()
-    opencode_touched = False
-    if _opencode_bridge_dest().exists():
-        opencode_touched = _install_opencode_bridge_plugin()
-    if has_managed_section(opencode_instruction_path(opencode_dir)):
-        _install_runtime_instruction_artifact("opencode", config_dir=opencode_dir)
-        opencode_touched = True
-    if opencode_touched:
-        refreshed.append("opencode")
-
-    if has_managed_section(gemini_instruction_path()):
-        _install_runtime_instruction_artifact("gemini")
-        refreshed.append("gemini")
-
-    if kiro_instruction_path().exists():
-        _install_runtime_instruction_artifact("kiro")
-        refreshed.append("kiro")
-
-    if copilot_instruction_path().exists():
-        _install_runtime_instruction_artifact("copilot")
-        refreshed.append("copilot")
-
-    pi_bridge = Path.home() / ".pi" / "agent" / "extensions" / _PI_OOO_BRIDGE_FILENAME
-    if pi_bridge.exists():
-        if _install_pi_ooo_bridge():
-            refreshed.append("pi")
-
-    gjc_touched = False
-    gjc_bridge = gjc_agent_dir() / "extensions" / _GJC_OOO_BRIDGE_SUBDIR / _GJC_OOO_BRIDGE_FILENAME
-    if gjc_bridge.exists():
-        gjc_touched = _install_gjc_ooo_bridge()
-    if gjc_instruction_path().exists():
-        _install_runtime_instruction_artifact("gjc")
-        gjc_touched = True
-    if gjc_touched:
-        refreshed.append("gjc")
-
-    if refreshed:
-        print_success(f"Refreshed runtime artifacts: {', '.join(refreshed)}")
-    else:
-        print_info("No installed runtime artifacts found to refresh.")
+    refresh_runtime_artifacts()
 
 
 # ── Brownfield subcommands ───────────────────────────────────────

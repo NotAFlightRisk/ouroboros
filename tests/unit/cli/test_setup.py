@@ -7697,6 +7697,417 @@ class TestHermesSetup:
         mock_register.assert_called_once()
         assert mock_register.call_args.kwargs["detected"]["command"] in {"uvx", "pipx"}
 
+    def test_setup_hermes_reports_failure_when_required_skills_are_not_installed(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_runtime_config = "orchestrator:\n  runtime_backend: codex\n"
+        config_path.write_text(original_runtime_config, encoding="utf-8")
+        hermes_config = tmp_path / ".hermes" / "config.yaml"
+        hermes_config.parent.mkdir()
+        original_hermes_config = "mcp_servers:\n  existing:\n    command: keep\n"
+        hermes_config.write_text(original_hermes_config, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._install_hermes_artifacts",
+                return_value=False,
+            ),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server") as mock_register,
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        output = capsys.readouterr().out
+        assert result is False
+        assert "activation incomplete" in output
+        assert "Configured Hermes runtime" not in output
+        assert config_path.read_text(encoding="utf-8") == original_runtime_config
+        assert hermes_config.read_text(encoding="utf-8") == original_hermes_config
+        mock_register.assert_not_called()
+
+    @pytest.mark.parametrize("target_existed", (False, True))
+    def test_setup_hermes_rolls_back_skills_when_activation_fails(
+        self, tmp_path: Path, target_existed: bool
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_run = source_skills / "run"
+        source_run.mkdir(parents=True)
+        source_run.joinpath("SKILL.md").write_text("fresh skill\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        if target_existed:
+            target.joinpath("run").mkdir(parents=True)
+            target.joinpath("run", "SKILL.md").write_text("operator generation\n", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        if target_existed:
+            assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == (
+                "operator generation\n"
+            )
+        else:
+            assert not target.exists()
+
+    def test_setup_hermes_failed_first_publication_leaves_no_unactivated_artifact(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        real_replace = os.replace
+
+        def interrupt_after_first_publication(src, dst):
+            result = real_replace(src, dst)
+            if Path(dst) == target and Path(src).name.startswith(".ouroboros-skills-"):
+                raise OSError("committed first publication")
+            return result
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.hermes.artifacts.os.replace",
+                side_effect=interrupt_after_first_publication,
+            ),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server") as register,
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert not target.exists()
+        register.assert_not_called()
+        assert config_path.read_text(encoding="utf-8") == (
+            "orchestrator:\n  runtime_backend: claude\n"
+        )
+
+    def test_setup_hermes_rolls_back_when_post_publication_snapshot_fails(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: claude\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.joinpath("run").mkdir(parents=True)
+        target.joinpath("run", "SKILL.md").write_text("previous\n", encoding="utf-8")
+        original_snapshot = setup_cmd._snapshot_path
+
+        def fail_published_snapshot(path: Path, **kwargs):
+            skill = target / "run" / "SKILL.md"
+            if path == target and skill.exists() and skill.read_text(encoding="utf-8") == "fresh\n":
+                raise OSError("synthetic post-publication snapshot failure")
+            return original_snapshot(path, **kwargs)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._snapshot_path",
+                side_effect=fail_published_snapshot,
+            ),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server") as register,
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "previous\n"
+        assert config_path.read_text(encoding="utf-8") == original_config
+        register.assert_not_called()
+
+    def test_setup_hermes_preserves_edit_after_publication_before_receipt(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: claude\n", encoding="utf-8"
+        )
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        from ouroboros.hermes.artifacts import install_hermes_skills
+
+        real_install = install_hermes_skills
+
+        def publish_then_operator_edit(**kwargs):
+            receipt = real_install(**kwargs)
+            target.joinpath("operator-after-publish.txt").write_text("preserve\n", encoding="utf-8")
+            return receipt
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.hermes.artifacts.install_hermes_skills",
+                side_effect=publish_then_operator_edit,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert target.joinpath("operator-after-publish.txt").read_text(encoding="utf-8") == (
+            "preserve\n"
+        )
+
+    def test_setup_hermes_rollback_staging_failure_keeps_published_generation(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: claude\n", encoding="utf-8"
+        )
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.joinpath("run").mkdir(parents=True)
+        target.joinpath("run", "SKILL.md").write_text("previous\n", encoding="utf-8")
+
+        def publish() -> bool:
+            target.joinpath("run", "SKILL.md").write_text("published\n", encoding="utf-8")
+            return True
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch("ouroboros.cli.commands.setup._install_hermes_artifacts", side_effect=publish),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._restore_path_snapshot",
+                side_effect=OSError("synthetic staging write failure"),
+            ),
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "published\n"
+        assert not tuple(target.parent.glob(".ouroboros-rollback-*"))
+
+    def test_setup_hermes_rollback_revalidates_after_staging(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: claude\n", encoding="utf-8"
+        )
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.joinpath("run").mkdir(parents=True)
+        target.joinpath("run", "SKILL.md").write_text("previous\n", encoding="utf-8")
+        real_restore = setup_cmd._restore_path_snapshot
+
+        def publish() -> bool:
+            target.joinpath("run", "SKILL.md").write_text("published\n", encoding="utf-8")
+            return True
+
+        def stage_then_mutate(path, snapshot, **kwargs) -> None:
+            real_restore(path, snapshot, **kwargs)
+            target.joinpath("concurrent.txt").write_text("preserve\n", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch("ouroboros.cli.commands.setup._install_hermes_artifacts", side_effect=publish),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server", return_value=False),
+            patch(
+                "ouroboros.cli.commands.setup._restore_path_snapshot",
+                side_effect=stage_then_mutate,
+            ),
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert target.joinpath("concurrent.txt").read_text(encoding="utf-8") == "preserve\n"
+        assert not tuple(target.parent.glob(".ouroboros-rollback-*"))
+
+    def test_setup_hermes_rollback_preserves_concurrent_symlink_target_update(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.mkdir(parents=True)
+        external = tmp_path / "operator-state.txt"
+        external.write_text("before\n", encoding="utf-8")
+        target.joinpath("operator-link").symlink_to(external)
+
+        def fail_after_external_update(*, detected) -> bool:  # noqa: ARG001
+            external.write_text("concurrent\n", encoding="utf-8")
+            return False
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                side_effect=fail_after_external_update,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        assert target.joinpath("operator-link").is_symlink()
+        assert external.read_text(encoding="utf-8") == "concurrent\n"
+
+    def test_setup_hermes_never_reads_nested_symlink_targets(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.mkdir(parents=True)
+        external = tmp_path / "operator-secret.txt"
+        external.write_text("secret\n", encoding="utf-8")
+        target.joinpath("operator-link").symlink_to(external)
+        real_read_bytes = Path.read_bytes
+
+        def refuse_external_read(path: Path) -> bytes:
+            if path == external:
+                raise AssertionError("nested symlink target was read")
+            return real_read_bytes(path)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.read_bytes", refuse_external_read),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch("ouroboros.cli.commands.setup._install_hermes_artifacts", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        assert target.joinpath("operator-link").is_symlink()
+        assert external.read_text(encoding="utf-8") == "secret\n"
+
+    def test_setup_hermes_rollback_preserves_concurrent_managed_tree_edits(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.joinpath("operator-note.txt").parent.mkdir(parents=True)
+        target.joinpath("operator-note.txt").write_text("before\n", encoding="utf-8")
+
+        def fail_after_tree_update(*, detected) -> bool:  # noqa: ARG001
+            target.joinpath("operator-note.txt").write_text("concurrent\n", encoding="utf-8")
+            target.joinpath("new-note.txt").write_text("new concurrent file\n", encoding="utf-8")
+            return False
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                side_effect=fail_after_tree_update,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        assert target.joinpath("operator-note.txt").read_text(encoding="utf-8") == "concurrent\n"
+        assert target.joinpath("new-note.txt").read_text(encoding="utf-8") == (
+            "new concurrent file\n"
+        )
+
     def test_setup_hermes_repairs_scalar_top_level_config(self, tmp_path: Path) -> None:
         """Hermes setup should recover from malformed scalar config.yaml contents."""
         config_dir = tmp_path / ".ouroboros"
