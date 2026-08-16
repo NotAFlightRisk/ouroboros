@@ -257,6 +257,29 @@ _HASATTR_BUILTIN = "<hasattr-builtin>"
 _OBJECT_BUILTIN = "<object-builtin>"
 _VARS_BUILTIN = "<vars-builtin>"
 _RANGE_BUILTIN = "<range-builtin>"
+_PROTOCOL_BUILTIN_PREFIX = "<protocol-builtin:"
+_PROTOCOL_BUILTINS = frozenset(
+    {
+        "abs",
+        "ascii",
+        "bin",
+        "bool",
+        "bytes",
+        "complex",
+        "divmod",
+        "float",
+        "format",
+        "hash",
+        "hex",
+        "int",
+        "len",
+        "oct",
+        "pow",
+        "repr",
+        "round",
+        "str",
+    }
+)
 _FUNCTOOLS_MODULE = "<functools-module>"
 _PARTIAL_FACTORY = "<functools-partial-factory>"
 _PARTIALMETHOD_FACTORY = "<functools-partialmethod-factory>"
@@ -1836,6 +1859,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 if node.id == "vars" and not self._name_is_bound("vars")
                 else _origin_value(_RANGE_BUILTIN)
                 if node.id == "range" and not self._name_is_bound("range")
+                else _origin_value(f"{_PROTOCOL_BUILTIN_PREFIX}{node.id}>")
+                if node.id in _PROTOCOL_BUILTINS and not self._name_is_bound(node.id)
                 else _origin_value(f"<builtin-consumer:{node.id}>")
                 if node.id in _TRACKED_BUILTIN_CONSUMERS and not self._name_is_bound(node.id)
                 else self._name_value(node.id)
@@ -1944,6 +1969,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_VARS_BUILTIN)
             if _BUILTINS_MODULE in owner.origins and node.attr == "range":
                 return _origin_value(_RANGE_BUILTIN)
+            if _BUILTINS_MODULE in owner.origins and node.attr in _PROTOCOL_BUILTINS:
+                return _origin_value(f"{_PROTOCOL_BUILTIN_PREFIX}{node.attr}>")
             if _ATEXIT_MODULE in owner.origins and node.attr == "register":
                 return _origin_value(_ATEXIT_REGISTER)
             if _SYS_MODULE in owner.origins and node.attr == "exit":
@@ -2244,10 +2271,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if _EXITSTACK_FACTORY in function_value.origins:
                 return _AbstractValue(origins=frozenset({_EXITSTACK_VALUE}))
             if _ENTER_CONTEXT_CONSUMER in function_value.origins and node.args:
-                return self._context_entry_value(
+                entry_value, _entry_executions = self._context_entry_value(
                     self._expression_value(node.args[0]),
                     asynchronous=False,
                 )
+                return entry_value
             if _TYPING_CAST in function_value.origins and len(node.args) >= 2:
                 return self._expression_value(node.args[1])
             if function_value.origins & _COPY_IDENTITY_TRANSFORMS and node.args:
@@ -2383,6 +2411,48 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         if keyword.arg is not None
                         else ("**", _conservative_value(value))
                     )
+                metaclass_executions: list[_FunctionExecution] = []
+                for class_node in constructor_classes:
+                    class_value = _AbstractValue(classes=frozenset({class_node}))
+                    metaclasses = frozenset(
+                        metaclass
+                        for keyword in class_node.keywords
+                        if keyword.arg == "metaclass"
+                        for metaclass in self._expression_value(keyword.value).classes
+                    )
+                    for function in self._source_index.methods(metaclasses, "__call__"):
+                        metaclass_executions.append(
+                            self._local_direct_call_execution(
+                                function,
+                                (class_value, *items),
+                            )
+                        )
+                if metaclass_executions:
+                    self._call_executions.setdefault(id(node), []).extend(metaclass_executions)
+                    returned = tuple(
+                        value for execution in metaclass_executions for value in execution.values
+                    )
+                    return _join_values(*returned) if returned else _UNKNOWN_VALUE
+
+                new_executions: list[_FunctionExecution] = []
+                for class_node in constructor_classes:
+                    class_value = _AbstractValue(classes=frozenset({class_node}))
+                    for function in self._source_index.methods((class_node,), "__new__"):
+                        new_executions.append(
+                            self._local_direct_call_execution(
+                                function,
+                                (class_value, *items),
+                            )
+                        )
+                if new_executions:
+                    self._call_executions.setdefault(id(node), []).extend(new_executions)
+                    returned = tuple(
+                        value for execution in new_executions for value in execution.values
+                    )
+                    # Exact local ``__new__`` owns construction. In particular,
+                    # an unrelated object returned here must not be fabricated
+                    # back into an instance of the requested class.
+                    return _join_values(*returned) if returned else _UNKNOWN_VALUE
                 instance = _AbstractValue(
                     items=tuple(items),
                     attributes=tuple(attributes),
@@ -2728,6 +2798,19 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         before = self._binding_snapshot()
         accessor = self._expression_value(node.func)
+        exact_builtins = {
+            origin[len(_PROTOCOL_BUILTIN_PREFIX) : -1]
+            for origin in accessor.origins
+            if origin.startswith(_PROTOCOL_BUILTIN_PREFIX) and origin.endswith(">")
+        } | {
+            origin[len("<builtin-consumer:") : -1]
+            for origin in accessor.origins
+            if origin.startswith("<builtin-consumer:") and origin.endswith(">")
+        }
+
+        def is_exact_builtin(name: str) -> bool:
+            return name in exact_builtins
+
         # Builtins below dispatch through implicit special-method lookup.
         # Attribute resolution alone cannot
         # see those calls, so execute the exact local protocol implementation
@@ -2744,64 +2827,40 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 "bin": "__index__",
                 "oct": "__index__",
                 "hex": "__index__",
-            }.get(node.func.id)
-            if isinstance(node.func, ast.Name) and not self._name_is_bound(node.func.id)
+            }.get(next(iter(exact_builtins), ""))
+            if len(exact_builtins) == 1
             else None
         )
         if protocol is not None and node.args:
             self._invoke_implicit_protocol(self._expression_value(node.args[0]), protocol)
-        if (
-            isinstance(node.func, ast.Name)
-            and node.func.id == "bool"
-            and not self._name_is_bound(node.func.id)
-            and node.args
-        ):
+        if is_exact_builtin("bool") and node.args:
             self._invoke_truth_protocol(self._expression_value(node.args[0]))
-        if (
-            isinstance(node.func, ast.Name)
-            and node.func.id in {"int", "float", "complex"}
-            and not self._name_is_bound(node.func.id)
-            and node.args
-        ):
+        if bool(exact_builtins & {"int", "float", "complex"}) and node.args:
             owner = self._expression_value(node.args[0])
+            conversion = next(iter(exact_builtins & {"int", "float", "complex"}))
             candidates = {
                 "int": ("__int__", "__index__"),
                 "float": ("__float__", "__index__"),
                 "complex": ("__complex__", "__float__", "__index__"),
-            }[node.func.id]
+            }[conversion]
             for candidate in candidates:
                 if self._source_index.methods(owner.instance_classes, candidate):
                     self._invoke_implicit_protocol(owner, candidate)
                     break
-        if (
-            isinstance(node.func, ast.Name)
-            and node.func.id == "reversed"
-            and not self._name_is_bound(node.func.id)
-            and node.args
-        ):
+        if is_exact_builtin("reversed") and node.args:
             owner = self._expression_value(node.args[0])
             if self._source_index.methods(owner.instance_classes, "__reversed__"):
                 self._invoke_implicit_protocol(owner, "__reversed__")
             else:
                 self._invoke_implicit_protocol(owner, "__len__")
                 self._invoke_implicit_protocol(owner, "__getitem__", (_UNKNOWN_VALUE,))
-        if (
-            isinstance(node.func, ast.Name)
-            and node.func.id == "round"
-            and not self._name_is_bound(node.func.id)
-            and node.args
-        ):
+        if is_exact_builtin("round") and node.args:
             self._invoke_implicit_protocol(
                 self._expression_value(node.args[0]),
                 "__round__",
                 ((self._expression_value(node.args[1]),) if len(node.args) > 1 else ()),
             )
-        if (
-            isinstance(node.func, ast.Name)
-            and node.func.id == "divmod"
-            and not self._name_is_bound(node.func.id)
-            and len(node.args) >= 2
-        ):
+        if is_exact_builtin("divmod") and len(node.args) >= 2:
             self._invoke_binary_protocol(
                 self._expression_value(node.args[0]),
                 self._expression_value(node.args[1]),
@@ -2810,12 +2869,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             )
         if _OPERATOR_INDEX in accessor.origins and node.args:
             self._invoke_implicit_protocol(self._expression_value(node.args[0]), "__index__")
-        if (
-            isinstance(node.func, ast.Name)
-            and node.func.id == "pow"
-            and not self._name_is_bound(node.func.id)
-            and len(node.args) >= 2
-        ):
+        if is_exact_builtin("pow") and len(node.args) >= 2:
             left = self._expression_value(node.args[0])
             right = self._expression_value(node.args[1])
             if len(node.args) == 2:
@@ -2826,12 +2880,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     "__pow__",
                     (right, self._expression_value(node.args[2])),
                 )
-        if (
-            isinstance(node.func, ast.Name)
-            and node.func.id == "format"
-            and not self._name_is_bound(node.func.id)
-            and node.args
-        ):
+        if is_exact_builtin("format") and node.args:
             specification = (
                 self._expression_value(node.args[1]) if len(node.args) > 1 else _UNKNOWN_VALUE
             )
@@ -2907,9 +2956,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     for function, receiver in self._call_targets(key_keyword.value):
                         values = ((receiver,) if receiver is not None else ()) + (item,)
                         self._local_direct_call_value(function, values)
-        if isinstance(node.func, ast.Name) and node.func.id == "iter" and node.args:
+        if is_exact_builtin("iter") and node.args:
             self._invoke_implicit_protocol(self._expression_value(node.args[0]), "__iter__")
-        if isinstance(node.func, ast.Name) and node.func.id == "next" and node.args:
+        if is_exact_builtin("next") and node.args:
             self._invoke_implicit_protocol(self._expression_value(node.args[0]), "__next__")
         if isinstance(node.func, ast.Attribute) and node.func.attr == "sort":
             key_keyword = next((keyword for keyword in node.keywords if keyword.arg == "key"), None)
@@ -4491,6 +4540,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "builtins" and alias.name == "vars"
                     else _origin_value(_RANGE_BUILTIN)
                     if node.module == "builtins" and alias.name == "range"
+                    else _origin_value(f"{_PROTOCOL_BUILTIN_PREFIX}{alias.name}>")
+                    if node.module == "builtins" and alias.name in _PROTOCOL_BUILTINS
                     else _origin_value(f"<builtin-consumer:{alias.name}>")
                     if node.module == "builtins" and alias.name in _TRACKED_BUILTIN_CONSUMERS
                     else _origin_value(_PARTIAL_FACTORY)
@@ -4657,18 +4708,21 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
     def _context_entry_value(
         self, context_value: _AbstractValue, *, asynchronous: bool
-    ) -> _AbstractValue:
+    ) -> tuple[_AbstractValue, tuple[_FunctionExecution, ...]]:
         if _NULLCONTEXT_VALUE in context_value.origins and context_value.items:
-            return context_value.items[0]
+            return context_value.items[0], ()
         if _CLOSING_VALUE in context_value.origins and context_value.items:
-            return context_value.items[0]
+            return context_value.items[0], ()
         if _EXITSTACK_VALUE in context_value.origins:
-            return context_value
+            return context_value, ()
         receiver = self._descriptor_receiver(context_value)
-        entries: list[_AbstractValue] = [
-            self._local_direct_call_value(function, (receiver,))
+        executions: list[_FunctionExecution] = [
+            self._local_direct_call_execution(function, (receiver,))
             for method_name in (("__aenter__",) if asynchronous else ("__enter__",))
             for function in self._source_index.methods(context_value.instance_classes, method_name)
+        ]
+        entries: list[_AbstractValue] = [
+            value for execution in executions for value in execution.values
         ]
         for identity in context_value.identity:
             deferred = self._deferred_generators.get(identity)
@@ -4693,11 +4747,12 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             )
             if yielded is not None:
                 entries.append(self._value_in_scope(yielded, deferred.scoped))
-        return _join_values(*entries)
+        return _join_values(*entries), tuple(executions)
 
     def _visit_with(self, node: ast.With | ast.AsyncWith) -> None:
         asynchronous = isinstance(node, ast.AsyncWith)
         context_values: list[_AbstractValue] = []
+        entry_abrupt: list[_AbruptPath] = []
         for item in node.items:
             self.visit(item.context_expr)
             context_value = self._expression_value(item.context_expr)
@@ -4714,28 +4769,69 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     )
                 ):
                     self._consume_deferred_generator(item.context_expr, mode="one_turn")
-            entry_value = self._context_entry_value(
+            entry_value, entry_executions = self._context_entry_value(
                 context_value,
                 asynchronous=asynchronous,
             )
+            for execution in entry_executions:
+                entry_abrupt.extend(execution.raises)
+            if entry_executions and all(
+                not execution.returns_to_caller for execution in entry_executions
+            ):
+                self._apply_flow_result(_FlowResult(None, tuple(entry_abrupt)))
+                return
             if item.optional_vars is not None:
                 self._visit_store_target(item.optional_vars)
                 self._bind_target_value(item.optional_vars, entry_value)
                 self._bind_function_target(item.optional_vars, frozenset())
                 self._bind_annotation_target(item.optional_vars, _UNKNOWN_VALUE)
         body_result = self._visit_binding_branch(node.body, self._binding_snapshot())
+        fallthrough = body_result.fallthrough
+        abrupt = [*entry_abrupt, *body_result.abrupt]
         for context_value in reversed(context_values):
             receiver = self._descriptor_receiver(context_value)
+            exit_executions: list[_FunctionExecution] = []
             for method_name in ("__aexit__",) if asynchronous else ("__exit__",):
                 for function in self._source_index.methods(
                     context_value.instance_classes, method_name
                 ):
-                    self._local_direct_call_value(
-                        function,
-                        (receiver, _UNKNOWN_VALUE, _UNKNOWN_VALUE, _UNKNOWN_VALUE),
+                    exit_executions.append(
+                        self._local_direct_call_execution(
+                            function,
+                            (receiver, _UNKNOWN_VALUE, _UNKNOWN_VALUE, _UNKNOWN_VALUE),
+                        )
                     )
             self._consume_deferred_generator_value(context_value, mode="full")
-        self._apply_flow_result(body_result)
+            if not exit_executions:
+                continue
+
+            exit_raises = [path for execution in exit_executions for path in execution.raises]
+            returning = [execution for execution in exit_executions if execution.returns_to_caller]
+            if not returning:
+                fallthrough = None
+                abrupt = exit_raises
+                continue
+
+            transformed: list[_AbruptPath] = []
+            for path in abrupt:
+                if path.kind != "raise":
+                    transformed.append(path)
+                    continue
+                truth_values = [
+                    value.truth
+                    for execution in returning
+                    for value in (execution.values or (_AbstractValue(truth=False),))
+                ]
+                if any(truth is True or truth is None for truth in truth_values):
+                    fallthrough = (
+                        path.bindings
+                        if fallthrough is None
+                        else self._join_binding_snapshots(fallthrough, path.bindings)
+                    )
+                if any(truth is False or truth is None for truth in truth_values):
+                    transformed.append(path)
+            abrupt = [*transformed, *exit_raises]
+        self._apply_flow_result(_FlowResult(fallthrough, tuple(abrupt)))
 
     def visit_With(self, node: ast.With) -> None:
         self._visit_with(node)

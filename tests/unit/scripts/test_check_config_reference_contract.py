@@ -337,6 +337,177 @@ with entered(settings):
     }
 
 
+def test_runtime_scan_tracks_qualified_and_imported_builtin_protocols(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "builtin_protocols.py").write_text(
+        """
+import builtins
+from builtins import int as integer
+
+class Reader:
+    def __len__(self):
+        return settings.evaluation.stage1_enabled
+
+    def __bool__(self):
+        return settings.evaluation.stage2_enabled
+
+    def __int__(self):
+        return settings.evaluation.stage3_enabled
+
+builtins.len(Reader())
+builtins.bool(Reader())
+integer(Reader())
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_does_not_treat_shadowed_builtin_protocol_names_as_builtins(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "shadowed_builtin_protocols.py").write_text(
+        """
+import builtins
+from builtins import int as integer
+
+class Reader:
+    def __len__(self):
+        return settings.evaluation.stage1_enabled
+    def __int__(self):
+        return settings.evaluation.stage2_enabled
+
+class FakeBuiltins:
+    len = lambda self, value: 0
+
+builtins = FakeBuiltins()
+integer = lambda value: 0
+builtins.len(Reader())
+integer(Reader())
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset()
+
+
+def test_runtime_scan_executes_exact_new_without_fabricating_requested_instance(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "new_protocol.py").write_text(
+        """
+class UnrelatedCallable:
+    def __call__(self):
+        return settings.evaluation.stage2_enabled
+
+class Reader:
+    def __new__(cls):
+        settings.evaluation.stage1_enabled
+        return UnrelatedCallable()
+
+Reader()
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {contract.ConfigField("evaluation", "stage1_enabled")}
+    )
+
+
+def test_runtime_scan_honors_exact_metaclass_construction(contract, tmp_path: Path) -> None:
+    (tmp_path / "metaclass_protocol.py").write_text(
+        """
+class Unrelated:
+    pass
+
+class Meta(type):
+    def __call__(cls):
+        settings.evaluation.stage1_enabled
+        return Unrelated()
+
+class Requested(metaclass=Meta):
+    def __new__(cls):
+        settings.evaluation.stage2_enabled
+        return super().__new__(cls)
+
+Requested()
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {contract.ConfigField("evaluation", "stage1_enabled")}
+    )
+
+
+def test_runtime_scan_threads_context_manager_abrupt_control_flow(contract, tmp_path: Path) -> None:
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+    cases = {
+        "entry_raises": (
+            """
+class Manager:
+    def __enter__(self):
+        raise RuntimeError
+    def __exit__(self, *args):
+        return False
+with Manager():
+    settings.evaluation.stage1_enabled
+""",
+            frozenset(),
+        ),
+        "exit_suppresses": (
+            """
+class Manager:
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        return True
+with Manager():
+    raise RuntimeError
+settings.evaluation.stage2_enabled
+""",
+            frozenset({contract.ConfigField("evaluation", "stage2_enabled")}),
+        ),
+        "exit_raises": (
+            """
+class Manager:
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        raise RuntimeError
+with Manager():
+    pass
+settings.evaluation.stage3_enabled
+""",
+            frozenset(),
+        ),
+    }
+    for name, (source, expected) in cases.items():
+        case_root = tmp_path / name
+        case_root.mkdir()
+        (case_root / "case.py").write_text(source, encoding="utf-8")
+        assert contract.runtime_reads(case_root, fields) == expected
+
+
 def test_runtime_scan_executes_eager_key_callback_only_for_nonempty_input(
     contract, tmp_path: Path
 ) -> None:
