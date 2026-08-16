@@ -237,6 +237,8 @@ def test_parent_seed_ignores_validation_content_and_field_specific_retraction() 
         "Fix handling when users inherit seed_demo.",
         "Analyze why the API accepts parent_seed_id: seed_old.",
         "Explain how the schema stores parent_seed_id: seed_old.",
+        "Rename parent_seed_id: seed_old to predecessor_id.",
+        "Remove parent_seed_id: seed_old from the API.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
     assert (

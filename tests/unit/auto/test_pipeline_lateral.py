@@ -566,6 +566,11 @@ def test_seed_qa_repairs_fail_closed_on_validation_content_and_field_retractions
         "Fix handling when users inherit seed_demo.",
         "Analyze why the API accepts task_type: document.",
         "Analyze why the API accepts parent_seed_id: seed_old.",
+        "Rename task_type: document to artifact in the API.",
+        "Refactor task_type: document handling.",
+        "Deprecate task_type: document.",
+        "Rename parent_seed_id: seed_old to predecessor_id.",
+        "Remove parent_seed_id: seed_old from the API.",
     ),
 )
 def test_seed_qa_repairs_ignore_artifact_payload_contract_fields(goal: str) -> None:

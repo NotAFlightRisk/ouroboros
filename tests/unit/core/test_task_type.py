@@ -169,6 +169,7 @@ def test_explicit_task_type_accepts_ordinary_positive_wording() -> None:
         "Use document as the task type.",
         "The task type must be a document.",
         "The task type should be a document.",
+        "Implement this as task_type: document.",
     ):
         assert explicit_task_type_from_goal(goal) == "document"
     assert (
@@ -441,6 +442,9 @@ def test_explicit_task_type_ignores_artifact_payload_fields() -> None:
         "Add a test for task_type: document.",
         "Analyze why the API accepts task_type: document.",
         "Explain how the schema stores task_type: document.",
+        "Rename task_type: document to artifact in the API.",
+        "Refactor task_type: document handling.",
+        "Deprecate task_type: document.",
     ):
         assert explicit_task_type_from_goal(goal) is None
 

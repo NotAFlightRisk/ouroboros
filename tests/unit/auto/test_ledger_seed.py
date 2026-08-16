@@ -285,7 +285,20 @@ class TestPartialSeedFromEvidence:
             "Fix handling when users inherit seed_demo.",
             "Analyze why the API accepts task_type: document.",
             "Analyze why the API accepts parent_seed_id: seed_old.",
+            "Rename task_type: document to artifact in the API.",
+            "Refactor task_type: document handling.",
+            "Deprecate task_type: document.",
+            "Rename parent_seed_id: seed_old to predecessor_id.",
+            "Remove parent_seed_id: seed_old from the API.",
         )
+
+        positive = "Implement this as task_type: document."
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(positive))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(positive), reason="interview_phase_deadline"
+        )
+        assert complete.task_type == "document"
+        assert partial.task_type == "document"
         for goal in goals:
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
             partial = partial_seed_from_evidence(

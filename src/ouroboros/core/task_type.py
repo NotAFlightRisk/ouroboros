@@ -227,7 +227,7 @@ _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN = re.compile(
     r"|\b(?:the|a|an)\s+[^\n.!?]{1,120}\b(?:must|should|will)\s+"
     r"(?:set|contain|include|say|show|state|read|emit|print|output)\b"
     r"[^\n.!?]{0,160}$"
-    r"|\b(?:add|update|fix|implement|support|test|validate|accept)\b"
+    r"|\b(?:add|update|fix|implement|support|test|validate|accept|rename|refactor|deprecate|remove|migrate)\b"
     r"[^\n.!?]{0,180}\b(?:task[_\s-]*type|parent_seed_id)\b[^\n.!?]{0,120}$"
     r"|\b(?:add|update|fix|implement|support|test|validate|accept)\b"
     r"[^\n.!?]{0,180}\b(?:when|whether|how)\b[^\n.!?]{0,120}"
@@ -235,6 +235,13 @@ _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN = re.compile(
     r"|\b(?:analyze|explain|investigate|describe|review|understand)\b"
     r"[^\n.!?]{0,240}\b(?:task[_\s-]*type|parent_seed_id|inherit(?:ing)?)\b"
     r"[^\n.!?]{0,120}$",
+    re.IGNORECASE,
+)
+_EXPLICIT_TASK_TYPE_BINDING_PATTERN = re.compile(
+    r"\b(?:implement|build|create|deliver|produce)\b\s+"
+    r"(?:this|it|the\s+(?:seed|task|result|output))\s+as\s+"
+    r"(?:task[_\s-]*type|task\s+type)\s*(?:is|=|:|to)?\s*"
+    rf"{_TASK_TYPE_PATTERN}\b",
     re.IGNORECASE,
 )
 
@@ -285,14 +292,16 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
             if re.match(r"\s*\?", normalized[match.end() :]):
                 continue
             contract_prefix = normalized[segment_start : match.start()]
+            candidate_through_match = normalized[segment_start : match.end()]
+            artifact_governed = (
+                _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(candidate_through_match) is not None
+                or _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(governor_prefix) is not None
+            )
             if (
                 is_non_binding_contract_segment(contract_prefix)
                 or is_non_binding_contract_segment(normalized[segment_start : match.end()])
-                or _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(
-                    normalized[segment_start : match.end()]
-                )
-                is not None
-                or _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(governor_prefix) is not None
+                or artifact_governed
+                and _EXPLICIT_TASK_TYPE_BINDING_PATTERN.search(candidate_through_match) is None
                 or is_quoted_contract(normalized, match.start(), match.end())
                 or has_historical_governor(
                     normalized, match.start(), _governor_scope_start(normalized, match.start())

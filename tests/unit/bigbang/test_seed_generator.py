@@ -355,15 +355,19 @@ class TestSeedGeneratorAmbiguityGating:
             assert isinstance(result.value, Seed)
 
     @pytest.mark.asyncio
-    async def test_generate_preserves_explicit_document_task_type(self) -> None:
+    @pytest.mark.parametrize(
+        "initial_context",
+        (
+            "Rather than change source code, write the requested plan; set the task type to document. For reference, task_type: code is an example.",
+            "Implement this as task_type: document.",
+        ),
+    )
+    async def test_generate_preserves_explicit_document_task_type(
+        self, initial_context: str
+    ) -> None:
         """A document contract must not silently fall back to code execution."""
         mock_adapter = AsyncMock()
-        state = create_interview_state_with_rounds(
-            initial_context=(
-                "Rather than change source code, write the requested plan; "
-                "set the task type to document. For reference, task_type: code is an example."
-            )
-        )
+        state = create_interview_state_with_rounds(initial_context=initial_context)
         low_ambiguity = create_low_ambiguity_score(0.15)
         extraction_response = create_valid_extraction_response(
             goal="Create the requested plan as a document.",
@@ -463,6 +467,11 @@ class TestSeedGeneratorAmbiguityGating:
             "Fix handling when users inherit seed_demo.",
             "Analyze why the API accepts task_type: document.",
             "Analyze why the API accepts parent_seed_id: seed_old.",
+            "Rename task_type: document to artifact in the API.",
+            "Refactor task_type: document handling.",
+            "Deprecate task_type: document.",
+            "Rename parent_seed_id: seed_old to predecessor_id.",
+            "Remove parent_seed_id: seed_old from the API.",
         ),
     )
     @pytest.mark.asyncio
