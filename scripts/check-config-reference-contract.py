@@ -231,6 +231,9 @@ _STATIC_UNKNOWN = object()
 _ANNOTATION_MODULE = "<annotation-config-module>"
 _TYPE_CHECKING_FALSE = "<typing-type-checking-false>"
 _TYPING_MODULE = "<typing-module>"
+_TYPING_CAST = "<typing-cast>"
+_COPY_MODULE = "<copy-module>"
+_COPY_IDENTITY_TRANSFORMS = frozenset({"<copy-copy>", "<copy-deepcopy>"})
 _OPERATOR_MODULE = "<operator-module>"
 _ATTRGETTER_FACTORY = "<attrgetter-factory>"
 _ITEMGETTER_FACTORY = "<itemgetter-factory>"
@@ -241,6 +244,7 @@ _GETATTR_BUILTIN = "<getattr-builtin>"
 _HASATTR_BUILTIN = "<hasattr-builtin>"
 _OBJECT_BUILTIN = "<object-builtin>"
 _VARS_BUILTIN = "<vars-builtin>"
+_RANGE_BUILTIN = "<range-builtin>"
 _FUNCTOOLS_MODULE = "<functools-module>"
 _PARTIAL_FACTORY = "<functools-partial-factory>"
 _PARTIALMETHOD_FACTORY = "<functools-partialmethod-factory>"
@@ -988,8 +992,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     ) -> tuple[tuple[_FunctionNode, _AbstractValue | None], ...]:
         value = self._expression_value(node)
         targets = [(target.function, target.receiver) for target in value.callables]
+        receiver = self._descriptor_receiver(value)
         for function in self._source_index.methods(value.instance_classes, "__call__"):
-            target = (function, None if self._method_is_static(function) else value)
+            target = (function, None if self._method_is_static(function) else receiver)
             if target not in targets:
                 targets.append(target)
         if not targets:
@@ -1466,6 +1471,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 if node.id == "object" and not self._name_is_bound("object")
                 else _origin_value(_VARS_BUILTIN)
                 if node.id == "vars" and not self._name_is_bound("vars")
+                else _origin_value(_RANGE_BUILTIN)
+                if node.id == "range" and not self._name_is_bound("range")
                 else _origin_value(f"<builtin-consumer:{node.id}>")
                 if node.id in _TRACKED_BUILTIN_CONSUMERS and not self._name_is_bound(node.id)
                 else self._name_value(node.id)
@@ -1509,6 +1516,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_METHODCALLER_FACTORY)
             if _OPERATOR_MODULE in owner.origins and node.attr == "getitem":
                 return _origin_value(_OPERATOR_GETITEM)
+            if _TYPING_MODULE in owner.origins and node.attr == "cast":
+                return _origin_value(_TYPING_CAST)
+            if _COPY_MODULE in owner.origins and node.attr in {"copy", "deepcopy"}:
+                return _origin_value(f"<copy-{node.attr}>")
             if _BUILTINS_MODULE in owner.origins and node.attr == "getattr":
                 return _origin_value(_GETATTR_BUILTIN)
             if _BUILTINS_MODULE in owner.origins and node.attr == "hasattr":
@@ -1517,6 +1528,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_GETATTR_BUILTIN)
             if _BUILTINS_MODULE in owner.origins and node.attr == "vars":
                 return _origin_value(_VARS_BUILTIN)
+            if _BUILTINS_MODULE in owner.origins and node.attr == "range":
+                return _origin_value(_RANGE_BUILTIN)
             if _BUILTINS_MODULE in owner.origins and node.attr in _TRACKED_BUILTIN_CONSUMERS:
                 return _origin_value(f"<builtin-consumer:{node.attr}>")
             if _FUNCTOOLS_MODULE in owner.origins and node.attr == "partial":
@@ -1579,7 +1592,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     *(
                         _CallableTarget(
                             function,
-                            None if self._method_is_static(function) else owner,
+                            None
+                            if self._method_is_static(function)
+                            else self._descriptor_receiver(owner),
                         )
                         for function in methods
                     ),
@@ -1720,6 +1735,20 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _AbstractValue(origins=frozenset({_EXITSTACK_VALUE}))
             if _ENTER_CONTEXT_CONSUMER in function_value.origins and node.args:
                 return self._context_entry_value(self._expression_value(node.args[0]))
+            if _TYPING_CAST in function_value.origins and len(node.args) >= 2:
+                return self._expression_value(node.args[1])
+            if function_value.origins & _COPY_IDENTITY_TRANSFORMS and node.args:
+                return self._expression_value(node.args[0])
+            if _RANGE_BUILTIN in function_value.origins:
+                values = tuple(_safe_constant_value(argument) for argument in node.args)
+                if 1 <= len(values) <= 3 and all(isinstance(value, int) for value in values):
+                    try:
+                        nonempty = bool(range(*values))
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                    else:
+                        return _AbstractValue(items=(_UNKNOWN_VALUE,) if nonempty else ())
+                return _UNKNOWN_VALUE
             if function_value.serialized_sections:
                 return _AbstractValue(serialized_sections=function_value.serialized_sections)
             if _VARS_BUILTIN in function_value.origins and node.args:
@@ -3239,6 +3268,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 self._states[-1][bound] = (
                     _origin_value(_TYPING_MODULE)
                     if alias.name == "typing"
+                    else _origin_value(_COPY_MODULE)
+                    if alias.name == "copy"
                     else _origin_value(_OPERATOR_MODULE)
                     if alias.name == "operator"
                     else _origin_value(_BUILTINS_MODULE)
@@ -3286,6 +3317,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 self._states[-1][bound] = (
                     _type_checking_value()
                     if node.module == "typing" and alias.name == "TYPE_CHECKING"
+                    else _origin_value(_TYPING_CAST)
+                    if node.module == "typing" and alias.name == "cast"
+                    else _origin_value(f"<copy-{alias.name}>")
+                    if node.module == "copy" and alias.name in {"copy", "deepcopy"}
                     else _origin_value(_ATTRGETTER_FACTORY)
                     if node.module == "operator" and alias.name == "attrgetter"
                     else _origin_value(_ITEMGETTER_FACTORY)
@@ -3300,6 +3335,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "builtins" and alias.name == "hasattr"
                     else _origin_value(_VARS_BUILTIN)
                     if node.module == "builtins" and alias.name == "vars"
+                    else _origin_value(_RANGE_BUILTIN)
+                    if node.module == "builtins" and alias.name == "range"
                     else _origin_value(f"<builtin-consumer:{alias.name}>")
                     if node.module == "builtins" and alias.name in _TRACKED_BUILTIN_CONSUMERS
                     else _origin_value(_PARTIAL_FACTORY)

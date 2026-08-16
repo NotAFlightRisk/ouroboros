@@ -2921,6 +2921,141 @@ reader(config.evaluation)
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
+@pytest.mark.parametrize(
+    "source",
+    (
+        """
+from typing import cast
+from ouroboros.config.models import EvaluationConfig
+
+cast(EvaluationConfig, config.evaluation).stage1_enabled
+""",
+        """
+import copy
+
+copy.copy(config.evaluation).stage1_enabled
+copy.deepcopy(config.evaluation).stage1_enabled
+""",
+        """
+from copy import copy as clone
+from copy import deepcopy as deep_clone
+
+clone(config.evaluation).stage1_enabled
+deep_clone(config.evaluation).stage1_enabled
+""",
+    ),
+)
+def test_runtime_scan_preserves_identity_transform_provenance(
+    contract, tmp_path: Path, source: str
+) -> None:
+    (tmp_path / "identity_transform.py").write_text(source, encoding="utf-8")
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        """
+from typing import cast
+
+cast = external
+cast(EvaluationConfig, config.evaluation).stage1_enabled
+""",
+        """
+import copy
+
+copy = external
+copy.copy(config.evaluation).stage1_enabled
+""",
+        """
+from copy import deepcopy
+
+deepcopy = external
+deepcopy(config.evaluation).stage1_enabled
+""",
+    ),
+)
+def test_runtime_scan_respects_overwritten_identity_transforms(
+    contract, tmp_path: Path, source: str
+) -> None:
+    (tmp_path / "overwritten_identity_transform.py").write_text(source, encoding="utf-8")
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+def test_runtime_scan_invokes_constructor_captured_callable_receiver(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "captured_callable.py").write_text(
+        """
+class Reader:
+    def __init__(self, section):
+        self.section = section
+
+    def __call__(self):
+        return self.section.stage1_enabled
+
+Reader(config.evaluation)()
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_respects_overwritten_constructor_captured_receiver(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "overwritten_captured_callable.py").write_text(
+        """
+class Reader:
+    def __init__(self, section):
+        self.section = section
+
+    def __call__(self):
+        return self.section.stage1_enabled
+
+reader = Reader(config.evaluation)
+reader.section = external
+reader()
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+@pytest.mark.parametrize("range_expression", ("range(0)", "range(5, 5)", "range(3, 3, -1)"))
+def test_runtime_scan_ignores_statically_empty_range_loops(
+    contract, tmp_path: Path, range_expression: str
+) -> None:
+    (tmp_path / "empty_range.py").write_text(
+        f"for _ in {range_expression}:\n    config.evaluation.stage1_enabled\n",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+@pytest.mark.parametrize("range_expression", ("range(1)", "range(2, 3)", "range(3, 0, -1)"))
+def test_runtime_scan_counts_statically_nonempty_range_loops(
+    contract, tmp_path: Path, range_expression: str
+) -> None:
+    (tmp_path / "nonempty_range.py").write_text(
+        f"for _ in {range_expression}:\n    config.evaluation.stage1_enabled\n",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
 def test_runtime_scan_ignores_unreachable_local_reader_before_external_overwrite(
     contract, tmp_path: Path
 ) -> None:
