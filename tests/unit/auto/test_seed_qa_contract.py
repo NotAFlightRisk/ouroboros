@@ -136,6 +136,7 @@ def test_parent_seed_rejects_ordinary_negative_inheritance_language() -> None:
         "In the previous proposal, inherit seed_bad.",
         "It is not true that we inherit seed_bad.",
         "Inherit seed_bad will not be used.",
+        "Inheriting from seed_bad is not required.",
         "Inherit seed_bad is no longer required.",
         "We won't inherit seed_bad.",
         "There is no requirement to inherit seed_bad.",

@@ -420,6 +420,7 @@ class TestPartialSeedFromEvidence:
             "It is not true that task_type: document.",
             "We are not using task_type: document.",
             "task_type: document will not be used.",
+            "Build a Python CLI; task_type: document is not required for this Seed.",
             "task_type: document is no longer required.",
             "We won't use task_type: document.",
             "We won’t use task_type: document.",
@@ -490,6 +491,7 @@ class TestPartialSeedFromEvidence:
 
         rejected = (
             "task_type: document will not be used.",
+            "Build a Python CLI; task_type: document is not required for this Seed.",
             "task_type: document is no longer required.",
             "We won't use task_type: document.",
             "We won’t use task_type: document.",
