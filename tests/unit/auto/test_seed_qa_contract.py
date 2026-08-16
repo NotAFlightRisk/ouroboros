@@ -227,6 +227,8 @@ def test_parent_seed_ignores_validation_content_and_field_specific_retraction() 
     for goal in (
         "Write unit tests asserting parent_seed_id: seed_bad.",
         "Create documentation showing how to set parent_seed_id: seed_bad.",
+        "Build a validator that rejects parent_seed_id: seed_bad.",
+        "Write docs recommending inherit seed_old to users.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
     assert (

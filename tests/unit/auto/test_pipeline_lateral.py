@@ -513,8 +513,8 @@ def test_seed_qa_repairs_fail_closed_on_validation_content_and_field_retractions
     seed = _build_seed(seed_id="seed_current").model_copy(
         update={
             "goal": (
-                "Write unit tests asserting task_type: document. "
-                "Create documentation showing how to set parent_seed_id: seed_bad. "
+                "Build a linter that rejects task_type: document in configuration. "
+                "Write docs recommending inherit seed_old to users. "
                 "Inherit seed_parent. Cancel the task type requirement."
             ),
             "task_type": "code",

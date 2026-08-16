@@ -400,6 +400,8 @@ def test_explicit_task_type_ignores_unrelated_cancellation_and_output_prose() ->
     for goal in (
         "Write unit tests asserting task_type: document.",
         "Create documentation showing how to set task_type: document.",
+        "Build a linter that rejects task_type: document in configuration.",
+        "Build a validator that warns when task_type: document is selected.",
     ):
         assert explicit_task_type_from_goal(goal) is None
     for goal in (
