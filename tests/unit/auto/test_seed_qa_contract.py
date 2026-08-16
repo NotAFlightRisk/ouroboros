@@ -265,6 +265,10 @@ def test_parent_seed_ignores_api_schema_and_parser_content() -> None:
         "The API returns parent_seed_id: seed_fake.",
         "The schema property parent_seed_id is seed_fake.",
         "Ensure the parser preserves strings where parent_seed_id: seed_fake.",
+        "Persist parent_seed_id: seed_demo in the database.",
+        "Store parent_seed_id: seed_demo in the session state.",
+        "Expose parent_seed_id: seed_demo in the CLI output.",
+        "The config field parent_seed_id: seed_demo controls resume.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
 

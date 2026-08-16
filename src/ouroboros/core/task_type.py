@@ -239,7 +239,12 @@ _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN = re.compile(
     # field-shaped value in that clause is data-plane content, not authority
     # to reroute this Seed or rewrite its lineage.
     r"|\b(?:ensure\s+)?(?:the\s+)?(?:api|schema(?:\s+property)?|parser)\b"
-    r"[^\n.!?]{0,240}$",
+    r"[^\n.!?]{0,240}$"
+    r"|\b(?:persist|store|expose|record|log)\b[^\n.!?]{0,200}"
+    r"\b(?:task[_\s-]*type|parent_seed_id)\b[^\n.!?]{0,120}$"
+    r"|\b(?:the\s+)?(?:config(?:uration)?(?:\s+field)?|database(?:\s+column)?|"
+    r"session\s+state|cli\s+output|log(?:ging)?\s+(?:field|output))\b"
+    r"[^\n.!?]{0,200}\b(?:task[_\s-]*type|parent_seed_id)\b[^\n.!?]{0,120}$",
     re.IGNORECASE,
 )
 _EXPLICIT_TASK_TYPE_BINDING_PATTERN = re.compile(

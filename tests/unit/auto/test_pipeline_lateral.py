@@ -255,6 +255,10 @@ def test_seed_qa_repairs_ignore_api_schema_and_parser_control_field_content() ->
         "The API returns a Seed where task_type: document and parent_seed_id: seed_fake.",
         "The schema property task_type is document and parent_seed_id is seed_fake.",
         "Ensure the parser preserves strings where task_type: document and parent_seed_id: seed_fake.",
+        "Persist task_type: document and parent_seed_id: seed_fake in the database.",
+        "Store task_type: document and parent_seed_id: seed_fake in the session state.",
+        "Expose task_type: document and parent_seed_id: seed_fake in the CLI output.",
+        "The config field task_type: document and parent_seed_id: seed_fake controls resume.",
     ):
         seed = _build_seed(seed_id="seed_current").model_copy(
             update={"goal": goal, "task_type": "code"}

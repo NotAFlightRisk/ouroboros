@@ -475,6 +475,10 @@ class TestSeedGeneratorAmbiguityGating:
             "The API returns a Seed where task_type: document.",
             "The schema property task_type is document.",
             "Ensure the parser preserves strings where task_type: document.",
+            "Persist task_type: document in the database.",
+            "Store task_type: document in the session state.",
+            "Expose task_type: document in the CLI output.",
+            "The config field task_type: document controls rendering.",
         ),
     )
     @pytest.mark.asyncio
