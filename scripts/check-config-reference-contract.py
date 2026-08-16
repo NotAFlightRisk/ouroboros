@@ -234,8 +234,12 @@ _TYPING_MODULE = "<typing-module>"
 _OPERATOR_MODULE = "<operator-module>"
 _ATTRGETTER_FACTORY = "<attrgetter-factory>"
 _ITEMGETTER_FACTORY = "<itemgetter-factory>"
+_METHODCALLER_FACTORY = "<methodcaller-factory>"
+_OPERATOR_GETITEM = "<operator-getitem>"
 _BUILTINS_MODULE = "<builtins-module>"
 _GETATTR_BUILTIN = "<getattr-builtin>"
+_HASATTR_BUILTIN = "<hasattr-builtin>"
+_OBJECT_BUILTIN = "<object-builtin>"
 _VARS_BUILTIN = "<vars-builtin>"
 _FUNCTOOLS_MODULE = "<functools-module>"
 _PARTIAL_FACTORY = "<functools-partial-factory>"
@@ -1456,6 +1460,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             value = (
                 _origin_value(_GETATTR_BUILTIN)
                 if node.id == "getattr" and not self._name_is_bound("getattr")
+                else _origin_value(_HASATTR_BUILTIN)
+                if node.id == "hasattr" and not self._name_is_bound("hasattr")
+                else _origin_value(_OBJECT_BUILTIN)
+                if node.id == "object" and not self._name_is_bound("object")
                 else _origin_value(_VARS_BUILTIN)
                 if node.id == "vars" and not self._name_is_bound("vars")
                 else _origin_value(f"<builtin-consumer:{node.id}>")
@@ -1497,7 +1505,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_ATTRGETTER_FACTORY)
             if _OPERATOR_MODULE in owner.origins and node.attr == "itemgetter":
                 return _origin_value(_ITEMGETTER_FACTORY)
+            if _OPERATOR_MODULE in owner.origins and node.attr == "methodcaller":
+                return _origin_value(_METHODCALLER_FACTORY)
+            if _OPERATOR_MODULE in owner.origins and node.attr == "getitem":
+                return _origin_value(_OPERATOR_GETITEM)
             if _BUILTINS_MODULE in owner.origins and node.attr == "getattr":
+                return _origin_value(_GETATTR_BUILTIN)
+            if _BUILTINS_MODULE in owner.origins and node.attr == "hasattr":
+                return _origin_value(_HASATTR_BUILTIN)
+            if _OBJECT_BUILTIN in owner.origins and node.attr == "__getattribute__":
                 return _origin_value(_GETATTR_BUILTIN)
             if _BUILTINS_MODULE in owner.origins and node.attr == "vars":
                 return _origin_value(_VARS_BUILTIN)
@@ -1679,6 +1695,19 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         argument.value
                         for argument in node.args
                         if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+                    )
+                )
+            if _METHODCALLER_FACTORY in function_value.origins:
+                method_name = (
+                    self._expression_value(node.args[0]).string_value if node.args else None
+                )
+                return _AbstractValue(
+                    accessed_attributes=frozenset(
+                        argument.value
+                        for argument in node.args[1:]
+                        if method_name == "__getattribute__"
+                        and isinstance(argument, ast.Constant)
+                        and isinstance(argument.value, str)
                     )
                 )
             if _NULLCONTEXT_FACTORY in function_value.origins:
@@ -2050,10 +2079,19 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 for parameter in parameters:
                     for section in mapping.serialized_sections:
                         self._record(section, parameter.arg)
-        if _GETATTR_BUILTIN in accessor.origins and len(node.args) >= 2:
+        if accessor.origins & {_GETATTR_BUILTIN, _HASATTR_BUILTIN} and len(node.args) >= 2:
             field_name = self._expression_value(node.args[1]).string_value
             if field_name is not None:
                 for section in self._expression_value(node.args[0]).origins & TRACKED_SECTIONS:
+                    self._record(section, field_name)
+        if _OPERATOR_GETITEM in accessor.origins and len(node.args) >= 2:
+            field_name = (
+                node.args[1].value
+                if isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str)
+                else None
+            )
+            if field_name is not None:
+                for section in self._expression_value(node.args[0]).serialized_sections:
                     self._record(section, field_name)
         self.generic_visit(node)
         self._record_possible_exception(before)
@@ -2987,6 +3025,18 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         if isinstance(key, ast.Constant) and isinstance(key.value, str):
                             for section in subject.serialized_sections:
                                 self._record(section, key.value)
+        for pattern in (candidate for case in node.cases for candidate in ast.walk(case.pattern)):
+            if not isinstance(pattern, ast.MatchClass):
+                continue
+            class_name = _callable_name(pattern.cls)
+            for section in subject.origins & TRACKED_SECTIONS:
+                if (
+                    class_name
+                    != {"evaluation": "EvaluationConfig", "consensus": "ConsensusConfig"}[section]
+                ):
+                    continue
+                for attribute in pattern.kwd_attrs:
+                    self._record(section, attribute)
         initial = self._binding_snapshot()
         branches: list[_FlowResult] = []
         unmatched = True
@@ -3240,8 +3290,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "operator" and alias.name == "attrgetter"
                     else _origin_value(_ITEMGETTER_FACTORY)
                     if node.module == "operator" and alias.name == "itemgetter"
+                    else _origin_value(_METHODCALLER_FACTORY)
+                    if node.module == "operator" and alias.name == "methodcaller"
+                    else _origin_value(_OPERATOR_GETITEM)
+                    if node.module == "operator" and alias.name == "getitem"
                     else _origin_value(_GETATTR_BUILTIN)
                     if node.module == "builtins" and alias.name == "getattr"
+                    else _origin_value(_HASATTR_BUILTIN)
+                    if node.module == "builtins" and alias.name == "hasattr"
                     else _origin_value(_VARS_BUILTIN)
                     if node.module == "builtins" and alias.name == "vars"
                     else _origin_value(f"<builtin-consumer:{alias.name}>")

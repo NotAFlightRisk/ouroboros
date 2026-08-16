@@ -2662,6 +2662,96 @@ read_stage(config.evaluation)
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
+def test_runtime_scan_tracks_alternative_attribute_accessors(contract, tmp_path: Path) -> None:
+    (tmp_path / "attribute_accessors.py").write_text(
+        """
+import builtins
+import operator
+
+hasattr(settings.evaluation, "stage1_enabled")
+object.__getattribute__(settings.evaluation, "stage2_enabled")
+operator.methodcaller("__getattribute__", "stage3_enabled")(settings.evaluation)
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "shadowed_attribute_accessors.py").write_text(
+        """
+hasattr = lambda *_args: False
+object = external_object
+methodcaller = external_factory
+
+hasattr(settings.evaluation, "semantic_model")
+object.__getattribute__(settings.evaluation, "semantic_model")
+methodcaller("__getattribute__", "semantic_model")(settings.evaluation)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled", "semantic_model")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields - {
+        contract.ConfigField("evaluation", "semantic_model")
+    }
+
+
+def test_runtime_scan_tracks_class_pattern_keyword_attributes(contract, tmp_path: Path) -> None:
+    (tmp_path / "class_patterns.py").write_text(
+        """
+match settings.evaluation:
+    case EvaluationConfig(stage1_enabled=True):
+        pass
+
+match unrelated:
+    case EvaluationConfig(stage2_enabled=True):
+        pass
+
+match settings.evaluation:
+    case OtherConfig(stage3_enabled=True):
+        pass
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {contract.ConfigField("evaluation", "stage1_enabled")}
+    )
+
+
+def test_runtime_scan_tracks_operator_getitem_over_serialized_sections(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "operator_getitem.py").write_text(
+        """
+import operator
+from operator import getitem as imported_getitem
+
+alias = operator.getitem
+operator.getitem(settings.evaluation.model_dump(), "stage1_enabled")
+imported_getitem(settings.evaluation.model_dump(), "stage2_enabled")
+alias(settings.evaluation.model_dump(), "stage3_enabled")
+dynamic = "semantic_model"
+operator.getitem(settings.evaluation.model_dump(), dynamic)
+imported_getitem = external_getitem
+imported_getitem(settings.evaluation.model_dump(), "semantic_model")
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled", "semantic_model")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields - {
+        contract.ConfigField("evaluation", "semantic_model")
+    }
+
+
 def test_runtime_scan_resolves_constant_indirected_getattr_and_ignores_shadowed_builtin(
     contract, tmp_path: Path
 ) -> None:
