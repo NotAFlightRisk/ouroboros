@@ -387,6 +387,146 @@ captured = reader.value
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
+def test_runtime_scan_tracks_exact_serialized_mapping_consumers(contract, tmp_path: Path) -> None:
+    (tmp_path / "serialized_consumers.py").write_text(
+        """
+def read(stage3_enabled):
+    return stage3_enabled
+
+match settings.evaluation.model_dump():
+    case {"stage1_enabled": value}:
+        pass
+
+rendered = "{stage2_enabled}".format_map(settings.evaluation.model_dump())
+read(**settings.evaluation.model_dump())
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_ignores_nonexact_serialized_mapping_consumers(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "nonexact_serialized_consumers.py").write_text(
+        """
+def read(**values):
+    return values
+
+match settings.evaluation.model_dump():
+    case {"untracked": value}:
+        pass
+
+rendered = "{{stage1_enabled}} {untracked}".format_map(settings.evaluation.model_dump())
+read(**settings.evaluation.model_dump())
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+def test_runtime_scan_executes_consumed_itertools_callbacks(contract, tmp_path: Path) -> None:
+    (tmp_path / "itertools_callbacks.py").write_text(
+        """
+import itertools
+
+list(itertools.groupby(
+    [settings.evaluation],
+    key=lambda section: section.stage1_enabled,
+))
+list(itertools.dropwhile(
+    lambda section: section.stage2_enabled,
+    [settings.evaluation],
+))
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_does_not_execute_unconsumed_or_empty_itertools_callbacks(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "inert_itertools_callbacks.py").write_text(
+        """
+from itertools import dropwhile, groupby
+
+groupby([settings.evaluation], key=lambda section: section.stage1_enabled)
+list(dropwhile(lambda section: section.stage2_enabled, []))
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset()
+
+
+def test_runtime_scan_tracks_itemgetter_and_partialmethod_factories(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "callable_factories.py").write_text(
+        """
+import functools
+import operator
+
+operator.itemgetter("stage1_enabled")(settings.evaluation.model_dump())
+
+class Reader:
+    def read(self, section):
+        return section.stage2_enabled
+
+    bound = functools.partialmethod(read, settings.evaluation)
+
+Reader().bound()
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_ignores_shadowed_callable_factories(contract, tmp_path: Path) -> None:
+    (tmp_path / "shadowed_callable_factories.py").write_text(
+        """
+from functools import partialmethod
+from operator import itemgetter
+
+itemgetter = external_factory
+partialmethod = external_descriptor
+itemgetter("stage1_enabled")(settings.evaluation.model_dump())
+
+class Reader:
+    def read(self, section):
+        return section.stage2_enabled
+    bound = partialmethod(read, settings.evaluation)
+
+Reader().bound()
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset()
+
+
 def test_runtime_scan_consumes_coroutines_scheduled_by_asyncio_gather(
     contract, tmp_path: Path
 ) -> None:

@@ -233,14 +233,17 @@ _TYPE_CHECKING_FALSE = "<typing-type-checking-false>"
 _TYPING_MODULE = "<typing-module>"
 _OPERATOR_MODULE = "<operator-module>"
 _ATTRGETTER_FACTORY = "<attrgetter-factory>"
+_ITEMGETTER_FACTORY = "<itemgetter-factory>"
 _BUILTINS_MODULE = "<builtins-module>"
 _GETATTR_BUILTIN = "<getattr-builtin>"
 _VARS_BUILTIN = "<vars-builtin>"
 _FUNCTOOLS_MODULE = "<functools-module>"
 _PARTIAL_FACTORY = "<functools-partial-factory>"
+_PARTIALMETHOD_FACTORY = "<functools-partialmethod-factory>"
 _REDUCE_CONSUMER = "<functools-reduce-consumer>"
 _ITERTOOLS_MODULE = "<itertools-module>"
 _STARMAP_FACTORY = "<itertools-starmap-factory>"
+_ITERTOOLS_CALLBACK_FACTORIES = frozenset({"dropwhile", "filterfalse", "groupby", "takewhile"})
 _HEAPQ_MODULE = "<heapq-module>"
 _HEAPQ_KEY_CONSUMERS = frozenset({"nsmallest", "nlargest"})
 _HEAPQ_KEY_CONSUMER_ORIGINS = frozenset(
@@ -1490,6 +1493,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 )
             if _OPERATOR_MODULE in owner.origins and node.attr == "attrgetter":
                 return _origin_value(_ATTRGETTER_FACTORY)
+            if _OPERATOR_MODULE in owner.origins and node.attr == "itemgetter":
+                return _origin_value(_ITEMGETTER_FACTORY)
             if _BUILTINS_MODULE in owner.origins and node.attr == "getattr":
                 return _origin_value(_GETATTR_BUILTIN)
             if _BUILTINS_MODULE in owner.origins and node.attr == "vars":
@@ -1498,10 +1503,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(f"<builtin-consumer:{node.attr}>")
             if _FUNCTOOLS_MODULE in owner.origins and node.attr == "partial":
                 return _origin_value(_PARTIAL_FACTORY)
+            if _FUNCTOOLS_MODULE in owner.origins and node.attr == "partialmethod":
+                return _origin_value(_PARTIALMETHOD_FACTORY)
             if _FUNCTOOLS_MODULE in owner.origins and node.attr == "reduce":
                 return _origin_value(_REDUCE_CONSUMER)
             if _ITERTOOLS_MODULE in owner.origins and node.attr == "starmap":
                 return _origin_value(_STARMAP_FACTORY)
+            if _ITERTOOLS_MODULE in owner.origins and node.attr in _ITERTOOLS_CALLBACK_FACTORIES:
+                return _origin_value(f"<itertools-callback-factory:{node.attr}>")
             if _HEAPQ_MODULE in owner.origins and node.attr in _HEAPQ_KEY_CONSUMERS:
                 return _origin_value(f"<heapq-key-consumer:{node.attr}>")
             if _ASYNCIO_MODULE in owner.origins and node.attr in _ASYNCIO_CONSUMERS:
@@ -1625,7 +1634,42 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     star_arguments=True,
                 )
                 return _AbstractValue(identity=frozenset({identity}))
-            if _ATTRGETTER_FACTORY in function_value.origins:
+            itertools_factory = next(
+                (
+                    name
+                    for name in _ITERTOOLS_CALLBACK_FACTORIES
+                    if f"<itertools-callback-factory:{name}>" in function_value.origins
+                ),
+                None,
+            )
+            if itertools_factory is not None:
+                callback_node: ast.expr | None = None
+                iterable_node: ast.expr | None = None
+                if itertools_factory == "groupby" and node.args:
+                    iterable_node = node.args[0]
+                    key = next((kw.value for kw in node.keywords if kw.arg == "key"), None)
+                    callback_node = key
+                elif len(node.args) >= 2:
+                    callback_node, iterable_node = node.args[:2]
+                if (
+                    callback_node is not None
+                    and iterable_node is not None
+                    and (callbacks := self._call_targets(callback_node))
+                ):
+                    identity = id(node)
+                    self._deferred_callable_iterators[identity] = _DeferredCallableIterator(
+                        callbacks=tuple(
+                            _CallableTarget(function, receiver) for function, receiver in callbacks
+                        ),
+                        iterables=(self._expression_value(iterable_node),),
+                    )
+                    return _AbstractValue(identity=frozenset({identity}))
+                return (
+                    self._expression_value(iterable_node)
+                    if iterable_node is not None
+                    else _UNKNOWN_VALUE
+                )
+            if function_value.origins & {_ATTRGETTER_FACTORY, _ITEMGETTER_FACTORY}:
                 return _AbstractValue(
                     accessed_attributes=frozenset(
                         argument.value
@@ -1699,13 +1743,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         if keyword.arg is not None
                         else ("**", _conservative_value(value))
                     )
-                return _AbstractValue(
+                instance = _AbstractValue(
                     items=tuple(items),
                     attributes=tuple(attributes),
                     identity=frozenset({id(node)}),
                     classes=constructor_classes,
                     instance_classes=constructor_classes,
                 )
+                return self._bind_partialmethod_descriptors(instance)
             if isinstance(node.func, ast.Name) and node.func.id == "dict":
                 if node.args:
                     sections = self._expression_value(node.args[0]).origins & TRACKED_SECTIONS
@@ -1973,9 +2018,31 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 value = self._expression_value(
                     argument.value if isinstance(argument, ast.Starred) else argument
                 )
-                for section in value.origins & TRACKED_SECTIONS:
+                for section in (value.origins & TRACKED_SECTIONS) | value.serialized_sections:
                     for name in accessor.accessed_attributes:
                         self._record(section, name.partition(".")[0])
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "format_map" and node.args:
+            template = self._expression_value(node.func.value).string_value
+            mapping = self._expression_value(node.args[0])
+            if template is not None and mapping.serialized_sections:
+                for name in re.findall(r"(?<!\{)\{([A-Za-z_]\w*)", template):
+                    for section in mapping.serialized_sections:
+                        self._record(section, name)
+        for keyword in node.keywords:
+            if keyword.arg is not None:
+                continue
+            mapping = self._expression_value(keyword.value)
+            if not mapping.serialized_sections:
+                continue
+            for function, _receiver in self._call_targets(node.func):
+                parameters = (
+                    *function.args.posonlyargs,
+                    *function.args.args,
+                    *function.args.kwonlyargs,
+                )
+                for parameter in parameters:
+                    for section in mapping.serialized_sections:
+                        self._record(section, parameter.arg)
         if _GETATTR_BUILTIN in accessor.origins and len(node.args) >= 2:
             field_name = self._expression_value(node.args[1]).string_value
             if field_name is not None:
@@ -2904,6 +2971,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_Match(self, node: ast.Match) -> None:
         self.visit(node.subject)
         subject = self._expression_value(node.subject)
+        if subject.serialized_sections:
+            for case in node.cases:
+                for pattern in ast.walk(case.pattern):
+                    if not isinstance(pattern, ast.MatchMapping):
+                        continue
+                    for key in pattern.keys:
+                        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                            for section in subject.serialized_sections:
+                                self._record(section, key.value)
         initial = self._binding_snapshot()
         branches: list[_FlowResult] = []
         unmatched = True
@@ -3155,6 +3231,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "typing" and alias.name == "TYPE_CHECKING"
                     else _origin_value(_ATTRGETTER_FACTORY)
                     if node.module == "operator" and alias.name == "attrgetter"
+                    else _origin_value(_ITEMGETTER_FACTORY)
+                    if node.module == "operator" and alias.name == "itemgetter"
                     else _origin_value(_GETATTR_BUILTIN)
                     if node.module == "builtins" and alias.name == "getattr"
                     else _origin_value(_VARS_BUILTIN)
@@ -3163,10 +3241,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "builtins" and alias.name in _TRACKED_BUILTIN_CONSUMERS
                     else _origin_value(_PARTIAL_FACTORY)
                     if node.module == "functools" and alias.name == "partial"
+                    else _origin_value(_PARTIALMETHOD_FACTORY)
+                    if node.module == "functools" and alias.name == "partialmethod"
                     else _origin_value(_REDUCE_CONSUMER)
                     if node.module == "functools" and alias.name == "reduce"
                     else _origin_value(_STARMAP_FACTORY)
                     if node.module == "itertools" and alias.name == "starmap"
+                    else _origin_value(f"<itertools-callback-factory:{alias.name}>")
+                    if node.module == "itertools" and alias.name in _ITERTOOLS_CALLBACK_FACTORIES
                     else _origin_value(f"<heapq-key-consumer:{alias.name}>")
                     if node.module == "heapq" and alias.name in _HEAPQ_KEY_CONSUMERS
                     else _origin_value(f"<asyncio-consumer:{alias.name}>")
@@ -3243,6 +3325,44 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         and target.value.id == receiver_name
                     ):
                         attributes[target.attr] = parameters[value.id]
+        return self._attribute_replacement(owner, tuple(sorted(attributes.items())))
+
+    def _bind_partialmethod_descriptors(self, owner: _AbstractValue) -> _AbstractValue:
+        """Bind local ``partialmethod`` declarations to their constructed receiver."""
+
+        attributes = dict(owner.attributes or ())
+        for class_node in owner.instance_classes:
+            for statement in class_node.body:
+                if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                    continue
+                targets = (
+                    statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                )
+                value = statement.value
+                if (
+                    not isinstance(value, ast.Call)
+                    or _PARTIALMETHOD_FACTORY not in self._expression_value(value.func).origins
+                    or not value.args
+                    or not isinstance(value.args[0], ast.Name)
+                ):
+                    continue
+                methods = self._source_index.methods((class_node,), value.args[0].id)
+                if not methods:
+                    continue
+                identity = id(value)
+                self._deferred_partials[identity] = _DeferredPartial(
+                    targets=tuple(_CallableTarget(method, owner) for method in methods),
+                    positional=tuple(self._expression_value(arg) for arg in value.args[1:]),
+                    keywords=tuple(
+                        (keyword.arg, self._expression_value(keyword.value))
+                        for keyword in value.keywords
+                        if keyword.arg is not None
+                    ),
+                )
+                descriptor = _AbstractValue(identity=frozenset({identity}))
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        attributes[target.id] = descriptor
         return self._attribute_replacement(owner, tuple(sorted(attributes.items())))
 
     def _context_entry_value(self, context_value: _AbstractValue) -> _AbstractValue:
