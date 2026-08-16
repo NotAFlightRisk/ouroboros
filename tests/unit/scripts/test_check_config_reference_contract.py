@@ -377,6 +377,35 @@ nsmallest(1, [], key=lambda section: section.stage3_enabled)
     assert contract.runtime_reads(tmp_path, fields) == frozenset()
 
 
+def test_runtime_scan_executes_consumed_itertools_accumulate_callbacks(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "accumulate_callbacks.py").write_text(
+        """
+import itertools
+from itertools import accumulate
+
+def pick(left, section):
+    return section.stage1_enabled
+
+list(itertools.accumulate((None, config.evaluation), pick))
+list(accumulate((None, config.evaluation), lambda left, section: section.stage2_enabled))
+list(accumulate((), lambda left, section: section.stage3_enabled))
+list(accumulate((config.evaluation,), lambda left, section: section.semantic_model))
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled", "semantic_model")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields - {
+        contract.ConfigField("evaluation", "stage3_enabled"),
+        contract.ConfigField("evaluation", "semantic_model"),
+    }
+
+
 def test_runtime_scan_tracks_exit_stack_and_async_context_manager_entries(
     contract, tmp_path: Path
 ) -> None:
@@ -480,6 +509,29 @@ captured = reader.value
     field = contract.ConfigField("evaluation", "satisfaction_threshold")
 
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_rejects_shadowed_property_decorators(contract, tmp_path: Path) -> None:
+    (tmp_path / "shadowed_property.py").write_text(
+        """
+def property(fn):
+    return lambda self: None
+
+class Reader:
+    def __init__(self, section):
+        self.section = section
+
+    @property
+    def value(self):
+        return self.section.stage1_enabled
+
+Reader(config.evaluation).value()
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
 
 
 def test_runtime_scan_tracks_exact_serialized_mapping_consumers(contract, tmp_path: Path) -> None:
@@ -2765,6 +2817,29 @@ read(settings)
     field = contract.ConfigField("evaluation", "stage1_enabled")
 
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_tracks_model_dump_json_serialization_filters(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "model_dump_json.py").write_text(
+        """
+config.evaluation.model_dump_json(include={"stage1_enabled"})
+config.evaluation.model_dump_json(exclude={"stage1_enabled", "stage3_enabled"})
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {
+            contract.ConfigField("evaluation", "stage1_enabled"),
+            contract.ConfigField("evaluation", "stage2_enabled"),
+        }
+    )
 
 
 def test_runtime_scan_tracks_exact_functools_wraps_and_update_wrapper(

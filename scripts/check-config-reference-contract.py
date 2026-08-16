@@ -214,6 +214,7 @@ class _DeferredCallableIterator:
     callbacks: tuple[_CallableTarget, ...]
     iterables: tuple[_AbstractValue, ...]
     star_arguments: bool = False
+    accumulate: bool = False
 
 
 @dataclass(frozen=True)
@@ -254,6 +255,8 @@ _PARTIALMETHOD_FACTORY = "<functools-partialmethod-factory>"
 _REDUCE_CONSUMER = "<functools-reduce-consumer>"
 _ITERTOOLS_MODULE = "<itertools-module>"
 _STARMAP_FACTORY = "<itertools-starmap-factory>"
+_ACCUMULATE_FACTORY = "<itertools-accumulate-factory>"
+_CACHED_PROPERTY_DECORATOR = "<functools-cached-property>"
 _ITERTOOLS_CALLBACK_FACTORIES = frozenset({"dropwhile", "filterfalse", "groupby", "takewhile"})
 _HEAPQ_MODULE = "<heapq-module>"
 _HEAPQ_KEY_CONSUMERS = frozenset({"nsmallest", "nlargest"})
@@ -1079,12 +1082,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             _callable_name(decorator) == "staticmethod" for decorator in function.decorator_list
         )
 
-    @staticmethod
-    def _method_is_property(function: _FunctionNode) -> bool:
-        return isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
-            _callable_name(decorator) in {"property", "cached_property"}
-            for decorator in function.decorator_list
-        )
+    def _method_is_property(self, function: _FunctionNode) -> bool:
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+        for decorator in function.decorator_list:
+            if isinstance(decorator, ast.Name) and decorator.id == "property":
+                return not any(decorator.id in scope for scope in self._states)
+            if _CACHED_PROPERTY_DECORATOR in self._expression_value(decorator).origins:
+                return True
+        return False
 
     def _call_targets(
         self, node: ast.AST
@@ -1646,12 +1652,16 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_REDUCE_CONSUMER)
             if _FUNCTOOLS_MODULE in owner.origins and node.attr in {"cache", "lru_cache"}:
                 return _origin_value(_IDENTITY_DECORATOR)
+            if _FUNCTOOLS_MODULE in owner.origins and node.attr == "cached_property":
+                return _origin_value(_CACHED_PROPERTY_DECORATOR)
             if _FUNCTOOLS_MODULE in owner.origins and node.attr == "wraps":
                 return _origin_value(_WRAPS_FACTORY)
             if _FUNCTOOLS_MODULE in owner.origins and node.attr == "update_wrapper":
                 return _origin_value(_UPDATE_WRAPPER)
             if _ITERTOOLS_MODULE in owner.origins and node.attr == "starmap":
                 return _origin_value(_STARMAP_FACTORY)
+            if _ITERTOOLS_MODULE in owner.origins and node.attr == "accumulate":
+                return _origin_value(_ACCUMULATE_FACTORY)
             if _ITERTOOLS_MODULE in owner.origins and node.attr in _ITERTOOLS_CALLBACK_FACTORIES:
                 return _origin_value(f"<itertools-callback-factory:{node.attr}>")
             if _HEAPQ_MODULE in owner.origins and node.attr in _HEAPQ_KEY_CONSUMERS:
@@ -1678,7 +1688,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 sections = TRACKED_SECTIONS
             if node.attr == "__dict__" and sections:
                 return _AbstractValue(serialized_sections=sections)
-            if node.attr == "model_dump" and sections:
+            if node.attr in {"model_dump", "model_dump_json"} and sections:
                 return _AbstractValue(serialized_sections=sections)
             if node.attr == "model_copy" and sections:
                 return _origin_value(*(f"{_MODEL_COPY_PREFIX}{section}>" for section in sections))
@@ -1718,17 +1728,29 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             )
             methods = self._source_index.methods(owner.classes, node.attr)
             if resolved_modules or resolved_classes or imported_functions or methods:
-                callable_targets = [
-                    *(_CallableTarget(function) for function in imported_functions),
-                    *(
+                method_targets: list[_CallableTarget] = []
+                receiver = self._descriptor_receiver(owner)
+                for function in methods:
+                    if (
+                        isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and function.decorator_list
+                        and not self._method_is_static(function)
+                    ):
+                        decorated = self._decorated_function_value(function)
+                        method_targets.extend(
+                            _CallableTarget(target.function, target.receiver or receiver)
+                            for target in decorated.callables
+                        )
+                        continue
+                    method_targets.append(
                         _CallableTarget(
                             function,
-                            None
-                            if self._method_is_static(function)
-                            else self._descriptor_receiver(owner),
+                            None if self._method_is_static(function) else receiver,
                         )
-                        for function in methods
-                    ),
+                    )
+                callable_targets = [
+                    *(_CallableTarget(function) for function in imported_functions),
+                    *method_targets,
                 ]
                 return _AbstractValue(
                     modules=frozenset(resolved_modules),
@@ -1807,6 +1829,19 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     star_arguments=True,
                 )
                 return _AbstractValue(identity=frozenset({identity}))
+            if _ACCUMULATE_FACTORY in function_value.origins and node.args:
+                callback_node = node.args[1] if len(node.args) >= 2 else None
+                if callback_node is not None and (callbacks := self._call_targets(callback_node)):
+                    identity = id(node)
+                    self._deferred_callable_iterators[identity] = _DeferredCallableIterator(
+                        callbacks=tuple(
+                            _CallableTarget(function, receiver) for function, receiver in callbacks
+                        ),
+                        iterables=(self._expression_value(node.args[0]),),
+                        accumulate=True,
+                    )
+                    return _AbstractValue(identity=frozenset({identity}))
+                return self._expression_value(node.args[0])
             itertools_factory = next(
                 (
                     name
@@ -1888,26 +1923,38 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         return _AbstractValue(items=(_UNKNOWN_VALUE,) if nonempty else ())
                 return _UNKNOWN_VALUE
             if function_value.serialized_sections:
-                if isinstance(node.func, ast.Attribute) and node.func.attr == "model_dump":
+                if isinstance(node.func, ast.Attribute) and node.func.attr in {
+                    "model_dump",
+                    "model_dump_json",
+                }:
+                    is_json = node.func.attr == "model_dump_json"
                     include = next((kw.value for kw in node.keywords if kw.arg == "include"), None)
                     exclude = next((kw.value for kw in node.keywords if kw.arg == "exclude"), None)
-                    if include is not None or exclude is not None:
-                        selected = _safe_constant_value(include) if include is not None else None
-                        omitted = _safe_constant_value(exclude) if exclude is not None else None
-                        if include is not None and not isinstance(selected, (set, list, tuple)):
-                            return _UNKNOWN_VALUE
-                        if exclude is not None and not isinstance(omitted, (set, list, tuple)):
-                            return _UNKNOWN_VALUE
-                        keys = (
-                            set(selected or ())
-                            if selected is not None
-                            else {
-                                field.name
-                                for field in self._fields
-                                if field.section in function_value.serialized_sections
-                            }
-                        )
+                    selected = _safe_constant_value(include) if include is not None else None
+                    omitted = _safe_constant_value(exclude) if exclude is not None else None
+                    filters_are_exact = (
+                        include is None or isinstance(selected, (set, list, tuple))
+                    ) and (exclude is None or isinstance(omitted, (set, list, tuple)))
+                    all_keys = {
+                        field.name
+                        for field in self._fields
+                        if field.section in function_value.serialized_sections
+                    }
+                    keys = (
+                        (set(selected or ()) if selected is not None else set(all_keys))
+                        if filters_are_exact
+                        else set(all_keys)
+                    )
+                    if filters_are_exact:
                         keys -= set(omitted or ()) if omitted is not None else set()
+                    if is_json:
+                        for section in function_value.serialized_sections:
+                            for key in keys:
+                                self._record(section, key)
+                        return _UNKNOWN_VALUE
+                    if include is not None or exclude is not None:
+                        if not filters_are_exact:
+                            return _UNKNOWN_VALUE
                         return _AbstractValue(
                             entries=tuple(
                                 (_key_token(ast.Constant(key)), _UNKNOWN_VALUE)
@@ -2187,6 +2234,35 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if any(
                 iterable.items == () or iterable.truth is False for iterable in deferred.iterables
             ):
+                continue
+            if deferred.accumulate:
+                iterable = deferred.iterables[0]
+                if mode == "one_turn":
+                    continue
+                if iterable.items is not None:
+                    if len(iterable.items) < 2:
+                        continue
+                    accumulated = iterable.items[0]
+                    for item in iterable.items[1:]:
+                        for target in deferred.callbacks:
+                            values = (
+                                (target.receiver, accumulated, item)
+                                if target.receiver is not None
+                                else (accumulated, item)
+                            )
+                            accumulated = self._local_direct_call_value(target.function, values)
+                    continue
+                for target in deferred.callbacks:
+                    values = (
+                        (
+                            target.receiver,
+                            _conservative_value(iterable),
+                            _conservative_value(iterable),
+                        )
+                        if target.receiver is not None
+                        else (_conservative_value(iterable), _conservative_value(iterable))
+                    )
+                    self._local_direct_call_value(target.function, values)
                 continue
             item_groups = [iterable.items for iterable in deferred.iterables]
             if all(items is not None for items in item_groups):
@@ -3568,6 +3644,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "functools" and alias.name == "update_wrapper"
                     else _origin_value(_STARMAP_FACTORY)
                     if node.module == "itertools" and alias.name == "starmap"
+                    else _origin_value(_ACCUMULATE_FACTORY)
+                    if node.module == "itertools" and alias.name == "accumulate"
+                    else _origin_value(_CACHED_PROPERTY_DECORATOR)
+                    if node.module == "functools" and alias.name == "cached_property"
                     else _origin_value(f"<itertools-callback-factory:{alias.name}>")
                     if node.module == "itertools" and alias.name in _ITERTOOLS_CALLBACK_FACTORIES
                     else _origin_value(f"<heapq-key-consumer:{alias.name}>")
