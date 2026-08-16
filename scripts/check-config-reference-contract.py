@@ -1248,6 +1248,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             )
         )
 
+    def _invoke_truth_protocol(self, owner: _AbstractValue) -> None:
+        """Execute Python's ``__bool__``/``__len__`` truth-test fallback."""
+        if self._source_index.methods(owner.instance_classes, "__bool__"):
+            self._invoke_implicit_protocol(owner, "__bool__")
+        else:
+            self._invoke_implicit_protocol(owner, "__len__")
+
     @staticmethod
     def _is_accessor_callback(value: _AbstractValue) -> bool:
         return bool(value.accessed_attributes or _GETATTR_BUILTIN in value.origins)
@@ -2201,7 +2208,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if _EXITSTACK_FACTORY in function_value.origins:
                 return _AbstractValue(origins=frozenset({_EXITSTACK_VALUE}))
             if _ENTER_CONTEXT_CONSUMER in function_value.origins and node.args:
-                return self._context_entry_value(self._expression_value(node.args[0]))
+                return self._context_entry_value(
+                    self._expression_value(node.args[0]),
+                    asynchronous=False,
+                )
             if _TYPING_CAST in function_value.origins and len(node.args) >= 2:
                 return self._expression_value(node.args[1])
             if function_value.origins & _COPY_IDENTITY_TRANSFORMS and node.args:
@@ -2504,6 +2514,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
     def visit_IfExp(self, node: ast.IfExp) -> None:
         self.visit(node.test)
+        self._invoke_truth_protocol(self._expression_value(node.test))
         truth = self._static_truth(node.test)
         if truth is None:
             self.visit(node.body)
@@ -2512,8 +2523,24 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self.visit(node.body if truth else node.orelse)
 
     def visit_BoolOp(self, node: ast.BoolOp) -> None:
+        for value in node.values[:-1]:
+            self._invoke_truth_protocol(self._expression_value(value))
         for value in self._reachable_bool_values(node):
             self.visit(value)
+
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> None:
+        self.visit(node.operand)
+        owner = self._expression_value(node.operand)
+        protocols = {
+            ast.USub: "__neg__",
+            ast.UAdd: "__pos__",
+            ast.Invert: "__invert__",
+        }
+        protocol = protocols.get(type(node.op))
+        if protocol is not None:
+            self._invoke_implicit_protocol(owner, protocol)
+        elif isinstance(node.op, ast.Not):
+            self._invoke_truth_protocol(owner)
 
     def _consume_deferred_generator_value(
         self, value: _AbstractValue, *, mode: str = "full"
@@ -2768,6 +2795,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     for function, receiver in self._call_targets(key_keyword.value):
                         values = ((receiver,) if receiver is not None else ()) + (item,)
                         self._local_direct_call_value(function, values)
+        if isinstance(node.func, ast.Name) and node.func.id == "iter" and node.args:
+            self._invoke_implicit_protocol(self._expression_value(node.args[0]), "__iter__")
+        if isinstance(node.func, ast.Name) and node.func.id == "next" and node.args:
+            self._invoke_implicit_protocol(self._expression_value(node.args[0]), "__next__")
         if isinstance(node.func, ast.Attribute) and node.func.attr == "sort":
             key_keyword = next((keyword for keyword in node.keywords if keyword.arg == "key"), None)
             owner = self._expression_value(node.func.value)
@@ -2943,6 +2974,25 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     )
                 else:
                     self._consume_local_iterator(comparator, mode="one_turn")
+            else:
+                protocols = {
+                    ast.Lt: ("__lt__", "__gt__"),
+                    ast.LtE: ("__le__", "__ge__"),
+                    ast.Gt: ("__gt__", "__lt__"),
+                    ast.GtE: ("__ge__", "__le__"),
+                    ast.Eq: ("__eq__", "__eq__"),
+                    ast.NotEq: ("__ne__", "__ne__"),
+                }
+                selected = protocols.get(type(operator))
+                if selected is None:
+                    continue
+                direct, reflected = selected
+                left = self._expression_value(node.left)
+                right = self._expression_value(comparator)
+                direct_methods = self._source_index.methods(left.instance_classes, direct)
+                self._invoke_implicit_protocol(left, direct, (right,))
+                if not direct_methods:
+                    self._invoke_implicit_protocol(right, reflected, (left,))
         self.generic_visit(node)
 
     def visit_BinOp(self, node: ast.BinOp) -> None:
@@ -3004,6 +3054,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         before = self._binding_snapshot()
         if isinstance(node.ctx, ast.Load):
             owner = self._expression_value(node.value)
+            self._invoke_implicit_protocol(
+                owner,
+                "__getitem__",
+                (self._expression_value(node.slice),),
+            )
             field_name = self._expression_value(node.slice).string_value
             if field_name is not None:
                 for section in owner.serialized_sections | (owner.origins & TRACKED_SECTIONS):
@@ -3016,6 +3071,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         """Visit the assertion message only on paths where it can execute."""
 
         self.visit(node.test)
+        self._invoke_truth_protocol(self._expression_value(node.test))
         if node.msg is not None and self._static_truth(node.test) is not True:
             self.visit(node.msg)
 
@@ -3330,6 +3386,26 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         owner = self._expression_value(node.target)
         self.visit(node.target)
         self.visit(node.value)
+        protocols = {
+            ast.Add: "__iadd__",
+            ast.Sub: "__isub__",
+            ast.Mult: "__imul__",
+            ast.MatMult: "__imatmul__",
+            ast.Div: "__itruediv__",
+            ast.FloorDiv: "__ifloordiv__",
+            ast.Mod: "__imod__",
+            ast.Pow: "__ipow__",
+            ast.LShift: "__ilshift__",
+            ast.RShift: "__irshift__",
+            ast.BitOr: "__ior__",
+            ast.BitXor: "__ixor__",
+            ast.BitAnd: "__iand__",
+        }
+        self._invoke_implicit_protocol(
+            owner,
+            protocols[type(node.op)],
+            (self._expression_value(node.value),),
+        )
         if isinstance(node.op, ast.BitOr):
             right = self._expression_value(node.value)
             entries = dict(owner.entries or ())
@@ -3350,6 +3426,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
     def visit_If(self, node: ast.If) -> None:
         self.visit(node.test)
+        self._invoke_truth_protocol(self._expression_value(node.test))
         initial = self._binding_snapshot()
         truth = self._static_truth(node.test)
         if truth is not None:
@@ -3464,6 +3541,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_While(self, node: ast.While) -> None:
         entry = self._binding_snapshot()
         self.visit(node.test)
+        self._invoke_truth_protocol(self._expression_value(node.test))
         truth = self._static_truth(node.test)
         if truth is False:
             tested_state = self._binding_snapshot()
@@ -3478,6 +3556,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         while True:
             self._restore_bindings(header)
             self.visit(node.test)
+            self._invoke_truth_protocol(self._expression_value(node.test))
             tested_state = self._binding_snapshot()
             body_result = self._visit_binding_branch(node.body, tested_state)
             back_edges = [path.bindings for path in body_result.abrupt if path.kind == "continue"]
@@ -3492,6 +3571,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         if truth is not True:
             self._restore_bindings(header)
             self.visit(node.test)
+            self._invoke_truth_protocol(self._expression_value(node.test))
             normal_entry = self._binding_snapshot()
         normal_result = (
             self._visit_binding_branch(node.orelse, normal_entry)
@@ -4391,7 +4471,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         attributes[target.id] = descriptor
         return self._attribute_replacement(owner, tuple(sorted(attributes.items())))
 
-    def _context_entry_value(self, context_value: _AbstractValue) -> _AbstractValue:
+    def _context_entry_value(
+        self, context_value: _AbstractValue, *, asynchronous: bool
+    ) -> _AbstractValue:
         if _NULLCONTEXT_VALUE in context_value.origins and context_value.items:
             return context_value.items[0]
         if _CLOSING_VALUE in context_value.origins and context_value.items:
@@ -4401,7 +4483,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         receiver = self._descriptor_receiver(context_value)
         entries: list[_AbstractValue] = [
             self._local_direct_call_value(function, (receiver,))
-            for method_name in ("__enter__", "__aenter__")
+            for method_name in (("__aenter__",) if asynchronous else ("__enter__",))
             for function in self._source_index.methods(context_value.instance_classes, method_name)
         ]
         for identity in context_value.identity:
@@ -4411,7 +4493,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             ):
                 continue
             is_context_manager = any(
-                _callable_name(decorator) in {"contextmanager", "asynccontextmanager"}
+                _callable_name(decorator)
+                == ("asynccontextmanager" if asynchronous else "contextmanager")
                 for decorator in deferred.node.decorator_list
             )
             if not is_context_manager:
@@ -4429,6 +4512,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         return _join_values(*entries)
 
     def _visit_with(self, node: ast.With | ast.AsyncWith) -> None:
+        asynchronous = isinstance(node, ast.AsyncWith)
         context_values: list[_AbstractValue] = []
         for item in node.items:
             self.visit(item.context_expr)
@@ -4440,12 +4524,16 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     deferred is not None
                     and isinstance(deferred.node, (ast.FunctionDef, ast.AsyncFunctionDef))
                     and any(
-                        _callable_name(decorator) in {"contextmanager", "asynccontextmanager"}
+                        _callable_name(decorator)
+                        == ("asynccontextmanager" if asynchronous else "contextmanager")
                         for decorator in deferred.node.decorator_list
                     )
                 ):
                     self._consume_deferred_generator(item.context_expr, mode="one_turn")
-            entry_value = self._context_entry_value(context_value)
+            entry_value = self._context_entry_value(
+                context_value,
+                asynchronous=asynchronous,
+            )
             if item.optional_vars is not None:
                 self._visit_store_target(item.optional_vars)
                 self._bind_target_value(item.optional_vars, entry_value)
@@ -4454,7 +4542,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         body_result = self._visit_binding_branch(node.body, self._binding_snapshot())
         for context_value in reversed(context_values):
             receiver = self._descriptor_receiver(context_value)
-            for method_name in ("__exit__", "__aexit__"):
+            for method_name in ("__aexit__",) if asynchronous else ("__exit__",):
                 for function in self._source_index.methods(
                     context_value.instance_classes, method_name
                 ):

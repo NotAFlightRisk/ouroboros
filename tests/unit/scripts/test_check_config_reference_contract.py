@@ -3238,6 +3238,137 @@ shadowed.value
     )
 
 
+def test_runtime_scan_executes_truth_and_fallback_len_protocols_only_when_tested(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "truth_protocols.py").write_text(
+        """
+class Reader:
+    def __init__(self, section):
+        self.section = section
+
+    def __bool__(self):
+        return self.section.stage1_enabled
+
+class LenReader:
+    def __init__(self, section):
+        self.section = section
+
+    def __len__(self):
+        return self.section.stage2_enabled
+
+if Reader(config.evaluation):
+    pass
+if not LenReader(config.evaluation):
+    pass
+unused = Reader(config.consensus)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        {
+            contract.ConfigField("evaluation", "stage1_enabled"),
+            contract.ConfigField("evaluation", "stage2_enabled"),
+            contract.ConfigField("consensus", "models"),
+        }
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == {
+        contract.ConfigField("evaluation", "stage1_enabled"),
+        contract.ConfigField("evaluation", "stage2_enabled"),
+    }
+
+
+def test_runtime_scan_models_subscription_iter_next_and_unary_protocols(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "ordinary_protocols.py").write_text(
+        """
+class Reader:
+    def __init__(self, section):
+        self.section = section
+
+    def __getitem__(self, index):
+        return self.section.stage1_enabled
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.section.stage2_enabled
+
+    def __lt__(self, other):
+        return self.section.stage3_enabled
+
+    def __neg__(self):
+        return self.section.stage4_enabled
+
+    def __iadd__(self, other):
+        return self.section.stage5_enabled
+
+reader = Reader(config.evaluation)
+reader[0]
+iter(reader)
+next(reader)
+reader < 1
+-reader
+reader += 1
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", f"stage{index}_enabled") for index in range(1, 6)
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_selects_context_manager_protocol_by_syntax(contract, tmp_path: Path) -> None:
+    (tmp_path / "context_protocols.py").write_text(
+        """
+import asyncio
+
+class Reader:
+    def __init__(self, section):
+        self.section = section
+
+    def __enter__(self):
+        return self.section.stage1_enabled
+
+    def __exit__(self, exc_type, exc, tb):
+        return self.section.stage2_enabled
+
+    async def __aenter__(self):
+        return self.section.stage3_enabled
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return self.section.stage4_enabled
+
+with Reader(config.evaluation):
+    pass
+
+async def consume():
+    async with Reader(config.consensus):
+        pass
+
+asyncio.run(consume())
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField(section, f"stage{index}_enabled")
+        for section in ("evaluation", "consensus")
+        for index in range(1, 5)
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == {
+        contract.ConfigField("evaluation", "stage1_enabled"),
+        contract.ConfigField("evaluation", "stage2_enabled"),
+        contract.ConfigField("consensus", "stage3_enabled"),
+        contract.ConfigField("consensus", "stage4_enabled"),
+    }
+
+
 def test_runtime_scan_models_membership_fallback_order_without_overreach(
     contract, tmp_path: Path
 ) -> None:
