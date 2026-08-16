@@ -373,6 +373,7 @@ def test_parent_seed_ignores_artifact_payload_fields() -> None:
         "Generate a YAML example containing parent_seed_id: seed_old.",
         "Return JSON with parent_seed_id: seed_old.",
         "The generated manifest must set parent_seed_id: seed_old.",
+        "Write a README saying inherit seed_external.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
 
@@ -403,5 +404,7 @@ def test_parent_seed_accepts_nonprefixed_schema_identifiers() -> None:
         ("Set parent_seed_id to release.2026.", "release.2026"),
         ("Set parent_seed_id to seed.parent", "seed.parent"),
         ("Set parent_seed_id to foo=bar", "foo=bar"),
+        ("Inherit seed#42.", "seed#42"),
+        ("Inherit 부모#42.", "부모#42"),
     ):
         assert inherited_parent_seed_id(_seed(goal)) == expected

@@ -8,7 +8,6 @@ from ouroboros.auto.adapters import EvaluateResult
 from ouroboros.core.seed import Seed
 from ouroboros.core.task_type import (
     _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN,
-    _SEED_ID_CHAR_PATTERN,
     _SEED_ID_CONTINUATION_PATTERN,
     _SEED_ID_PATTERN,
     _candidate_segment,
@@ -106,18 +105,20 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
     patterns = (
         re.compile(
             rf"\b(?:inherit(?:ing)?(?:\s+from)?|derive(?:d)?\s+from|"
-            rf"(?:set\s+)?parent(?:_seed_id|\s+seed)?\s*(?:is|=|:|to))\s+{seed_id}\b",
+            rf"(?:set\s+)?parent(?:_seed_id|\s+seed)?\s*(?:is|=|:|to))\s+{seed_id}"
+            rf"(?!{_SEED_ID_CONTINUATION_PATTERN})",
             re.IGNORECASE,
         ),
         re.compile(
-            rf"\buse\s+{seed_id}\s+as\s+(?:the\s+)?parent(?:_seed|\s+seed)\b",
+            rf"\buse\s+{seed_id}(?!{_SEED_ID_CONTINUATION_PATTERN})"
+            rf"\s+as\s+(?:the\s+)?parent(?:_seed|\s+seed)\b",
             re.IGNORECASE,
         ),
         re.compile(
-            rf"(?<![{_SEED_ID_CHAR_PATTERN}]){seed_id}"
-            rf"(?!{_SEED_ID_CONTINUATION_PATTERN})"
-            rf"(?:을|를)?\s*"
-            rf"(?:계승|상속)(?!하지)",
+            r"(?<!\S)(?P<seed_id>[^\s,;!?]+?)(?=(?:을|를)?\s*"
+            r"(?:계승|상속)(?!하지))"
+            r"(?:을|를)?\s*"
+            r"(?:계승|상속)(?!하지)",
             re.IGNORECASE,
         ),
     )

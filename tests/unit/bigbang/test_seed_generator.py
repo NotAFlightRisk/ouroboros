@@ -452,6 +452,8 @@ class TestSeedGeneratorAmbiguityGating:
             "Implement a validator whose error says task_type: document.",
             "Generate a TOML file with task_type: document.",
             "Write tests where the expected string is task_type: document.",
+            "The YAML file must set task_type: document.",
+            "Write a README saying task_type: document.",
         ),
     )
     @pytest.mark.asyncio

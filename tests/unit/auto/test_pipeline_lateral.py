@@ -555,6 +555,8 @@ def test_seed_qa_repairs_fail_closed_on_validation_content_and_field_retractions
         "Implement a validator whose error says task_type: document.",
         "Generate a TOML file with task_type: document.",
         "Write tests where the expected string is task_type: document.",
+        "The YAML file must set task_type: document.",
+        "Write a README saying task_type: document and inherit seed_external.",
     ),
 )
 def test_seed_qa_repairs_ignore_artifact_payload_contract_fields(goal: str) -> None:
@@ -595,6 +597,8 @@ def test_seed_qa_repairs_ignore_artifact_payload_contract_fields(goal: str) -> N
         "release.2026",
         "seed.parent",
         "foo=bar",
+        "seed#42",
+        "부모#42",
     ),
 )
 def test_seed_qa_repairs_preserve_schema_valid_parent_identifiers(parent: str) -> None:

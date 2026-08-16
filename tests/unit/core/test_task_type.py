@@ -434,6 +434,8 @@ def test_explicit_task_type_ignores_artifact_payload_fields() -> None:
         "Implement a validator whose error says task_type: document.",
         "Generate a TOML file with task_type: document.",
         "Write tests where the expected string is task_type: document.",
+        "The YAML file must set task_type: document.",
+        "Write a README saying task_type: document.",
     ):
         assert explicit_task_type_from_goal(goal) is None
 

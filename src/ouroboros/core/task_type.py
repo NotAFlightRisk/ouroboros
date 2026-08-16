@@ -22,8 +22,11 @@ _TASK_TYPE_PATTERN = (
 # Keep the bounded natural-language token parser compatible with punctuation
 # already accepted by that schema instead of silently truncating lineage.
 _SEED_ID_CHAR_PATTERN = r"A-Za-z0-9_:@/+~.=-"
-_SEED_ID_PATTERN = rf"[A-Za-z0-9](?:[{_SEED_ID_CHAR_PATTERN}]*[A-Za-z0-9])?"
-_SEED_ID_CONTINUATION_PATTERN = r"[A-Za-z0-9_:@/+~=-]|\.(?=[A-Za-z0-9])"
+# Parent IDs are opaque schema strings.  The natural-language boundary only
+# excludes whitespace/clause punctuation; a final period is treated as sentence
+# punctuation while internal punctuation and non-ASCII characters are kept.
+_SEED_ID_PATTERN = r"[^\s,;!?]+?(?<!\.)"
+_SEED_ID_CONTINUATION_PATTERN = r"[^\s,;!?.]|\.(?=[^\s,;!?])"
 _TASK_TYPE_CONTRACT_PATTERNS = (
     re.compile(
         rf"\btask[_\s-]*type\b\s*(?:=|:)\s*{_TASK_TYPE_PATTERN}\b",
@@ -173,7 +176,7 @@ _PARENT_CONTRACT_PATTERN = re.compile(
     r"\b(?:inherit(?:ing)?(?:\s+from)?|derive(?:d)?\s+from|"
     r"(?:set\s+)?parent(?:_seed_id|\s+seed)?\s*(?:is|=|:|to)|"
     rf"use)\s+{_SEED_ID_PATTERN}(?!{_SEED_ID_CONTINUATION_PATTERN})"
-    rf"|(?<![{_SEED_ID_CHAR_PATTERN}]){_SEED_ID_PATTERN}"
+    rf"|(?<!\S){_SEED_ID_PATTERN}"
     rf"(?!{_SEED_ID_CONTINUATION_PATTERN})"
     r"(?:을|를)?\s*(?:계승|상속)(?!하지)",
     re.IGNORECASE,
@@ -181,7 +184,7 @@ _PARENT_CONTRACT_PATTERN = re.compile(
 _CONTRACT_TAIL_AMBIGUITY_PATTERN = re.compile(
     r"^\s*(?:,\s*)?(?:if|unless|whether|depending|otherwise)\b"
     rf"|^\s*(?:,\s*)?or\s+(?:{_TASK_TYPE_PATTERN}|{_SEED_ID_PATTERN})"
-    rf"(?![{_SEED_ID_CHAR_PATTERN}])",
+    rf"(?!{_SEED_ID_CONTINUATION_PATTERN})",
     re.IGNORECASE,
 )
 _CANDIDATE_BOUNDARY_PATTERN = re.compile(
@@ -219,7 +222,11 @@ _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN = re.compile(
     r"|\b(?:build|implement|create|add)\b[^\n.!?]{0,240}"
     r"\b(?:whose|where|containing|that)\b[^\n.!?]{0,160}$"
     r"|\b(?:generate|return|produce|write)\b[^\n.!?]{0,240}"
-    r"\b(?:whose|where|with|containing|that)\b[^\n.!?]{0,160}$",
+    r"\b(?:whose|where|with|containing|that|saying|stating|showing|reading)\b"
+    r"[^\n.!?]{0,160}$"
+    r"|\b(?:the|a|an)\s+[^\n.!?]{1,120}\b(?:must|should|will)\s+"
+    r"(?:set|contain|include|say|show|state|read|emit|print|output)\b"
+    r"[^\n.!?]{0,160}$",
     re.IGNORECASE,
 )
 
