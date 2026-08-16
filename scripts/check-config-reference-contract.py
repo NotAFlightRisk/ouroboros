@@ -1191,41 +1191,32 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             return True
         return bound_receiver is not None and bool(_contained_origins(bound_receiver) & tracked)
 
-    def _direct_raise_execution(self, function: _FunctionNode) -> _FunctionExecution | None:
-        """Recognize an exact local helper whose first reachable action raises."""
+    def _function_is_syntactically_nonreturning(self, function: _FunctionNode) -> bool:
+        """Select exact local helpers whose reachable suite cannot return."""
         if isinstance(function, ast.Lambda):
-            return None
-        for statement in function.body:
-            if (
-                isinstance(statement, ast.Expr)
-                and isinstance(statement.value, ast.Constant)
-                and isinstance(statement.value.value, str)
-            ):
-                continue
-            if isinstance(
-                statement,
-                (ast.Pass, ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign),
-            ):
-                continue
-            if not isinstance(statement, ast.Raise):
-                return None
-            exception_type = (
-                self._exception_name(statement.exc) if statement.exc is not None else None
-            )
-            leaf = exception_type.rsplit(".", 1)[-1] if exception_type else None
-            return _FunctionExecution(
-                (),
-                False,
-                (
-                    _AbruptPath(
-                        "raise",
-                        self._binding_snapshot(),
-                        exception_type=leaf,
-                        exception_upper_bound=leaf or "BaseException",
-                    ),
-                ),
-            )
-        return None
+            return False
+
+        def suite_terminates(statements: list[ast.stmt]) -> bool:
+            for statement in statements:
+                if isinstance(statement, ast.Raise):
+                    return True
+                if isinstance(statement, ast.Return):
+                    return False
+                if isinstance(statement, ast.If):
+                    truth = self._static_truth(statement.test)
+                    if truth is not None:
+                        if suite_terminates(statement.body if truth else statement.orelse):
+                            return True
+                        continue
+                    if (
+                        statement.orelse
+                        and suite_terminates(statement.body)
+                        and suite_terminates(statement.orelse)
+                    ):
+                        return True
+            return False
+
+        return suite_terminates(function.body)
 
     @staticmethod
     def _named_value(
@@ -2147,8 +2138,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 if self._call_has_relevant_provenance(node, function, bound_receiver):
                     values.append(self._local_call_value(node, function, bound_receiver))
                     continue
-                if execution := self._direct_raise_execution(function):
-                    self._call_executions.setdefault(id(node), []).append(execution)
+                if self._function_is_syntactically_nonreturning(function):
+                    values.append(self._local_call_value(node, function, bound_receiver))
             if values:
                 value = _join_values(*values)
                 self._expression_cache[id(node)] = value
@@ -2364,7 +2355,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
     def _consume_local_iterator(self, node: ast.AST, *, mode: str = "full") -> None:
         owner = self._expression_value(node)
-        for function in self._source_index.methods(owner.instance_classes, "__iter__"):
+        iterator_methods = self._source_index.methods(owner.instance_classes, "__iter__")
+        for function in iterator_methods:
             scoped = self._bound_direct_arguments(function, (self._descriptor_receiver(owner),))
             if _is_generator_function(function):
                 self._visit_function_body(
@@ -2380,6 +2372,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 (self._descriptor_receiver(owner),),
             )
             self._consume_deferred_generator_value(returned, mode=mode)
+            self._consume_deferred_callable_iterator_value(returned, mode=mode)
+        if iterator_methods:
+            return
+        for function in self._source_index.methods(owner.instance_classes, "__getitem__"):
+            self._local_direct_call_value(
+                function,
+                (self._descriptor_receiver(owner), _UNKNOWN_VALUE),
+            )
 
     def _consume_deferred_coroutine(self, node: ast.AST) -> None:
         value = self._expression_value(node)
@@ -2391,7 +2391,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def _consume_deferred_callable_iterator(self, node: ast.AST, *, mode: str = "full") -> None:
         """Execute callbacks only when their lazy map/filter is consumed."""
 
-        for identity in self._expression_value(node).identity:
+        self._consume_deferred_callable_iterator_value(self._expression_value(node), mode=mode)
+
+    def _consume_deferred_callable_iterator_value(
+        self, value: _AbstractValue, *, mode: str = "full"
+    ) -> None:
+        """Execute callbacks captured by an already-resolved lazy iterator value."""
+
+        for identity in value.identity:
             deferred = self._deferred_callable_iterators.get(identity)
             if deferred is None:
                 continue

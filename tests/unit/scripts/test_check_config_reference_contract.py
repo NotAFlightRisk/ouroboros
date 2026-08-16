@@ -3218,6 +3218,69 @@ except RuntimeError:
     assert reads == frozenset({contract.ConfigField("evaluation", "stage3_enabled")})
 
 
+def test_runtime_scan_consumes_callable_iterators_returned_by_local_protocols(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "local_iterable_protocol.py").write_text(
+        """
+import operator
+
+class Wrapper:
+    def __init__(self, source):
+        self.source = source
+
+    def __iter__(self):
+        return iter(self.source)
+
+class Fallback:
+    def __getitem__(self, index):
+        return settings.evaluation.stage2_enabled
+
+list(Wrapper(map(operator.attrgetter("stage1_enabled"), [settings.evaluation])))
+list(Fallback())
+pending = Wrapper(map(operator.attrgetter("stage3_enabled"), [settings.evaluation]))
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields - {
+        contract.ConfigField("evaluation", "stage3_enabled")
+    }
+
+
+def test_runtime_scan_propagates_conditional_exact_local_termination(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "conditional_nonreturning.py").write_text(
+        """
+def stop():
+    if True:
+        raise RuntimeError("stop")
+
+def exported():
+    stop()
+    return settings.evaluation.stage1_enabled
+
+try:
+    stop()
+except RuntimeError:
+    settings.evaluation.stage2_enabled
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {contract.ConfigField("evaluation", "stage2_enabled")}
+    )
+
+
 def test_runtime_scan_tracks_constant_and_dotted_operator_getters(contract, tmp_path: Path) -> None:
     (tmp_path / "operator_constants.py").write_text(
         """
