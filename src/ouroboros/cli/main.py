@@ -19,8 +19,9 @@ from typing import Annotated
 import click
 import typer
 
-from ouroboros import __version__
+from ouroboros import __version__, telemetry
 from ouroboros.cli.commands import (
+    artifacts,
     auto,
     cancel,
     cleanup,
@@ -28,6 +29,7 @@ from ouroboros.cli.commands import (
     config,
     detect,
     dispatch,
+    doctor,
     harness,
     init,
     job,
@@ -42,6 +44,7 @@ from ouroboros.cli.commands import (
     status,
     tui,
     uninstall,
+    update,
     workflow_ir,
     zcode,
 )
@@ -103,12 +106,14 @@ app.command(name="seed", help="Generate a Seed YAML specification from an interv
 )
 app.add_typer(run.app, name="run")
 app.add_typer(job.app, name="job")
+app.add_typer(artifacts.app, name="artifacts")
 app.add_typer(harness.app, name="harness")
 app.add_typer(config.app, name="config")
 app.add_typer(status.app, name="status")
 app.add_typer(cancel.app, name="cancel")
 app.add_typer(cleanup.app, name="cleanup")
 app.add_typer(codex.app, name="codex")
+app.add_typer(doctor.app, name="doctor")
 app.add_typer(mcp.app, name="mcp")
 app.add_typer(setup.app, name="setup")
 app.add_typer(detect.app, name="detect")
@@ -118,6 +123,7 @@ app.command(name="qa", help="General-purpose QA verdict for any artifact.")(qa.q
 app.add_typer(plugin.app, name="plugin")
 app.add_typer(resume.app, name="resume")
 app.add_typer(uninstall.app, name="uninstall")
+app.add_typer(update.app, name="update")
 app.add_typer(workflow_ir.app, name="workflow-ir")
 app.add_typer(zcode.app, name="zcode")
 app.command(name="dispatch", hidden=True)(dispatch.dispatch_command)
@@ -147,7 +153,8 @@ def version_callback(value: bool) -> None:
 
 @app.callback()
 def main(
-    version: Annotated[
+    ctx: typer.Context,
+    version: Annotated[  # noqa: ARG001 — consumed by the eager version_callback
         bool | None,
         typer.Option(
             "--version",
@@ -172,7 +179,8 @@ def main(
 
     Use [bold cyan]ouroboros COMMAND --help[/] for command-specific help.
     """
-    pass
+    telemetry.show_first_run_notice()
+    telemetry.capture_cli_command(ctx.invoked_subcommand)
 
 
 __all__ = ["app", "main"]

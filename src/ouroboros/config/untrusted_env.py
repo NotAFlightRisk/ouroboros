@@ -11,10 +11,11 @@ The loader owns *when* the policy applies; this module owns *what* it covers.
 
 from __future__ import annotations
 
-# Environment variables that determine HOW Ouroboros executes work. This
+# Environment variables that determine HOW Ouroboros executes work or install
+# its own persistent package. This
 # is the single authoritative trust boundary: a cloned repository's `.env`
 # must not be able to change which binary runs or whether the user's
-# approval gate applies. Four classes, all remote-code-execution sinks
+# approval gate applies. Five classes, all remote-code-execution sinks
 # when sourced from an untrusted location:
 #   1. Explicit CLI path overrides fed straight into a subprocess.
 #   2. Runtime/backend selectors that pick which adapter (and therefore
@@ -25,6 +26,10 @@ from __future__ import annotations
 #      auto-approve arbitrary tool calls (effectively RCE).
 #   4. Runtime-native preload hooks such as NODE_OPTIONS, which can execute
 #      attacker-controlled code before a spawned JavaScript CLI starts.
+#   5. Python package-manager controls. `ouroboros update` deliberately
+#      inherits trusted process/home configuration so corporate indexes keep
+#      working, but a cloned repository must not redirect uv/pipx resolution to
+#      its own index or config file through the project `.env`.
 # These keys are only honored from trusted sources (the real process
 # environment, ~/.ouroboros/.env, ~/.ouroboros/config.yaml), never from
 # the project-directory .env that travels with a cloned repo. Trusted .env
@@ -59,6 +64,12 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_GROK_CLI_PATH",
         "OUROBOROS_OUROCODE_CLI_PATH",
         "OUROBOROS_ZCODE_CLI_PATH",
+        "OUROBOROS_DSH_CLI_PATH",
+        # Not an executable path, but it selects the Cordis composition the
+        # spawned Node process loads — plugin rows in that file execute
+        # arbitrary code inside `dsh-acp-demo`, so an untrusted repo .env must
+        # not be able to choose it.
+        "OUROBOROS_DSH_CONFIG_PATH",
         # Bare provider aliases (no OUROBOROS_ prefix) that adapters also
         # honor and then execute. Any new such alias MUST be added here:
         # `opencode_config._configured_opencode_cli_path` reads
@@ -137,6 +148,37 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # MCP transport targets unless this is "1"; an untrusted .env must not
         # be able to re-enable connections to internal addresses.
         "OUROBOROS_ALLOW_LOCAL_TRANSPORT",
+        # Telemetry is an operator-owned privacy boundary. A project `.env`
+        # must not be able to re-enable collection, replace the public ingest
+        # key, or redirect the stable anonymous identifier to an arbitrary
+        # endpoint. These remain available from the real process environment
+        # and the trusted ~/.ouroboros/.env file. DO_NOT_TRACK belongs to the
+        # same boundary from the opposite direction: the loader applies the
+        # untrusted project `.env` before the trusted `~/.ouroboros/.env` and
+        # never overrides an already-set value, so an unset DO_NOT_TRACK here
+        # would let a cloned repo's `.env` (e.g. `DO_NOT_TRACK=0`) win the
+        # race and silently suppress a user's persisted opt-out before the
+        # trusted file ever gets a chance to set it. CI/GITHUB_ACTIONS are
+        # the same boundary again: telemetry.py stamps `ci=true` on events
+        # from these two vars, and the published counting rule excludes
+        # `ci=true` from the weekly-active metric -- an untrusted project
+        # `.env` shipping `CI=1` could silently deregister genuine local
+        # workflow_outcome events from that metric. Real CI runners set
+        # these in the actual process environment, which the loader never
+        # overrides regardless of this denylist, so denying project-`.env`
+        # input here does not affect real CI detection -- only a cloned
+        # repository's own `.env` file loses the ability to set them. The
+        # trusted `~/.ouroboros/.env` is unaffected either way: this
+        # denylist only gates the untrusted project file.
+        "OUROBOROS_TELEMETRY",
+        "OUROBOROS_POSTHOG_API_KEY",
+        "OUROBOROS_POSTHOG_HOST",
+        # Onboarding attribution is an analytics boundary. A cloned repo must
+        # not rewrite the surface label used to compare activation cohorts.
+        "OUROBOROS_FIRST_COMMAND_SURFACE",
+        "DO_NOT_TRACK",
+        "CI",
+        "GITHUB_ACTIONS",
         # Runtime/backend selectors — choose which adapter is spawned.
         "OUROBOROS_AGENT_RUNTIME",
         "OUROBOROS_RUNTIME",
@@ -172,7 +214,18 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_SHADOW_REPLAY",
     }
 )
-UNTRUSTED_ENV_DENIED_PREFIXES = ("DYLD_", "LD_")
+UNTRUSTED_ENV_DENIED_PREFIXES = (
+    "DYLD_",
+    "LD_",
+    # Package-manager source/configuration families. Prefixes are intentional:
+    # uv supports dynamically named index credentials (UV_INDEX_<NAME>_*), and
+    # both uv and pip/pipx may add new controls. Trusted real-process and home
+    # `.env` values remain allowed because this policy applies only to the
+    # project-directory `.env`.
+    "PIP_",
+    "PIPX_",
+    "UV_",
+)
 
 
 def is_untrusted_env_denied_key(key: str) -> bool:

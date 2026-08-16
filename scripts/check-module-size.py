@@ -94,12 +94,12 @@ RESEED_SLACK = 200
 GRANDFATHERED: dict[str, int] = {
     "src/ouroboros/orchestrator/parallel_executor.py": 13158,
     "src/ouroboros/orchestrator/runner.py": 12144,
-    "src/ouroboros/auto/pipeline.py": 5286,
+    "src/ouroboros/auto/pipeline.py": 3306,
     "src/ouroboros/cli/commands/setup.py": 5225,
     "src/ouroboros/orchestrator/codex_cli_runtime.py": 4140,
-    "src/ouroboros/mcp/tools/authoring_handlers.py": 3780,
+    "src/ouroboros/mcp/tools/authoring_handlers.py": 3722,  # was 3780
     "src/ouroboros/orchestrator/execution_authority.py": 3449,
-    "src/ouroboros/mcp/tools/subagent.py": 2786,  # was 3163
+    "src/ouroboros/mcp/tools/subagent.py": 2639,  # was 3163
     "src/ouroboros/persistence/event_store.py": 3102,
     "src/ouroboros/cli/commands/plugin.py": 3053,
     "src/ouroboros/mcp/job_manager.py": 2950,

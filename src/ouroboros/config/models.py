@@ -146,6 +146,7 @@ class LLMConfig(BaseModel, frozen=True):
         "goose",
         "pi",
         "ourocode",
+        "dsh",
         "gjc",
         "zcode",
     ] = "claude_code"
@@ -265,6 +266,13 @@ class ExecutionConfig(BaseModel, frozen=True):
             (stack, verify commands, layout) to run worker system prompts.
         project_guidance: Allowlist of project guidance ids to resolve from
             fixed project-local paths under ``.ouroboros/guidance/<id>/GUIDANCE.md``.
+        default_policy: Persistent default execution policy for FRESH runs
+            (#1733). ``ask`` (the default) preserves the host's interactive
+            prompt exactly; ``efficient`` resolves to adaptive/observe and
+            ``quality_first`` to quality_first/off without asking. Explicit
+            invocation arguments always win, resumed sessions keep their
+            persisted immutable contract, and strict frugality assurance
+            never derives from this setting.
     """
 
     max_iterations_per_ac: int = Field(default=DEFAULT_MAX_ITERATIONS_PER_AC, ge=1)
@@ -287,6 +295,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     decomposition_mode: Literal["bounce_only", "off"] = "bounce_only"
     context_pack: bool = True
     project_guidance: tuple[str, ...] = ()
+    default_policy: Literal["ask", "efficient", "quality_first"] = "ask"
 
     @field_validator("decomposition_mode", mode="before")
     @classmethod
@@ -481,6 +490,7 @@ VALID_RUNTIME_BACKENDS = frozenset(
     {
         "claude",
         "claude_code",
+        "claude_mcp",
         "codex",
         "codex_cli",
         "opencode",
@@ -661,6 +671,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
 
     runtime_backend: Literal[
         "claude",
+        "claude_mcp",
         "codex",
         "opencode",
         "hermes",
@@ -716,6 +727,11 @@ class OrchestratorConfig(BaseModel, frozen=True):
     grok_cli_path: str | None = None
     ourocode_cli_path: str | None = None
     zcode_cli_path: str | None = None
+    dsh_cli_path: str | None = None
+    # dsh Cordis composition file passed to `dsh-acp-demo --config`. Not an
+    # executable itself, but it names the plugins the Node process loads, so it
+    # is treated with the same untrusted-source caution as a CLI path.
+    dsh_config_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
     max_parallel_workers: int = Field(default=3, ge=1)
     usage_limit_pause_hours: float = Field(default=5.0, gt=0.0)
@@ -741,6 +757,8 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "grok_cli_path",
         "ourocode_cli_path",
         "zcode_cli_path",
+        "dsh_cli_path",
+        "dsh_config_path",
     )
     @classmethod
     def expand_cli_path(cls, v: str | None) -> str | None:
@@ -754,6 +772,18 @@ class OrchestratorConfig(BaseModel, frozen=True):
     def expand_worktree_root(cls, v: str) -> str:
         """Expand ~ in worktree_root."""
         return str(Path(v).expanduser())
+
+
+class TelemetryConfig(BaseModel, frozen=True):
+    """Anonymous usage telemetry configuration.
+
+    Attributes:
+        enabled: Whether anonymous usage events may be sent. Environment
+            overrides (DO_NOT_TRACK, OUROBOROS_TELEMETRY) always win over
+            this flag — see config.loader.get_telemetry_enabled().
+    """
+
+    enabled: bool = True
 
 
 class OuroborosConfig(BaseModel, frozen=True):
@@ -792,6 +822,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     runtime_controls: RuntimeControlsConfig = Field(default_factory=RuntimeControlsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
+    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
 
 
 def get_default_config() -> OuroborosConfig:

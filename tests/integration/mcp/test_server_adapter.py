@@ -694,10 +694,12 @@ class TestCreateOuroborosServer:
         "ouroboros_brownfield",
         "ouroboros_cancel_execution",
         "ouroboros_cancel_job",
+        "ouroboros_checklist_verify",
         "ouroboros_evaluate",
         "ouroboros_evolve_rewind",
         "ouroboros_evolve_step",
         "ouroboros_execute_seed",
+        "ouroboros_fetch_artifact",
         "ouroboros_generate_seed",
         "ouroboros_interview",
         "ouroboros_job_result",
@@ -735,30 +737,102 @@ class TestCreateOuroborosServer:
         assert server.info.name == "ouroboros-mcp"
         assert server.info.version == __version__
         tool_names = {tool.name for tool in server.info.tools}
+        assert len(tool_names) == 36
         assert tool_names == self.EXPECTED_OUROBOROS_SERVER_TOOLS
 
-    def test_synapse_tools_and_execute_paths_share_one_composition_root_hub(self) -> None:
-        """Public admission and active execution must use the same live queue."""
+    def test_checklist_verify_reuses_the_registered_evaluator(self) -> None:
+        """Checklist verification must not create a parallel evaluation authority."""
+        from ouroboros.mcp.tools.evaluation_handlers import (
+            ChecklistVerifyHandler,
+            EvaluateHandler,
+        )
+
+        server = create_ouroboros_server()
+        evaluate = server._tool_handlers["ouroboros_evaluate"]
+        checklist = server._tool_handlers["ouroboros_checklist_verify"]
+
+        assert isinstance(evaluate, EvaluateHandler)
+        assert isinstance(checklist, ChecklistVerifyHandler)
+        assert checklist.evaluate_handler is evaluate
+
+    @pytest.mark.asyncio
+    async def test_public_client_initializes_lists_and_routes_checklist_verify(self) -> None:
+        """The shipped server exposes and invokes checklist verify across MCP v2."""
+        from mcp import Client
+        from mcp.server import MCPServer
+
+        server = create_ouroboros_server(runtime_backend="claude_mcp")
+        with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+            await server.serve(transport="stdio")
+
+        async with Client(server._mcp_server, mode="auto") as client:
+            tool_names = {tool.name for tool in (await client.list_tools()).tools}
+            result = await client.call_tool(
+                "ouroboros_checklist_verify",
+                {
+                    "session_id": "ses_issue_1978",
+                    "seed_content": "goal: missing acceptance criteria",
+                    "artifact": "candidate",
+                },
+            )
+
+            assert client.server_info.name == "ouroboros-mcp"
+
+        assert "ouroboros_checklist_verify" in tool_names
+        assert result.is_error is True
+        assert "Seed validation failed" in result.content[0].text
+
+    @pytest.mark.asyncio
+    async def test_synapse_control_and_execution_paths_use_durable_relay(self) -> None:
+        """Control persists remotely while each execution process owns its live queue."""
+        from ouroboros.mcp.tools.evolution_handlers import EvolveStepHandler
         from ouroboros.mcp.tools.execution_handlers import (
             ExecuteSeedHandler,
             StartExecuteSeedHandler,
         )
         from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler
+        from ouroboros.persistence.event_store import EventStore
 
-        server = create_ouroboros_server()
-        runtime_context = server._runtime_context
-        execute = server._tool_handlers["ouroboros_execute_seed"]
-        start_execute = server._tool_handlers["ouroboros_start_execute_seed"]
-        signal = server._tool_handlers["ouroboros_session_signal"]
+        captured_runner_kwargs: dict[str, object] = {}
 
-        assert runtime_context is not None
-        assert runtime_context.synapse is not None
-        assert isinstance(execute, ExecuteSeedHandler)
-        assert isinstance(start_execute, StartExecuteSeedHandler)
-        assert isinstance(signal, SynapseSignalHandler)
-        assert execute.session_signal_hub is runtime_context.synapse
-        assert start_execute._execute_handler.session_signal_hub is runtime_context.synapse
-        assert signal.mailbox.delivery_queue is runtime_context.synapse
+        class CapturingRunner:
+            def __init__(self, **kwargs: object) -> None:
+                captured_runner_kwargs.update(kwargs)
+
+            async def execute_seed(self, **_kwargs: object) -> str:
+                return "evolve execution completed"
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        with patch("ouroboros.orchestrator.runner.OrchestratorRunner", CapturingRunner):
+            server = create_ouroboros_server(event_store=store)
+
+        try:
+            runtime_context = server._runtime_context
+            execute = server._tool_handlers["ouroboros_execute_seed"]
+            start_execute = server._tool_handlers["ouroboros_start_execute_seed"]
+            evolve = server._tool_handlers["ouroboros_evolve_step"]
+            signal = server._tool_handlers["ouroboros_session_signal"]
+
+            assert runtime_context is not None
+            assert runtime_context.synapse is not None
+            assert isinstance(execute, ExecuteSeedHandler)
+            assert isinstance(start_execute, StartExecuteSeedHandler)
+            assert isinstance(evolve, EvolveStepHandler)
+            assert isinstance(signal, SynapseSignalHandler)
+            assert execute.session_signal_hub is runtime_context.synapse
+            assert start_execute._execute_handler.session_signal_hub is runtime_context.synapse
+            assert signal.mailbox.delivery_queue is None
+
+            assert evolve.evolutionary_loop is not None
+            result = await evolve.evolutionary_loop.executor(
+                MagicMock(),
+                execution_id="evolve:lin_test:generation:1",
+            )
+
+            assert result == "evolve execution completed"
+            assert captured_runner_kwargs["session_signal_hub"] is runtime_context.synapse
+        finally:
+            await server.shutdown()
 
     def test_create_server_forwards_bridge_context_to_auto_handler(self) -> None:
         """Auto resume rebuilds should retain bridge access from server wiring."""

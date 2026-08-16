@@ -3,8 +3,11 @@
     "ouroboros": {
       "command": "uvx",
       "args": [
+        "--isolated",
+        "--python",
+        ">=3.12",
         "--from",
-        "ouroboros-ai[mcp,claude]",
+        "ouroboros-ai[mcp]==0.51.5",
         "ouroboros",
         "mcp",
         "serve",
