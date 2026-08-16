@@ -383,6 +383,33 @@ heapq.nsmallest(1, [settings.evaluation], key=lambda section: section.stage3_ena
     assert contract.runtime_reads(tmp_path, fields) == fields
 
 
+def test_runtime_scan_models_min_max_and_heap_key_callback_cardinality(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "key_callback_cardinality.py").write_text(
+        """
+import heapq
+
+def read_stage1(section):
+    return section.stage1_enabled
+
+def read_stage2(section):
+    return section.stage2_enabled
+
+max(config.evaluation, config.evaluation, key=read_stage1)
+heapq.nsmallest(0, [config.evaluation], key=read_stage2)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == {
+        contract.ConfigField("evaluation", "stage1_enabled")
+    }
+
+
 def test_runtime_scan_does_not_execute_empty_standard_library_callback_consumers(
     contract, tmp_path: Path
 ) -> None:
@@ -561,6 +588,50 @@ Reader(config.evaluation).value()
     field = contract.ConfigField("evaluation", "stage1_enabled")
 
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+def test_runtime_scan_resolves_builtin_descriptor_aliases_and_replacements(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "descriptor_identity.py").write_text(
+        """
+from builtins import property as prop
+from builtins import staticmethod as sm
+
+class Reader:
+    @sm
+    def static(section):
+        return section.stage2_enabled
+
+    def __init__(self, section):
+        self.section = section
+
+    @prop
+    def value(self):
+        return self.section.stage3_enabled
+
+Reader.static(config.evaluation)
+Reader(config.evaluation).value
+
+staticmethod = lambda fn: lambda *args: None
+
+class Shadow:
+    @staticmethod
+    def static(section):
+        return section.stage1_enabled
+
+Shadow.static(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields - {
+        contract.ConfigField("evaluation", "stage1_enabled")
+    }
 
 
 def test_runtime_scan_tracks_exact_serialized_mapping_consumers(contract, tmp_path: Path) -> None:

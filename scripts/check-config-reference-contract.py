@@ -244,6 +244,8 @@ _OPERATOR_GETITEM = "<operator-getitem>"
 _BUILTINS_MODULE = "<builtins-module>"
 _DICT_BUILTIN = "<dict-builtin>"
 _CLASSMETHOD_DECORATOR = "<classmethod-decorator>"
+_STATICMETHOD_DECORATOR = "<staticmethod-decorator>"
+_PROPERTY_DECORATOR = "<property-decorator>"
 _GETATTR_BUILTIN = "<getattr-builtin>"
 _BOUND_GETATTRIBUTE_PREFIX = "<bound-getattribute:"
 _MODEL_COPY_PREFIX = "<model-copy:"
@@ -1078,11 +1080,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             return self._function_value(node.body) | self._function_value(node.orelse)
         return frozenset()
 
-    @staticmethod
-    def _method_is_static(function: _FunctionNode) -> bool:
-        return isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
-            _callable_name(decorator) == "staticmethod" for decorator in function.decorator_list
-        )
+    def _method_is_static(self, function: _FunctionNode) -> bool:
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+        for decorator in function.decorator_list:
+            if isinstance(decorator, ast.Name) and decorator.id == "staticmethod":
+                return not any(decorator.id in scope for scope in self._states)
+            if _STATICMETHOD_DECORATOR in self._expression_value(decorator).origins:
+                return True
+        return False
 
     def _method_is_property(self, function: _FunctionNode) -> bool:
         if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -1090,6 +1096,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         for decorator in function.decorator_list:
             if isinstance(decorator, ast.Name) and decorator.id == "property":
                 return not any(decorator.id in scope for scope in self._states)
+            if _PROPERTY_DECORATOR in self._expression_value(decorator).origins:
+                return True
             if _CACHED_PROPERTY_DECORATOR in self._expression_value(decorator).origins:
                 return True
         return False
@@ -1597,6 +1605,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 if node.id == "dict" and not self._name_is_bound("dict")
                 else _origin_value(_CLASSMETHOD_DECORATOR)
                 if node.id == "classmethod" and not self._name_is_bound("classmethod")
+                else _origin_value(_STATICMETHOD_DECORATOR)
+                if node.id == "staticmethod" and not self._name_is_bound("staticmethod")
+                else _origin_value(_PROPERTY_DECORATOR)
+                if node.id == "property" and not self._name_is_bound("property")
                 else _origin_value(_VARS_BUILTIN)
                 if node.id == "vars" and not self._name_is_bound("vars")
                 else _origin_value(_RANGE_BUILTIN)
@@ -1654,6 +1666,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_DICT_BUILTIN)
             if _BUILTINS_MODULE in owner.origins and node.attr == "classmethod":
                 return _origin_value(_CLASSMETHOD_DECORATOR)
+            if _BUILTINS_MODULE in owner.origins and node.attr == "staticmethod":
+                return _origin_value(_STATICMETHOD_DECORATOR)
+            if _BUILTINS_MODULE in owner.origins and node.attr == "property":
+                return _origin_value(_PROPERTY_DECORATOR)
             if _BUILTINS_MODULE in owner.origins and node.attr == "hasattr":
                 return _origin_value(_HASATTR_BUILTIN)
             if _OBJECT_BUILTIN in owner.origins and node.attr == "__getattribute__":
@@ -2215,6 +2231,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         if isinstance(node.ctx, ast.Load):
             self._record_possible_exception(before)
 
+    def visit_Expr(self, node: ast.Expr) -> None:
+        self.visit(node.value)
+        if isinstance(node.value, ast.Attribute) and isinstance(node.value.ctx, ast.Load):
+            # A descriptor executes even when its result is discarded. Most
+            # expression consumers ask for the abstract value themselves, but
+            # a standalone attribute expression otherwise only visits its
+            # owner and would skip a property getter entirely.
+            self._expression_value(node.value)
+
     def visit_IfExp(self, node: ast.IfExp) -> None:
         self.visit(node.test)
         truth = self._static_truth(node.test)
@@ -2333,10 +2358,32 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 self._consume_deferred_callable_iterator(argument, mode=mode)
             key_keyword = next((keyword for keyword in node.keywords if keyword.arg == "key"), None)
             if key_keyword is not None and node.args:
-                iterable_index = 1 if accessor.origins & _HEAPQ_KEY_CONSUMER_ORIGINS else 0
+                if accessor.origins & _HEAPQ_KEY_CONSUMER_ORIGINS:
+                    limit = _safe_constant_value(node.args[0])
+                    if isinstance(limit, int) and limit <= 0:
+                        iterable_index = None
+                    else:
+                        iterable_index = 1
+                elif (
+                    "<builtin-consumer:min>" in accessor.origins
+                    or "<builtin-consumer:max>" in accessor.origins
+                ):
+                    iterable_index = 0
+                    if len(node.args) > 1 and all(
+                        self._expression_value(argument).items is None for argument in node.args
+                    ):
+                        for argument in node.args:
+                            for function, receiver in self._call_targets(key_keyword.value):
+                                values = ((receiver,) if receiver is not None else ()) + (
+                                    self._expression_value(argument),
+                                )
+                                self._local_direct_call_value(function, values)
+                        iterable_index = None
+                else:
+                    iterable_index = 0
                 iterable = (
                     self._expression_value(node.args[iterable_index])
-                    if len(node.args) > iterable_index
+                    if iterable_index is not None and len(node.args) > iterable_index
                     else _UNKNOWN_VALUE
                 )
                 for item in iterable.items or ():
@@ -3658,6 +3705,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "builtins" and alias.name == "dict"
                     else _origin_value(_CLASSMETHOD_DECORATOR)
                     if node.module == "builtins" and alias.name == "classmethod"
+                    else _origin_value(_STATICMETHOD_DECORATOR)
+                    if node.module == "builtins" and alias.name == "staticmethod"
+                    else _origin_value(_PROPERTY_DECORATOR)
+                    if node.module == "builtins" and alias.name == "property"
                     else _origin_value(_HASATTR_BUILTIN)
                     if node.module == "builtins" and alias.name == "hasattr"
                     else _origin_value(_VARS_BUILTIN)
