@@ -69,6 +69,7 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"|\bchose\s+not\s+to\b"
     r"|\bthere\s+(?:is|was)\s+no\s+(?:requirement|contract|need)\b"
     r"|\b(?:explain(?:ed|ing)?|docs?\s+(?:say|says|said)|legacy\s+exports?)\b"
+    r"|\b(?:for\s+reference|(?:the\s+)?docs?\s+(?:show|say|mention)|as\s+an?\s+example)\b"
     r"|(?:설정하지\s*마세요|(?:상속|계승)하면\s*안\s*(?:됩니다|돼요))",
     re.IGNORECASE,
 )
@@ -101,6 +102,8 @@ _POST_MATCH_REJECTION_PATTERN = re.compile(
     r"|(?:should|must|may)\s+(?:not\s+)?(?:be\s+)?(?:used|required|adopted|applied|avoided)"
     r"|(?:value|requirement|contract|proposal)\s+(?:should|must|may)\s+not\s+(?:be\s+)?(?:used|required|adopted|applied|avoided)"
     r"|(?:value|requirement|contract|proposal)\s+(?:is|was)\s+not\s+allowed"
+    r"|(?:is|was)\s+an?\s+example"
+    r"|as\s+an?\s+example"
     r"|(?:하지\s*마세요|하면\s*안\s*(?:됩니다|돼요)))\b",
     re.IGNORECASE,
 )

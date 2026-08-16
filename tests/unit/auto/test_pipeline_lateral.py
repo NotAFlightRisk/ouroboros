@@ -149,7 +149,9 @@ def test_seed_qa_repairs_preserve_same_clause_task_and_parent_contracts() -> Non
         update={
             "goal": (
                 "Use task_type: document to explain why the old proposal was rejected. "
-                "Inherit seed_good for either a PDF or DOCX migration note."
+                "Inherit seed_good for either a PDF or DOCX migration note. "
+                "For reference, task_type: code is an example. "
+                "The docs show inherit seed_bad as an example."
             ),
             "task_type": "code",
         }

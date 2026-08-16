@@ -245,6 +245,7 @@ class TestPartialSeedFromEvidence:
             "Keep the task type as document.",
             "Use document as the task type.",
             "Use task_type: document for the final proposal.",
+            "task_type: document. For reference, task_type: code is an example.",
         )
         for goal in positive_goals:
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))

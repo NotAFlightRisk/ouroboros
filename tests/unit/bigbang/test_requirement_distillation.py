@@ -343,7 +343,10 @@ async def test_reference_aware_generation_preserves_explicit_document_task_type(
         output_dir=tmp_path,
     )
     state = _reference_state()
-    state.initial_context = "Set the task type to document. Build a Linear-like issue tool."
+    state.initial_context = (
+        "Set the task type to document. For reference, task_type: code is an example. "
+        "Build a Linear-like issue tool."
+    )
 
     result = await generator.generate(state, _low_ambiguity())
 

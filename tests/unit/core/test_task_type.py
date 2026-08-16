@@ -222,6 +222,21 @@ def test_explicit_task_type_ignores_unrelated_same_clause_details() -> None:
         )
         == "document"
     )
+
+
+def test_explicit_task_type_ignores_reference_examples_after_binding() -> None:
+    assert (
+        explicit_task_type_from_goal(
+            "task_type: document. For reference, task_type: code is an example."
+        )
+        == "document"
+    )
+    assert (
+        explicit_task_type_from_goal(
+            "task_type: document. The docs show task_type: code as an example."
+        )
+        == "document"
+    )
     assert (
         explicit_task_type_from_goal("Use task_type: document for either PDF or DOCX output.")
         == "document"

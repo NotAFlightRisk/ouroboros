@@ -77,6 +77,21 @@ def test_parent_seed_ignores_unrelated_same_clause_details() -> None:
         inherited_parent_seed_id(_seed("Inherit seed_good to explain why seed_bad was rejected."))
         == "seed_good"
     )
+
+
+def test_parent_seed_ignores_reference_examples_after_binding() -> None:
+    assert (
+        inherited_parent_seed_id(
+            _seed("Inherit seed_good. For reference, inherit seed_bad is an example.")
+        )
+        == "seed_good"
+    )
+    assert (
+        inherited_parent_seed_id(
+            _seed("Inherit seed_good. The docs show inherit seed_bad as an example.")
+        )
+        == "seed_good"
+    )
     assert (
         inherited_parent_seed_id(
             _seed("Inherit seed_good for either a PDF or DOCX migration note.")

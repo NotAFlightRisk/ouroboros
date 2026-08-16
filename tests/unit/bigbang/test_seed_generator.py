@@ -361,7 +361,7 @@ class TestSeedGeneratorAmbiguityGating:
         state = create_interview_state_with_rounds(
             initial_context=(
                 "Rather than change source code, write the requested plan; "
-                "set the task type to document."
+                "set the task type to document. For reference, task_type: code is an example."
             )
         )
         low_ambiguity = create_low_ambiguity_score(0.15)
