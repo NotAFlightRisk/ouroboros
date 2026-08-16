@@ -171,6 +171,8 @@ class TestPartialSeedFromEvidence:
             "task_type: document. Forget that.",
             "task_type: document. Cancel that requirement.",
             "task_type: document. I take that back.",
+            "task_type: document. However, cancel that requirement.",
+            "task_type: document. But cancel that requirement.",
         )
         corrected = (
             "task_type: code. Actually, task_type: document. Confirmed: task_type: document."
@@ -188,6 +190,16 @@ class TestPartialSeedFromEvidence:
         partial = partial_seed_from_evidence(
             SeedDraftLedger.from_goal(corrected), reason="interview_phase_deadline"
         )
+        assert complete.task_type == "document"
+        assert partial.task_type == "document"
+
+    def test_complete_and_partial_ledgers_scope_mixed_contract_retractions(self) -> None:
+        goal = "task_type: document. Inherit seed_old. Cancel that requirement."
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+        )
+
         assert complete.task_type == "document"
         assert partial.task_type == "document"
 

@@ -371,6 +371,8 @@ def test_seed_qa_repair_preserves_clause_local_document_contract() -> None:
         "task_type: document. Forget that. Inherit seed_bad. Forget that.",
         "task_type: document. Cancel that requirement. Inherit seed_bad. Cancel that requirement.",
         "task_type: document. I take that back. Inherit seed_bad. I take that back.",
+        "task_type: document. However, cancel that requirement. Inherit seed_bad. "
+        "But cancel that requirement.",
     ),
 )
 def test_seed_qa_repair_never_persists_retracted_task_type_or_parent(
@@ -390,6 +392,35 @@ def test_seed_qa_repair_never_persists_retracted_task_type_or_parent(
 
     assert repaired.task_type == "code"
     assert repaired.metadata.parent_seed_id == "seed_current"
+
+
+def test_seed_qa_repairs_scope_mixed_contract_retractions() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": "task_type: document. Inherit seed_bad. Cancel that requirement.",
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("The task type must be document.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Preserve only active contracts.",
+        text="Keep the active document route.",
+    )
+
+    deterministic = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    lateral = _seed_with_seed_qa_lateral_feedback(
+        seed, lateral_result, qa_result=qa_result, attempt=1
+    )
+
+    for repaired in (deterministic, lateral):
+        assert repaired.task_type == "document"
+        assert repaired.metadata.parent_seed_id == "seed_current"
 
 
 @pytest.mark.parametrize(

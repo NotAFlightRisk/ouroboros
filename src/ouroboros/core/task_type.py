@@ -116,7 +116,7 @@ _POST_MATCH_REJECTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _STANDALONE_RETRACTION_PATTERN = re.compile(
-    r"(?:^|[.!?\n])\s*(?:actually\s*,?\s*)?"
+    r"(?:^|[.!?\n])\s*(?:(?:actually|but|however)\s*,?\s*)?"
     r"(?:scratch\s+that|we\s+decided\s+against\s+it|"
     r"never\s+mind|forget\s+that|i\s+take\s+that\s+back|"
     r"cancel\s+(?:that\s+)?(?:requirement|contract|proposal|value)?|"
@@ -124,6 +124,14 @@ _STANDALONE_RETRACTION_PATTERN = re.compile(
     r"(?:was|is)\s+(?:rejected|superseded|obsolete|discarded)|"
     r"(?:the\s+)?(?:requirement|contract|proposal|value)\s+"
     r"(?:is|was)\s+not\s+allowed)",
+    re.IGNORECASE,
+)
+
+_PARENT_CONTRACT_PATTERN = re.compile(
+    r"\b(?:inherit(?:ing)?(?:\s+from)?|derive(?:d)?\s+from|"
+    r"(?:set\s+)?parent(?:_seed_id|\s+seed)?\s*(?:is|=|:|to)|"
+    r"use)\s+seed_[A-Za-z0-9]+\b"
+    r"|\bseed_[A-Za-z0-9]+\b(?:을|를)?\s*(?:계승|상속)(?!하지)",
     re.IGNORECASE,
 )
 _CONTRACT_TAIL_AMBIGUITY_PATTERN = re.compile(
@@ -277,6 +285,19 @@ def _is_explicit_correction(text: str, prior_end: int, next_start: int) -> bool:
     )
 
 
+def _retraction_cancels_candidate(text: str, candidate_end: int) -> bool:
+    """Scope a later cancellation to its nearest task/lineage contract."""
+    candidates = [
+        match.end() for pattern in _TASK_TYPE_CONTRACT_PATTERNS for match in pattern.finditer(text)
+    ]
+    candidates.extend(match.end() for match in _PARENT_CONTRACT_PATTERN.finditer(text))
+    for retraction in _STANDALONE_RETRACTION_PATTERN.finditer(text, candidate_end):
+        prior = [end for end in candidates if end <= retraction.start()]
+        if prior and max(prior) == candidate_end:
+            return True
+    return False
+
+
 def _resolve_authoritative_matches(text: str, matches: list[tuple[int, int, str]]) -> str | None:
     """Resolve every ordered value transition, allowing duplicate confirmations."""
     ordered = sorted(matches)
@@ -289,7 +310,7 @@ def _resolve_authoritative_matches(text: str, matches: list[tuple[int, int, str]
             return None
         current = value
         prior_end = end
-    if _STANDALONE_RETRACTION_PATTERN.search(text[prior_end:]) is not None:
+    if _retraction_cancels_candidate(text, prior_end):
         return None
     return current
 

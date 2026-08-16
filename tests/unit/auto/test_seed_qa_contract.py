@@ -205,8 +205,25 @@ def test_parent_seed_honors_later_standalone_retractions() -> None:
         "Inherit seed_old. Forget that.",
         "Inherit seed_old. Cancel that requirement.",
         "Inherit seed_old. I take that back.",
+        "Inherit seed_old. However, cancel that requirement.",
+        "Inherit seed_old. But cancel that requirement.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
+
+
+def test_parent_seed_scopes_retraction_to_nearest_contract() -> None:
+    assert (
+        inherited_parent_seed_id(
+            _seed("task_type: document. Inherit seed_old. Cancel that requirement.")
+        )
+        is None
+    )
+    assert (
+        inherited_parent_seed_id(
+            _seed("Inherit seed_old. task_type: document. Cancel that requirement.")
+        )
+        == "seed_old"
+    )
 
 
 def test_parent_seed_preserves_korean_inheritance_contract() -> None:

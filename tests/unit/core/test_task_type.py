@@ -334,5 +334,22 @@ def test_explicit_task_type_honors_later_standalone_retractions() -> None:
         "task_type: document. Forget that.",
         "task_type: document. Cancel that requirement.",
         "task_type: document. I take that back.",
+        "task_type: document. However, cancel that requirement.",
+        "task_type: document. But cancel that requirement.",
     ):
         assert explicit_task_type_from_goal(goal) is None
+
+
+def test_explicit_task_type_scopes_retraction_to_nearest_contract() -> None:
+    assert (
+        explicit_task_type_from_goal(
+            "task_type: document. Inherit seed_old. Cancel that requirement."
+        )
+        == "document"
+    )
+    assert (
+        explicit_task_type_from_goal(
+            "Inherit seed_old. task_type: document. Cancel that requirement."
+        )
+        is None
+    )
