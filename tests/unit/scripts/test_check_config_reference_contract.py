@@ -364,6 +364,60 @@ async def read(config):
     assert contract.runtime_reads(tmp_path, fields) == fields
 
 
+def test_runtime_scan_tracks_local_and_closing_context_entry_protocols(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "ordinary_context_entries.py").write_text(
+        """
+import contextlib
+
+class Box:
+    def __init__(self, section):
+        self.section = section
+
+    def __enter__(self):
+        return self.section
+
+    def __exit__(self, *args):
+        return None
+
+with Box(settings.evaluation) as section:
+    value = section.stage1_enabled
+
+with contextlib.closing(settings.evaluation) as section:
+    value = section.stage2_enabled
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_does_not_enter_unconsumed_context_objects(contract, tmp_path: Path) -> None:
+    (tmp_path / "unentered_contexts.py").write_text(
+        """
+from contextlib import closing
+
+class Box:
+    def __init__(self, section):
+        self.section = section
+
+    def __enter__(self):
+        return self.section.stage1_enabled
+
+Box(settings.evaluation)
+closing(settings.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
 def test_runtime_scan_invokes_cached_property_getters(contract, tmp_path: Path) -> None:
     (tmp_path / "cached_property_read.py").write_text(
         """

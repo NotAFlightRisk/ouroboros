@@ -255,6 +255,8 @@ _ASYNCIO_CONSUMER_ORIGINS = frozenset(f"<asyncio-consumer:{name}>" for name in _
 _CONTEXTLIB_MODULE = "<contextlib-module>"
 _NULLCONTEXT_FACTORY = "<nullcontext-factory>"
 _NULLCONTEXT_VALUE = "<nullcontext-value>"
+_CLOSING_FACTORY = "<closing-factory>"
+_CLOSING_VALUE = "<closing-value>"
 _EXITSTACK_FACTORY = "<exitstack-factory>"
 _EXITSTACK_VALUE = "<exitstack-value>"
 _ENTER_CONTEXT_CONSUMER = "<enter-context-consumer>"
@@ -1517,6 +1519,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(f"<asyncio-consumer:{node.attr}>")
             if _CONTEXTLIB_MODULE in owner.origins and node.attr == "nullcontext":
                 return _origin_value(_NULLCONTEXT_FACTORY)
+            if _CONTEXTLIB_MODULE in owner.origins and node.attr in {"closing", "aclosing"}:
+                return _origin_value(_CLOSING_FACTORY)
             if _CONTEXTLIB_MODULE in owner.origins and node.attr == "ExitStack":
                 return _origin_value(_EXITSTACK_FACTORY)
             if _EXITSTACK_VALUE in owner.origins and node.attr == "enter_context":
@@ -1680,6 +1684,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if _NULLCONTEXT_FACTORY in function_value.origins:
                 entry = self._expression_value(node.args[0]) if node.args else _UNKNOWN_VALUE
                 return _AbstractValue(origins=frozenset({_NULLCONTEXT_VALUE}), items=(entry,))
+            if _CLOSING_FACTORY in function_value.origins:
+                entry = self._expression_value(node.args[0]) if node.args else _UNKNOWN_VALUE
+                return _AbstractValue(origins=frozenset({_CLOSING_VALUE}), items=(entry,))
             if _EXITSTACK_FACTORY in function_value.origins:
                 return _AbstractValue(origins=frozenset({_EXITSTACK_VALUE}))
             if _ENTER_CONTEXT_CONSUMER in function_value.origins and node.args:
@@ -3255,6 +3262,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "asyncio" and alias.name in _ASYNCIO_CONSUMERS
                     else _origin_value(_NULLCONTEXT_FACTORY)
                     if node.module == "contextlib" and alias.name == "nullcontext"
+                    else _origin_value(_CLOSING_FACTORY)
+                    if node.module == "contextlib" and alias.name in {"closing", "aclosing"}
                     else _origin_value(_EXITSTACK_FACTORY)
                     if node.module == "contextlib" and alias.name == "ExitStack"
                     else _origin_value("<external-consumer:collections.deque>")
@@ -3368,9 +3377,16 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def _context_entry_value(self, context_value: _AbstractValue) -> _AbstractValue:
         if _NULLCONTEXT_VALUE in context_value.origins and context_value.items:
             return context_value.items[0]
+        if _CLOSING_VALUE in context_value.origins and context_value.items:
+            return context_value.items[0]
         if _EXITSTACK_VALUE in context_value.origins:
             return context_value
-        entries: list[_AbstractValue] = []
+        receiver = self._descriptor_receiver(context_value)
+        entries: list[_AbstractValue] = [
+            self._local_direct_call_value(function, (receiver,))
+            for method_name in ("__enter__", "__aenter__")
+            for function in self._source_index.methods(context_value.instance_classes, method_name)
+        ]
         for identity in context_value.identity:
             deferred = self._deferred_generators.get(identity)
             if deferred is None or not isinstance(
