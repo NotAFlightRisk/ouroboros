@@ -213,6 +213,7 @@ class _DeferredCallableIterator:
 
     callbacks: tuple[_CallableTarget, ...]
     iterables: tuple[_AbstractValue, ...]
+    star_arguments: bool = False
 
 
 @dataclass(frozen=True)
@@ -237,12 +238,23 @@ _GETATTR_BUILTIN = "<getattr-builtin>"
 _VARS_BUILTIN = "<vars-builtin>"
 _FUNCTOOLS_MODULE = "<functools-module>"
 _PARTIAL_FACTORY = "<functools-partial-factory>"
+_REDUCE_CONSUMER = "<functools-reduce-consumer>"
+_ITERTOOLS_MODULE = "<itertools-module>"
+_STARMAP_FACTORY = "<itertools-starmap-factory>"
+_HEAPQ_MODULE = "<heapq-module>"
+_HEAPQ_KEY_CONSUMERS = frozenset({"nsmallest", "nlargest"})
+_HEAPQ_KEY_CONSUMER_ORIGINS = frozenset(
+    f"<heapq-key-consumer:{name}>" for name in _HEAPQ_KEY_CONSUMERS
+)
 _ASYNCIO_MODULE = "<asyncio-module>"
 _ASYNCIO_CONSUMERS = frozenset({"create_task", "ensure_future", "gather", "run"})
 _ASYNCIO_CONSUMER_ORIGINS = frozenset(f"<asyncio-consumer:{name}>" for name in _ASYNCIO_CONSUMERS)
 _CONTEXTLIB_MODULE = "<contextlib-module>"
 _NULLCONTEXT_FACTORY = "<nullcontext-factory>"
 _NULLCONTEXT_VALUE = "<nullcontext-value>"
+_EXITSTACK_FACTORY = "<exitstack-factory>"
+_EXITSTACK_VALUE = "<exitstack-value>"
+_ENTER_CONTEXT_CONSUMER = "<enter-context-consumer>"
 _EAGER_BUILTIN_CONSUMERS = frozenset(
     {
         "all",
@@ -267,7 +279,9 @@ _EAGER_BUILTIN_CONSUMER_ORIGINS = frozenset(
     f"<builtin-consumer:{name}>" for name in _EAGER_BUILTIN_CONSUMERS
 )
 _EAGER_EXTERNAL_CONSUMER_ORIGINS = frozenset({"<external-consumer:collections.deque>"})
-_EAGER_CONSUMER_ORIGINS = _EAGER_BUILTIN_CONSUMER_ORIGINS | _EAGER_EXTERNAL_CONSUMER_ORIGINS
+_EAGER_CONSUMER_ORIGINS = (
+    _EAGER_BUILTIN_CONSUMER_ORIGINS | _EAGER_EXTERNAL_CONSUMER_ORIGINS | _HEAPQ_KEY_CONSUMER_ORIGINS
+)
 _LAZY_BUILTIN_CONSUMER_ORIGINS = frozenset(
     f"<builtin-consumer:{name}>" for name in _LAZY_BUILTIN_CONSUMERS
 )
@@ -956,7 +970,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     @staticmethod
     def _method_is_property(function: _FunctionNode) -> bool:
         return isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
-            _callable_name(decorator) == "property" for decorator in function.decorator_list
+            _callable_name(decorator) in {"property", "cached_property"}
+            for decorator in function.decorator_list
         )
 
     def _call_targets(
@@ -1469,7 +1484,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if property_getters:
                 return _join_values(
                     *(
-                        self._local_direct_call_value(function, (owner,))
+                        self._local_direct_call_value(function, (self._descriptor_receiver(owner),))
                         for function in property_getters
                     )
                 )
@@ -1483,10 +1498,20 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(f"<builtin-consumer:{node.attr}>")
             if _FUNCTOOLS_MODULE in owner.origins and node.attr == "partial":
                 return _origin_value(_PARTIAL_FACTORY)
+            if _FUNCTOOLS_MODULE in owner.origins and node.attr == "reduce":
+                return _origin_value(_REDUCE_CONSUMER)
+            if _ITERTOOLS_MODULE in owner.origins and node.attr == "starmap":
+                return _origin_value(_STARMAP_FACTORY)
+            if _HEAPQ_MODULE in owner.origins and node.attr in _HEAPQ_KEY_CONSUMERS:
+                return _origin_value(f"<heapq-key-consumer:{node.attr}>")
             if _ASYNCIO_MODULE in owner.origins and node.attr in _ASYNCIO_CONSUMERS:
                 return _origin_value(f"<asyncio-consumer:{node.attr}>")
             if _CONTEXTLIB_MODULE in owner.origins and node.attr == "nullcontext":
                 return _origin_value(_NULLCONTEXT_FACTORY)
+            if _CONTEXTLIB_MODULE in owner.origins and node.attr == "ExitStack":
+                return _origin_value(_EXITSTACK_FACTORY)
+            if _EXITSTACK_VALUE in owner.origins and node.attr == "enter_context":
+                return _origin_value(_ENTER_CONTEXT_CONSUMER)
             if node.attr == "deque" and "collections" in owner.modules:
                 return _origin_value("<external-consumer:collections.deque>")
             sections = owner.origins & TRACKED_SECTIONS
@@ -1589,6 +1614,17 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     ),
                 )
                 return _AbstractValue(identity=frozenset({identity}))
+            if _STARMAP_FACTORY in function_value.origins and len(node.args) >= 2:
+                identity = id(node)
+                self._deferred_callable_iterators[identity] = _DeferredCallableIterator(
+                    callbacks=tuple(
+                        _CallableTarget(function, receiver)
+                        for function, receiver in self._call_targets(node.args[0])
+                    ),
+                    iterables=(self._expression_value(node.args[1]),),
+                    star_arguments=True,
+                )
+                return _AbstractValue(identity=frozenset({identity}))
             if _ATTRGETTER_FACTORY in function_value.origins:
                 return _AbstractValue(
                     accessed_attributes=frozenset(
@@ -1600,6 +1636,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if _NULLCONTEXT_FACTORY in function_value.origins:
                 entry = self._expression_value(node.args[0]) if node.args else _UNKNOWN_VALUE
                 return _AbstractValue(origins=frozenset({_NULLCONTEXT_VALUE}), items=(entry,))
+            if _EXITSTACK_FACTORY in function_value.origins:
+                return _AbstractValue(origins=frozenset({_EXITSTACK_VALUE}))
+            if _ENTER_CONTEXT_CONSUMER in function_value.origins and node.args:
+                return self._context_entry_value(self._expression_value(node.args[0]))
             if function_value.serialized_sections:
                 return _AbstractValue(serialized_sections=function_value.serialized_sections)
             if _VARS_BUILTIN in function_value.origins and node.args:
@@ -1862,6 +1902,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     tuple(_conservative_value(iterable) for iterable in deferred.iterables),
                 )
             for arguments in argument_sets:
+                if deferred.star_arguments and len(arguments) == 1:
+                    item = arguments[0]
+                    arguments = item.items or (_conservative_value(item),)
                 for target in deferred.callbacks:
                     values = (
                         (target.receiver, *arguments) if target.receiver is not None else arguments
@@ -1886,11 +1929,31 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 self._consume_deferred_callable_iterator(argument, mode=mode)
             key_keyword = next((keyword for keyword in node.keywords if keyword.arg == "key"), None)
             if key_keyword is not None and node.args:
-                iterable = self._expression_value(node.args[0])
+                iterable_index = 1 if accessor.origins & _HEAPQ_KEY_CONSUMER_ORIGINS else 0
+                iterable = (
+                    self._expression_value(node.args[iterable_index])
+                    if len(node.args) > iterable_index
+                    else _UNKNOWN_VALUE
+                )
                 for item in iterable.items or ():
                     for function, receiver in self._call_targets(key_keyword.value):
                         values = ((receiver,) if receiver is not None else ()) + (item,)
                         self._local_direct_call_value(function, values)
+        if _REDUCE_CONSUMER in accessor.origins and len(node.args) >= 2:
+            iterable = self._expression_value(node.args[1])
+            items = iterable.items or ()
+            if items:
+                accumulator = (
+                    self._expression_value(node.args[2]) if len(node.args) >= 3 else items[0]
+                )
+                remaining = items if len(node.args) >= 3 else items[1:]
+                for item in remaining:
+                    for function, receiver in self._call_targets(node.args[0]):
+                        values = ((receiver,) if receiver is not None else ()) + (
+                            accumulator,
+                            item,
+                        )
+                        accumulator = self._local_direct_call_value(function, values)
         if accessor.origins & _ASYNCIO_CONSUMER_ORIGINS:
             for argument in node.args:
                 self._consume_deferred_coroutine(argument)
@@ -3049,6 +3112,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if alias.name == "builtins"
                     else _origin_value(_FUNCTOOLS_MODULE)
                     if alias.name == "functools"
+                    else _origin_value(_ITERTOOLS_MODULE)
+                    if alias.name == "itertools"
+                    else _origin_value(_HEAPQ_MODULE)
+                    if alias.name == "heapq"
                     else _origin_value(_ASYNCIO_MODULE)
                     if alias.name == "asyncio"
                     else _origin_value(_CONTEXTLIB_MODULE)
@@ -3096,10 +3163,18 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "builtins" and alias.name in _TRACKED_BUILTIN_CONSUMERS
                     else _origin_value(_PARTIAL_FACTORY)
                     if node.module == "functools" and alias.name == "partial"
+                    else _origin_value(_REDUCE_CONSUMER)
+                    if node.module == "functools" and alias.name == "reduce"
+                    else _origin_value(_STARMAP_FACTORY)
+                    if node.module == "itertools" and alias.name == "starmap"
+                    else _origin_value(f"<heapq-key-consumer:{alias.name}>")
+                    if node.module == "heapq" and alias.name in _HEAPQ_KEY_CONSUMERS
                     else _origin_value(f"<asyncio-consumer:{alias.name}>")
                     if node.module == "asyncio" and alias.name in _ASYNCIO_CONSUMERS
                     else _origin_value(_NULLCONTEXT_FACTORY)
                     if node.module == "contextlib" and alias.name == "nullcontext"
+                    else _origin_value(_EXITSTACK_FACTORY)
+                    if node.module == "contextlib" and alias.name == "ExitStack"
                     else _origin_value("<external-consumer:collections.deque>")
                     if node.module == "collections" and alias.name == "deque"
                     else _AbstractValue(
@@ -3118,6 +3193,88 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         self._bind_import_from(node, runtime=True)
 
+    def _value_in_scope(
+        self, expression: ast.expr, scoped: dict[str, _AbstractValue]
+    ) -> _AbstractValue:
+        self._states.append(dict(scoped))
+        self._annotations.append({})
+        self._functions.append({})
+        self._global_names.append(set())
+        self._nonlocal_names.append(set())
+        previous_cache = self._expression_cache
+        self._expression_cache = {}
+        try:
+            return self._expression_value(expression)
+        finally:
+            self._expression_cache = previous_cache
+            self._nonlocal_names.pop()
+            self._global_names.pop()
+            self._functions.pop()
+            self._annotations.pop()
+            self._states.pop()
+
+    def _descriptor_receiver(self, owner: _AbstractValue) -> _AbstractValue:
+        """Recover direct constructor assignments needed by executable descriptors."""
+
+        attributes = dict(owner.attributes or ())
+        for initializer in self._source_index.methods(owner.instance_classes, "__init__"):
+            positional = (*initializer.args.posonlyargs, *initializer.args.args)
+            if not positional:
+                continue
+            receiver_name = positional[0].arg
+            parameters = {
+                argument.arg: value
+                for argument, value in zip(positional[1:], owner.items or (), strict=False)
+            }
+            parameters.update(attributes)
+            for statement in initializer.body:
+                if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                    continue
+                targets = (
+                    statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                )
+                value = statement.value
+                if not isinstance(value, ast.Name) or value.id not in parameters:
+                    continue
+                for target in targets:
+                    if (
+                        isinstance(target, ast.Attribute)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == receiver_name
+                    ):
+                        attributes[target.attr] = parameters[value.id]
+        return self._attribute_replacement(owner, tuple(sorted(attributes.items())))
+
+    def _context_entry_value(self, context_value: _AbstractValue) -> _AbstractValue:
+        if _NULLCONTEXT_VALUE in context_value.origins and context_value.items:
+            return context_value.items[0]
+        if _EXITSTACK_VALUE in context_value.origins:
+            return context_value
+        entries: list[_AbstractValue] = []
+        for identity in context_value.identity:
+            deferred = self._deferred_generators.get(identity)
+            if deferred is None or not isinstance(
+                deferred.node, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                continue
+            is_context_manager = any(
+                _callable_name(decorator) in {"contextmanager", "asynccontextmanager"}
+                for decorator in deferred.node.decorator_list
+            )
+            if not is_context_manager:
+                continue
+            yielded = next(
+                (
+                    candidate.value
+                    for candidate in ast.walk(deferred.node)
+                    if isinstance(candidate, ast.Yield) and candidate.value is not None
+                ),
+                None,
+            )
+            if yielded is not None:
+                entries.append(self._value_in_scope(yielded, deferred.scoped))
+        return _join_values(*entries)
+
     def _visit_with(self, node: ast.With | ast.AsyncWith) -> None:
         for item in node.items:
             self.visit(item.context_expr)
@@ -3126,20 +3283,16 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 deferred = self._deferred_generators.get(identity)
                 if (
                     deferred is not None
-                    and isinstance(deferred.node, ast.FunctionDef)
+                    and isinstance(deferred.node, (ast.FunctionDef, ast.AsyncFunctionDef))
                     and any(
-                        _callable_name(decorator) == "contextmanager"
+                        _callable_name(decorator) in {"contextmanager", "asynccontextmanager"}
                         for decorator in deferred.node.decorator_list
                     )
                 ):
                     self._consume_deferred_generator(item.context_expr, mode="one_turn")
             if item.optional_vars is not None:
                 self._visit_store_target(item.optional_vars)
-                entry_value = (
-                    context_value.items[0]
-                    if _NULLCONTEXT_VALUE in context_value.origins and context_value.items
-                    else _UNKNOWN_VALUE
-                )
+                entry_value = self._context_entry_value(context_value)
                 self._bind_target_value(item.optional_vars, entry_value)
                 self._bind_function_target(item.optional_vars, frozenset())
                 self._bind_annotation_target(item.optional_vars, _UNKNOWN_VALUE)

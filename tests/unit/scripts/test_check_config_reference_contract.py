@@ -283,6 +283,110 @@ sorted([], key=lambda section: section.stage2_enabled)
     )
 
 
+def test_runtime_scan_executes_standard_library_callback_consumers(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "stdlib_callbacks.py").write_text(
+        """
+import functools
+import heapq
+import itertools
+
+def star(prefix, section):
+    return section.stage1_enabled
+
+list(itertools.starmap(star, [("x", settings.evaluation)]))
+functools.reduce(
+    lambda total, section: total + int(section.stage2_enabled),
+    [settings.evaluation],
+    0,
+)
+heapq.nsmallest(1, [settings.evaluation], key=lambda section: section.stage3_enabled)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_does_not_execute_empty_standard_library_callback_consumers(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "empty_stdlib_callbacks.py").write_text(
+        """
+from functools import reduce
+from heapq import nsmallest
+from itertools import starmap
+
+list(starmap(lambda section: section.stage1_enabled, []))
+reduce(lambda total, section: section.stage2_enabled, [], 0)
+nsmallest(1, [], key=lambda section: section.stage3_enabled)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset()
+
+
+def test_runtime_scan_tracks_exit_stack_and_async_context_manager_entries(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "context_protocols.py").write_text(
+        """
+from contextlib import ExitStack, asynccontextmanager, nullcontext
+
+with ExitStack() as stack:
+    section = stack.enter_context(nullcontext(settings.evaluation))
+    value = section.stage1_enabled
+
+@asynccontextmanager
+async def entered(config):
+    yield config.evaluation
+
+async def read(config):
+    async with entered(config) as section:
+        return section.stage2_enabled
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_invokes_cached_property_getters(contract, tmp_path: Path) -> None:
+    (tmp_path / "cached_property_read.py").write_text(
+        """
+from functools import cached_property
+
+class Reader:
+    def __init__(self, section):
+        self.section = section
+
+    @cached_property
+    def value(self):
+        return self.section.satisfaction_threshold
+
+reader = Reader(settings.evaluation)
+captured = reader.value
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "satisfaction_threshold")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
 def test_runtime_scan_consumes_coroutines_scheduled_by_asyncio_gather(
     contract, tmp_path: Path
 ) -> None:
