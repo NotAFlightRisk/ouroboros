@@ -242,6 +242,23 @@ def test_seed_qa_repair_preserves_final_actual_task_type_and_parent() -> None:
     assert repaired.metadata.parent_seed_id == "seed_new"
 
 
+def test_seed_qa_repair_preserves_clause_local_document_contract() -> None:
+    goal = "Without changing the existing task type, task_type must remain document."
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": goal, "task_type": "code"}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("The task type must be document.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.task_type == "document"
+
+
 @pytest.mark.parametrize(
     "retraction",
     (

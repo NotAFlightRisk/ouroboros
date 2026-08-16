@@ -29,7 +29,7 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        rf"\btask[_\s-]*type\b.{{0,80}}?\b(?:must|should|needs?\s+to)\s+"
+        rf"\btask[_\s-]*type\b[^,;.!?\n]{{0,80}}?\b(?:must|should|needs?\s+to)\s+"
         rf"(?:be|remain|use|equal)\s+(?:an?\s+)?{_TASK_TYPE_PATTERN}\b",
         re.IGNORECASE,
     ),
@@ -218,10 +218,13 @@ def has_optional_contract_tail(text: str, end: int, segment_end: int) -> bool:
 
 def _is_explicit_correction(text: str, prior_end: int, next_start: int) -> bool:
     """Return whether the later surviving contract explicitly replaces the prior one."""
+    gap = text[prior_end:next_start]
+    hard_boundary = max(gap.rfind(token) for token in (";", ".", "!", "?", "\n"))
+    correction_scope = gap[hard_boundary + 1 :]
     return (
         re.search(
             r"\b(?:actually|correction|corrected|instead|supersed(?:e|ed|ing))\b|정정|대신",
-            text[prior_end:next_start],
+            correction_scope,
             re.IGNORECASE,
         )
         is not None

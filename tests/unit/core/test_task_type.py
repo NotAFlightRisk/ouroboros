@@ -31,6 +31,19 @@ def test_explicit_task_type_keeps_correction_after_duplicate_confirmation() -> N
     assert explicit_task_type_from_goal(goal) == "document"
 
 
+def test_explicit_task_type_scopes_predicate_to_binding_clause() -> None:
+    assert (
+        explicit_task_type_from_goal(
+            "Without changing the existing task type, task_type must remain document."
+        )
+        == "document"
+    )
+    for goal in (
+        "task_type: code. Actually, keep the title short. Separately, task_type: document.",
+    ):
+        assert explicit_task_type_from_goal(goal) is None
+
+
 def test_explicit_task_type_ignores_superseded_clause() -> None:
     goal = "Ignore superseded task_type: code. task_type: research."
 
