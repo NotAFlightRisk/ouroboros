@@ -2527,6 +2527,17 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         before = self._binding_snapshot()
         accessor = self._expression_value(node.func)
+        accessor_arguments: list[_AbstractValue] = []
+        accessor_arguments_exact = True
+        for argument in node.args:
+            if not isinstance(argument, ast.Starred):
+                accessor_arguments.append(self._expression_value(argument))
+                continue
+            expanded = self._expression_value(argument.value).items
+            if expanded is None:
+                accessor_arguments_exact = False
+                continue
+            accessor_arguments.extend(expanded)
         if isinstance(node.func, ast.Attribute) and node.func.attr == "extend":
             for argument in node.args:
                 self._consume_deferred_callable_iterator(argument)
@@ -2666,15 +2677,21 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 for parameter in parameters:
                     for section in mapping.serialized_sections:
                         self._record(section, parameter.arg)
-        if accessor.origins & {_GETATTR_BUILTIN, _HASATTR_BUILTIN} and len(node.args) >= 2:
-            field_name = self._expression_value(node.args[1]).string_value
+        tracked_accessor = bool(
+            accessor.origins & {_GETATTR_BUILTIN, _HASATTR_BUILTIN, _OPERATOR_GETITEM}
+        )
+        if tracked_accessor and not accessor_arguments_exact:
+            for field in self._fields:
+                self._record(field.section, field.name)
+        if accessor.origins & {_GETATTR_BUILTIN, _HASATTR_BUILTIN} and len(accessor_arguments) >= 2:
+            field_name = accessor_arguments[1].string_value
             if field_name is not None:
-                for section in self._expression_value(node.args[0]).origins & TRACKED_SECTIONS:
+                for section in accessor_arguments[0].origins & TRACKED_SECTIONS:
                     self._record(section, field_name)
-        if _OPERATOR_GETITEM in accessor.origins and len(node.args) >= 2:
-            field_name = self._expression_value(node.args[1]).string_value
+        if _OPERATOR_GETITEM in accessor.origins and len(accessor_arguments) >= 2:
+            field_name = accessor_arguments[1].string_value
             if field_name is not None:
-                for section in self._expression_value(node.args[0]).serialized_sections:
+                for section in accessor_arguments[0].serialized_sections:
                     self._record(section, field_name)
         self.generic_visit(node)
         executions = self._call_executions.pop(id(node), [])
@@ -4762,6 +4779,16 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         try:
             for statement in node.body:
                 self.visit(statement)
+            method_names = {
+                statement.name
+                for statement in node.body
+                if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            class_attributes = tuple(
+                (name, value)
+                for name, value in self._states[-1].items()
+                if name not in method_names
+            )
             self._class_member_values[id(node)] = tuple(
                 value for name, value in self._states[-1].items() if not name.startswith("_")
             )
@@ -4771,7 +4798,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self._functions.pop()
             self._annotations.pop()
             self._states.pop()
-        self._states[-1][node.name] = _AbstractValue(classes=frozenset({node}))
+        self._states[-1][node.name] = _AbstractValue(
+            classes=frozenset({node}),
+            attributes=class_attributes,
+        )
         self._annotations[-1][node.name] = _UNKNOWN_VALUE
         self._functions[-1][node.name] = frozenset()
 

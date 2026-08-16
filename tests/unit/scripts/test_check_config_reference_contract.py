@@ -3720,6 +3720,53 @@ settings.evaluation.model_dump().get(GET_FIELD)
         )
 
 
+def test_runtime_scan_tracks_class_constants_and_callback_registries(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "class_values.py").write_text(
+        """
+def read_stage(section):
+    return section.stage2_enabled
+
+class Fields:
+    STAGE = "stage1_enabled"
+
+class Registry:
+    READERS = {"main": read_stage}
+
+getattr(config.evaluation, Fields.STAGE)
+Registry.READERS["main"](config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    reads = contract.runtime_reads(tmp_path, fields)
+    assert reads == fields
+
+
+def test_runtime_scan_expands_static_starred_accessor_arguments(contract, tmp_path: Path) -> None:
+    (tmp_path / "starred_accessors.py").write_text(
+        """
+import operator
+
+GETATTR_ARGS = (config.evaluation, "stage1_enabled")
+GETITEM_ARGS = (config.evaluation.model_dump(), "stage2_enabled")
+
+getattr(*GETATTR_ARGS)
+operator.getitem(*GETITEM_ARGS)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
 def test_runtime_scan_tracks_class_pattern_keyword_attributes(contract, tmp_path: Path) -> None:
     (tmp_path / "class_patterns.py").write_text(
         """
