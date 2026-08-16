@@ -2449,10 +2449,34 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     returned = tuple(
                         value for execution in new_executions for value in execution.values
                     )
+                    returned_value = _join_values(*returned) if returned else _UNKNOWN_VALUE
+                    initializes_requested_class = any(
+                        returned_class is requested_class
+                        or self._source_index.is_strict_subclass(returned_class, requested_class)
+                        for returned_class in returned_value.instance_classes
+                        for requested_class in constructor_classes
+                    )
+                    if initializes_requested_class or returned_value == _UNKNOWN_VALUE:
+                        receiver = (
+                            returned_value
+                            if initializes_requested_class
+                            else _AbstractValue(
+                                identity=frozenset({id(node)}),
+                                classes=constructor_classes,
+                                instance_classes=constructor_classes,
+                            )
+                        )
+                        init_executions = [
+                            self._local_direct_call_execution(function, (receiver, *items))
+                            for function in self._source_index.methods(
+                                constructor_classes, "__init__"
+                            )
+                        ]
+                        self._call_executions.setdefault(id(node), []).extend(init_executions)
                     # Exact local ``__new__`` owns construction. In particular,
                     # an unrelated object returned here must not be fabricated
                     # back into an instance of the requested class.
-                    return _join_values(*returned) if returned else _UNKNOWN_VALUE
+                    return returned_value
                 instance = _AbstractValue(
                     items=tuple(items),
                     attributes=tuple(attributes),
@@ -2460,6 +2484,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     classes=constructor_classes,
                     instance_classes=constructor_classes,
                 )
+                init_executions = [
+                    self._local_direct_call_execution(function, (instance, *items))
+                    for function in self._source_index.methods(constructor_classes, "__init__")
+                ]
+                self._call_executions.setdefault(id(node), []).extend(init_executions)
                 return self._bind_partialmethod_descriptors(instance)
             if _DICT_BUILTIN in function_value.origins:
                 if node.args:
@@ -5384,8 +5413,12 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         )
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        for expression in (*node.decorator_list, *node.bases):
+        base_values: list[_AbstractValue] = []
+        for expression in node.decorator_list:
             self.visit(expression)
+        for expression in node.bases:
+            self.visit(expression)
+            base_values.append(self._expression_value(expression))
         for keyword in node.keywords:
             self.visit(keyword.value)
         self._states.append({})
@@ -5416,12 +5449,56 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self._functions.pop()
             self._annotations.pop()
             self._states.pop()
-        self._states[-1][node.name] = _AbstractValue(
+        created_class = _AbstractValue(
             classes=frozenset({node}),
             attributes=class_attributes,
         )
+        self._states[-1][node.name] = created_class
         self._annotations[-1][node.name] = _UNKNOWN_VALUE
         self._functions[-1][node.name] = frozenset()
+
+        # Python executes descriptor ``__set_name__`` hooks and inherited
+        # ``__init_subclass__`` during class creation, before the class name is
+        # available to later module statements. Keep those reads on the real
+        # creation boundary instead of treating class bodies as declarations.
+        creation_executions: list[_FunctionExecution] = []
+        for name, value in class_attributes:
+            for function in self._source_index.methods(value.instance_classes, "__set_name__"):
+                creation_executions.append(
+                    self._local_direct_call_execution(
+                        function,
+                        (
+                            self._descriptor_receiver(value),
+                            created_class,
+                            _AbstractValue(
+                                literal=_key_token(ast.Constant(name)),
+                                string_value=name,
+                                string_values=frozenset({name}),
+                            ),
+                        ),
+                    )
+                )
+        base_classes = {base_class for value in base_values for base_class in value.classes}
+        for function in self._source_index.methods(base_classes, "__init_subclass__"):
+            creation_executions.append(
+                self._local_direct_call_execution(function, (created_class,))
+            )
+        for execution in creation_executions:
+            if execution.returns_to_caller:
+                continue
+            for path in execution.raises:
+                self._append_abrupt(
+                    self._flow_abrupts[-1],
+                    _AbruptPath(
+                        "raise",
+                        self._binding_snapshot(),
+                        exception_type=path.exception_type,
+                        exception_exclusions=path.exception_exclusions,
+                        exception_upper_bound=path.exception_upper_bound,
+                    ),
+                )
+            self._path_reachable = False
+            break
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         for default in (*node.args.defaults, *node.args.kw_defaults):

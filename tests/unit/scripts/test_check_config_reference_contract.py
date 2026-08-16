@@ -414,6 +414,9 @@ class Reader:
         settings.evaluation.stage1_enabled
         return UnrelatedCallable()
 
+    def __init__(self):
+        settings.evaluation.stage2_enabled
+
 Reader()
 """,
         encoding="utf-8",
@@ -425,6 +428,22 @@ Reader()
     assert contract.runtime_reads(tmp_path, fields) == frozenset(
         {contract.ConfigField("evaluation", "stage1_enabled")}
     )
+
+
+def test_runtime_scan_executes_normal_local_initializer(contract, tmp_path: Path) -> None:
+    (tmp_path / "initializer.py").write_text(
+        """
+class Reader:
+    def __init__(self, config):
+        config.evaluation.uncertainty_threshold
+
+Reader(settings)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "uncertainty_threshold")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
 def test_runtime_scan_honors_exact_metaclass_construction(contract, tmp_path: Path) -> None:
@@ -453,6 +472,52 @@ Requested()
 
     assert contract.runtime_reads(tmp_path, fields) == frozenset(
         {contract.ConfigField("evaluation", "stage1_enabled")}
+    )
+
+
+def test_runtime_scan_executes_class_creation_protocols_without_overreach(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "class_creation.py").write_text(
+        """
+class Base:
+    def __init_subclass__(cls):
+        settings.evaluation.stage1_enabled
+
+class Descriptor:
+    def __set_name__(self, owner, name):
+        settings.evaluation.stage2_enabled
+
+class Child(Base):
+    field = Descriptor()
+
+class PendingBase:
+    def __init_subclass__(cls):
+        settings.evaluation.stage3_enabled
+
+class PendingDescriptor:
+    def __set_name__(self, owner, name):
+        settings.evaluation.semantic_model
+
+PendingDescriptor()
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in (
+            "stage1_enabled",
+            "stage2_enabled",
+            "stage3_enabled",
+            "semantic_model",
+        )
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset(
+        {
+            contract.ConfigField("evaluation", "stage1_enabled"),
+            contract.ConfigField("evaluation", "stage2_enabled"),
+        }
     )
 
 
