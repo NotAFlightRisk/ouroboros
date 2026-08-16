@@ -183,6 +183,10 @@ def test_seed_qa_repair_persists_only_binding_mixed_clause_contracts() -> None:
     "goal",
     (
         "It does not inherit from seed_bad.",
+        "No, inherit seed_bad.",
+        "Inherit seed_bad, but not anymore.",
+        "Inherit seed_bad, but we decided against it.",
+        "Inherit seed_bad, but scratch that.",
         "Inherit seed_one and inherit seed_two.",
         "Inherit seed_one; inherit seed_two.",
     ),
@@ -218,7 +222,9 @@ def test_seed_qa_repair_preserves_final_actual_task_type_and_parent() -> None:
         update={
             "goal": (
                 "task_type must be code. Actually, task_type must be document. "
-                "Inherit seed_old. Actually, inherit seed_new."
+                "Confirmed: task_type must be document. "
+                "Inherit seed_old. Actually, inherit seed_new. "
+                "Confirmed: inherit seed_new."
             ),
             "task_type": "code",
         }
@@ -234,6 +240,37 @@ def test_seed_qa_repair_preserves_final_actual_task_type_and_parent() -> None:
 
     assert repaired.task_type == "document"
     assert repaired.metadata.parent_seed_id == "seed_new"
+
+
+@pytest.mark.parametrize(
+    "retraction",
+    (
+        "No, task_type: document. No, inherit seed_bad.",
+        "task_type: document, but not anymore. Inherit seed_bad, but not anymore.",
+        (
+            "task_type: document, but we decided against it. "
+            "Inherit seed_bad, but we decided against it."
+        ),
+        "task_type: document, but scratch that. Inherit seed_bad, but scratch that.",
+    ),
+)
+def test_seed_qa_repair_never_persists_retracted_task_type_or_parent(
+    retraction: str,
+) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": retraction, "task_type": "code"}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.task_type == "code"
+    assert repaired.metadata.parent_seed_id == "seed_current"
 
 
 @pytest.mark.parametrize(

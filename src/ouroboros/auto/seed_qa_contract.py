@@ -9,7 +9,7 @@ from ouroboros.core.seed import Seed
 from ouroboros.core.task_type import (
     _candidate_segment,
     _governor_scope_start,
-    _is_explicit_correction,
+    _resolve_authoritative_matches,
     explicit_task_type_from_goal,
     has_historical_governor,
     has_negative_governor,
@@ -143,12 +143,7 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
             matches.append((match.start(), match.end(), match.group("seed_id")))
     if not matches:
         return None
-    ordered = sorted(matches)
-    if len({seed_id for _, _, seed_id in ordered}) > 1 and not _is_explicit_correction(
-        seed.goal, ordered[-2][1], ordered[-1][0]
-    ):
-        return None
-    return ordered[-1][2]
+    return _resolve_authoritative_matches(seed.goal, matches)
 
 
 def requests_seed_qa_ambiguity_repair(qa_result: EvaluateResult) -> bool:

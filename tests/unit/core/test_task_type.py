@@ -15,6 +15,22 @@ def test_explicit_task_type_uses_final_correction() -> None:
         assert explicit_task_type_from_goal(goal) == "document"
 
 
+def test_explicit_task_type_rejects_direct_and_trailing_retractions() -> None:
+    for goal in (
+        "No, task_type: document.",
+        "task_type: document, but not anymore.",
+        "task_type: document, but we decided against it.",
+        "task_type: document, but scratch that.",
+    ):
+        assert explicit_task_type_from_goal(goal) is None
+
+
+def test_explicit_task_type_keeps_correction_after_duplicate_confirmation() -> None:
+    goal = "task_type: code. Actually, task_type: document. Confirmed: task_type: document."
+
+    assert explicit_task_type_from_goal(goal) == "document"
+
+
 def test_explicit_task_type_ignores_superseded_clause() -> None:
     goal = "Ignore superseded task_type: code. task_type: research."
 

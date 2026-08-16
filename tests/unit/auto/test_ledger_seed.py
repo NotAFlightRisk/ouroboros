@@ -150,6 +150,32 @@ class TestPartialSeedFromEvidence:
 
             assert seed.task_type == "document"
 
+    def test_complete_and_partial_ledgers_respect_retraction_and_reconfirmation(self) -> None:
+        rejected_goals = (
+            "No, task_type: document.",
+            "task_type: document, but not anymore.",
+            "task_type: document, but we decided against it.",
+            "task_type: document, but scratch that.",
+        )
+        corrected = (
+            "task_type: code. Actually, task_type: document. Confirmed: task_type: document."
+        )
+
+        for goal in rejected_goals:
+            complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+            partial = partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            )
+            assert complete.task_type == "code"
+            assert partial.task_type == "code"
+
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(corrected))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(corrected), reason="interview_phase_deadline"
+        )
+        assert complete.task_type == "document"
+        assert partial.task_type == "document"
+
     def test_historical_task_type_does_not_override_ledger_default(self) -> None:
         for goal in (
             "We discussed task_type: document in the rejected proposal. Build a CLI.",

@@ -85,7 +85,7 @@ _HISTORICAL_PREFIX_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _NEGATIVE_GOVERNOR_PATTERN = re.compile(
-    r"\b(?:instead\s+of|rather\s+than|it\s+is\s+false\s+that|false\s+that|no\s+longer)\b"
+    r"\b(?:no|instead\s+of|rather\s+than|it\s+is\s+false\s+that|false\s+that|no\s+longer)\b"
     r"[^\n.!?]{0,120}$",
     re.IGNORECASE,
 )
@@ -94,7 +94,10 @@ _POST_MATCH_REJECTION_PATTERN = re.compile(
     r"(?:(?:was|is|has\s+been)?\s*(?:rejected|superseded|obsolete|discarded)"
     r"|(?:which\s+)?(?:was|is|has\s+been)\s+(?:rejected|declined|abandoned)"
     r"|(?:will|would)\s+not\s+(?:be\s+)?(?:used|required|adopted|applied)"
-    r"|(?:am|is|are|was|were)\s+no\s+longer\s+(?:used|required|adopted|applied))\b",
+    r"|(?:am|is|are|was|were)\s+no\s+longer\s+(?:used|required|adopted|applied)"
+    r"|not\s+anymore"
+    r"|(?:we\s+)?decided\s+against\s+it"
+    r"|scratch\s+that)\b",
     re.IGNORECASE,
 )
 _CANDIDATE_BOUNDARY_PATTERN = re.compile(
@@ -175,12 +178,7 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
             matches.append((match.start(), match.end(), match.group("task_type").casefold()))
     if not matches:
         return None
-    ordered = sorted(matches)
-    if len({value for _, _, value in ordered}) > 1 and not _is_explicit_correction(
-        normalized, ordered[-2][1], ordered[-1][0]
-    ):
-        return None
-    return ordered[-1][2]
+    return _resolve_authoritative_matches(normalized, matches)
 
 
 def is_non_binding_contract_segment(segment: str) -> bool:
@@ -228,6 +226,21 @@ def _is_explicit_correction(text: str, prior_end: int, next_start: int) -> bool:
         )
         is not None
     )
+
+
+def _resolve_authoritative_matches(text: str, matches: list[tuple[int, int, str]]) -> str | None:
+    """Resolve every ordered value transition, allowing duplicate confirmations."""
+    ordered = sorted(matches)
+    if not ordered:
+        return None
+    current = ordered[0][2]
+    prior_end = ordered[0][1]
+    for start, end, value in ordered[1:]:
+        if value != current and not _is_explicit_correction(text, prior_end, start):
+            return None
+        current = value
+        prior_end = end
+    return current
 
 
 def has_historical_governor(text: str, start: int, scope_start: int | None = None) -> bool:
