@@ -2381,8 +2381,23 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if model_copy_sections:
                 return _origin_value(*model_copy_sections)
             values: list[_AbstractValue] = []
+            direct_local_call = (
+                isinstance(node.func, ast.Name)
+                and node.func.id.startswith("_")
+                or isinstance(node.func, ast.Attribute)
+                and node.func.attr.startswith("_")
+            )
             for function, bound_receiver in self._call_targets(node.func):
-                if self._call_has_relevant_provenance(node, function, bound_receiver):
+                private_config_reader = direct_local_call and any(
+                    isinstance(candidate, ast.Name)
+                    and _looks_like_config_name(candidate.id)
+                    or isinstance(candidate, ast.Attribute)
+                    and candidate.attr in TRACKED_SECTIONS
+                    for candidate in ast.walk(function)
+                )
+                if private_config_reader or self._call_has_relevant_provenance(
+                    node, function, bound_receiver
+                ):
                     values.append(self._local_call_value(node, function, bound_receiver))
                     continue
                 if self._function_is_syntactically_nonreturning(function):

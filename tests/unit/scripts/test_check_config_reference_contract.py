@@ -95,6 +95,30 @@ outer()
     )
 
 
+def test_runtime_scan_executes_invoked_private_helpers_and_methods(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "private_calls.py").write_text(
+        """
+def _read():
+    return settings.evaluation.stage1_enabled
+
+class Reader:
+    def _read(self):
+        return settings.evaluation.stage2_enabled
+
+_read()
+Reader()._read()
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
 def test_runtime_scan_requires_generator_consumption(contract, tmp_path: Path) -> None:
     (tmp_path / "deferred.py").write_text(
         """
