@@ -557,6 +557,13 @@ def test_seed_qa_repairs_fail_closed_on_validation_content_and_field_retractions
         "Write tests where the expected string is task_type: document.",
         "The YAML file must set task_type: document.",
         "Write a README saying task_type: document and inherit seed_external.",
+        "Add support for task_type: document in the Seed API.",
+        "Update the parser to accept task_type: document.",
+        "Add a test for task_type: document.",
+        "Add support for parent_seed_id: seed_demo in the API.",
+        "The schema must accept parent_seed_id: seed_demo.",
+        "Add a test for parent_seed_id: seed_demo.",
+        "Fix handling when users inherit seed_demo.",
     ),
 )
 def test_seed_qa_repairs_ignore_artifact_payload_contract_fields(goal: str) -> None:
@@ -691,6 +698,16 @@ def test_seed_qa_repairs_scope_modal_clause_and_semicolon_retraction() -> None:
         ("We may revise the title, and task_type: document.", "document", "seed_current"),
         ("task_type: document; cancel that requirement.", "code", "seed_current"),
         ("Inherit seed_old; cancel that requirement.", "code", "seed_current"),
+        (
+            "Inherit seed_good. Use SVG. Cancel the parent requirement.",
+            "code",
+            "seed_current",
+        ),
+        (
+            "Inherit seed_good. Use SVG. Retract the parent contract.",
+            "code",
+            "seed_current",
+        ),
     ):
         seed = _build_seed(seed_id="seed_current").model_copy(
             update={"goal": goal, "task_type": "code"}

@@ -214,6 +214,8 @@ def test_parent_seed_honors_later_standalone_retractions() -> None:
         "Inherit seed_old. Retract that requirement.",
         "Inherit seed_old. Cancel this requirement.",
         "Inherit seed_old. Cancel the parent requirement.",
+        "Inherit seed_good. Use SVG. Cancel the parent requirement.",
+        "Inherit seed_good. Use SVG. Retract the parent contract.",
         "Inherit seed_old; cancel that requirement.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
@@ -229,6 +231,10 @@ def test_parent_seed_ignores_validation_content_and_field_specific_retraction() 
         "Create documentation showing how to set parent_seed_id: seed_bad.",
         "Build a validator that rejects parent_seed_id: seed_bad.",
         "Write docs recommending inherit seed_old to users.",
+        "Add support for parent_seed_id: seed_demo in the API.",
+        "The schema must accept parent_seed_id: seed_demo.",
+        "Add a test for parent_seed_id: seed_demo.",
+        "Fix handling when users inherit seed_demo.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
     assert (

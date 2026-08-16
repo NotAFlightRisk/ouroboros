@@ -222,6 +222,8 @@ class TestPartialSeedFromEvidence:
         for goal in (
             "task_type: document; cancel that requirement.",
             "Inherit seed_old; cancel that requirement.",
+            "Inherit seed_good. Use SVG. Cancel the parent requirement.",
+            "Inherit seed_good. Use SVG. Retract the parent contract.",
         ):
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
             partial = partial_seed_from_evidence(
@@ -274,6 +276,13 @@ class TestPartialSeedFromEvidence:
             "Add a CLI flag whose help text says task_type: document.",
             "Implement a validator whose error message says task_type: document.",
             "Create docs with the sentence task_type: document.",
+            "Add support for task_type: document in the Seed API.",
+            "Update the parser to accept task_type: document.",
+            "Add a test for task_type: document.",
+            "Add support for parent_seed_id: seed_demo in the API.",
+            "The schema must accept parent_seed_id: seed_demo.",
+            "Add a test for parent_seed_id: seed_demo.",
+            "Fix handling when users inherit seed_demo.",
         )
         for goal in goals:
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))

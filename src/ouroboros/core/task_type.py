@@ -174,8 +174,8 @@ _STANDALONE_RETRACTION_PATTERN = re.compile(
 
 _PARENT_CONTRACT_PATTERN = re.compile(
     r"\b(?:inherit(?:ing)?(?:\s+from)?|derive(?:d)?\s+from|"
-    r"(?:set\s+)?parent(?:_seed_id|\s+seed)?\s*(?:is|=|:|to)|"
-    rf"use)\s+{_SEED_ID_PATTERN}(?!{_SEED_ID_CONTINUATION_PATTERN})"
+    r"(?:set\s+)?parent(?:_seed_id|\s+seed)?\s*(?:is|=|:|to))\s+"
+    rf"{_SEED_ID_PATTERN}(?!{_SEED_ID_CONTINUATION_PATTERN})"
     rf"|(?<!\S){_SEED_ID_PATTERN}"
     rf"(?!{_SEED_ID_CONTINUATION_PATTERN})"
     r"(?:을|를)?\s*(?:계승|상속)(?!하지)",
@@ -226,7 +226,12 @@ _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN = re.compile(
     r"[^\n.!?]{0,160}$"
     r"|\b(?:the|a|an)\s+[^\n.!?]{1,120}\b(?:must|should|will)\s+"
     r"(?:set|contain|include|say|show|state|read|emit|print|output)\b"
-    r"[^\n.!?]{0,160}$",
+    r"[^\n.!?]{0,160}$"
+    r"|\b(?:add|update|fix|implement|support|test|validate|accept)\b"
+    r"[^\n.!?]{0,180}\b(?:task[_\s-]*type|parent_seed_id)\b[^\n.!?]{0,120}$"
+    r"|\b(?:add|update|fix|implement|support|test|validate|accept)\b"
+    r"[^\n.!?]{0,180}\b(?:when|whether|how)\b[^\n.!?]{0,120}"
+    r"\b(?:inherit(?:ing)?|derive(?:d)?\s+from)\b[^\n.!?]{0,100}$",
     re.IGNORECASE,
 )
 
@@ -280,6 +285,10 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
             if (
                 is_non_binding_contract_segment(contract_prefix)
                 or is_non_binding_contract_segment(normalized[segment_start : match.end()])
+                or _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(
+                    normalized[segment_start : match.end()]
+                )
+                is not None
                 or _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(governor_prefix) is not None
                 or is_quoted_contract(normalized, match.start(), match.end())
                 or has_historical_governor(

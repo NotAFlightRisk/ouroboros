@@ -436,6 +436,9 @@ def test_explicit_task_type_ignores_artifact_payload_fields() -> None:
         "Write tests where the expected string is task_type: document.",
         "The YAML file must set task_type: document.",
         "Write a README saying task_type: document.",
+        "Add support for task_type: document in the Seed API.",
+        "Update the parser to accept task_type: document.",
+        "Add a test for task_type: document.",
     ):
         assert explicit_task_type_from_goal(goal) is None
 
@@ -447,3 +450,7 @@ def test_explicit_task_type_ignores_help_error_and_documentation_content() -> No
         "Create docs with the sentence task_type: document.",
     ):
         assert explicit_task_type_from_goal(goal) is None
+
+
+def test_explicit_task_type_ignores_implementation_inheritance_prose() -> None:
+    assert explicit_task_type_from_goal("Fix handling when users inherit seed_demo.") is None
