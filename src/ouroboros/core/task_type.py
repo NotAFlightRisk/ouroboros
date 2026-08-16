@@ -133,6 +133,9 @@ _NEGATIVE_GOVERNOR_PATTERN = re.compile(
 _POST_MATCH_REJECTION_PATTERN = re.compile(
     r"^(?:(?:the|that)\s+)?(?:requirement|contract|proposal)?\s*"
     r"(?:(?:was|is|has\s+been)?\s*(?:rejected|superseded|obsolete|discarded)"
+    r"|not\s+(?:used|required|needed|adopted|applied)"
+    r"|no\s+longer\s+(?:used|required|needed|adopted|applied)"
+    r"|(?:unnecessary|unneeded)"
     r"|(?:am|is|are|was|were)\s+not\s+(?:used|required|adopted|applied)"
     r"|(?:isn't|isn’t|aren't|aren’t|wasn't|wasn’t|weren't|weren’t)\s+(?:used|required|adopted|applied)"
     r"|(?:am|is|are|was|were)\s+(?:unnecessary|unneeded)"
