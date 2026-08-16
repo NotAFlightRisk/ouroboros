@@ -167,6 +167,10 @@ class TestPartialSeedFromEvidence:
             "task_type: document. Actually, scratch that.",
             "task_type: document. We decided against it.",
             "task_type: document. That requirement was rejected.",
+            "task_type: document. Never mind.",
+            "task_type: document. Forget that.",
+            "task_type: document. Cancel that requirement.",
+            "task_type: document. I take that back.",
         )
         corrected = (
             "task_type: code. Actually, task_type: document. Confirmed: task_type: document."

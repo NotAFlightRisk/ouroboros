@@ -330,5 +330,9 @@ def test_explicit_task_type_honors_later_standalone_retractions() -> None:
         "task_type: document. Actually, scratch that.",
         "task_type: document. We decided against it.",
         "task_type: document. That requirement was rejected.",
+        "task_type: document. Never mind.",
+        "task_type: document. Forget that.",
+        "task_type: document. Cancel that requirement.",
+        "task_type: document. I take that back.",
     ):
         assert explicit_task_type_from_goal(goal) is None

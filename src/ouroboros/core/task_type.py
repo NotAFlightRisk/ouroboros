@@ -118,6 +118,8 @@ _POST_MATCH_REJECTION_PATTERN = re.compile(
 _STANDALONE_RETRACTION_PATTERN = re.compile(
     r"(?:^|[.!?\n])\s*(?:actually\s*,?\s*)?"
     r"(?:scratch\s+that|we\s+decided\s+against\s+it|"
+    r"never\s+mind|forget\s+that|i\s+take\s+that\s+back|"
+    r"cancel\s+(?:that\s+)?(?:requirement|contract|proposal|value)?|"
     r"(?:that|the)\s+(?:requirement|contract|proposal|value)\s+"
     r"(?:was|is)\s+(?:rejected|superseded|obsolete|discarded)|"
     r"(?:the\s+)?(?:requirement|contract|proposal|value)\s+"

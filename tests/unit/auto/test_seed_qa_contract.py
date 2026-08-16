@@ -201,6 +201,10 @@ def test_parent_seed_honors_later_standalone_retractions() -> None:
         "Inherit seed_old. Actually, scratch that.",
         "Inherit seed_old. We decided against it.",
         "Inherit seed_old. That requirement was rejected.",
+        "Inherit seed_old. Never mind.",
+        "Inherit seed_old. Forget that.",
+        "Inherit seed_old. Cancel that requirement.",
+        "Inherit seed_old. I take that back.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
 
