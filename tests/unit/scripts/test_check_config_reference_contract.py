@@ -3135,6 +3135,68 @@ bool(Wrapper(config.consensus))
     }
 
 
+def test_runtime_scan_executes_implicit_membership_iteration_hash_and_format_protocols(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "implicit_protocols_extended.py").write_text(
+        """
+class Reader:
+    def __init__(self, section):
+        self.section = section
+
+    def __contains__(self, item):
+        return self.section.stage1_enabled
+
+    def __hash__(self):
+        return self.section.stage2_enabled
+
+    def __format__(self, spec):
+        return self.section.stage3_enabled
+
+class AsyncReader:
+    def __init__(self, section):
+        self.section = section
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        return self.section.stage4_enabled
+
+reader = Reader(config.evaluation)
+1 in reader
+hash(reader)
+format(reader, "")
+f"{reader}"
+
+async def consume():
+    async for item in AsyncReader(config.evaluation):
+        break
+
+unused = Reader(config.consensus)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        {
+            *(
+                contract.ConfigField("evaluation", name)
+                for name in (
+                    "stage1_enabled",
+                    "stage2_enabled",
+                    "stage3_enabled",
+                    "stage4_enabled",
+                )
+            ),
+            contract.ConfigField("consensus", "models"),
+        }
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields - {
+        contract.ConfigField("consensus", "models")
+    }
+
+
 def test_runtime_scan_skips_statically_unreachable_assert_messages(
     contract, tmp_path: Path
 ) -> None:

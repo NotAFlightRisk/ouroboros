@@ -1213,6 +1213,24 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             targets.extend((function, None) for function in self._function_value(node))
         return tuple(targets)
 
+    def _invoke_implicit_protocol(
+        self,
+        owner: _AbstractValue,
+        method_name: str,
+        arguments: tuple[_AbstractValue, ...] = (),
+    ) -> _AbstractValue:
+        """Execute a local implementation selected by Python implicitly."""
+        receiver = self._descriptor_receiver(owner)
+        return _join_values(
+            *(
+                self._local_direct_call_value(
+                    function,
+                    (() if self._method_is_static(function) else (receiver,)) + arguments,
+                )
+                for function in self._source_index.methods(owner.instance_classes, method_name)
+            )
+        )
+
     @staticmethod
     def _is_accessor_callback(value: _AbstractValue) -> bool:
         return bool(value.accessed_attributes or _GETATTR_BUILTIN in value.origins)
@@ -2587,23 +2605,36 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         before = self._binding_snapshot()
         accessor = self._expression_value(node.func)
-        # ``str(value)``, ``len(value)``, and ``bool(value)`` dispatch through
-        # implicit special-method lookup.  Attribute resolution alone cannot
+        # Builtins below dispatch through implicit special-method lookup.
+        # Attribute resolution alone cannot
         # see those calls, so execute the exact local protocol implementation
         # when the builtin has not been shadowed.
         protocol = (
-            {"str": "__str__", "len": "__len__", "bool": "__bool__"}.get(node.func.id)
+            {
+                "str": "__str__",
+                "repr": "__repr__",
+                "ascii": "__repr__",
+                "len": "__len__",
+                "bool": "__bool__",
+                "hash": "__hash__",
+            }.get(node.func.id)
             if isinstance(node.func, ast.Name) and not self._name_is_bound(node.func.id)
             else None
         )
         if protocol is not None and node.args:
-            owner = self._expression_value(node.args[0])
-            receiver = self._descriptor_receiver(owner)
-            for function in self._source_index.methods(owner.instance_classes, protocol):
-                self._local_direct_call_value(
-                    function,
-                    () if self._method_is_static(function) else (receiver,),
-                )
+            self._invoke_implicit_protocol(self._expression_value(node.args[0]), protocol)
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "format"
+            and not self._name_is_bound(node.func.id)
+            and node.args
+        ):
+            specification = (
+                self._expression_value(node.args[1]) if len(node.args) > 1 else _UNKNOWN_VALUE
+            )
+            self._invoke_implicit_protocol(
+                self._expression_value(node.args[0]), "__format__", (specification,)
+            )
         accessor_arguments: list[_AbstractValue] = []
         accessor_arguments_exact = True
         for argument in node.args:
@@ -2824,7 +2855,30 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         for operator, comparator in zip(node.ops, node.comparators, strict=True):
             if isinstance(operator, (ast.In, ast.NotIn)):
                 self._consume_deferred_callable_iterator(comparator, mode="one_turn")
+                self._invoke_implicit_protocol(
+                    self._expression_value(comparator),
+                    "__contains__",
+                    (self._expression_value(node.left),),
+                )
         self.generic_visit(node)
+
+    def visit_FormattedValue(self, node: ast.FormattedValue) -> None:
+        """Execute local formatting protocols selected by f-strings."""
+        self.visit(node.value)
+        owner = self._expression_value(node.value)
+        if node.conversion == ord("s"):
+            self._invoke_implicit_protocol(owner, "__str__")
+        elif node.conversion in {ord("r"), ord("a")}:
+            self._invoke_implicit_protocol(owner, "__repr__")
+        else:
+            specification = (
+                self._expression_value(node.format_spec)
+                if node.format_spec is not None
+                else _UNKNOWN_VALUE
+            )
+            self._invoke_implicit_protocol(owner, "__format__", (specification,))
+        if node.format_spec is not None:
+            self.visit(node.format_spec)
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
         before = self._binding_snapshot()
@@ -3281,6 +3335,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         )
 
     def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        iterable = self._expression_value(node.iter)
+        iterator = self._invoke_implicit_protocol(iterable, "__aiter__")
+        self._invoke_implicit_protocol(iterator, "__anext__")
+        self._invoke_implicit_protocol(iterable, "__anext__")
         self.visit_For(node)
 
     def visit_While(self, node: ast.While) -> None:
