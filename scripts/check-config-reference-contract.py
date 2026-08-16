@@ -241,6 +241,8 @@ _METHODCALLER_FACTORY = "<methodcaller-factory>"
 _OPERATOR_GETITEM = "<operator-getitem>"
 _BUILTINS_MODULE = "<builtins-module>"
 _GETATTR_BUILTIN = "<getattr-builtin>"
+_BOUND_GETATTRIBUTE_PREFIX = "<bound-getattribute:"
+_MODEL_COPY_PREFIX = "<model-copy:"
 _HASATTR_BUILTIN = "<hasattr-builtin>"
 _OBJECT_BUILTIN = "<object-builtin>"
 _VARS_BUILTIN = "<vars-builtin>"
@@ -1425,6 +1427,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             return _join_values(*values, default)
         token = _key_token(key)
         entries = dict(owner.entries or ())
+        if owner.serialized_sections:
+            field_name = key.value if isinstance(key, ast.Constant) else None
+            if isinstance(field_name, str):
+                for section in owner.serialized_sections:
+                    self._record(section, field_name)
         selected = entries.get(token)
         wildcard = entries.get(_DYNAMIC_KEY)
         if method == "get":
@@ -1655,6 +1662,12 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _AbstractValue(serialized_sections=sections)
             if node.attr == "model_dump" and sections:
                 return _AbstractValue(serialized_sections=sections)
+            if node.attr == "model_copy" and sections:
+                return _origin_value(*(f"{_MODEL_COPY_PREFIX}{section}>" for section in sections))
+            if node.attr == "__getattribute__" and sections:
+                return _origin_value(
+                    *(f"{_BOUND_GETATTRIBUTE_PREFIX}{section}>" for section in sections)
+                )
             if (
                 isinstance(node.value, ast.Call)
                 and _callable_name(node.value.func) == "super"
@@ -1882,6 +1895,23 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     and _CONFIG_ROOT in self._expression_value(node.args[0]).origins
                 ):
                     return _origin_value(field_name)
+            bound_sections = {
+                origin[len(_BOUND_GETATTRIBUTE_PREFIX) : -1]
+                for origin in function_value.origins
+                if origin.startswith(_BOUND_GETATTRIBUTE_PREFIX) and origin.endswith(">")
+            }
+            if bound_sections and node.args:
+                field_name = self._expression_value(node.args[0]).string_value
+                if field_name is not None:
+                    for section in bound_sections:
+                        self._record(section, field_name)
+            model_copy_sections = {
+                origin[len(_MODEL_COPY_PREFIX) : -1]
+                for origin in function_value.origins
+                if origin.startswith(_MODEL_COPY_PREFIX) and origin.endswith(">")
+            }
+            if model_copy_sections:
+                return _origin_value(*model_copy_sections)
             values = [
                 self._local_call_value(node, function, bound_receiver)
                 for function, bound_receiver in self._call_targets(node.func)
@@ -4162,8 +4192,12 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_Module(self, node: ast.Module) -> None:
         self._functions[-1].update(self._declared_functions(node.body))
         for statement in node.body:
+            if not self._path_reachable:
+                break
             self.visit(statement)
-        self._visit_reachable_values(self._states[-1].values())
+        self._visit_reachable_values(
+            value for name, value in self._states[-1].items() if not name.startswith("_")
+        )
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         for expression in (*node.decorator_list, *node.bases):

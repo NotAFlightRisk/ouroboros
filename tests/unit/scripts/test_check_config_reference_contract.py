@@ -2673,6 +2673,50 @@ read(config.evaluation)
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
+def test_runtime_scan_tracks_serialized_mapping_method_reads(contract, tmp_path: Path) -> None:
+    (tmp_path / "serialized_mapping_methods.py").write_text(
+        """
+config.evaluation.model_dump().get("stage1_enabled")
+dumped = config.evaluation.model_dump()
+dumped.pop("stage2_enabled")
+attributes = vars(config.evaluation)
+attributes.setdefault("stage3_enabled", False)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_tracks_bound_getattribute_reads(contract, tmp_path: Path) -> None:
+    (tmp_path / "bound_getattribute.py").write_text(
+        """
+config.evaluation.__getattribute__("stage1_enabled")
+reader = config.evaluation.__getattribute__
+reader("stage2_enabled")
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_tracks_model_copy_identity(contract, tmp_path: Path) -> None:
+    (tmp_path / "model_copy.py").write_text(
+        "config.evaluation.model_copy().stage1_enabled\n", encoding="utf-8"
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
 def test_runtime_scan_tracks_operator_attrgetter_reads(contract, tmp_path: Path) -> None:
     (tmp_path / "attrgetter_read.py").write_text(
         """
@@ -3098,6 +3142,35 @@ def dispatch(config):
         selected = local_reader
     selected = external
     selected(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+def test_runtime_scan_ignores_module_statements_after_infinite_loop(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "module_unreachable.py").write_text(
+        """
+while True:
+    pass
+config.evaluation.stage1_enabled
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+def test_runtime_scan_ignores_uninvoked_private_helpers(contract, tmp_path: Path) -> None:
+    (tmp_path / "uninvoked_helper.py").write_text(
+        """
+def _never_called(config):
+    return config.evaluation.stage1_enabled
 """,
         encoding="utf-8",
     )
