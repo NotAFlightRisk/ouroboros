@@ -28,6 +28,21 @@ def contract():
     return module
 
 
+def _audit_as_documented_inert(contract, field, reads):
+    return contract.audit_contract(
+        fields=frozenset({field}),
+        reads=reads & {field},
+        rows={
+            field: contract.ReferenceRow(
+                "true", "Currently inert. Effective control: runtime.stage1_enabled."
+            )
+        },
+        markers={field: contract.InertMarker(field, "runtime.stage1_enabled")},
+        allowlist={},
+        documented_defaults={},
+    )
+
+
 def test_current_repository_passes_standalone_contract() -> None:
     result = subprocess.run(
         [sys.executable, str(SCRIPT)],
@@ -2752,6 +2767,66 @@ read(settings)
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
+def test_runtime_scan_tracks_exact_functools_wraps_and_update_wrapper(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "wrapped_readers.py").write_text(
+        """
+import functools
+
+def template(config):
+    return None
+
+@functools.wraps(template)
+def decorated(config):
+    return config.evaluation.stage1_enabled
+
+def assigned(config):
+    return config.evaluation.stage2_enabled
+
+assigned = functools.update_wrapper(assigned, template)
+decorated(settings)
+assigned(settings)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+    reads = contract.runtime_reads(tmp_path, fields)
+
+    assert reads == fields
+    assert "production-wired field is still documented inert" in "\n".join(
+        _audit_as_documented_inert(
+            contract, contract.ConfigField("evaluation", "stage1_enabled"), reads
+        ).violations
+    )
+
+
+def test_runtime_scan_does_not_treat_shadowed_wraps_as_functools(contract, tmp_path: Path) -> None:
+    (tmp_path / "shadowed_wraps.py").write_text(
+        """
+from functools import wraps
+wraps = external_decorator
+
+def template(config):
+    return None
+
+@wraps(template)
+def reader(config):
+    return config.evaluation.stage1_enabled
+
+reader(settings)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset()
+    assert _audit_as_documented_inert(contract, field, reads).violations == ()
+
+
 def test_runtime_scan_tracks_list_sort_callback(contract, tmp_path: Path) -> None:
     (tmp_path / "sort_callback.py").write_text(
         """
@@ -2781,6 +2856,82 @@ read_stage(config.evaluation)
     field = contract.ConfigField("evaluation", "stage3_enabled")
 
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_tracks_partial_wrapped_builtin_attribute_reads(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "partial_builtin_readers.py").write_text(
+        """
+import functools
+import operator
+
+read_stage1 = functools.partial(getattr, config.evaluation, "stage1_enabled")
+read_stage2 = functools.partial(operator.attrgetter("stage2_enabled"), config.evaluation)
+make_stage3_reader = functools.partial(operator.attrgetter, "stage3_enabled")
+read_stage1()
+read_stage2()
+make_stage3_reader()(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+    reads = contract.runtime_reads(tmp_path, fields)
+
+    assert reads == fields
+    assert "production-wired field is still documented inert" in "\n".join(
+        _audit_as_documented_inert(
+            contract, contract.ConfigField("evaluation", "stage1_enabled"), reads
+        ).violations
+    )
+
+
+def test_runtime_scan_does_not_model_shadowed_partial_builtin_targets(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "shadowed_partial_builtins.py").write_text(
+        """
+import functools
+getattr = external_getattr
+
+reader = functools.partial(getattr, config.evaluation, "stage1_enabled")
+reader()
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset()
+    assert _audit_as_documented_inert(contract, field, reads).violations == ()
+
+
+def test_runtime_scan_respects_postponed_annotation_runtime_semantics(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "postponed_annotation.py").write_text(
+        """
+from __future__ import annotations
+marker: config.evaluation.stage1_enabled
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "eager_annotation.py").write_text(
+        "marker: config.evaluation.stage2_enabled\n",
+        encoding="utf-8",
+    )
+    stage1 = contract.ConfigField("evaluation", "stage1_enabled")
+    stage2 = contract.ConfigField("evaluation", "stage2_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({stage1, stage2}))
+
+    assert reads == frozenset({stage2})
+    assert _audit_as_documented_inert(contract, stage1, reads).violations == ()
+    assert "production-wired field is still documented inert" in "\n".join(
+        _audit_as_documented_inert(contract, stage2, reads).violations
+    )
 
 
 def test_runtime_scan_tracks_alternative_attribute_accessors(contract, tmp_path: Path) -> None:

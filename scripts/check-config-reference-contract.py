@@ -221,6 +221,7 @@ class _DeferredPartial:
     """A local callable with positional and keyword arguments pre-applied."""
 
     targets: tuple[_CallableTarget, ...]
+    callable_value: _AbstractValue
     positional: tuple[_AbstractValue, ...]
     keywords: tuple[tuple[str, _AbstractValue], ...]
 
@@ -267,6 +268,8 @@ _CONTEXTMANAGER_DECORATORS = frozenset(
     {"<contextmanager-decorator>", "<asynccontextmanager-decorator>"}
 )
 _IDENTITY_DECORATOR = "<identity-decorator>"
+_WRAPS_FACTORY = "<functools-wraps-factory>"
+_UPDATE_WRAPPER = "<functools-update-wrapper>"
 _NULLCONTEXT_FACTORY = "<nullcontext-factory>"
 _NULLCONTEXT_VALUE = "<nullcontext-value>"
 _CLOSING_FACTORY = "<closing-factory>"
@@ -938,6 +941,12 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._fields = fields
         self._source_index = source_index
         self._module = module
+        self._postponed_annotations = any(
+            isinstance(statement, ast.ImportFrom)
+            and statement.module == "__future__"
+            and any(alias.name == "annotations" for alias in statement.names)
+            for statement in module.tree.body
+        )
         # Explicit unknown values shadow name-based config inference.
         self._states: list[dict[str, _AbstractValue]] = [{}]
         self._annotations: list[dict[str, _AbstractValue]] = [{}]
@@ -1637,6 +1646,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_REDUCE_CONSUMER)
             if _FUNCTOOLS_MODULE in owner.origins and node.attr in {"cache", "lru_cache"}:
                 return _origin_value(_IDENTITY_DECORATOR)
+            if _FUNCTOOLS_MODULE in owner.origins and node.attr == "wraps":
+                return _origin_value(_WRAPS_FACTORY)
+            if _FUNCTOOLS_MODULE in owner.origins and node.attr == "update_wrapper":
+                return _origin_value(_UPDATE_WRAPPER)
             if _ITERTOOLS_MODULE in owner.origins and node.attr == "starmap":
                 return _origin_value(_STARMAP_FACTORY)
             if _ITERTOOLS_MODULE in owner.origins and node.attr in _ITERTOOLS_CALLBACK_FACTORIES:
@@ -1739,6 +1752,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 self._expression_cache[id(node)] = dict_method_value
                 return dict_method_value
             function_value = self._expression_value(node.func)
+            if _WRAPS_FACTORY in function_value.origins:
+                return _origin_value(_IDENTITY_DECORATOR)
+            if _UPDATE_WRAPPER in function_value.origins and node.args:
+                return self._expression_value(node.args[0])
             if _IDENTITY_DECORATOR in function_value.origins:
                 return _origin_value(_IDENTITY_DECORATOR)
             if function_value.origins & _LAZY_BUILTIN_CONSUMER_ORIGINS:
@@ -1770,6 +1787,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         _CallableTarget(function, receiver)
                         for function, receiver in self._call_targets(node.args[0])
                     ),
+                    callable_value=self._expression_value(node.args[0]),
                     positional=tuple(self._expression_value(arg) for arg in node.args[1:]),
                     keywords=tuple(
                         (keyword.arg, self._expression_value(keyword.value))
@@ -2625,7 +2643,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self._bind_function_target(target, function)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        self.visit(node.annotation)
+        if not self._postponed_annotations:
+            self.visit(node.annotation)
         self._bind_function_target(node.target, frozenset())
         if node.value is not None:
             self.visit(node.value)
@@ -3543,6 +3562,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "functools" and alias.name == "reduce"
                     else _origin_value(_IDENTITY_DECORATOR)
                     if node.module == "functools" and alias.name in {"cache", "lru_cache"}
+                    else _origin_value(_WRAPS_FACTORY)
+                    if node.module == "functools" and alias.name == "wraps"
+                    else _origin_value(_UPDATE_WRAPPER)
+                    if node.module == "functools" and alias.name == "update_wrapper"
                     else _origin_value(_STARMAP_FACTORY)
                     if node.module == "itertools" and alias.name == "starmap"
                     else _origin_value(f"<itertools-callback-factory:{alias.name}>")
@@ -3655,6 +3678,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 identity = id(value)
                 self._deferred_partials[identity] = _DeferredPartial(
                     targets=tuple(_CallableTarget(method, owner) for method in methods),
+                    callable_value=_UNKNOWN_VALUE,
                     positional=tuple(self._expression_value(arg) for arg in value.args[1:]),
                     keywords=tuple(
                         (keyword.arg, self._expression_value(keyword.value))
@@ -4038,6 +4062,22 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         """Execute a partial with every pre-bound positional/keyword argument."""
         values = (*partial.positional, *(self._expression_value(arg) for arg in call.args))
         results: list[_AbstractValue] = []
+        callable_origins = partial.callable_value.origins
+        if _GETATTR_BUILTIN in callable_origins and len(values) >= 2:
+            field_name = values[1].string_value
+            if field_name is not None:
+                for section in values[0].origins & TRACKED_SECTIONS:
+                    self._record(section, field_name)
+                return _origin_value(*(values[0].origins & TRACKED_SECTIONS))
+        if _ATTRGETTER_FACTORY in callable_origins and values:
+            field_name = values[0].string_value
+            if field_name is not None:
+                return _AbstractValue(accessed_attributes=frozenset({field_name}))
+        if partial.callable_value.accessed_attributes:
+            for value in values:
+                for section in value.origins & TRACKED_SECTIONS:
+                    for field_name in partial.callable_value.accessed_attributes:
+                        self._record(section, field_name.partition(".")[0])
         for target in partial.targets:
             function_id = id(target.function)
             if function_id in self._active_calls:
