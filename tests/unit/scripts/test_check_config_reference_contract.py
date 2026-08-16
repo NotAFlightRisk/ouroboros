@@ -3590,6 +3590,94 @@ READERS = {"stage": read_stage}
     assert _audit_as_documented_inert(contract, field, reads).violations == ()
 
 
+def test_runtime_scan_resolves_final_imported_mutations_and_control_flow(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "mutated_values.py").write_text(
+        """
+def _old(section):
+    return section.stage1_enabled
+
+def _new(section):
+    return section.stage2_enabled
+
+READERS = {"main": _old}
+READERS["main"] = _new
+
+if runtime_flag:
+    FIELD = "stage2_enabled"
+else:
+    FIELD = "stage3_enabled"
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "use_mutated_values.py").write_text(
+        """
+from mutated_values import FIELD, READERS
+
+READERS["main"](settings.evaluation)
+getattr(settings.evaluation, FIELD)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    reads = contract.runtime_reads(tmp_path, fields)
+    expected = fields - {contract.ConfigField("evaluation", "stage1_enabled")}
+    assert reads == expected
+    for field in expected:
+        assert _audit_as_documented_inert(contract, field, reads).violations
+    assert (
+        _audit_as_documented_inert(
+            contract, contract.ConfigField("evaluation", "stage1_enabled"), reads
+        ).violations
+        == ()
+    )
+
+
+def test_runtime_scan_resolves_dictionary_comprehension_registry_keys(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "comprehension_registry.py").write_text(
+        """
+def _read(section):
+    return section.stage2_enabled
+
+READERS = {name: callback for name, callback in [("main", _read)]}
+READERS["main"](settings.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage2_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert reads == frozenset({field})
+    assert _audit_as_documented_inert(contract, field, reads).violations
+
+
+def test_runtime_scan_does_not_overreach_dictionary_comprehension_registry(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "inactive_comprehension_registry.py").write_text(
+        """
+def _read(section):
+    return section.stage2_enabled
+
+READERS = {name: callback for name, callback in [("main", _read)]}
+READERS["main"](report.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage2_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert reads == frozenset()
+    assert _audit_as_documented_inert(contract, field, reads).violations == ()
+
+
 def test_runtime_scan_tracks_unshadowed_classmethod_and_rejects_shadowing(
     contract, tmp_path: Path
 ) -> None:

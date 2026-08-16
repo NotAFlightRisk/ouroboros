@@ -174,6 +174,7 @@ class _AbstractValue:
     identity: frozenset[int] = frozenset()
     literal: str | None = None
     string_value: str | None = None
+    string_values: frozenset[str] = frozenset()
     truth: bool | None = None
     classes: frozenset[ast.ClassDef] = frozenset()
     instance_classes: frozenset[ast.ClassDef] = frozenset()
@@ -573,6 +574,7 @@ def _conservative_value(value: _AbstractValue) -> _AbstractValue:
         callables=value.callables,
         serialized_sections=value.serialized_sections,
         accessed_attributes=value.accessed_attributes,
+        string_values=value.string_values,
     )
 
 
@@ -646,6 +648,13 @@ def _join_values(*values: _AbstractValue) -> _AbstractValue:
             if all(value.string_value == values[0].string_value for value in values)
             else None
         ),
+        string_values=frozenset().union(
+            *(
+                value.string_values
+                | ({value.string_value} if value.string_value is not None else set())
+                for value in values
+            )
+        ),
         truth=(
             values[0].truth if all(value.truth == values[0].truth for value in values) else None
         ),
@@ -693,6 +702,8 @@ class _SourceIndex:
         self._paths: dict[Path, _IndexedModule] = {}
         self._reexports: dict[tuple[str, str], tuple[_IndexedModule, str]] = {}
         self._class_bases: dict[int, tuple[ast.ClassDef, ...]] = {}
+        self._data_states: dict[str, dict[str, _AbstractValue]] = {}
+        self._data_states_in_progress: set[str] = set()
         for path, tree in trees.items():
             relative = path.relative_to(source_root).with_suffix("")
             parts = list(relative.parts)
@@ -851,6 +862,31 @@ class _SourceIndex:
                 if name in bound:
                     resolved = None
         return resolved
+
+    def resolve_data_value(
+        self,
+        module: _IndexedModule,
+        name: str,
+        fields: frozenset[ConfigField],
+    ) -> _AbstractValue | None:
+        """Evaluate final module data with the runtime visitor's flow semantics."""
+        cached = self._data_states.get(module.name)
+        if cached is not None:
+            return cached.get(name)
+        if module.name in self._data_states_in_progress:
+            return None
+        self._data_states_in_progress.add(module.name)
+        visitor = _RuntimeReadVisitor(fields, self, module)
+        try:
+            for statement in module.tree.body:
+                if not visitor._path_reachable:
+                    break
+                visitor.visit(statement)
+            state = dict(visitor._states[0])
+            self._data_states[module.name] = state
+            return state.get(name)
+        finally:
+            self._data_states_in_progress.remove(module.name)
 
     def _index_class_bases(self, module: _IndexedModule) -> None:
         class_bindings: dict[str, frozenset[ast.ClassDef]] = {}
@@ -1683,6 +1719,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             return _AbstractValue(
                 literal=_key_token(node),
                 string_value=node.value if isinstance(node.value, str) else None,
+                string_values=(
+                    frozenset({node.value}) if isinstance(node.value, str) else frozenset()
+                ),
                 truth=bool(node.value),
             )
         constant_value = _safe_constant_value(node)
@@ -1690,6 +1729,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             return _AbstractValue(
                 literal=_key_token(ast.Constant(constant_value)),
                 string_value=constant_value,
+                string_values=frozenset({constant_value}),
                 truth=bool(constant_value),
             )
         if isinstance(node, ast.Name):
@@ -2684,13 +2724,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             for field in self._fields:
                 self._record(field.section, field.name)
         if accessor.origins & {_GETATTR_BUILTIN, _HASATTR_BUILTIN} and len(accessor_arguments) >= 2:
-            field_name = accessor_arguments[1].string_value
-            if field_name is not None:
+            field_names = accessor_arguments[1].string_values
+            for field_name in field_names:
                 for section in accessor_arguments[0].origins & TRACKED_SECTIONS:
                     self._record(section, field_name)
         if _OPERATOR_GETITEM in accessor.origins and len(accessor_arguments) >= 2:
-            field_name = accessor_arguments[1].string_value
-            if field_name is not None:
+            field_names = accessor_arguments[1].string_values
+            for field_name in field_names:
                 for section in accessor_arguments[0].serialized_sections:
                     self._record(section, field_name)
         self.generic_visit(node)
@@ -3749,8 +3789,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if isinstance(node, ast.DictComp):
                 self.visit(node.key)
                 self.visit(node.value)
+                key = self._expression_value(node.key).literal or _DYNAMIC_KEY
                 result = _AbstractValue(
-                    entries=((_key_token(node.key), self._expression_value(node.value)),),
+                    entries=((key, self._expression_value(node.value)),),
                     identity=frozenset({id(node)}),
                 )
             else:
@@ -4029,24 +4070,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         key = (module.name, name)
         if key in seen:
             return None
-        resolved = self._source_index.resolve_value_expression(module, name)
-        if resolved is None:
-            return None
-        owner, expression = resolved
-        scoped: dict[str, _AbstractValue] = {}
-        for candidate in ast.walk(expression):
-            if not isinstance(candidate, ast.Name) or candidate.id in scoped:
-                continue
-            functions = self._source_index.resolve_functions(owner, candidate.id)
-            if functions:
-                scoped[candidate.id] = _AbstractValue(
-                    callables=tuple(_CallableTarget(function) for function in functions)
-                )
-                continue
-            nested = self._imported_data_value(owner, candidate.id, seen | {key})
-            if nested is not None:
-                scoped[candidate.id] = nested
-        return self._value_in_scope(expression, scoped)
+        return self._source_index.resolve_data_value(module, name, self._fields)
 
     def visit_Import(self, node: ast.Import) -> None:
         self._bind_import(node, runtime=True)
