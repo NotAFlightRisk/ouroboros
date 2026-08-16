@@ -432,3 +432,12 @@ def test_explicit_task_type_ignores_artifact_payload_fields() -> None:
         "The generated manifest must set task_type: document.",
     ):
         assert explicit_task_type_from_goal(goal) is None
+
+
+def test_explicit_task_type_ignores_help_error_and_documentation_content() -> None:
+    for goal in (
+        "Add a CLI flag whose help text says task_type: document.",
+        "Implement a validator whose error message says task_type: document.",
+        "Create docs with the sentence task_type: document.",
+    ):
+        assert explicit_task_type_from_goal(goal) is None

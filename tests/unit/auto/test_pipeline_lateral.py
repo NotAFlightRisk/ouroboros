@@ -548,6 +548,9 @@ def test_seed_qa_repairs_fail_closed_on_validation_content_and_field_retractions
         "Generate a YAML example containing task_type: document and parent_seed_id: seed_old.",
         "Return JSON with task_type: document and parent_seed_id: seed_old.",
         "The generated manifest must set task_type: document and parent_seed_id: seed_old.",
+        "Add a CLI flag whose help text says task_type: document and inherit seed_old.",
+        "Implement a validator whose error message says task_type: document and inherit seed_old.",
+        "Create docs with the sentence task_type: document and inherit seed_old.",
     ),
 )
 def test_seed_qa_repairs_ignore_artifact_payload_contract_fields(goal: str) -> None:
@@ -578,7 +581,14 @@ def test_seed_qa_repairs_ignore_artifact_payload_contract_fields(goal: str) -> N
 
 @pytest.mark.parametrize(
     "parent",
-    ("seed_parent_001", "seed_mechanical_eval_minimal", "seed_4749408237de-auto_35d"),
+    (
+        "seed_parent_001",
+        "seed_mechanical_eval_minimal",
+        "seed_4749408237de-auto_35d",
+        "release-parent-v2",
+        "another-id",
+        "seed-parent-v2",
+    ),
 )
 def test_seed_qa_repairs_preserve_schema_valid_parent_identifiers(parent: str) -> None:
     seed = _build_seed(seed_id="seed_current").model_copy(

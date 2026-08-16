@@ -18,7 +18,8 @@ SUPPORTED_TASK_TYPES = frozenset(
 _TASK_TYPE_PATTERN = (
     r"(?P<task_type>code|research|analysis|artifact|document|documentation|presentation)"
 )
-_SEED_ID_PATTERN = r"seed_[A-Za-z0-9][A-Za-z0-9_-]*"
+_SEED_ID_CHAR_PATTERN = r"A-Za-z0-9_:@/+~-"
+_SEED_ID_PATTERN = rf"[A-Za-z0-9](?:[{_SEED_ID_CHAR_PATTERN}]*[A-Za-z0-9])?"
 _TASK_TYPE_CONTRACT_PATTERNS = (
     re.compile(
         rf"\btask[_\s-]*type\b\s*(?:=|:)\s*{_TASK_TYPE_PATTERN}\b",
@@ -90,6 +91,9 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"|\b(?:the\s+)?generated\s+"
     r"(?:ya?ml|json|manifest|config(?:uration)?|fixture|example|payload|snippet)\b"
     r"[^\n.!?]{0,120}$"
+    r"|\b(?:help\s+text|error\s+message)\b[^\n.!?]{0,160}$"
+    r"|\b(?:create|write|add)\s+(?:the\s+)?(?:docs?|documentation)\s+"
+    r"(?:with|containing|that|whose)\b[^\n.!?]{0,160}$"
     r"|\bexplain(?:s|ed|ing)?\s+why\b[^\n.!?]{0,80}$"
     r"|\bexplain(?:ed|ing)?\s+(?=(?:how\s+to\s+)?"
     r"(?:(?:use|set)\s+)?(?:task[_\s-]*type\b|inherit\b|derive\b|parent\b))"
@@ -164,14 +168,15 @@ _STANDALONE_RETRACTION_PATTERN = re.compile(
 _PARENT_CONTRACT_PATTERN = re.compile(
     r"\b(?:inherit(?:ing)?(?:\s+from)?|derive(?:d)?\s+from|"
     r"(?:set\s+)?parent(?:_seed_id|\s+seed)?\s*(?:is|=|:|to)|"
-    rf"use)\s+{_SEED_ID_PATTERN}(?![A-Za-z0-9_-])"
-    rf"|(?<![A-Za-z0-9_-]){_SEED_ID_PATTERN}(?![A-Za-z0-9_-])"
+    rf"use)\s+{_SEED_ID_PATTERN}(?![{_SEED_ID_CHAR_PATTERN}])"
+    rf"|(?<![{_SEED_ID_CHAR_PATTERN}]){_SEED_ID_PATTERN}(?![{_SEED_ID_CHAR_PATTERN}])"
     r"(?:을|를)?\s*(?:계승|상속)(?!하지)",
     re.IGNORECASE,
 )
 _CONTRACT_TAIL_AMBIGUITY_PATTERN = re.compile(
     r"^\s*(?:,\s*)?(?:if|unless|whether|depending|otherwise)\b"
-    rf"|^\s*(?:,\s*)?or\s+(?:{_TASK_TYPE_PATTERN}|{_SEED_ID_PATTERN})(?![A-Za-z0-9_-])",
+    rf"|^\s*(?:,\s*)?or\s+(?:{_TASK_TYPE_PATTERN}|{_SEED_ID_PATTERN})"
+    rf"(?![{_SEED_ID_CHAR_PATTERN}])",
     re.IGNORECASE,
 )
 _CANDIDATE_BOUNDARY_PATTERN = re.compile(
@@ -198,7 +203,10 @@ _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN = re.compile(
     r"[^\n.!?]{0,240}$"
     r"|\b(?:the\s+)?generated\s+"
     r"(?:ya?ml|json|manifest|config(?:uration)?|fixture|example|payload|snippet)\b"
-    r"[^\n.!?]{0,240}$",
+    r"[^\n.!?]{0,240}$"
+    r"|\b(?:help\s+text|error\s+message)\b[^\n.!?]{0,240}$"
+    r"|\b(?:create|write|add)\s+(?:the\s+)?(?:docs?|documentation)\s+"
+    r"(?:with|containing|that|whose)\b[^\n.!?]{0,240}$",
     re.IGNORECASE,
 )
 

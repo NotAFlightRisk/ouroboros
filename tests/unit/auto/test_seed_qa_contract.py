@@ -384,3 +384,21 @@ def test_parent_seed_accepts_schema_valid_identifier_characters() -> None:
         ("Inherit seed_4749408237de-auto_35d.", "seed_4749408237de-auto_35d"),
     ):
         assert inherited_parent_seed_id(_seed(goal)) == expected
+
+
+def test_parent_seed_ignores_help_error_and_documentation_content() -> None:
+    for goal in (
+        "Add a CLI flag whose help text says inherit seed_fake.",
+        "Implement a validator whose error message says inherit seed_fake.",
+        "Create docs with the sentence inherit seed_fake.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) is None
+
+
+def test_parent_seed_accepts_nonprefixed_schema_identifiers() -> None:
+    for goal, expected in (
+        ("Inherit release-parent-v2.", "release-parent-v2"),
+        ("Set parent_seed_id to another-id.", "another-id"),
+        ("Inherit seed-parent-v2.", "seed-parent-v2"),
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) == expected

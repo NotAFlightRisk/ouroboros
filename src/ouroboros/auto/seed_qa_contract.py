@@ -8,6 +8,7 @@ from ouroboros.auto.adapters import EvaluateResult
 from ouroboros.core.seed import Seed
 from ouroboros.core.task_type import (
     _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN,
+    _SEED_ID_CHAR_PATTERN,
     _SEED_ID_PATTERN,
     _candidate_segment,
     _governor_scope_start,
@@ -112,7 +113,8 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
             re.IGNORECASE,
         ),
         re.compile(
-            rf"(?<![A-Za-z0-9_-]){seed_id}(?![A-Za-z0-9_-])(?:을|를)?\s*"
+            rf"(?<![{_SEED_ID_CHAR_PATTERN}]){seed_id}(?![{_SEED_ID_CHAR_PATTERN}])"
+            rf"(?:을|를)?\s*"
             rf"(?:계승|상속)(?!하지)",
             re.IGNORECASE,
         ),

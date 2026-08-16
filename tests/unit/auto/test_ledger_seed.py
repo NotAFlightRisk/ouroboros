@@ -271,6 +271,9 @@ class TestPartialSeedFromEvidence:
             "Generate a YAML example containing task_type: document.",
             "Return JSON with task_type: document.",
             "The generated manifest must set task_type: document.",
+            "Add a CLI flag whose help text says task_type: document.",
+            "Implement a validator whose error message says task_type: document.",
+            "Create docs with the sentence task_type: document.",
         )
         for goal in goals:
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
