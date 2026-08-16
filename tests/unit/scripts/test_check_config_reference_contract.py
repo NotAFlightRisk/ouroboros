@@ -3123,6 +3123,101 @@ list(map(getattr, [config.evaluation], ["stage3_enabled"]))
         assert _audit_as_documented_inert(contract, field, reads).violations == ()
 
 
+def test_runtime_scan_consumes_accessor_maps_through_iterable_protocols(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "iterable_accessor_callbacks.py").write_text(
+        """
+import operator
+
+for value in map(operator.attrgetter("stage1_enabled"), [config.evaluation]):
+    pass
+[stage2] = map(operator.attrgetter("stage2_enabled"), [config.evaluation])
+None in map(operator.attrgetter("stage3_enabled"), [config.evaluation])
+values = []
+values.extend(map(operator.attrgetter("semantic_model"), [config.evaluation]))
+list(value for value in map(operator.attrgetter("assertion_extraction_model"), [config.evaluation]))
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in (
+            "stage1_enabled",
+            "stage2_enabled",
+            "stage3_enabled",
+            "semantic_model",
+            "assertion_extraction_model",
+        )
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_keeps_empty_and_unconsumed_accessor_maps_inert(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "inactive_iterable_callbacks.py").write_text(
+        """
+import operator
+
+pending = map(operator.attrgetter("stage1_enabled"), [config.evaluation])
+for value in map(operator.attrgetter("stage2_enabled"), []):
+    pass
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset()
+
+
+def test_runtime_scan_propagates_exact_local_raise_reachability(contract, tmp_path: Path) -> None:
+    (tmp_path / "exported_nonreturning.py").write_text(
+        """
+def stop():
+    raise RuntimeError("stop")
+
+def exported():
+    stop()
+    return config.evaluation.stage1_enabled
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "module_nonreturning.py").write_text(
+        """
+def stop():
+    raise RuntimeError("stop")
+
+stop()
+config.evaluation.stage2_enabled
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "caught_nonreturning.py").write_text(
+        """
+def stop():
+    raise RuntimeError("stop")
+
+try:
+    stop()
+except RuntimeError:
+    config.evaluation.stage3_enabled
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    reads = contract.runtime_reads(tmp_path, fields)
+
+    assert reads == frozenset({contract.ConfigField("evaluation", "stage3_enabled")})
+
+
 def test_runtime_scan_tracks_constant_and_dotted_operator_getters(contract, tmp_path: Path) -> None:
     (tmp_path / "operator_constants.py").write_text(
         """

@@ -939,6 +939,15 @@ class _FlowResult:
     abrupt: tuple[_AbruptPath, ...] = ()
 
 
+@dataclass(frozen=True)
+class _FunctionExecution:
+    """Exact local-call values and whether control can return to the caller."""
+
+    values: tuple[_AbstractValue, ...]
+    returns_to_caller: bool
+    raises: tuple[_AbruptPath, ...] = ()
+
+
 class _RuntimeReadVisitor(ast.NodeVisitor):
     """Collect config reads with conservative flow- and binding-aware provenance."""
 
@@ -964,6 +973,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._global_names: list[set[str]] = [set()]
         self._nonlocal_names: list[set[str]] = [set()]
         self._active_calls: set[int] = set()
+        self._call_executions: dict[int, list[_FunctionExecution]] = {}
         self._expression_cache: dict[int, _AbstractValue] = {}
         self._flow_abrupts: list[list[_AbruptPath]] = [[]]
         self._path_reachable = True
@@ -1180,6 +1190,42 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         ):
             return True
         return bound_receiver is not None and bool(_contained_origins(bound_receiver) & tracked)
+
+    def _direct_raise_execution(self, function: _FunctionNode) -> _FunctionExecution | None:
+        """Recognize an exact local helper whose first reachable action raises."""
+        if isinstance(function, ast.Lambda):
+            return None
+        for statement in function.body:
+            if (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Constant)
+                and isinstance(statement.value.value, str)
+            ):
+                continue
+            if isinstance(
+                statement,
+                (ast.Pass, ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign),
+            ):
+                continue
+            if not isinstance(statement, ast.Raise):
+                return None
+            exception_type = (
+                self._exception_name(statement.exc) if statement.exc is not None else None
+            )
+            leaf = exception_type.rsplit(".", 1)[-1] if exception_type else None
+            return _FunctionExecution(
+                (),
+                False,
+                (
+                    _AbruptPath(
+                        "raise",
+                        self._binding_snapshot(),
+                        exception_type=leaf,
+                        exception_upper_bound=leaf or "BaseException",
+                    ),
+                ),
+            )
+        return None
 
     @staticmethod
     def _named_value(
@@ -2096,11 +2142,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             }
             if model_copy_sections:
                 return _origin_value(*model_copy_sections)
-            values = [
-                self._local_call_value(node, function, bound_receiver)
-                for function, bound_receiver in self._call_targets(node.func)
-                if self._call_has_relevant_provenance(node, function, bound_receiver)
-            ]
+            values: list[_AbstractValue] = []
+            for function, bound_receiver in self._call_targets(node.func):
+                if self._call_has_relevant_provenance(node, function, bound_receiver):
+                    values.append(self._local_call_value(node, function, bound_receiver))
+                    continue
+                if execution := self._direct_raise_execution(function):
+                    self._call_executions.setdefault(id(node), []).append(execution)
             if values:
                 value = _join_values(*values)
                 self._expression_cache[id(node)] = value
@@ -2414,6 +2462,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         before = self._binding_snapshot()
         accessor = self._expression_value(node.func)
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "extend":
+            for argument in node.args:
+                self._consume_deferred_callable_iterator(argument)
         if accessor.origins & _EAGER_CONSUMER_ORIGINS:
             mode = (
                 "one_turn"
@@ -2565,6 +2616,22 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 for section in self._expression_value(node.args[0]).serialized_sections:
                     self._record(section, field_name)
         self.generic_visit(node)
+        executions = self._call_executions.pop(id(node), [])
+        if executions and all(not execution.returns_to_caller for execution in executions):
+            for execution in executions:
+                for path in execution.raises:
+                    self._append_abrupt(
+                        self._flow_abrupts[-1],
+                        _AbruptPath(
+                            "raise",
+                            before,
+                            exception_type=path.exception_type,
+                            exception_exclusions=path.exception_exclusions,
+                            exception_upper_bound=path.exception_upper_bound,
+                        ),
+                    )
+            self._path_reachable = False
+            return
         self._record_possible_exception(before)
 
     def visit_Await(self, node: ast.Await) -> None:
@@ -2588,11 +2655,20 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_Starred(self, node: ast.Starred) -> None:
         """Iterable unpacking eagerly consumes a deferred generator."""
         self._consume_deferred_generator(node.value)
+        self._consume_deferred_callable_iterator(node.value)
         self.generic_visit(node)
 
     def visit_YieldFrom(self, node: ast.YieldFrom) -> None:
         """``yield from`` eagerly consumes its delegated iterable."""
         self._consume_deferred_generator(node.value)
+        self._consume_deferred_callable_iterator(node.value)
+        self.generic_visit(node)
+
+    def visit_Compare(self, node: ast.Compare) -> None:
+        """Membership checks consume their right-hand iterable."""
+        for operator, comparator in zip(node.ops, node.comparators, strict=True):
+            if isinstance(operator, (ast.In, ast.NotIn)):
+                self._consume_deferred_callable_iterator(comparator, mode="one_turn")
         self.generic_visit(node)
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
@@ -2875,6 +2951,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._replace_shared_value(owner, replacement, target.value)
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        if any(isinstance(target, (ast.Tuple, ast.List)) for target in node.targets):
+            self._consume_deferred_callable_iterator(node.value)
         self.visit(node.value)
         value = self._expression_value(node.value)
         annotation_value = self._annotation_value(node.value)
@@ -2994,6 +3072,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         else:
             mode = "one_turn" if node.body and isinstance(node.body[0], ast.Break) else "full"
             self._consume_deferred_generator(node.iter, mode=mode)
+            self._consume_deferred_callable_iterator(node.iter, mode=mode)
         self.visit(node.iter)
         iterable = self._expression_value(node.iter)
         zero_iterations_possible = self._static_truth(node.iter) is not True
@@ -3560,6 +3639,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         node: ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp,
     ) -> None:
         first, *remaining = node.generators
+        if not isinstance(node, ast.GeneratorExp):
+            self._consume_deferred_callable_iterator(first.iter)
         self.visit(first.iter)
         first_value = self._expression_value(first.iter)
         self._states.append({})
@@ -3577,6 +3658,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     self._expression_cache[id(node)] = _UNKNOWN_VALUE
                     return
             for generator in remaining:
+                self._consume_deferred_callable_iterator(generator.iter)
                 self.visit(generator.iter)
                 if not self._bind_iteration_target(
                     generator.target, self._expression_value(generator.iter)
@@ -3611,6 +3693,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     ) -> None:
         """Advance one generator-expression identity with runtime consumption semantics."""
         first, *remaining = node.generators
+        self._consume_deferred_callable_iterator(first.iter, mode=mode)
         candidates = self._iteration_values(self._expression_value(first.iter))
         start = self._deferred_generator_positions.get(identity, 0)
         consumed = 0
@@ -4213,7 +4296,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         consume_generator: bool = False,
         generator_consumer_mode: str = "full",
         generator_identity: int | None = None,
-    ) -> tuple[_AbstractValue, ...]:
+    ) -> _FunctionExecution:
         scoped = {**self._closure_bindings.get(id(node), {}), **scoped}
         self._states.append(scoped)
         self._annotations.append({})
@@ -4248,14 +4331,20 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         try:
             if isinstance(node, ast.Lambda):
                 self.visit(node.body)
-                return (self._expression_value(node.body),)
+                return _FunctionExecution((self._expression_value(node.body),), True)
             if _is_generator_function(node) and not consume_generator:
-                return ()
+                return _FunctionExecution((), True)
             result = self._visit_binding_branch(node.body, self._binding_snapshot())
-            return tuple(
+            values = tuple(
                 path.return_value or _UNKNOWN_VALUE
                 for path in result.abrupt
                 if path.kind == "return"
+            )
+            raises = tuple(path for path in result.abrupt if path.kind == "raise")
+            return _FunctionExecution(
+                values,
+                result.fallthrough is not None or bool(values),
+                raises,
             )
         finally:
             if generator_identity is not None:
@@ -4292,13 +4381,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             return _UNKNOWN_VALUE
         self._active_calls.add(function_id)
         try:
-            returned = self._visit_function_body(
+            execution = self._visit_function_body(
                 function,
                 scoped,
             )
         finally:
             self._active_calls.remove(function_id)
-        return _join_values(*returned)
+        self._call_executions.setdefault(id(call), []).append(execution)
+        return _join_values(*execution.values)
 
     def _local_direct_call_value(
         self,
@@ -4310,13 +4400,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             return _UNKNOWN_VALUE
         self._active_calls.add(function_id)
         try:
-            returned = self._visit_function_body(
+            execution = self._visit_function_body(
                 function,
                 self._bound_direct_arguments(function, values),
             )
         finally:
             self._active_calls.remove(function_id)
-        return _join_values(*returned)
+        return _join_values(*execution.values)
 
     def _partial_call_value(self, call: ast.Call, partial: _DeferredPartial) -> _AbstractValue:
         """Execute a partial with every pre-bound positional/keyword argument."""
@@ -4357,10 +4447,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 scoped[name] = value
             self._active_calls.add(function_id)
             try:
-                returned = self._visit_function_body(target.function, scoped)
+                execution = self._visit_function_body(target.function, scoped)
             finally:
                 self._active_calls.remove(function_id)
-            results.extend(returned)
+            results.extend(execution.values)
         return _join_values(*results)
 
     def visit_Return(self, node: ast.Return) -> None:
