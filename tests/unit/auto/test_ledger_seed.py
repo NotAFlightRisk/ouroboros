@@ -391,6 +391,10 @@ class TestPartialSeedFromEvidence:
             "task_type: document, which was rejected.",
             "We ruled out task_type: document.",
             "We opted not to use task_type: document.",
+            "Build a CLI whose README says task_type: document.",
+            "Implement a validator whose error says task_type: document.",
+            "Generate a TOML file with task_type: document.",
+            "Write tests where the expected string is task_type: document.",
         ):
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
             partial = partial_seed_from_evidence(

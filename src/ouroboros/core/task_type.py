@@ -18,8 +18,12 @@ SUPPORTED_TASK_TYPES = frozenset(
 _TASK_TYPE_PATTERN = (
     r"(?P<task_type>code|research|analysis|artifact|document|documentation|presentation)"
 )
-_SEED_ID_CHAR_PATTERN = r"A-Za-z0-9_:@/+~-"
+# ``SeedMetadata.parent_seed_id`` is intentionally an opaque non-empty string.
+# Keep the bounded natural-language token parser compatible with punctuation
+# already accepted by that schema instead of silently truncating lineage.
+_SEED_ID_CHAR_PATTERN = r"A-Za-z0-9_:@/+~.=-"
 _SEED_ID_PATTERN = rf"[A-Za-z0-9](?:[{_SEED_ID_CHAR_PATTERN}]*[A-Za-z0-9])?"
+_SEED_ID_CONTINUATION_PATTERN = r"[A-Za-z0-9_:@/+~=-]|\.(?=[A-Za-z0-9])"
 _TASK_TYPE_CONTRACT_PATTERNS = (
     re.compile(
         rf"\btask[_\s-]*type\b\s*(?:=|:)\s*{_TASK_TYPE_PATTERN}\b",
@@ -168,8 +172,9 @@ _STANDALONE_RETRACTION_PATTERN = re.compile(
 _PARENT_CONTRACT_PATTERN = re.compile(
     r"\b(?:inherit(?:ing)?(?:\s+from)?|derive(?:d)?\s+from|"
     r"(?:set\s+)?parent(?:_seed_id|\s+seed)?\s*(?:is|=|:|to)|"
-    rf"use)\s+{_SEED_ID_PATTERN}(?![{_SEED_ID_CHAR_PATTERN}])"
-    rf"|(?<![{_SEED_ID_CHAR_PATTERN}]){_SEED_ID_PATTERN}(?![{_SEED_ID_CHAR_PATTERN}])"
+    rf"use)\s+{_SEED_ID_PATTERN}(?!{_SEED_ID_CONTINUATION_PATTERN})"
+    rf"|(?<![{_SEED_ID_CHAR_PATTERN}]){_SEED_ID_PATTERN}"
+    rf"(?!{_SEED_ID_CONTINUATION_PATTERN})"
     r"(?:을|를)?\s*(?:계승|상속)(?!하지)",
     re.IGNORECASE,
 )
@@ -206,7 +211,15 @@ _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN = re.compile(
     r"[^\n.!?]{0,240}$"
     r"|\b(?:help\s+text|error\s+message)\b[^\n.!?]{0,240}$"
     r"|\b(?:create|write|add)\s+(?:the\s+)?(?:docs?|documentation)\s+"
-    r"(?:with|containing|that|whose)\b[^\n.!?]{0,240}$",
+    r"(?:with|containing|that|whose)\b[^\n.!?]{0,240}$"
+    # Fail closed for control-looking text governed by an artifact-content
+    # clause.  This is syntax based rather than an allowlist of README/TOML/
+    # test/etc. nouns: callers can state a real Seed contract in a separate
+    # imperative clause.
+    r"|\b(?:build|implement|create|add)\b[^\n.!?]{0,240}"
+    r"\b(?:whose|where|containing|that)\b[^\n.!?]{0,160}$"
+    r"|\b(?:generate|return|produce|write)\b[^\n.!?]{0,240}"
+    r"\b(?:whose|where|with|containing|that)\b[^\n.!?]{0,160}$",
     re.IGNORECASE,
 )
 

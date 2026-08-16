@@ -400,5 +400,8 @@ def test_parent_seed_accepts_nonprefixed_schema_identifiers() -> None:
         ("Inherit release-parent-v2.", "release-parent-v2"),
         ("Set parent_seed_id to another-id.", "another-id"),
         ("Inherit seed-parent-v2.", "seed-parent-v2"),
+        ("Set parent_seed_id to release.2026.", "release.2026"),
+        ("Set parent_seed_id to seed.parent", "seed.parent"),
+        ("Set parent_seed_id to foo=bar", "foo=bar"),
     ):
         assert inherited_parent_seed_id(_seed(goal)) == expected

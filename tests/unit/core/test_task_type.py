@@ -430,6 +430,10 @@ def test_explicit_task_type_ignores_artifact_payload_fields() -> None:
         "Generate a YAML example containing task_type: document.",
         "Return JSON with task_type: document.",
         "The generated manifest must set task_type: document.",
+        "Build a CLI whose README says task_type: document.",
+        "Implement a validator whose error says task_type: document.",
+        "Generate a TOML file with task_type: document.",
+        "Write tests where the expected string is task_type: document.",
     ):
         assert explicit_task_type_from_goal(goal) is None
 

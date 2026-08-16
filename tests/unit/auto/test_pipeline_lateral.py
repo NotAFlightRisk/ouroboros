@@ -551,6 +551,10 @@ def test_seed_qa_repairs_fail_closed_on_validation_content_and_field_retractions
         "Add a CLI flag whose help text says task_type: document and inherit seed_old.",
         "Implement a validator whose error message says task_type: document and inherit seed_old.",
         "Create docs with the sentence task_type: document and inherit seed_old.",
+        "Build a CLI whose README says task_type: document.",
+        "Implement a validator whose error says task_type: document.",
+        "Generate a TOML file with task_type: document.",
+        "Write tests where the expected string is task_type: document.",
     ),
 )
 def test_seed_qa_repairs_ignore_artifact_payload_contract_fields(goal: str) -> None:
@@ -588,6 +592,9 @@ def test_seed_qa_repairs_ignore_artifact_payload_contract_fields(goal: str) -> N
         "release-parent-v2",
         "another-id",
         "seed-parent-v2",
+        "release.2026",
+        "seed.parent",
+        "foo=bar",
     ),
 )
 def test_seed_qa_repairs_preserve_schema_valid_parent_identifiers(parent: str) -> None:

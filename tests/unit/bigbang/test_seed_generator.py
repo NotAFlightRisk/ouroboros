@@ -448,6 +448,10 @@ class TestSeedGeneratorAmbiguityGating:
             "Add a CLI flag whose help text says task_type: document.",
             "Implement a validator whose error message says task_type: document.",
             "Create docs with the sentence task_type: document.",
+            "Build a CLI whose README says task_type: document.",
+            "Implement a validator whose error says task_type: document.",
+            "Generate a TOML file with task_type: document.",
+            "Write tests where the expected string is task_type: document.",
         ),
     )
     @pytest.mark.asyncio
