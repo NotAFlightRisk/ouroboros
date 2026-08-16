@@ -365,3 +365,23 @@ def test_explicit_task_type_accepts_replacement_after_cancellation() -> None:
         )
         == "document"
     )
+
+
+def test_explicit_task_type_ignores_unrelated_cancellation_and_output_prose() -> None:
+    assert explicit_task_type_from_goal("Use task_type: document. Cancel lunch.") == "document"
+    assert (
+        explicit_task_type_from_goal("Use task_type: document. Cancel the parent requirement.")
+        == "document"
+    )
+    assert (
+        explicit_task_type_from_goal(
+            "Write a Python validator that emits the line task_type: document."
+        )
+        is None
+    )
+    assert (
+        explicit_task_type_from_goal(
+            "Build a CLI that explains why task_type: document is unsupported."
+        )
+        is None
+    )

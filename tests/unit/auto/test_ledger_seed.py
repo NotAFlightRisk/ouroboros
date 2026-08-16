@@ -217,6 +217,23 @@ class TestPartialSeedFromEvidence:
         assert complete.task_type == "document"
         assert partial.task_type == "document"
 
+    def test_complete_and_partial_ledgers_ignore_unrelated_cancellation_and_output_prose(
+        self,
+    ) -> None:
+        goals = (
+            "Use task_type: document. Cancel lunch.",
+            "Write a validator that emits the line task_type: document.",
+        )
+
+        for goal in goals:
+            complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+            partial = partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            )
+            expected = "document" if "Use task_type" in goal else "code"
+            assert complete.task_type == expected
+            assert partial.task_type == expected
+
     def test_ledgers_ignore_comma_prefixed_reference_task_types(self) -> None:
         goal = "The task type must be document. For example, task_type: code."
 

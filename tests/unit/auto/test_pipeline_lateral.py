@@ -471,6 +471,45 @@ def test_seed_qa_repairs_accept_replacements_after_cancellation() -> None:
 
 
 @pytest.mark.parametrize(
+    ("goal", "expected_task_type", "expected_parent"),
+    (
+        ("Use task_type: document. Cancel lunch. Inherit seed_parent.", "document", "seed_parent"),
+        (
+            "Write a validator that emits the line task_type: document. Inherit seed_parent.",
+            "code",
+            "seed_parent",
+        ),
+    ),
+)
+def test_seed_qa_repairs_ignore_unrelated_cancellation_and_output_prose(
+    goal: str, expected_task_type: str, expected_parent: str
+) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": goal, "task_type": "code"}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Preserve only active contracts.",
+        text="Ignore prose that does not select routing.",
+    )
+
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.task_type == expected_task_type
+        assert candidate.metadata.parent_seed_id == expected_parent
+
+
+@pytest.mark.parametrize(
     "goal",
     (
         "Do not ever inherit seed_bad.",
