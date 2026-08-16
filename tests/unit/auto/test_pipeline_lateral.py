@@ -211,6 +211,28 @@ def test_seed_qa_repairs_ignore_comma_prefixed_reference_contracts() -> None:
         assert candidate.metadata.parent_seed_id == "seed_good"
 
 
+def test_seed_qa_repairs_preserve_descriptive_and_reference_contracts() -> None:
+    for goal in (
+        "Create a guide explaining setup with task_type: document. Inherit seed_good.",
+        "Summarize the rejected proposal with task_type: document. Inherit seed_good.",
+        "Use task_type: document. As a reference, task_type: code appears in old docs. "
+        "Inherit seed_good. As a reference, inherit seed_bad appears in old docs.",
+    ):
+        seed = _build_seed(seed_id="seed_descriptive_contract").model_copy(
+            update={"goal": goal, "task_type": "code"}
+        )
+        qa_result = EvaluateResult(
+            passed=False,
+            score=0.61,
+            verdict="revise",
+            differences=("The explicit task and parent contracts are not reflected.",),
+            suggestions=("Preserve the explicit contracts.",),
+        )
+        repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+        assert repaired.task_type == "document"
+        assert repaired.metadata.parent_seed_id == "seed_good"
+
+
 def test_seed_qa_repair_persists_only_binding_mixed_clause_contracts() -> None:
     qa_result = EvaluateResult(
         passed=False,

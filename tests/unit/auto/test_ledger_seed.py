@@ -196,6 +196,22 @@ class TestPartialSeedFromEvidence:
             == "code"
         )
 
+    def test_ledgers_preserve_descriptive_task_type_contracts(self) -> None:
+        for goal in (
+            "Create a guide explaining setup with task_type: document.",
+            "Summarize the rejected proposal with task_type: document.",
+            "Use task_type: document. As a reference, task_type: code appears in old docs.",
+        ):
+            assert (
+                synthesize_seed_from_ledger(_populate_complete_ledger(goal)).task_type == "document"
+            )
+            assert (
+                partial_seed_from_evidence(
+                    SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+                ).task_type
+                == "document"
+            )
+
     def test_ledgers_preserve_clause_local_document_contract(self) -> None:
         goal = "Without changing the existing task type, task_type must remain document."
         assert synthesize_seed_from_ledger(_populate_complete_ledger(goal)).task_type == "document"

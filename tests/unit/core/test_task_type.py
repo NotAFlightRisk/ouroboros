@@ -260,6 +260,23 @@ def test_explicit_task_type_preserves_comma_separated_governors() -> None:
         assert explicit_task_type_from_goal(negated) is None
 
 
+def test_explicit_task_type_scopes_descriptive_and_reference_prose() -> None:
+    assert (
+        explicit_task_type_from_goal("Create a guide explaining setup with task_type: document.")
+        == "document"
+    )
+    assert (
+        explicit_task_type_from_goal("Summarize the rejected proposal with task_type: document.")
+        == "document"
+    )
+    assert (
+        explicit_task_type_from_goal(
+            "Use task_type: document. As a reference, task_type: code appears in old docs."
+        )
+        == "document"
+    )
+
+
 def test_explicit_task_type_rejects_modal_contracts() -> None:
     assert explicit_task_type_from_goal("We may use task_type: document.") is None
     assert explicit_task_type_from_goal("The task type does not need to be document.") is None

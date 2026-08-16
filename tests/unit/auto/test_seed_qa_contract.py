@@ -104,9 +104,7 @@ def test_parent_seed_preserves_comma_separated_governors() -> None:
     for reference in ("For example", "For reference", "As an example", "e.g."):
         assert inherited_parent_seed_id(_seed(f"{reference}, inherit seed_bad.")) is None
         assert (
-            inherited_parent_seed_id(
-                _seed(f"Inherit seed_good. {reference}, inherit seed_bad.")
-            )
+            inherited_parent_seed_id(_seed(f"Inherit seed_good. {reference}, inherit seed_bad."))
             == "seed_good"
         )
     for negated in (
@@ -114,6 +112,19 @@ def test_parent_seed_preserves_comma_separated_governors() -> None:
         "Never, under any circumstances, inherit seed_bad.",
     ):
         assert inherited_parent_seed_id(_seed(negated)) is None
+
+
+def test_parent_seed_scopes_descriptive_and_reference_prose() -> None:
+    assert (
+        inherited_parent_seed_id(_seed("Summarize the rejected proposal with inherit seed_good."))
+        == "seed_good"
+    )
+    assert (
+        inherited_parent_seed_id(
+            _seed("Inherit seed_good. As a reference, inherit seed_bad appears in old docs.")
+        )
+        == "seed_good"
+    )
 
 
 def test_parent_seed_rejects_ordinary_negative_inheritance_language() -> None:

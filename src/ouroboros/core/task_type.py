@@ -63,13 +63,19 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"|\b(?:am|is|are|was|were)\s+no\s+longer\b"
     r"|\bnot\s+allowed\b"
     r"|\b(?:declin(?:e|ed)|refus(?:e|ed))\s+to\b"
-    r"|\b(?:rejected|abandoned|declined)\b"
+    r"|\b(?:rejected|abandoned)\s+"
+    r"(?=(?:the\s+(?:plan|requirement|proposal)\s+to\s+)?"
+    r"(?:(?:use|set|select)\s+)?(?:task[_\s-]*type\b|inherit\b|derive\b|parent\b))"
     r"|\bruled\s+out\b"
     r"|\bopted\s+not\s+to\b"
     r"|\bchose\s+not\s+to\b"
     r"|\bthere\s+(?:is|was)\s+no\s+(?:requirement|contract|need)\b"
-    r"|\b(?:explain(?:ed|ing)?|docs?\s+(?:say|says|said)|legacy\s+exports?)\b"
-    r"|\b(?:for\s+reference|(?:the\s+)?docs?\s+(?:show|say|mention)|as\s+an?\s+example)\b"
+    r"|\bexplain(?:ed|ing)?\s+(?=(?:how\s+to\s+)?"
+    r"(?:(?:use|set)\s+)?(?:task[_\s-]*type\b|inherit\b|derive\b|parent\b))"
+    r"|\b(?:docs?\s+(?:say|says|said)|legacy\s+exports?)\b"
+    r"|\b(?:for\s+reference|as\s+an?\s+reference|by\s+way\s+of\s+reference|"
+    r"for\s+illustration|as\s+an?\s+illustration|"
+    r"(?:the\s+)?docs?\s+(?:show|say|mention)|as\s+an?\s+example)\b"
     r"|(?:설정하지\s*마세요|(?:상속|계승)하면\s*안\s*(?:됩니다|돼요))",
     re.IGNORECASE,
 )
@@ -122,7 +128,9 @@ _AMBIGUOUS_CONTRACT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _COMMA_NON_BINDING_GOVERNOR_PATTERN = re.compile(
-    r"(?:\b(?:for\s+(?:an?\s+)?example|for\s+reference|as\s+an?\s+example)"
+    r"(?:\b(?:for\s+(?:an?\s+)?example|for\s+reference|as\s+an?\s+reference|"
+    r"by\s+way\s+of\s+reference|for\s+illustration|as\s+an?\s+illustration|"
+    r"as\s+an?\s+example)"
     r"|\be\.g\.)\s*,\s*$"
     r"|\b(?:do\s+not|don't|doesn't|never|cannot|can't)\s*,"
     r"[^;.!?\n]{0,120},\s*(?:(?:use|set|select|choose)\s+)?$",

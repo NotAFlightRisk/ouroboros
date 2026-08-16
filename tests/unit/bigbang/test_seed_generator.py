@@ -384,6 +384,37 @@ class TestSeedGeneratorAmbiguityGating:
         assert result.is_ok
         assert result.value.task_type == "document"
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "initial_context",
+        (
+            "Create a guide explaining setup with task_type: document.",
+            "Summarize the rejected proposal with task_type: document.",
+            "Use task_type: document. As a reference, task_type: code appears in old docs.",
+        ),
+    )
+    async def test_generate_preserves_descriptive_document_task_type(
+        self, initial_context: str
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds(initial_context=initial_context)
+        extraction_response = create_valid_extraction_response(
+            goal="Create the requested plan as a document.", task_type="code"
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, create_low_ambiguity_score(0.15))
+
+        assert result.is_ok
+        assert result.value.task_type == "document"
+
     @pytest.mark.parametrize(
         "initial_context",
         (
