@@ -3361,6 +3361,111 @@ del overwritten[0]
     }
 
 
+def test_runtime_scan_models_reflected_augmented_builtin_and_os_exit_protocols(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "dispatch_edges.py").write_text(
+        """
+import operator
+import os
+from os import _exit as stop
+
+class Left:
+    def __init__(self, section):
+        self.section = section
+
+    def __lt__(self, other):
+        return self.section.stage1_enabled
+
+class Right(Left):
+    def __gt__(self, other):
+        return self.section.stage2_enabled
+
+class Fallback:
+    def __init__(self, section):
+        self.section = section
+
+    def __lt__(self, other):
+        return NotImplemented
+
+    def __gt__(self, other):
+        return self.section.stage3_enabled
+
+class AddOnly:
+    def __init__(self, section):
+        self.section = section
+
+    def __add__(self, other):
+        return self.section.stage4_enabled
+
+class InPlaceFallback:
+    def __init__(self, section):
+        self.section = section
+
+    def __iadd__(self, other):
+        return NotImplemented
+
+    def __add__(self, other):
+        return self.section.stage5_enabled
+
+class Builtins:
+    def __init__(self, section):
+        self.section = section
+
+    def __abs__(self):
+        return self.section.stage6_enabled
+
+    def __round__(self, ndigits=None):
+        return self.section.stage7_enabled
+
+    def __divmod__(self, other):
+        return self.section.stage8_enabled
+
+    def __reversed__(self):
+        return iter((self.section.stage9_enabled,))
+
+    def __index__(self):
+        return self.section.stage10_enabled
+
+Left(config.evaluation) < Right(config.evaluation)
+Fallback(config.evaluation) < Fallback(config.evaluation)
+add_only = AddOnly(config.evaluation)
+add_only += 1
+in_place = InPlaceFallback(config.evaluation)
+in_place += 1
+value = Builtins(config.evaluation)
+abs(value)
+round(value)
+divmod(value, 1)
+reversed(value)
+operator.index(value)
+unused = Builtins(config.consensus)
+
+def module_exit(config):
+    os._exit(0)
+    return config.evaluation.stage11_enabled
+
+def imported_exit(config):
+    stop(0)
+    return config.evaluation.stage12_enabled
+
+def shadowed(os):
+    os._exit(0)
+    return config.evaluation.stage13_enabled
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", f"stage{index}_enabled") for index in range(1, 14)
+    ) | frozenset(
+        contract.ConfigField("consensus", f"stage{index}_enabled") for index in range(6, 11)
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == {
+        contract.ConfigField("evaluation", f"stage{index}_enabled") for index in range(2, 11)
+    } | {contract.ConfigField("evaluation", "stage13_enabled")}
+
+
 def test_runtime_scan_selects_context_manager_protocol_by_syntax(contract, tmp_path: Path) -> None:
     (tmp_path / "context_protocols.py").write_text(
         """

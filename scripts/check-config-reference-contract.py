@@ -244,6 +244,7 @@ _ATTRGETTER_FACTORY = "<attrgetter-factory>"
 _ITEMGETTER_FACTORY = "<itemgetter-factory>"
 _METHODCALLER_FACTORY = "<methodcaller-factory>"
 _OPERATOR_GETITEM = "<operator-getitem>"
+_OPERATOR_INDEX = "<operator-index>"
 _BUILTINS_MODULE = "<builtins-module>"
 _DICT_BUILTIN = "<dict-builtin>"
 _CLASSMETHOD_DECORATOR = "<classmethod-decorator>"
@@ -274,6 +275,8 @@ _ATEXIT_MODULE = "<atexit-module>"
 _ATEXIT_REGISTER = "<atexit-register>"
 _SYS_MODULE = "<sys-module>"
 _SYS_EXIT = "<sys-exit>"
+_OS_MODULE = "<os-module>"
+_OS_EXIT = "<os-exit>"
 _ASYNCIO_MODULE = "<asyncio-module>"
 _ASYNCIO_CONSUMERS = frozenset({"create_task", "ensure_future", "gather", "run"})
 _ASYNCIO_CONSUMER_ORIGINS = frozenset(f"<asyncio-consumer:{name}>" for name in _ASYNCIO_CONSUMERS)
@@ -1257,6 +1260,31 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         else:
             self._invoke_implicit_protocol(owner, "__len__")
 
+    def _invoke_binary_protocol(
+        self,
+        left: _AbstractValue,
+        right: _AbstractValue,
+        direct: str,
+        reflected: str,
+    ) -> _AbstractValue:
+        """Model Python's reflected binary/rich-comparison dispatch order."""
+        direct_methods = self._source_index.methods(left.instance_classes, direct)
+        reflected_methods = self._source_index.methods(right.instance_classes, reflected)
+        reflected_precedes = any(
+            self._source_index.is_strict_subclass(right_class, left_class)
+            for right_class in right.instance_classes
+            for left_class in left.instance_classes
+        )
+        if reflected_precedes and reflected_methods:
+            result = self._invoke_implicit_protocol(right, reflected, (left,))
+            if _NOT_IMPLEMENTED in result.origins and direct_methods:
+                return self._invoke_implicit_protocol(left, direct, (right,))
+            return result
+        result = self._invoke_implicit_protocol(left, direct, (right,))
+        if (not direct_methods or _NOT_IMPLEMENTED in result.origins) and reflected_methods:
+            return self._invoke_implicit_protocol(right, reflected, (left,))
+        return result
+
     @staticmethod
     def _is_accessor_callback(value: _AbstractValue) -> bool:
         return bool(value.accessed_attributes or _GETATTR_BUILTIN in value.origins)
@@ -1892,6 +1920,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_METHODCALLER_FACTORY)
             if _OPERATOR_MODULE in owner.origins and node.attr == "getitem":
                 return _origin_value(_OPERATOR_GETITEM)
+            if _OPERATOR_MODULE in owner.origins and node.attr == "index":
+                return _origin_value(_OPERATOR_INDEX)
             if _TYPING_MODULE in owner.origins and node.attr == "cast":
                 return _origin_value(_TYPING_CAST)
             if _COPY_MODULE in owner.origins and node.attr in {"copy", "deepcopy"}:
@@ -1918,6 +1948,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_ATEXIT_REGISTER)
             if _SYS_MODULE in owner.origins and node.attr == "exit":
                 return _origin_value(_SYS_EXIT)
+            if _OS_MODULE in owner.origins and node.attr == "_exit":
+                return _origin_value(_OS_EXIT)
             if _BUILTINS_MODULE in owner.origins and node.attr in _TRACKED_BUILTIN_CONSUMERS:
                 return _origin_value(f"<builtin-consumer:{node.attr}>")
             if _FUNCTOOLS_MODULE in owner.origins and node.attr == "partial":
@@ -2706,18 +2738,94 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 "repr": "__repr__",
                 "ascii": "__repr__",
                 "len": "__len__",
-                "bool": "__bool__",
                 "hash": "__hash__",
-                "int": "__int__",
-                "float": "__float__",
-                "complex": "__complex__",
                 "bytes": "__bytes__",
+                "abs": "__abs__",
+                "bin": "__index__",
+                "oct": "__index__",
+                "hex": "__index__",
             }.get(node.func.id)
             if isinstance(node.func, ast.Name) and not self._name_is_bound(node.func.id)
             else None
         )
         if protocol is not None and node.args:
             self._invoke_implicit_protocol(self._expression_value(node.args[0]), protocol)
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "bool"
+            and not self._name_is_bound(node.func.id)
+            and node.args
+        ):
+            self._invoke_truth_protocol(self._expression_value(node.args[0]))
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id in {"int", "float", "complex"}
+            and not self._name_is_bound(node.func.id)
+            and node.args
+        ):
+            owner = self._expression_value(node.args[0])
+            candidates = {
+                "int": ("__int__", "__index__"),
+                "float": ("__float__", "__index__"),
+                "complex": ("__complex__", "__float__", "__index__"),
+            }[node.func.id]
+            for candidate in candidates:
+                if self._source_index.methods(owner.instance_classes, candidate):
+                    self._invoke_implicit_protocol(owner, candidate)
+                    break
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "reversed"
+            and not self._name_is_bound(node.func.id)
+            and node.args
+        ):
+            owner = self._expression_value(node.args[0])
+            if self._source_index.methods(owner.instance_classes, "__reversed__"):
+                self._invoke_implicit_protocol(owner, "__reversed__")
+            else:
+                self._invoke_implicit_protocol(owner, "__len__")
+                self._invoke_implicit_protocol(owner, "__getitem__", (_UNKNOWN_VALUE,))
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "round"
+            and not self._name_is_bound(node.func.id)
+            and node.args
+        ):
+            self._invoke_implicit_protocol(
+                self._expression_value(node.args[0]),
+                "__round__",
+                ((self._expression_value(node.args[1]),) if len(node.args) > 1 else ()),
+            )
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "divmod"
+            and not self._name_is_bound(node.func.id)
+            and len(node.args) >= 2
+        ):
+            self._invoke_binary_protocol(
+                self._expression_value(node.args[0]),
+                self._expression_value(node.args[1]),
+                "__divmod__",
+                "__rdivmod__",
+            )
+        if _OPERATOR_INDEX in accessor.origins and node.args:
+            self._invoke_implicit_protocol(self._expression_value(node.args[0]), "__index__")
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "pow"
+            and not self._name_is_bound(node.func.id)
+            and len(node.args) >= 2
+        ):
+            left = self._expression_value(node.args[0])
+            right = self._expression_value(node.args[1])
+            if len(node.args) == 2:
+                self._invoke_binary_protocol(left, right, "__pow__", "__rpow__")
+            else:
+                self._invoke_implicit_protocol(
+                    left,
+                    "__pow__",
+                    (right, self._expression_value(node.args[2])),
+                )
         if (
             isinstance(node.func, ast.Name)
             and node.func.id == "format"
@@ -2901,6 +3009,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 for section in accessor_arguments[0].serialized_sections:
                     self._record(section, field_name)
         self.generic_visit(node)
+        if _OS_EXIT in accessor.origins:
+            self._append_abrupt(
+                self._flow_abrupts[-1],
+                _AbruptPath("exit", self._binding_snapshot()),
+            )
+            self._path_reachable = False
+            return
         if _SYS_EXIT in accessor.origins:
             self._append_abrupt(
                 self._flow_abrupts[-1],
@@ -2977,6 +3092,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
 
     def visit_Compare(self, node: ast.Compare) -> None:
         """Membership checks consume their right-hand iterable."""
+        left_node = node.left
         for operator, comparator in zip(node.ops, node.comparators, strict=True):
             if isinstance(operator, (ast.In, ast.NotIn)):
                 self._consume_deferred_callable_iterator(comparator, mode="one_turn")
@@ -2985,7 +3101,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     self._invoke_implicit_protocol(
                         owner,
                         "__contains__",
-                        (self._expression_value(node.left),),
+                        (self._expression_value(left_node),),
                     )
                 else:
                     self._consume_local_iterator(comparator, mode="one_turn")
@@ -2999,15 +3115,12 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     ast.NotEq: ("__ne__", "__ne__"),
                 }
                 selected = protocols.get(type(operator))
-                if selected is None:
-                    continue
-                direct, reflected = selected
-                left = self._expression_value(node.left)
-                right = self._expression_value(comparator)
-                direct_methods = self._source_index.methods(left.instance_classes, direct)
-                self._invoke_implicit_protocol(left, direct, (right,))
-                if not direct_methods:
-                    self._invoke_implicit_protocol(right, reflected, (left,))
+                if selected is not None:
+                    direct, reflected = selected
+                    left = self._expression_value(left_node)
+                    right = self._expression_value(comparator)
+                    self._invoke_binary_protocol(left, right, direct, reflected)
+            left_node = comparator
         self.generic_visit(node)
 
     def visit_BinOp(self, node: ast.BinOp) -> None:
@@ -3030,21 +3143,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         direct, reflected = protocols[type(node.op)]
         left = self._expression_value(node.left)
         right = self._expression_value(node.right)
-        direct_methods = self._source_index.methods(left.instance_classes, direct)
-        reflected_methods = self._source_index.methods(right.instance_classes, reflected)
-        reflected_precedes = any(
-            self._source_index.is_strict_subclass(right_class, left_class)
-            for right_class in right.instance_classes
-            for left_class in left.instance_classes
-        )
-        if reflected_precedes and reflected_methods:
-            result = self._invoke_implicit_protocol(right, reflected, (left,))
-            if _NOT_IMPLEMENTED in result.origins and direct_methods:
-                self._invoke_implicit_protocol(left, direct, (right,))
-        else:
-            result = self._invoke_implicit_protocol(left, direct, (right,))
-            if (not direct_methods or _NOT_IMPLEMENTED in result.origins) and reflected_methods:
-                self._invoke_implicit_protocol(right, reflected, (left,))
+        self._invoke_binary_protocol(left, right, direct, reflected)
         self.generic_visit(node)
 
     def visit_FormattedValue(self, node: ast.FormattedValue) -> None:
@@ -3458,11 +3557,29 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             ast.BitXor: "__ixor__",
             ast.BitAnd: "__iand__",
         }
-        self._invoke_implicit_protocol(
-            owner,
-            protocols[type(node.op)],
-            (self._expression_value(node.value),),
-        )
+        in_place_name = protocols[type(node.op)]
+        right = self._expression_value(node.value)
+        in_place = self._invoke_implicit_protocol(owner, in_place_name, (right,))
+        if (
+            not self._source_index.methods(owner.instance_classes, in_place_name)
+            or _NOT_IMPLEMENTED in in_place.origins
+        ):
+            direct, reflected = {
+                ast.Add: ("__add__", "__radd__"),
+                ast.Sub: ("__sub__", "__rsub__"),
+                ast.Mult: ("__mul__", "__rmul__"),
+                ast.MatMult: ("__matmul__", "__rmatmul__"),
+                ast.Div: ("__truediv__", "__rtruediv__"),
+                ast.FloorDiv: ("__floordiv__", "__rfloordiv__"),
+                ast.Mod: ("__mod__", "__rmod__"),
+                ast.Pow: ("__pow__", "__rpow__"),
+                ast.LShift: ("__lshift__", "__rlshift__"),
+                ast.RShift: ("__rshift__", "__rrshift__"),
+                ast.BitOr: ("__or__", "__ror__"),
+                ast.BitXor: ("__xor__", "__rxor__"),
+                ast.BitAnd: ("__and__", "__rand__"),
+            }[type(node.op)]
+            self._invoke_binary_protocol(owner, right, direct, reflected)
         if isinstance(node.op, ast.BitOr):
             right = self._expression_value(node.value)
             entries = dict(owner.entries or ())
@@ -4302,6 +4419,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if alias.name == "atexit"
                     else _origin_value(_SYS_MODULE)
                     if alias.name == "sys"
+                    else _origin_value(_OS_MODULE)
+                    if alias.name == "os"
                     else _origin_value(_ASYNCIO_MODULE)
                     if alias.name == "asyncio"
                     else _origin_value(_CONTEXTLIB_MODULE)
@@ -4354,6 +4473,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "operator" and alias.name == "methodcaller"
                     else _origin_value(_OPERATOR_GETITEM)
                     if node.module == "operator" and alias.name == "getitem"
+                    else _origin_value(_OPERATOR_INDEX)
+                    if node.module == "operator" and alias.name == "index"
                     else _origin_value(_GETATTR_BUILTIN)
                     if node.module == "builtins" and alias.name == "getattr"
                     else _origin_value(_DICT_BUILTIN)
@@ -4398,6 +4519,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "atexit" and alias.name == "register"
                     else _origin_value(_SYS_EXIT)
                     if node.module == "sys" and alias.name == "exit"
+                    else _origin_value(_OS_EXIT)
+                    if node.module == "os" and alias.name == "_exit"
                     else _origin_value(f"<asyncio-consumer:{alias.name}>")
                     if node.module == "asyncio" and alias.name in _ASYNCIO_CONSUMERS
                     else _origin_value(_NULLCONTEXT_FACTORY)
