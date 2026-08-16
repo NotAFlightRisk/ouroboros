@@ -374,7 +374,7 @@ def has_ambiguous_contract_governor(prefix: str) -> bool:
     but_resets = tuple(re.finditer(r"\bbut\b", prefix, re.IGNORECASE))
     if but_resets:
         scope = prefix[but_resets[-1].end() :]
-    elif re.search(r"\b(?:if|unless|whether)\b", prefix, re.IGNORECASE):
+    elif re.search(r"\b(?:if|when|whenever|unless|whether)\b", prefix, re.IGNORECASE):
         scope = prefix
     else:
         resets = tuple(re.finditer(r",|\b(?:and|while|although|though)\b", prefix, re.IGNORECASE))
