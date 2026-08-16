@@ -366,3 +366,21 @@ def test_parent_seed_handles_contracted_korean_and_corrected_lineage() -> None:
         inherited_parent_seed_id(_seed("Inherit seed_bad, but that requirement was rejected."))
         is None
     )
+
+
+def test_parent_seed_ignores_artifact_payload_fields() -> None:
+    for goal in (
+        "Generate a YAML example containing parent_seed_id: seed_old.",
+        "Return JSON with parent_seed_id: seed_old.",
+        "The generated manifest must set parent_seed_id: seed_old.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) is None
+
+
+def test_parent_seed_accepts_schema_valid_identifier_characters() -> None:
+    for goal, expected in (
+        ("Inherit seed_parent_001.", "seed_parent_001"),
+        ("Set parent_seed_id to seed_mechanical_eval_minimal.", "seed_mechanical_eval_minimal"),
+        ("Inherit seed_4749408237de-auto_35d.", "seed_4749408237de-auto_35d"),
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) == expected

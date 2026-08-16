@@ -7,6 +7,8 @@ import re
 from ouroboros.auto.adapters import EvaluateResult
 from ouroboros.core.seed import Seed
 from ouroboros.core.task_type import (
+    _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN,
+    _SEED_ID_PATTERN,
     _candidate_segment,
     _governor_scope_start,
     _has_contract_local_ambiguity,
@@ -98,7 +100,7 @@ def requested_seed_qa_task_type(seed: Seed) -> str | None:
 
 def inherited_parent_seed_id(seed: Seed) -> str | None:
     """Return the inherited Seed ID explicitly named by the goal contract."""
-    seed_id = r"(?P<seed_id>seed_[A-Za-z0-9]+)"
+    seed_id = rf"(?P<seed_id>{_SEED_ID_PATTERN})"
     patterns = (
         re.compile(
             rf"\b(?:inherit(?:ing)?(?:\s+from)?|derive(?:d)?\s+from|"
@@ -110,7 +112,7 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
             re.IGNORECASE,
         ),
         re.compile(
-            rf"(?<![A-Za-z0-9_]){seed_id}(?![A-Za-z0-9_])(?:을|를)?\s*"
+            rf"(?<![A-Za-z0-9_-]){seed_id}(?![A-Za-z0-9_-])(?:을|를)?\s*"
             rf"(?:계승|상속)(?!하지)",
             re.IGNORECASE,
         ),
@@ -126,6 +128,7 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
             if (
                 is_non_binding_contract_segment(contract_prefix)
                 or is_non_binding_contract_segment(seed.goal[segment_start : match.end()])
+                or _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(governor_prefix) is not None
                 or is_quoted_contract(seed.goal, match.start(), match.end())
                 or has_historical_governor(
                     seed.goal, match.start(), _governor_scope_start(seed.goal, match.start())

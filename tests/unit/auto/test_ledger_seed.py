@@ -268,6 +268,9 @@ class TestPartialSeedFromEvidence:
             "Write a validator that parses parent_seed_id: seed_bad.",
             "Write unit tests asserting task_type: document.",
             "Create documentation showing how to set task_type: document.",
+            "Generate a YAML example containing task_type: document.",
+            "Return JSON with task_type: document.",
+            "The generated manifest must set task_type: document.",
         )
         for goal in goals:
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))

@@ -423,3 +423,12 @@ def test_explicit_task_type_ignores_unrelated_bare_retraction_details() -> None:
         "Use task_type: document. Scratch that old heading.",
     ):
         assert explicit_task_type_from_goal(goal) == "document"
+
+
+def test_explicit_task_type_ignores_artifact_payload_fields() -> None:
+    for goal in (
+        "Generate a YAML example containing task_type: document.",
+        "Return JSON with task_type: document.",
+        "The generated manifest must set task_type: document.",
+    ):
+        assert explicit_task_type_from_goal(goal) is None

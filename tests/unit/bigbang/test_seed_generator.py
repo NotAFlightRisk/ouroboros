@@ -442,6 +442,9 @@ class TestSeedGeneratorAmbiguityGating:
             "task_type: document, which was rejected.",
             "We ruled out task_type: document.",
             "We opted not to use task_type: document.",
+            "Generate a YAML example containing task_type: document.",
+            "Return JSON with task_type: document.",
+            "The generated manifest must set task_type: document.",
         ),
     )
     @pytest.mark.asyncio

@@ -18,6 +18,7 @@ SUPPORTED_TASK_TYPES = frozenset(
 _TASK_TYPE_PATTERN = (
     r"(?P<task_type>code|research|analysis|artifact|document|documentation|presentation)"
 )
+_SEED_ID_PATTERN = r"seed_[A-Za-z0-9][A-Za-z0-9_-]*"
 _TASK_TYPE_CONTRACT_PATTERNS = (
     re.compile(
         rf"\btask[_\s-]*type\b\s*(?:=|:)\s*{_TASK_TYPE_PATTERN}\b",
@@ -83,6 +84,12 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"|\b(?:the\s+)?(?:report|output|fixture|example|response|message|text|line)\s+"
     r"(?:should|must|will|can|contain(?:s|ed)?|include|say|show|display)\b"
     r"[^\n.!?]{0,80}$"
+    r"|\b(?:generate|return|create|produce|write)\s+(?:an?\s+|the\s+)?"
+    r"(?:ya?ml|json|manifest|config(?:uration)?|fixture|example|payload|snippet)\b"
+    r"[^\n.!?]{0,120}$"
+    r"|\b(?:the\s+)?generated\s+"
+    r"(?:ya?ml|json|manifest|config(?:uration)?|fixture|example|payload|snippet)\b"
+    r"[^\n.!?]{0,120}$"
     r"|\bexplain(?:s|ed|ing)?\s+why\b[^\n.!?]{0,80}$"
     r"|\bexplain(?:ed|ing)?\s+(?=(?:how\s+to\s+)?"
     r"(?:(?:use|set)\s+)?(?:task[_\s-]*type\b|inherit\b|derive\b|parent\b))"
@@ -157,13 +164,14 @@ _STANDALONE_RETRACTION_PATTERN = re.compile(
 _PARENT_CONTRACT_PATTERN = re.compile(
     r"\b(?:inherit(?:ing)?(?:\s+from)?|derive(?:d)?\s+from|"
     r"(?:set\s+)?parent(?:_seed_id|\s+seed)?\s*(?:is|=|:|to)|"
-    r"use)\s+seed_[A-Za-z0-9]+\b"
-    r"|\bseed_[A-Za-z0-9]+\b(?:을|를)?\s*(?:계승|상속)(?!하지)",
+    rf"use)\s+{_SEED_ID_PATTERN}(?![A-Za-z0-9_-])"
+    rf"|(?<![A-Za-z0-9_-]){_SEED_ID_PATTERN}(?![A-Za-z0-9_-])"
+    r"(?:을|를)?\s*(?:계승|상속)(?!하지)",
     re.IGNORECASE,
 )
 _CONTRACT_TAIL_AMBIGUITY_PATTERN = re.compile(
     r"^\s*(?:,\s*)?(?:if|unless|whether|depending|otherwise)\b"
-    rf"|^\s*(?:,\s*)?or\s+(?:{_TASK_TYPE_PATTERN}|seed_[A-Za-z0-9]+)\b",
+    rf"|^\s*(?:,\s*)?or\s+(?:{_TASK_TYPE_PATTERN}|{_SEED_ID_PATTERN})(?![A-Za-z0-9_-])",
     re.IGNORECASE,
 )
 _CANDIDATE_BOUNDARY_PATTERN = re.compile(
@@ -182,6 +190,15 @@ _COMMA_NON_BINDING_GOVERNOR_PATTERN = re.compile(
     r"|\be\.g\.)\s*,\s*$"
     r"|\b(?:do\s+not|don't|doesn't|never|cannot|can't)\s*,"
     r"[^;.!?\n]{0,120},\s*(?:(?:use|set|select|choose)\s+)?$",
+    re.IGNORECASE,
+)
+_ARTIFACT_PAYLOAD_GOVERNOR_PATTERN = re.compile(
+    r"\b(?:generate|return|create|produce|write)\s+(?:an?\s+|the\s+)?"
+    r"(?:ya?ml|json|manifest|config(?:uration)?|fixture|example|payload|snippet)\b"
+    r"[^\n.!?]{0,240}$"
+    r"|\b(?:the\s+)?generated\s+"
+    r"(?:ya?ml|json|manifest|config(?:uration)?|fixture|example|payload|snippet)\b"
+    r"[^\n.!?]{0,240}$",
     re.IGNORECASE,
 )
 
@@ -235,6 +252,7 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
             if (
                 is_non_binding_contract_segment(contract_prefix)
                 or is_non_binding_contract_segment(normalized[segment_start : match.end()])
+                or _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(governor_prefix) is not None
                 or is_quoted_contract(normalized, match.start(), match.end())
                 or has_historical_governor(
                     normalized, match.start(), _governor_scope_start(normalized, match.start())

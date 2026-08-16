@@ -542,6 +542,69 @@ def test_seed_qa_repairs_fail_closed_on_validation_content_and_field_retractions
         assert candidate.metadata.parent_seed_id == "seed_parent"
 
 
+@pytest.mark.parametrize(
+    "goal",
+    (
+        "Generate a YAML example containing task_type: document and parent_seed_id: seed_old.",
+        "Return JSON with task_type: document and parent_seed_id: seed_old.",
+        "The generated manifest must set task_type: document and parent_seed_id: seed_old.",
+    ),
+)
+def test_seed_qa_repairs_ignore_artifact_payload_contract_fields(goal: str) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": goal, "task_type": "code"}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Keep payload fields out of Seed control metadata.",
+        text="Preserve the existing routing and repair lineage.",
+    )
+
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.task_type == "code"
+        assert candidate.metadata.parent_seed_id == "seed_current"
+
+
+@pytest.mark.parametrize(
+    "parent",
+    ("seed_parent_001", "seed_mechanical_eval_minimal", "seed_4749408237de-auto_35d"),
+)
+def test_seed_qa_repairs_preserve_schema_valid_parent_identifiers(parent: str) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": f"Inherit {parent}.", "task_type": "code"}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Preserve explicit lineage.",
+        text="Keep the complete parent identifier.",
+    )
+
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.metadata.parent_seed_id == parent
+
+
 def test_seed_qa_repairs_ignore_unrelated_bare_retraction_details() -> None:
     seed = _build_seed(seed_id="seed_current").model_copy(
         update={

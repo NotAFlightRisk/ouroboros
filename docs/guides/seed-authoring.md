@@ -28,7 +28,7 @@ metadata:
   ambiguity_score: <0.0-1.0>
 
 # Optional fields
-task_type: "code"           # "code" (default), "research", or "analysis"
+task_type: "code"           # See the supported values table below; default: "code"
 constraints:
   - "<constraint>"
 evaluation_principles:
