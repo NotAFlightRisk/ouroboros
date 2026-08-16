@@ -97,7 +97,16 @@ _POST_MATCH_REJECTION_PATTERN = re.compile(
     r"|(?:am|is|are|was|were)\s+no\s+longer\s+(?:used|required|adopted|applied)"
     r"|not\s+anymore"
     r"|(?:we\s+)?decided\s+against\s+it"
-    r"|scratch\s+that)\b",
+    r"|scratch\s+that"
+    r"|(?:should|must|may)\s+(?:not\s+)?(?:be\s+)?(?:used|required|adopted|applied|avoided)"
+    r"|(?:value|requirement|contract|proposal)\s+(?:should|must|may)\s+not\s+(?:be\s+)?(?:used|required|adopted|applied|avoided)"
+    r"|(?:value|requirement|contract|proposal)\s+(?:is|was)\s+not\s+allowed"
+    r"|(?:하지\s*마세요|하면\s*안\s*(?:됩니다|돼요)))\b",
+    re.IGNORECASE,
+)
+_CONTRACT_TAIL_AMBIGUITY_PATTERN = re.compile(
+    r"^\s*(?:,\s*)?(?:if|unless|whether|depending|otherwise)\b"
+    rf"|^\s*(?:,\s*)?or\s+(?:{_TASK_TYPE_PATTERN}|seed_[A-Za-z0-9]+)\b",
     re.IGNORECASE,
 )
 _CANDIDATE_BOUNDARY_PATTERN = re.compile(
@@ -146,7 +155,6 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
             line = normalized[line_start:line_end]
             segment_start, segment_end = _candidate_segment(normalized, match.start(), match.end())
             segment = normalized[segment_start:segment_end]
-            authority_scope = normalized[segment_start:segment_end]
             governor_prefix = normalized[
                 _governor_scope_start(normalized, match.start()) : match.start()
             ]
@@ -157,8 +165,10 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
                 continue
             if re.match(r"\s*\?", normalized[match.end() :]):
                 continue
+            contract_prefix = normalized[segment_start : match.start()]
             if (
-                is_non_binding_contract_segment(segment)
+                is_non_binding_contract_segment(contract_prefix)
+                or is_non_binding_contract_segment(normalized[segment_start : match.end()])
                 or is_quoted_contract(normalized, match.start(), match.end())
                 or has_historical_governor(
                     normalized, match.start(), _governor_scope_start(normalized, match.start())
@@ -167,7 +177,7 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
                     normalized, match.start(), _governor_scope_start(normalized, match.start())
                 )
                 or has_post_match_rejection(normalized, match.end())
-                or is_ambiguous_contract_segment(authority_scope)
+                or _has_contract_local_ambiguity(normalized, match.end(), segment_end)
                 or has_optional_contract_tail(normalized, match.end(), segment_end)
                 or (
                     is_ambiguous_contract_segment(governor_prefix)
@@ -278,6 +288,11 @@ def has_post_match_rejection(text: str, end: int) -> bool:
         flags=re.IGNORECASE,
     )
     return _POST_MATCH_REJECTION_PATTERN.search(candidate) is not None
+
+
+def _has_contract_local_ambiguity(text: str, end: int, segment_end: int) -> bool:
+    """Reject ambiguity immediately attached to the matched contract only."""
+    return _CONTRACT_TAIL_AMBIGUITY_PATTERN.search(text[end:segment_end]) is not None
 
 
 def normalize_task_type(value: object) -> str:

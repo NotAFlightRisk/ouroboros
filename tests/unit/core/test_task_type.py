@@ -215,6 +215,19 @@ def test_explicit_task_type_accepts_documentation_as_a_supported_value() -> None
     )
 
 
+def test_explicit_task_type_ignores_unrelated_same_clause_details() -> None:
+    assert (
+        explicit_task_type_from_goal(
+            "Use task_type: document to explain why the old proposal was rejected."
+        )
+        == "document"
+    )
+    assert (
+        explicit_task_type_from_goal("Use task_type: document for either PDF or DOCX output.")
+        == "document"
+    )
+
+
 def test_explicit_task_type_rejects_modal_contracts() -> None:
     assert explicit_task_type_from_goal("We may use task_type: document.") is None
     assert explicit_task_type_from_goal("The task type does not need to be document.") is None

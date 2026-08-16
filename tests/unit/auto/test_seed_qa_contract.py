@@ -72,6 +72,19 @@ def test_parent_seed_scopes_possessives_and_historical_governors() -> None:
     assert inherited_parent_seed_id(_seed("Inherit seed_good for John's project.")) == ("seed_good")
 
 
+def test_parent_seed_ignores_unrelated_same_clause_details() -> None:
+    assert (
+        inherited_parent_seed_id(_seed("Inherit seed_good to explain why seed_bad was rejected."))
+        == "seed_good"
+    )
+    assert (
+        inherited_parent_seed_id(
+            _seed("Inherit seed_good for either a PDF or DOCX migration note.")
+        )
+        == "seed_good"
+    )
+
+
 def test_parent_seed_rejects_ordinary_negative_inheritance_language() -> None:
     for goal in (
         "It is false that we inherit seed_bad.",

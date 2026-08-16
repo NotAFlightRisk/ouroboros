@@ -144,6 +144,38 @@ def test_seed_qa_feedback_repairs_explicit_document_task_type() -> None:
     assert any("uncertainty and fallback rule" in item for item in repaired.constraints)
 
 
+def test_seed_qa_repairs_preserve_same_clause_task_and_parent_contracts() -> None:
+    seed = _build_seed(seed_id="seed_wrong_contracts").model_copy(
+        update={
+            "goal": (
+                "Use task_type: document to explain why the old proposal was rejected. "
+                "Inherit seed_good for either a PDF or DOCX migration note."
+            ),
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.61,
+        verdict="revise",
+        differences=("The explicit task and parent contracts are not reflected.",),
+        suggestions=("Preserve the explicit contracts.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Keep the explicit contracts authoritative.",
+        text="Apply the requested document task and inherited parent.",
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    lateral = _seed_with_seed_qa_lateral_feedback(
+        seed, lateral_result, qa_result=qa_result, attempt=1
+    )
+    for candidate in (repaired, lateral):
+        assert candidate.task_type == "document"
+        assert candidate.metadata.parent_seed_id == "seed_good"
+
+
 def test_seed_qa_repair_persists_only_binding_mixed_clause_contracts() -> None:
     qa_result = EvaluateResult(
         passed=False,

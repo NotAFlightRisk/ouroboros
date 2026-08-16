@@ -9,6 +9,7 @@ from ouroboros.core.seed import Seed
 from ouroboros.core.task_type import (
     _candidate_segment,
     _governor_scope_start,
+    _has_contract_local_ambiguity,
     _resolve_authoritative_matches,
     explicit_task_type_from_goal,
     has_historical_governor,
@@ -117,13 +118,13 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
     for pattern in patterns:
         for match in pattern.finditer(seed.goal):
             segment_start, segment_end = _candidate_segment(seed.goal, match.start(), match.end())
-            segment = seed.goal[segment_start:segment_end]
-            authority_scope = seed.goal[segment_start:segment_end]
             governor_prefix = seed.goal[
                 _governor_scope_start(seed.goal, match.start()) : match.start()
             ]
+            contract_prefix = seed.goal[segment_start : match.start()]
             if (
-                is_non_binding_contract_segment(segment)
+                is_non_binding_contract_segment(contract_prefix)
+                or is_non_binding_contract_segment(seed.goal[segment_start : match.end()])
                 or is_quoted_contract(seed.goal, match.start(), match.end())
                 or has_historical_governor(
                     seed.goal, match.start(), _governor_scope_start(seed.goal, match.start())
@@ -132,7 +133,7 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
                     seed.goal, match.start(), _governor_scope_start(seed.goal, match.start())
                 )
                 or has_post_match_rejection(seed.goal, match.end())
-                or is_ambiguous_contract_segment(authority_scope)
+                or _has_contract_local_ambiguity(seed.goal, match.end(), segment_end)
                 or has_optional_contract_tail(seed.goal, match.end(), segment_end)
                 or (
                     is_ambiguous_contract_segment(governor_prefix)

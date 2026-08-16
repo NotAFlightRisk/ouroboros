@@ -186,6 +186,17 @@ class TestPartialSeedFromEvidence:
             == "document"
         )
 
+    def test_ledgers_preserve_contracts_with_unrelated_same_clause_details(self) -> None:
+        goal = (
+            "Use task_type: document to explain why the old proposal was rejected. "
+            "Inherit seed_good for either a PDF or DOCX migration note."
+        )
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+        )
+        assert complete.task_type == partial.task_type == "document"
+
     def test_historical_task_type_does_not_override_ledger_default(self) -> None:
         for goal in (
             "We discussed task_type: document in the rejected proposal. Build a CLI.",
