@@ -814,6 +814,44 @@ class _SourceIndex:
         target, target_name = edge
         return self.resolve_classes(target, target_name, seen | {key})
 
+    def resolve_value_expression(
+        self,
+        module: _IndexedModule,
+        name: str,
+        seen: frozenset[tuple[str, str]] = frozenset(),
+    ) -> tuple[_IndexedModule, ast.expr] | None:
+        """Resolve a final explicit module data binding or re-export."""
+        key = (module.name, name)
+        if key in seen:
+            return None
+        edge = self._reexports.get(key)
+        if edge is not None:
+            target, target_name = edge
+            return self.resolve_value_expression(target, target_name, seen | {key})
+        resolved: tuple[_IndexedModule, ast.expr] | None = None
+        for statement in module.tree.body:
+            if isinstance(statement, ast.Assign):
+                assigned = frozenset().union(
+                    *(self._assigned_names(target) for target in statement.targets)
+                )
+                if name in assigned:
+                    resolved = (module, statement.value)
+            elif isinstance(statement, ast.AnnAssign) and name in self._assigned_names(
+                statement.target
+            ):
+                resolved = (module, statement.value) if statement.value is not None else None
+            elif isinstance(
+                statement, (ast.AugAssign, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
+                bound = (
+                    self._assigned_names(statement.target)
+                    if isinstance(statement, ast.AugAssign)
+                    else frozenset({statement.name})
+                )
+                if name in bound:
+                    resolved = None
+        return resolved
+
     def _index_class_bases(self, module: _IndexedModule) -> None:
         class_bindings: dict[str, frozenset[ast.ClassDef]] = {}
         module_bindings: dict[str, _IndexedModule] = {}
@@ -3877,6 +3915,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     f"{module.name}.{alias.name}" if module is not None else alias.name,
                     self._module,
                 )
+                imported_value = (
+                    self._imported_data_value(module, alias.name) if module is not None else None
+                )
                 self._functions[-1][bound] = functions
                 self._states[-1][bound] = (
                     _type_checking_value()
@@ -3948,6 +3989,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "contextlib" and alias.name == "ExitStack"
                     else _origin_value("<external-consumer:collections.deque>")
                     if node.module == "collections" and alias.name == "deque"
+                    else imported_value
+                    if imported_value is not None
                     else _AbstractValue(
                         classes=classes,
                         modules=(
@@ -3957,6 +4000,35 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         ),
                     )
                 )
+
+    def _imported_data_value(
+        self,
+        module: _IndexedModule,
+        name: str,
+        seen: frozenset[tuple[str, str]] = frozenset(),
+    ) -> _AbstractValue | None:
+        """Evaluate bounded imported constants and callback containers."""
+        key = (module.name, name)
+        if key in seen:
+            return None
+        resolved = self._source_index.resolve_value_expression(module, name)
+        if resolved is None:
+            return None
+        owner, expression = resolved
+        scoped: dict[str, _AbstractValue] = {}
+        for candidate in ast.walk(expression):
+            if not isinstance(candidate, ast.Name) or candidate.id in scoped:
+                continue
+            functions = self._source_index.resolve_functions(owner, candidate.id)
+            if functions:
+                scoped[candidate.id] = _AbstractValue(
+                    callables=tuple(_CallableTarget(function) for function in functions)
+                )
+                continue
+            nested = self._imported_data_value(owner, candidate.id, seen | {key})
+            if nested is not None:
+                scoped[candidate.id] = nested
+        return self._value_in_scope(expression, scoped)
 
     def visit_Import(self, node: ast.Import) -> None:
         self._bind_import(node, runtime=True)

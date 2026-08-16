@@ -579,7 +579,15 @@ async def read(config):
         contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
     )
 
-    assert contract.runtime_reads(tmp_path, fields) == fields
+    reads = contract.runtime_reads(tmp_path, fields)
+    assert reads == fields
+    report = _audit_as_documented_inert(
+        contract, contract.ConfigField("evaluation", "stage1_enabled"), reads
+    )
+    assert "evaluation.stage1_enabled: conflicting config-field dispositions" in report.violations
+    assert "evaluation.stage1_enabled: production-wired field is still documented inert" in (
+        report.violations
+    )
 
 
 def test_runtime_scan_tracks_local_and_closing_context_entry_protocols(
@@ -633,7 +641,9 @@ closing(settings.evaluation)
     )
     field = contract.ConfigField("evaluation", "stage1_enabled")
 
-    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert reads == frozenset()
+    assert _audit_as_documented_inert(contract, field, reads).violations == ()
 
 
 def test_runtime_scan_executes_context_exit_and_generator_continuation(
@@ -3418,6 +3428,64 @@ itemgetter(FIELD)(config.evaluation.model_dump())
     )
 
     assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_resolves_imported_constants_and_callback_containers(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "names.py").write_text('FIELD = "stage1_enabled"\n', encoding="utf-8")
+    (tmp_path / "callbacks.py").write_text(
+        """
+def read_stage(section):
+    return section.stage2_enabled
+
+_READERS = {"stage": read_stage}
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "imported_values.py").write_text(
+        """
+from names import FIELD
+from callbacks import _READERS
+
+getattr(settings.evaluation, FIELD)
+_READERS["stage"](settings.evaluation)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    reads = contract.runtime_reads(tmp_path, fields)
+    assert reads == fields
+    report = _audit_as_documented_inert(
+        contract, contract.ConfigField("evaluation", "stage1_enabled"), reads
+    )
+    assert "evaluation.stage1_enabled: conflicting config-field dispositions" in report.violations
+    assert "evaluation.stage1_enabled: production-wired field is still documented inert" in (
+        report.violations
+    )
+
+
+def test_runtime_scan_keeps_imported_values_lazy_when_unused(contract, tmp_path: Path) -> None:
+    (tmp_path / "callbacks.py").write_text(
+        """
+def read_stage(section):
+    return section.stage3_enabled
+
+_READERS = {"stage": read_stage}
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "unused_imported_values.py").write_text(
+        "from callbacks import _READERS\npending = _READERS\n", encoding="utf-8"
+    )
+    field = contract.ConfigField("evaluation", "stage3_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    assert reads == frozenset()
+    assert _audit_as_documented_inert(contract, field, reads).violations == ()
 
 
 def test_runtime_scan_tracks_unshadowed_classmethod_and_rejects_shadowing(
