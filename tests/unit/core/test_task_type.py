@@ -38,6 +38,10 @@ def test_explicit_task_type_scopes_predicate_to_binding_clause() -> None:
         )
         == "document"
     )
+    assert (
+        explicit_task_type_from_goal("We may revise the title, and task_type: document.")
+        == "document"
+    )
     for goal in (
         "task_type: code. Actually, keep the title short. Separately, task_type: document.",
     ):
@@ -343,6 +347,7 @@ def test_explicit_task_type_honors_later_standalone_retractions() -> None:
         "task_type: document. Retract that requirement.",
         "task_type: document. Cancel this requirement.",
         "task_type: document. Cancel the task type requirement.",
+        "task_type: document; cancel that requirement.",
     ):
         assert explicit_task_type_from_goal(goal) is None
 

@@ -570,6 +570,26 @@ def test_seed_qa_repairs_preserve_parent_before_content_example() -> None:
         assert candidate.metadata.parent_seed_id == "seed_old"
 
 
+def test_seed_qa_repairs_scope_modal_clause_and_semicolon_retraction() -> None:
+    for goal, task_type, parent in (
+        ("We may revise the title, and task_type: document.", "document", "seed_current"),
+        ("task_type: document; cancel that requirement.", "code", "seed_current"),
+        ("Inherit seed_old; cancel that requirement.", "code", "seed_current"),
+    ):
+        seed = _build_seed(seed_id="seed_current").model_copy(
+            update={"goal": goal, "task_type": "code"}
+        )
+        qa_result = EvaluateResult(
+            passed=False,
+            score=0.5,
+            verdict="revise",
+            differences=("metadata.ambiguity_score must be <= 0.20.",),
+        )
+        repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+        assert repaired.task_type == task_type
+        assert repaired.metadata.parent_seed_id == parent
+
+
 @pytest.mark.parametrize(
     "goal",
     (

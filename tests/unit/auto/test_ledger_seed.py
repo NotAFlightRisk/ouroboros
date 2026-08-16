@@ -209,6 +209,31 @@ class TestPartialSeedFromEvidence:
         assert complete.task_type == "document"
         assert partial.task_type == "document"
 
+    def test_complete_and_partial_ledgers_scope_unrelated_modal_clause(self) -> None:
+        goal = "We may revise the title, and task_type: document."
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+        )
+        assert complete.task_type == "document"
+        assert partial.task_type == "document"
+
+    def test_complete_and_partial_ledgers_honor_semicolon_retraction(self) -> None:
+        for goal in (
+            "task_type: document; cancel that requirement.",
+            "Inherit seed_old; cancel that requirement.",
+        ):
+            complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+            partial = partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            )
+            if goal.startswith("task_type"):
+                assert complete.task_type == "code"
+                assert partial.task_type == "code"
+            else:
+                assert complete.metadata.parent_seed_id is None
+                assert partial.metadata.parent_seed_id is None
+
     def test_complete_and_partial_ledgers_accept_replacement_after_cancellation(self) -> None:
         goal = "task_type: code. Cancel that requirement. task_type: document."
 

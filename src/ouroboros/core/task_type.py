@@ -127,7 +127,7 @@ _POST_MATCH_REJECTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _STANDALONE_RETRACTION_PATTERN = re.compile(
-    r"(?:^|[.!?\n])\s*(?:(?:actually|but|however)\s*,?\s*)?"
+    r"(?:^|[;.!?\n])\s*(?:(?:actually|but|however)\s*,?\s*)?"
     r"(?:scratch\s+that|we\s+decided\s+against\s+it|"
     r"never\s+mind|forget\s+that|i\s+take\s+that\s+back|"
     r"(?:that|it|the\s+(?:requirement|contract|proposal|value))\s+"
@@ -276,9 +276,15 @@ def is_ambiguous_contract_segment(segment: str) -> bool:
 
 
 def has_ambiguous_contract_governor(prefix: str) -> bool:
-    """Reject clause-local conditional authority, resetting only after `but`."""
-    reset = tuple(re.finditer(r"\bbut\b", prefix, re.IGNORECASE))
-    scope = prefix[reset[-1].end() :] if reset else prefix
+    """Reject ambiguity governing this clause, not unrelated earlier clauses."""
+    but_resets = tuple(re.finditer(r"\bbut\b", prefix, re.IGNORECASE))
+    if but_resets:
+        scope = prefix[but_resets[-1].end() :]
+    elif re.search(r"\b(?:if|unless|whether)\b", prefix, re.IGNORECASE):
+        scope = prefix
+    else:
+        resets = tuple(re.finditer(r",|\b(?:and|while|although|though)\b", prefix, re.IGNORECASE))
+        scope = prefix[resets[-1].end() :] if resets else prefix
     return is_ambiguous_contract_segment(scope)
 
 
