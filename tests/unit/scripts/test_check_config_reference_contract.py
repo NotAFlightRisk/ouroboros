@@ -256,6 +256,35 @@ settings.evaluation.__dict__["stage1_enabled"]
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
+def test_runtime_scan_tracks_exact_builtin_dict_aliases_and_rejects_shadowing(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "dict_identity.py").write_text(
+        """
+import builtins
+
+to_mapping = dict
+to_mapping(config.evaluation)["stage1_enabled"]
+builtins.dict(config.evaluation)["stage1_enabled"]
+
+def shadow(dict):
+    return dict(config.evaluation)["stage2_enabled"]
+
+dict = None
+dict(config.evaluation)["stage3_enabled"]
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == {
+        contract.ConfigField("evaluation", "stage1_enabled")
+    }
+
+
 @pytest.mark.parametrize(
     "expression",
     (
@@ -2931,6 +2960,59 @@ read_stage(config.evaluation)
     field = contract.ConfigField("evaluation", "stage3_enabled")
 
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_tracks_constant_and_dotted_operator_getters(contract, tmp_path: Path) -> None:
+    (tmp_path / "operator_constants.py").write_text(
+        """
+import operator
+from operator import attrgetter, itemgetter
+
+FIELD = "stage1_enabled"
+attrgetter(FIELD)(config.evaluation)
+operator.attrgetter("evaluation.stage2_enabled")(config)
+itemgetter(FIELD)(config.evaluation.model_dump())
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_tracks_unshadowed_classmethod_and_rejects_shadowing(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "classmethod_read.py").write_text(
+        """
+class Reader:
+    @classmethod
+    def read(cls, section):
+        return section.stage1_enabled
+
+Reader.read(config.evaluation)
+
+def classmethod(fn):
+    return lambda *args: None
+
+class Shadow:
+    @classmethod
+    def read(cls, section):
+        return section.stage2_enabled
+
+Shadow.read(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == {
+        contract.ConfigField("evaluation", "stage1_enabled")
+    }
 
 
 def test_runtime_scan_tracks_partial_wrapped_builtin_attribute_reads(

@@ -242,6 +242,8 @@ _ITEMGETTER_FACTORY = "<itemgetter-factory>"
 _METHODCALLER_FACTORY = "<methodcaller-factory>"
 _OPERATOR_GETITEM = "<operator-getitem>"
 _BUILTINS_MODULE = "<builtins-module>"
+_DICT_BUILTIN = "<dict-builtin>"
+_CLASSMETHOD_DECORATOR = "<classmethod-decorator>"
 _GETATTR_BUILTIN = "<getattr-builtin>"
 _BOUND_GETATTRIBUTE_PREFIX = "<bound-getattribute:"
 _MODEL_COPY_PREFIX = "<model-copy:"
@@ -1092,6 +1094,16 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return True
         return False
 
+    def _method_is_classmethod(self, function: _FunctionNode) -> bool:
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+        for decorator in function.decorator_list:
+            if isinstance(decorator, ast.Name) and decorator.id == "classmethod":
+                return not any(decorator.id in scope for scope in self._states)
+            if _CLASSMETHOD_DECORATOR in self._expression_value(decorator).origins:
+                return True
+        return False
+
     def _call_targets(
         self, node: ast.AST
     ) -> tuple[tuple[_FunctionNode, _AbstractValue | None], ...]:
@@ -1581,6 +1593,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 if node.id == "hasattr" and not self._name_is_bound("hasattr")
                 else _origin_value(_OBJECT_BUILTIN)
                 if node.id == "object" and not self._name_is_bound("object")
+                else _origin_value(_DICT_BUILTIN)
+                if node.id == "dict" and not self._name_is_bound("dict")
+                else _origin_value(_CLASSMETHOD_DECORATOR)
+                if node.id == "classmethod" and not self._name_is_bound("classmethod")
                 else _origin_value(_VARS_BUILTIN)
                 if node.id == "vars" and not self._name_is_bound("vars")
                 else _origin_value(_RANGE_BUILTIN)
@@ -1634,6 +1650,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(f"<copy-{node.attr}>")
             if _BUILTINS_MODULE in owner.origins and node.attr == "getattr":
                 return _origin_value(_GETATTR_BUILTIN)
+            if _BUILTINS_MODULE in owner.origins and node.attr == "dict":
+                return _origin_value(_DICT_BUILTIN)
+            if _BUILTINS_MODULE in owner.origins and node.attr == "classmethod":
+                return _origin_value(_CLASSMETHOD_DECORATOR)
             if _BUILTINS_MODULE in owner.origins and node.attr == "hasattr":
                 return _origin_value(_HASATTR_BUILTIN)
             if _OBJECT_BUILTIN in owner.origins and node.attr == "__getattribute__":
@@ -1731,6 +1751,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 method_targets: list[_CallableTarget] = []
                 receiver = self._descriptor_receiver(owner)
                 for function in methods:
+                    if self._method_is_classmethod(function):
+                        method_targets.append(
+                            _CallableTarget(
+                                function,
+                                _AbstractValue(classes=owner.classes),
+                            )
+                        )
+                        continue
                     if (
                         isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
                         and function.decorator_list
@@ -1880,9 +1908,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if function_value.origins & {_ATTRGETTER_FACTORY, _ITEMGETTER_FACTORY}:
                 return _AbstractValue(
                     accessed_attributes=frozenset(
-                        argument.value
+                        field_name
                         for argument in node.args
-                        if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+                        if (field_name := self._expression_value(argument).string_value) is not None
                     )
                 )
             if _METHODCALLER_FACTORY in function_value.origins:
@@ -2049,7 +2077,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     instance_classes=constructor_classes,
                 )
                 return self._bind_partialmethod_descriptors(instance)
-            if isinstance(node.func, ast.Name) and node.func.id == "dict":
+            if _DICT_BUILTIN in function_value.origins:
                 if node.args:
                     sections = self._expression_value(node.args[0]).origins & TRACKED_SECTIONS
                     if sections:
@@ -2357,9 +2385,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 value = self._expression_value(
                     argument.value if isinstance(argument, ast.Starred) else argument
                 )
-                for section in (value.origins & TRACKED_SECTIONS) | value.serialized_sections:
-                    for name in accessor.accessed_attributes:
-                        self._record(section, name.partition(".")[0])
+                for name in accessor.accessed_attributes:
+                    parts = name.split(".")
+                    if _CONFIG_ROOT in value.origins and len(parts) >= 2:
+                        if parts[0] in TRACKED_SECTIONS:
+                            self._record(parts[0], parts[1])
+                    for section in (value.origins & TRACKED_SECTIONS) | value.serialized_sections:
+                        self._record(section, parts[0])
         if isinstance(node.func, ast.Attribute) and node.func.attr == "format_map" and node.args:
             template = self._expression_value(node.func.value).string_value
             mapping = self._expression_value(node.args[0])
@@ -3622,6 +3654,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "operator" and alias.name == "getitem"
                     else _origin_value(_GETATTR_BUILTIN)
                     if node.module == "builtins" and alias.name == "getattr"
+                    else _origin_value(_DICT_BUILTIN)
+                    if node.module == "builtins" and alias.name == "dict"
+                    else _origin_value(_CLASSMETHOD_DECORATOR)
+                    if node.module == "builtins" and alias.name == "classmethod"
                     else _origin_value(_HASATTR_BUILTIN)
                     if node.module == "builtins" and alias.name == "hasattr"
                     else _origin_value(_VARS_BUILTIN)
