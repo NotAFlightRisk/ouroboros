@@ -4809,6 +4809,76 @@ marker: config.evaluation.stage1_enabled
     )
 
 
+def test_runtime_scan_tracks_eager_function_signature_annotations(contract, tmp_path: Path) -> None:
+    (tmp_path / "eager_signature.py").write_text(
+        """
+def reader(
+    positional: settings.evaluation.stage1_enabled,
+    *args: settings.evaluation.stage2_enabled,
+    keyword: settings.evaluation.stage3_enabled,
+    **kwargs: settings.consensus.semantic_enabled,
+) -> settings.consensus.uncertainty_threshold:
+    pass
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        {
+            contract.ConfigField("evaluation", "stage1_enabled"),
+            contract.ConfigField("evaluation", "stage2_enabled"),
+            contract.ConfigField("evaluation", "stage3_enabled"),
+            contract.ConfigField("consensus", "semantic_enabled"),
+            contract.ConfigField("consensus", "uncertainty_threshold"),
+        }
+    )
+    reads = contract.runtime_reads(tmp_path, fields)
+
+    assert reads == fields
+    for field in fields:
+        assert _audit_as_documented_inert(contract, field, reads).violations
+
+
+def test_runtime_scan_skips_postponed_function_signature_annotations(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "postponed_signature.py").write_text(
+        """
+from __future__ import annotations
+
+def reader(
+    value: settings.evaluation.stage1_enabled,
+) -> settings.evaluation.stage2_enabled:
+    pass
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+    reads = contract.runtime_reads(tmp_path, fields)
+
+    assert reads == frozenset()
+    for field in fields:
+        assert _audit_as_documented_inert(contract, field, reads).violations == ()
+
+
+def test_runtime_scan_skips_function_local_variable_annotations(contract, tmp_path: Path) -> None:
+    (tmp_path / "local_annotation.py").write_text(
+        """
+def reader():
+    local: settings.evaluation.stage1_enabled
+
+reader()
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset()
+    assert _audit_as_documented_inert(contract, field, reads).violations == ()
+
+
 def test_runtime_scan_tracks_alternative_attribute_accessors(contract, tmp_path: Path) -> None:
     (tmp_path / "attribute_accessors.py").write_text(
         """

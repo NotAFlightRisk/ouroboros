@@ -1098,6 +1098,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._exception_capture_depth = 0
         self._caught_exception_stack: list[tuple[_AbruptPath, ...]] = []
         self._function_body_depth = 0
+        self._runtime_scope_kinds: list[str] = ["module"]
         self._class_member_values: dict[int, tuple[_AbstractValue, ...]] = {}
         self._class_attributes: dict[int, tuple[tuple[str, _AbstractValue], ...]] = {}
         self._closure_bindings: dict[int, dict[str, _AbstractValue]] = {}
@@ -3596,7 +3597,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             self._bind_function_target(target, function)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        if not self._postponed_annotations:
+        # Eager annotations are evaluated in module and class scopes, but a
+        # bare local-variable annotation inside a function has no runtime
+        # evaluation effect (PEP 526).
+        if not self._postponed_annotations and self._runtime_scope_kinds[-1] != "function":
             self.visit(node.annotation)
         self._bind_function_target(node.target, frozenset())
         if node.value is not None:
@@ -5099,6 +5103,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._module = self._source_index.owner(node) or self._module
         self._expression_cache = {}
         self._function_body_depth += 1
+        self._runtime_scope_kinds.append("function")
         if generator_identity is not None:
             self._generator_consumer_modes.append(generator_consumer_mode)
             self._generator_skip_yields.append(
@@ -5131,6 +5136,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 )
                 self._generator_skip_yields.pop()
                 self._generator_consumer_modes.pop()
+            self._runtime_scope_kinds.pop()
             self._function_body_depth -= 1
             self._expression_cache = previous_cache
             self._module = previous_module
@@ -5372,6 +5378,19 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         for default in (*node.args.defaults, *node.args.kw_defaults):
             if default is not None:
                 self.visit(default)
+        if not self._postponed_annotations:
+            for argument in (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            ):
+                if argument.annotation is not None:
+                    self.visit(argument.annotation)
+            for argument in (node.args.vararg, node.args.kwarg):
+                if argument is not None and argument.annotation is not None:
+                    self.visit(argument.annotation)
+            if node.returns is not None:
+                self.visit(node.returns)
         self._capture_function_closure(node)
         value = self._decorated_function_value(node)
         functions = frozenset(target.function for target in value.callables)
@@ -5436,6 +5455,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._functions.append(self._declared_functions(node.body))
         self._global_names.append(set())
         self._nonlocal_names.append(set())
+        self._runtime_scope_kinds.append("class")
         try:
             for statement in node.body:
                 self.visit(statement)
@@ -5454,6 +5474,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             )
             self._class_attributes[id(node)] = class_attributes
         finally:
+            self._runtime_scope_kinds.pop()
             self._nonlocal_names.pop()
             self._global_names.pop()
             self._functions.pop()
