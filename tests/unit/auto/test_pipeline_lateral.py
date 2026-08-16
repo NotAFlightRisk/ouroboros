@@ -438,6 +438,38 @@ def test_seed_qa_repairs_scope_mixed_contract_retractions() -> None:
         assert repaired.metadata.parent_seed_id == "seed_current"
 
 
+def test_seed_qa_repairs_accept_replacements_after_cancellation() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": (
+                "task_type: code. Cancel that requirement. task_type: document. "
+                "Inherit seed_old. Cancel that requirement. Inherit seed_new."
+            ),
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("The final explicit contracts must be preserved.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Preserve final active contracts.",
+        text="Use the replacement route and lineage.",
+    )
+
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.task_type == "document"
+        assert candidate.metadata.parent_seed_id == "seed_new"
+
+
 @pytest.mark.parametrize(
     "goal",
     (

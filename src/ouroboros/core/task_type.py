@@ -307,7 +307,9 @@ def _retraction_cancels_candidate(text: str, candidate_end: int) -> bool:
 
 def _resolve_authoritative_matches(text: str, matches: list[tuple[int, int, str]]) -> str | None:
     """Resolve every ordered value transition, allowing duplicate confirmations."""
-    ordered = sorted(matches)
+    ordered = sorted(
+        match for match in matches if not _retraction_cancels_candidate(text, match[1])
+    )
     if not ordered:
         return None
     current = ordered[0][2]
@@ -317,8 +319,6 @@ def _resolve_authoritative_matches(text: str, matches: list[tuple[int, int, str]
             return None
         current = value
         prior_end = end
-    if _retraction_cancels_candidate(text, prior_end):
-        return None
     return current
 
 

@@ -356,3 +356,12 @@ def test_explicit_task_type_scopes_retraction_to_nearest_contract() -> None:
         )
         is None
     )
+
+
+def test_explicit_task_type_accepts_replacement_after_cancellation() -> None:
+    assert (
+        explicit_task_type_from_goal(
+            "task_type: code. Cancel that requirement. task_type: document."
+        )
+        == "document"
+    )

@@ -229,6 +229,12 @@ def test_parent_seed_scopes_retraction_to_nearest_contract() -> None:
     )
 
 
+def test_parent_seed_accepts_replacement_after_cancellation() -> None:
+    seed = _seed("Inherit seed_old. Cancel that requirement. Inherit seed_new.")
+
+    assert inherited_parent_seed_id(seed) == "seed_new"
+
+
 def test_parent_seed_preserves_korean_inheritance_contract() -> None:
     seed = _seed("seed_parent를 계승해 문서형 Seed로 명세한다.")
 
