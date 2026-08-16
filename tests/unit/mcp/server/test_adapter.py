@@ -4499,14 +4499,14 @@ class TestCreateOuroborosServerOpenCodeMode:
             "ouroboros_execute_seed": "ouroboros.mcp.tools.definitions.ExecuteSeedHandler",
             "ouroboros_start_execute_seed": "ouroboros.mcp.tools.definitions.StartExecuteSeedHandler",
             "ouroboros_generate_seed": "ouroboros.mcp.tools.definitions.GenerateSeedHandler",
-            "ouroboros_interview": "ouroboros.mcp.tools.definitions.InterviewHandler",
+            "ouroboros_interview": "ouroboros.mcp.tools.interview_composition.InterviewHandler",
             "ouroboros_evaluate": "ouroboros.mcp.tools.definitions.EvaluateHandler",
             "ouroboros_lateral_think": "ouroboros.mcp.tools.definitions.LateralThinkHandler",
             "ouroboros_evolve_step": "ouroboros.mcp.tools.definitions.EvolveStepHandler",
             "ouroboros_start_evolve_step": "ouroboros.mcp.tools.definitions.StartEvolveStepHandler",
             "ouroboros_ralph": "ouroboros.mcp.tools.definitions.RalphHandler",
             "ouroboros_start_ralph": "ouroboros.mcp.tools.definitions.StartRalphHandler",
-            "ouroboros_pm_interview": "ouroboros.mcp.tools.pm_handler.PMInterviewHandler",
+            "ouroboros_pm_interview": "ouroboros.mcp.tools.interview_composition.PMInterviewHandler",
             "ouroboros_qa": "ouroboros.mcp.tools.qa.QAHandler",
         }
 

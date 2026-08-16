@@ -1610,7 +1610,7 @@ def create_ouroboros_server(
     )
     from ouroboros.mcp.tools.evaluation_composition import create_shared_evaluation_handlers
     from ouroboros.mcp.tools.fanout import FanoutRegistry
-    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
+    from ouroboros.mcp.tools.interview_composition import create_interview_handlers
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
     from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
@@ -2475,27 +2475,20 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
         ),
         MeasureDriftHandler(event_store=event_store),
-        InterviewHandler(
+        # ``workspace`` is the same value ``create_fanout_handlers`` builds the
+        # artifact store from below, so the composition that writes fan-out
+        # results and the one that points a lane at them cannot name different
+        # directories.
+        *create_interview_handlers(
             interview_engine=interview_engine,
+            state_dir=state_dir_path,
+            workspace=effective_cwd,
             event_store=event_store,
+            fanout_registry=fanout_registry,
             llm_backend=interview_llm_backend,
             agent_runtime_backend=interview_runtime_backend,
             opencode_mode=opencode_mode,
-            fanout_registry=fanout_registry,
             suppress_tool_use_prompt_cues=interview_envelope_sealed,
-        ),
-        PMInterviewHandler(
-            data_dir=state_dir_path,
-            llm_backend=interview_llm_backend,
-            event_store=event_store,
-            agent_runtime_backend=interview_runtime_backend,
-            opencode_mode=opencode_mode,
-            fanout_registry=fanout_registry,
-            # The same workspace ``create_fanout_handlers`` builds the artifact
-            # store from, below. A lane is told where this session's earlier
-            # answers are, and one composition passing a different path than the
-            # one that wrote them would send it somewhere empty.
-            project_dir=effective_cwd,
         ),
         BrownfieldHandler(_store=brownfield_store),
         evaluate_handler,

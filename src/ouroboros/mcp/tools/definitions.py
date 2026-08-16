@@ -416,6 +416,9 @@ def evolve_rewind_handler() -> EvolveRewindHandler:
 # Tool handler tuple type and factory
 # ---------------------------------------------------------------------------
 from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler  # noqa: E402
+from ouroboros.mcp.tools.interview_composition import (  # noqa: E402
+    create_interview_handlers,
+)
 from ouroboros.mcp.tools.pm_handler import PMInterviewHandler  # noqa: E402
 
 OuroborosToolHandlers = tuple[
@@ -539,11 +542,16 @@ def get_ouroboros_tools(
     job_status = JobStatusHandler()
     job_wait = JobWaitHandler()
     job_result = JobResultHandler()
-    interview = InterviewHandler(
+    # Both interview handlers come from one wiring, shared with the server's
+    # composition root. This set has no event store, engine or state dir to
+    # give them, and passing less is the difference between the roots that is
+    # real; how the two are wired is not, and is no longer written twice.
+    interview, pm_interview = create_interview_handlers(
+        fanout_registry=fanout_registry,
+        workspace=project_dir,
         llm_backend=llm_backend,
         agent_runtime_backend=runtime_backend,
         opencode_mode=opencode_mode,
-        fanout_registry=fanout_registry,
     )
     generate_seed = GenerateSeedHandler(
         llm_backend=llm_backend,
@@ -650,13 +658,7 @@ def get_ouroboros_tools(
         EvolveRewindHandler(),
         CancelExecutionHandler(),
         BrownfieldHandler(),
-        PMInterviewHandler(
-            llm_backend=llm_backend,
-            agent_runtime_backend=runtime_backend,
-            opencode_mode=opencode_mode,
-            fanout_registry=fanout_registry,
-            project_dir=Path(project_dir) if project_dir is not None else None,
-        ),
+        pm_interview,
         QAHandler(
             llm_backend=llm_backend,
             agent_runtime_backend=runtime_backend,
