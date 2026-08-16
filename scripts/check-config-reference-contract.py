@@ -75,6 +75,21 @@ class ContractReport:
     runtime_reads: frozenset[ConfigField]
 
 
+class _RuntimeReads(frozenset[ConfigField]):
+    """Read set carrying fail-closed analyzer uncertainty."""
+
+    unresolved_semantics: tuple[str, ...]
+
+    def __new__(
+        cls,
+        values: Iterable[ConfigField] = (),
+        unresolved_semantics: Iterable[str] = (),
+    ) -> _RuntimeReads:
+        instance = super().__new__(cls, values)
+        instance.unresolved_semantics = tuple(sorted(set(unresolved_semantics)))
+        return instance
+
+
 TRACKED_SECTIONS = frozenset({"evaluation", "consensus"})
 REFERENCE_PATH = Path("docs/config-reference.md")
 _SECTION_HEADING = re.compile(r"^## `(?P<section>evaluation|consensus)`\s*$")
@@ -308,6 +323,17 @@ _CONTEXTMANAGER_DECORATORS = frozenset(
     {"<contextmanager-decorator>", "<asynccontextmanager-decorator>"}
 )
 _IDENTITY_DECORATOR = "<identity-decorator>"
+_PRESERVING_DECORATOR_NAMES = frozenset(
+    {
+        "app.command",
+        "app.callback",
+        "command",
+        "callback",
+        "dataclass",
+        "field_validator",
+        "retry_async",
+    }
+)
 _WRAPS_FACTORY = "<functools-wraps-factory>"
 _UPDATE_WRAPPER = "<functools-update-wrapper>"
 _NULLCONTEXT_FACTORY = "<nullcontext-factory>"
@@ -1111,6 +1137,32 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._generator_skip_yields: list[int] = []
         self._generator_advanced_yields: list[int] = []
         self.reads: set[ConfigField] = set()
+        self.unresolved_semantics: set[str] = set()
+
+    @staticmethod
+    def _syntactically_mentions_tracked_config(node: ast.AST) -> bool:
+        return any(
+            isinstance(candidate, ast.Name)
+            and _looks_like_config_name(candidate.id)
+            or isinstance(candidate, ast.Attribute)
+            and candidate.attr in TRACKED_SECTIONS
+            for candidate in ast.walk(node)
+        )
+
+    @staticmethod
+    def _decorator_name(decorator: ast.expr) -> str | None:
+        target = decorator.func if isinstance(decorator, ast.Call) else decorator
+        return _callable_name(target)
+
+    def _record_unresolved_decorator(self, node: ast.AST, decorator: ast.expr) -> None:
+        if not self._syntactically_mentions_tracked_config(node):
+            return
+        name = self._decorator_name(decorator) or ast.unparse(decorator)
+        if name in _PRESERVING_DECORATOR_NAMES:
+            return
+        self.unresolved_semantics.add(
+            f"{self._module.name}:{getattr(node, 'lineno', 0)}: unresolved decorator {name!r}"
+        )
 
     def _name_value(self, name: str) -> _AbstractValue:
         for scope in reversed(self._states):
@@ -1986,7 +2038,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_PARTIALMETHOD_FACTORY)
             if _FUNCTOOLS_MODULE in owner.origins and node.attr == "reduce":
                 return _origin_value(_REDUCE_CONSUMER)
-            if _FUNCTOOLS_MODULE in owner.origins and node.attr in {"cache", "lru_cache"}:
+            if _FUNCTOOLS_MODULE in owner.origins and node.attr in {
+                "cache",
+                "lru_cache",
+                "singledispatch",
+            }:
                 return _origin_value(_IDENTITY_DECORATOR)
             if _FUNCTOOLS_MODULE in owner.origins and node.attr == "cached_property":
                 return _origin_value(_CACHED_PROPERTY_DECORATOR)
@@ -4594,7 +4650,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     else _origin_value(_REDUCE_CONSUMER)
                     if node.module == "functools" and alias.name == "reduce"
                     else _origin_value(_IDENTITY_DECORATOR)
-                    if node.module == "functools" and alias.name in {"cache", "lru_cache"}
+                    if node.module == "functools"
+                    and alias.name in {"cache", "lru_cache", "singledispatch"}
                     else _origin_value(_WRAPS_FACTORY)
                     if node.module == "functools" and alias.name == "wraps"
                     else _origin_value(_UPDATE_WRAPPER)
@@ -5350,10 +5407,22 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         value = original
         for decorator in reversed(node.decorator_list):
             decorator_value = self._expression_value(decorator)
-            if decorator_value.origins & (_CONTEXTMANAGER_DECORATORS | {_IDENTITY_DECORATOR}):
+            if decorator_value.origins & (
+                _CONTEXTMANAGER_DECORATORS
+                | {
+                    _IDENTITY_DECORATOR,
+                    _CLASSMETHOD_DECORATOR,
+                    _STATICMETHOD_DECORATOR,
+                    _PROPERTY_DECORATOR,
+                    _CACHED_PROPERTY_DECORATOR,
+                }
+            ):
                 continue
             targets = self._call_targets(decorator)
             if not targets:
+                if (self._decorator_name(decorator) or "") in _PRESERVING_DECORATOR_NAMES:
+                    continue
+                self._record_unresolved_decorator(node, decorator)
                 return _UNKNOWN_VALUE
             replacements = [
                 self._local_direct_call_value(
@@ -5363,11 +5432,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 for function, receiver in targets
             ]
             if not replacements:
+                self._record_unresolved_decorator(node, decorator)
                 return _UNKNOWN_VALUE
             replacement = _join_values(*replacements)
             if not replacement.callables and not replacement.instance_classes:
                 if replacement != _UNKNOWN_VALUE:
                     return replacement
+                self._record_unresolved_decorator(node, decorator)
                 return _UNKNOWN_VALUE
             value = replacement
         return value
@@ -5484,7 +5555,39 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             classes=frozenset({node}),
             attributes=class_attributes,
         )
-        self._states[-1][node.name] = created_class
+        decorated_class = created_class
+        for decorator in reversed(node.decorator_list):
+            decorator_value = self._expression_value(decorator)
+            if _IDENTITY_DECORATOR in decorator_value.origins:
+                continue
+            targets = self._call_targets(decorator)
+            if not targets:
+                if (self._decorator_name(decorator) or "") in _PRESERVING_DECORATOR_NAMES:
+                    continue
+                self._record_unresolved_decorator(node, decorator)
+                decorated_class = _UNKNOWN_VALUE
+                break
+            replacements = [
+                self._local_direct_call_value(
+                    function,
+                    ((receiver,) if receiver is not None else ()) + (decorated_class,),
+                )
+                for function, receiver in targets
+            ]
+            replacement = _join_values(*replacements)
+            if replacement == _UNKNOWN_VALUE:
+                self._record_unresolved_decorator(node, decorator)
+                decorated_class = _UNKNOWN_VALUE
+                break
+            decorated_class = replacement
+        for class_node in decorated_class.classes:
+            attributes = tuple(value for _name, value in decorated_class.attributes or ())
+            if attributes:
+                self._class_member_values[id(class_node)] = (
+                    *self._class_member_values.get(id(class_node), ()),
+                    *attributes,
+                )
+        self._states[-1][node.name] = decorated_class
         self._annotations[-1][node.name] = _UNKNOWN_VALUE
         self._functions[-1][node.name] = frozenset()
 
@@ -5546,11 +5649,13 @@ def runtime_reads(source_root: Path, fields: frozenset[ConfigField]) -> frozense
         for path in sorted(source_root.rglob("*.py"))
     }
     source_index = _SourceIndex(source_root, trees)
+    unresolved_semantics: set[str] = set()
     for path, tree in trees.items():
         visitor = _RuntimeReadVisitor(fields, source_index, source_index.module_for_path(path))
         visitor.visit(tree)
         reads.update(visitor.reads)
-    return frozenset(reads)
+        unresolved_semantics.update(visitor.unresolved_semantics)
+    return _RuntimeReads(reads, unresolved_semantics)
 
 
 def _split_markdown_row(line: str) -> tuple[str, ...]:
@@ -5688,6 +5793,8 @@ def audit_contract(
     """Classify every field and return precise bidirectional drift failures."""
 
     violations: list[str] = []
+    for detail in getattr(reads, "unresolved_semantics", ()):
+        violations.append(f"runtime scan unresolved semantics: {detail}")
     marker_fields = frozenset(markers)
     allowlisted_fields = frozenset(allowlist)
 

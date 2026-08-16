@@ -5509,7 +5509,22 @@ read_stage(config)
     )
     field = contract.ConfigField("evaluation", "stage2_enabled")
 
-    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset()
+    report = contract.audit_contract(
+        fields=frozenset({field}),
+        reads=reads,
+        rows={
+            field: contract.ReferenceRow(
+                "true", "Currently inert. Effective control: runtime.stage1_enabled."
+            )
+        },
+        markers={field: contract.InertMarker(field, "runtime.stage1_enabled")},
+        allowlist={},
+        documented_defaults={},
+    )
+    assert any("unresolved decorator 'erase'" in violation for violation in report.violations)
 
 
 def test_runtime_scan_keeps_exact_local_identity_decorator(contract, tmp_path: Path) -> None:
@@ -5529,6 +5544,68 @@ read_stage(config)
     field = contract.ConfigField("evaluation", "stage2_enabled")
 
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_applies_exact_local_class_decorator(contract, tmp_path: Path) -> None:
+    (tmp_path / "class_decorator.py").write_text(
+        """
+def install(cls):
+    def read(self):
+        return settings.evaluation.stage1_enabled
+    cls.read = read
+    return cls
+
+@install
+class Reader:
+    pass
+
+Reader().read()
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset({field})
+    assert _audit_as_documented_inert(contract, field, reads).violations
+
+
+def test_runtime_scan_honors_exact_class_erasing_decorator(contract, tmp_path: Path) -> None:
+    (tmp_path / "erased_class.py").write_text(
+        """
+def erase(cls):
+    return None
+
+@erase
+class Reader:
+    def read(self):
+        return settings.evaluation.stage1_enabled
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+def test_runtime_scan_preserves_functools_singledispatch_default(contract, tmp_path: Path) -> None:
+    (tmp_path / "singledispatch_reader.py").write_text(
+        """
+from functools import singledispatch
+
+@singledispatch
+def read(value):
+    return settings.evaluation.stage1_enabled
+
+read(object())
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset({field})
+    assert _audit_as_documented_inert(contract, field, reads).violations
 
 
 def test_runtime_scan_resolves_inherited_super_property(contract, tmp_path: Path) -> None:
