@@ -73,6 +73,8 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"|\bthere\s+(?:is|was)\s+no\s+(?:requirement|contract|need)\b"
     r"|\b(?:emit(?:s|ted|ting)?|print(?:s|ed|ing)?|output(?:s|ted|ting)?)\b"
     r"[^\n.!?]{0,80}$"
+    r"|\b(?:validat(?:e|es|ed|ing)|pars(?:e|es|ed|ing)|tokeniz(?:e|es|ed|ing)|"
+    r"serializ(?:e|es|ed|ing)|deserializ(?:e|es|ed|ing)|lint(?:s|ed|ing)?)\s+$"
     r"|\bexplain(?:s|ed|ing)?\s+why\b[^\n.!?]{0,80}$"
     r"|\bexplain(?:ed|ing)?\s+(?=(?:how\s+to\s+)?"
     r"(?:(?:use|set)\s+)?(?:task[_\s-]*type\b|inherit\b|derive\b|parent\b))"
@@ -129,7 +131,9 @@ _STANDALONE_RETRACTION_PATTERN = re.compile(
     r"(?:was|is)\s+(?:only\s+)?an?\s+example|"
     r"(?:i|we)\s+(?:am|are|was|were)\s+(?:only\s+)?giving\s+an?\s+example|"
     r"(?:please\s+)?disregard\s+(?:that|it|the\s+(?:requirement|contract|proposal|value))|"
-    r"cancel\s+(?:that\s+)?(?:requirement|contract|proposal|value)|"
+    r"(?:cancel|withdraw|retract)\s+(?:(?:that|this|the)\s+)?"
+    r"(?:(?:task[_\s-]*type|parent(?:_seed_id|\s+seed)?)\s+)?"
+    r"(?:requirement|contract|proposal|value)|"
     r"(?:that|the)\s+(?:requirement|contract|proposal|value)\s+"
     r"(?:was|is)\s+(?:rejected|superseded|obsolete|discarded)|"
     r"(?:the\s+)?(?:requirement|contract|proposal|value)\s+"
@@ -298,11 +302,23 @@ def _is_explicit_correction(text: str, prior_end: int, next_start: int) -> bool:
 def _retraction_cancels_candidate(text: str, candidate_end: int) -> bool:
     """Scope a later cancellation to its nearest task/lineage contract."""
     candidates = [
-        match.end() for pattern in _TASK_TYPE_CONTRACT_PATTERNS for match in pattern.finditer(text)
+        (match.end(), "task_type")
+        for pattern in _TASK_TYPE_CONTRACT_PATTERNS
+        for match in pattern.finditer(text)
     ]
-    candidates.extend(match.end() for match in _PARENT_CONTRACT_PATTERN.finditer(text))
+    candidates.extend((match.end(), "parent") for match in _PARENT_CONTRACT_PATTERN.finditer(text))
     for retraction in _STANDALONE_RETRACTION_PATTERN.finditer(text, candidate_end):
-        prior = [end for end in candidates if end <= retraction.start()]
+        wording = retraction.group(0).casefold()
+        target = None
+        if re.search(r"task[_\s-]*type", wording):
+            target = "task_type"
+        elif re.search(r"\bparent(?:_seed_id|\s+seed)?\b", wording):
+            target = "parent"
+        prior = [
+            end
+            for end, kind in candidates
+            if end <= retraction.start() and (target is None or kind == target)
+        ]
         if prior and max(prior) == candidate_end:
             return True
     return False

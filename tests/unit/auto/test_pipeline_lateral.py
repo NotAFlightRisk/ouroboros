@@ -509,6 +509,39 @@ def test_seed_qa_repairs_ignore_unrelated_cancellation_and_output_prose(
         assert candidate.metadata.parent_seed_id == expected_parent
 
 
+def test_seed_qa_repairs_fail_closed_on_validation_content_and_field_retractions() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": (
+                "Build a parser that validates task_type: document. "
+                "Write a validator that parses parent_seed_id: seed_bad. "
+                "Inherit seed_parent. Cancel the task type requirement."
+            ),
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Keep routing and lineage authoritative.",
+        text="Ignore data-format examples.",
+    )
+
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.task_type == "code"
+        assert candidate.metadata.parent_seed_id == "seed_parent"
+
+
 @pytest.mark.parametrize(
     "goal",
     (

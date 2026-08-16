@@ -210,8 +210,31 @@ def test_parent_seed_honors_later_standalone_retractions() -> None:
         "Inherit seed_old. That was only an example.",
         "Inherit seed_old. I was only giving an example.",
         "Inherit seed_old. Please disregard that requirement.",
+        "Inherit seed_old. Withdraw that requirement.",
+        "Inherit seed_old. Retract that requirement.",
+        "Inherit seed_old. Cancel this requirement.",
+        "Inherit seed_old. Cancel the parent requirement.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
+
+
+def test_parent_seed_ignores_validation_content_and_field_specific_retraction() -> None:
+    assert (
+        inherited_parent_seed_id(_seed("Write a validator that parses parent_seed_id: seed_bad."))
+        is None
+    )
+    assert (
+        inherited_parent_seed_id(
+            _seed("Inherit seed_old. task_type: document. Cancel the parent requirement.")
+        )
+        is None
+    )
+    assert (
+        inherited_parent_seed_id(
+            _seed("Inherit seed_old. task_type: document. Cancel the task type requirement.")
+        )
+        == "seed_old"
+    )
 
 
 def test_parent_seed_scopes_retraction_to_nearest_contract() -> None:
