@@ -8,9 +8,11 @@ def test_explicit_task_type_ignores_question_and_uses_answer() -> None:
 
 
 def test_explicit_task_type_uses_final_correction() -> None:
-    goal = "task_type must be code. Correction: task_type must be document."
-
-    assert explicit_task_type_from_goal(goal) == "document"
+    for goal in (
+        "task_type must be code. Correction: task_type must be document.",
+        "task_type must be code. Actually, task_type must be document.",
+    ):
+        assert explicit_task_type_from_goal(goal) == "document"
 
 
 def test_explicit_task_type_ignores_superseded_clause() -> None:

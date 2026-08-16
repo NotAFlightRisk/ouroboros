@@ -222,7 +222,7 @@ def _is_explicit_correction(text: str, prior_end: int, next_start: int) -> bool:
     """Return whether the later surviving contract explicitly replaces the prior one."""
     return (
         re.search(
-            r"\b(?:correction|corrected|instead|supersed(?:e|ed|ing))\b|정정|대신",
+            r"\b(?:actually|correction|corrected|instead|supersed(?:e|ed|ing))\b|정정|대신",
             text[prior_end:next_start],
             re.IGNORECASE,
         )

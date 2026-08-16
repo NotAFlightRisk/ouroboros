@@ -180,6 +180,10 @@ def test_parent_seed_handles_contracted_korean_and_corrected_lineage() -> None:
         == "seed_new"
     )
     assert (
+        inherited_parent_seed_id(_seed("Inherit seed_old. Actually, inherit seed_new."))
+        == "seed_new"
+    )
+    assert (
         inherited_parent_seed_id(_seed("Inherit seed_good, not inherit seed_bad.")) == "seed_good"
     )
     assert (

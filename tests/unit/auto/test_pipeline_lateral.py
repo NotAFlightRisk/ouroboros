@@ -213,6 +213,29 @@ def test_seed_qa_repair_preserves_parent_with_optional_output_modifier() -> None
     assert repaired.metadata.parent_seed_id == "seed_good"
 
 
+def test_seed_qa_repair_preserves_final_actual_task_type_and_parent() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": (
+                "task_type must be code. Actually, task_type must be document. "
+                "Inherit seed_old. Actually, inherit seed_new."
+            ),
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.task_type == "document"
+    assert repaired.metadata.parent_seed_id == "seed_new"
+
+
 @pytest.mark.parametrize(
     "goal",
     (
