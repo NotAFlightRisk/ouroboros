@@ -391,6 +391,8 @@ class TestSeedGeneratorAmbiguityGating:
             "Create a guide explaining setup with task_type: document.",
             "Summarize the rejected proposal with task_type: document.",
             "Use task_type: document. As a reference, task_type: code appears in old docs.",
+            "Use task_type: document. The report should say task_type: code.",
+            "Use task_type: document. A test fixture contains task_type: code.",
         ),
     )
     async def test_generate_preserves_descriptive_document_task_type(

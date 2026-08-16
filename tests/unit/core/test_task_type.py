@@ -392,6 +392,11 @@ def test_explicit_task_type_ignores_unrelated_cancellation_and_output_prose() ->
     assert (
         explicit_task_type_from_goal("Build a parser that validates task_type: document.") is None
     )
+    for goal in (
+        "Use task_type: document. The report should say task_type: code.",
+        "Use task_type: document. A test fixture contains task_type: code.",
+    ):
+        assert explicit_task_type_from_goal(goal) == "document"
     assert (
         explicit_task_type_from_goal(
             "Inherit seed_old. task_type: document. Cancel the parent requirement."

@@ -250,6 +250,18 @@ class TestPartialSeedFromEvidence:
             assert complete.task_type == "code"
             assert partial.task_type == "code"
 
+    def test_complete_and_partial_ledgers_preserve_binding_before_content_example(self) -> None:
+        for goal in (
+            "Use task_type: document. The report should say task_type: code.",
+            "Use task_type: document. A test fixture contains task_type: code.",
+        ):
+            complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+            partial = partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            )
+            assert complete.task_type == "document"
+            assert partial.task_type == "document"
+
     def test_ledgers_ignore_comma_prefixed_reference_task_types(self) -> None:
         goal = "The task type must be document. For example, task_type: code."
 

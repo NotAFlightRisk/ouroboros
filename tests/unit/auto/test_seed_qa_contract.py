@@ -235,6 +235,11 @@ def test_parent_seed_ignores_validation_content_and_field_specific_retraction() 
         )
         == "seed_old"
     )
+    for goal in (
+        "Inherit seed_old. The report should say parent_seed_id: seed_fake.",
+        "Inherit seed_old. A test fixture contains parent_seed_id: seed_fake.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) == "seed_old"
 
 
 def test_parent_seed_scopes_retraction_to_nearest_contract() -> None:
