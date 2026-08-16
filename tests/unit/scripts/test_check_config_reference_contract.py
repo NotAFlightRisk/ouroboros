@@ -3197,6 +3197,77 @@ unused = Reader(config.consensus)
     }
 
 
+def test_runtime_scan_executes_numeric_and_getattribute_protocols(contract, tmp_path: Path) -> None:
+    (tmp_path / "implicit_numeric_protocols.py").write_text(
+        """
+class Reader:
+    def __init__(self, section):
+        self.section = section
+
+    def __int__(self):
+        return self.section.stage1_enabled
+
+    def __add__(self, other):
+        return self.section.stage2_enabled
+
+    def __getattribute__(self, name):
+        return self.section.stage3_enabled
+
+reader = Reader(config.evaluation)
+int(reader)
+reader + 1
+reader.value
+unused = Reader(config.consensus)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        {
+            *(
+                contract.ConfigField("evaluation", name)
+                for name in (
+                    "stage1_enabled",
+                    "stage2_enabled",
+                    "stage3_enabled",
+                )
+            ),
+            contract.ConfigField("consensus", "models"),
+        }
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields - {
+        contract.ConfigField("consensus", "models")
+    }
+
+
+def test_runtime_scan_does_not_continue_past_unconditional_recursion(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "recursive_readers.py").write_text(
+        """
+def self_recursive(config):
+    self_recursive(config)
+    config.evaluation.stage1_enabled
+
+def first(config):
+    second(config)
+    config.evaluation.stage2_enabled
+
+def second(config):
+    first(config)
+
+self_recursive(config)
+first(config)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == frozenset()
+
+
 def test_runtime_scan_skips_statically_unreachable_assert_messages(
     contract, tmp_path: Path
 ) -> None:

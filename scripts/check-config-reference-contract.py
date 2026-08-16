@@ -1800,6 +1800,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             return _AbstractValue(callables=(_CallableTarget(node),))
         if isinstance(node, ast.Attribute):
             owner = self._expression_value(node.value)
+            self._invoke_implicit_protocol(
+                owner,
+                "__getattribute__",
+                (_AbstractValue(string_value=node.attr, string_values=frozenset({node.attr})),),
+            )
             attribute = self._named_value(owner.attributes, node.attr)
             if attribute is not None:
                 return attribute
@@ -2617,6 +2622,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 "len": "__len__",
                 "bool": "__bool__",
                 "hash": "__hash__",
+                "int": "__int__",
+                "float": "__float__",
+                "complex": "__complex__",
+                "bytes": "__bytes__",
             }.get(node.func.id)
             if isinstance(node.func, ast.Name) and not self._name_is_bound(node.func.id)
             else None
@@ -2860,6 +2869,30 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     "__contains__",
                     (self._expression_value(node.left),),
                 )
+        self.generic_visit(node)
+
+    def visit_BinOp(self, node: ast.BinOp) -> None:
+        """Execute local numeric protocols selected by binary operators."""
+        protocols = {
+            ast.Add: ("__add__", "__radd__"),
+            ast.Sub: ("__sub__", "__rsub__"),
+            ast.Mult: ("__mul__", "__rmul__"),
+            ast.MatMult: ("__matmul__", "__rmatmul__"),
+            ast.Div: ("__truediv__", "__rtruediv__"),
+            ast.FloorDiv: ("__floordiv__", "__rfloordiv__"),
+            ast.Mod: ("__mod__", "__rmod__"),
+            ast.Pow: ("__pow__", "__rpow__"),
+            ast.LShift: ("__lshift__", "__rlshift__"),
+            ast.RShift: ("__rshift__", "__rrshift__"),
+            ast.BitOr: ("__or__", "__ror__"),
+            ast.BitXor: ("__xor__", "__rxor__"),
+            ast.BitAnd: ("__and__", "__rand__"),
+        }
+        direct, reflected = protocols[type(node.op)]
+        left = self._expression_value(node.left)
+        right = self._expression_value(node.right)
+        self._invoke_implicit_protocol(left, direct, (right,))
+        self._invoke_implicit_protocol(right, reflected, (left,))
         self.generic_visit(node)
 
     def visit_FormattedValue(self, node: ast.FormattedValue) -> None:
@@ -4628,6 +4661,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             return _AbstractValue(identity=frozenset({id(call)}))
         function_id = id(function)
         if function_id in self._active_calls:
+            self._call_executions.setdefault(id(call), []).append(
+                _FunctionExecution((_UNKNOWN_VALUE,), False)
+            )
             return _UNKNOWN_VALUE
         self._active_calls.add(function_id)
         try:
@@ -4654,7 +4690,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     ) -> _FunctionExecution:
         function_id = id(function)
         if function_id in self._active_calls:
-            return _FunctionExecution((_UNKNOWN_VALUE,), True)
+            return _FunctionExecution((_UNKNOWN_VALUE,), False)
         self._active_calls.add(function_id)
         try:
             execution = self._visit_function_body(
