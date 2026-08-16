@@ -366,6 +366,18 @@ class TestPartialSeedFromEvidence:
                 == "document"
             )
 
+    def test_ledgers_ignore_api_schema_and_parser_task_type_content(self) -> None:
+        for goal in (
+            "The API returns a Seed where task_type: document.",
+            "The schema property task_type is document.",
+            "Ensure the parser preserves strings where task_type: document.",
+        ):
+            complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+            partial = partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            )
+            assert complete.task_type == partial.task_type == "code"
+
     def test_ledgers_preserve_clause_local_document_contract(self) -> None:
         goal = "Without changing the existing task type, task_type must remain document."
         assert synthesize_seed_from_ledger(_populate_complete_ledger(goal)).task_type == "document"

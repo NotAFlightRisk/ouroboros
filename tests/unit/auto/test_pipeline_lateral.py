@@ -239,6 +239,37 @@ def test_seed_qa_repairs_preserve_descriptive_and_reference_contracts() -> None:
         assert repaired.metadata.parent_seed_id == "seed_good"
 
 
+def test_seed_qa_repairs_ignore_api_schema_and_parser_control_field_content() -> None:
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Keep descriptive payload fields non-authoritative.",
+        text="Preserve the code execution route and genuine repair lineage.",
+    )
+    for goal in (
+        "The API returns a Seed where task_type: document and parent_seed_id: seed_fake.",
+        "The schema property task_type is document and parent_seed_id is seed_fake.",
+        "Ensure the parser preserves strings where task_type: document and parent_seed_id: seed_fake.",
+    ):
+        seed = _build_seed(seed_id="seed_current").model_copy(
+            update={"goal": goal, "task_type": "code"}
+        )
+        repaired = (
+            _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+            _seed_with_seed_qa_lateral_feedback(
+                seed, lateral_result, qa_result=qa_result, attempt=1
+            ),
+        )
+        for candidate in repaired:
+            assert candidate.task_type == "code"
+            assert candidate.metadata.parent_seed_id == "seed_current"
+
+
 def test_seed_qa_repair_persists_only_binding_mixed_clause_contracts() -> None:
     qa_result = EvaluateResult(
         passed=False,

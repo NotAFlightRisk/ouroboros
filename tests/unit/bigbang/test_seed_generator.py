@@ -472,6 +472,9 @@ class TestSeedGeneratorAmbiguityGating:
             "Deprecate task_type: document.",
             "Rename parent_seed_id: seed_old to predecessor_id.",
             "Remove parent_seed_id: seed_old from the API.",
+            "The API returns a Seed where task_type: document.",
+            "The schema property task_type is document.",
+            "Ensure the parser preserves strings where task_type: document.",
         ),
     )
     @pytest.mark.asyncio

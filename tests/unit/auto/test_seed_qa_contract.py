@@ -260,6 +260,15 @@ def test_parent_seed_ignores_validation_content_and_field_specific_retraction() 
         assert inherited_parent_seed_id(_seed(goal)) == "seed_old"
 
 
+def test_parent_seed_ignores_api_schema_and_parser_content() -> None:
+    for goal in (
+        "The API returns parent_seed_id: seed_fake.",
+        "The schema property parent_seed_id is seed_fake.",
+        "Ensure the parser preserves strings where parent_seed_id: seed_fake.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) is None
+
+
 def test_parent_seed_ignores_unrelated_bare_retraction_details() -> None:
     for goal in (
         "Inherit seed_good. Never mind the earlier color choice.",

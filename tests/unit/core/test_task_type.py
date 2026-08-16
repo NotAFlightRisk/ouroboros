@@ -449,6 +449,15 @@ def test_explicit_task_type_ignores_artifact_payload_fields() -> None:
         assert explicit_task_type_from_goal(goal) is None
 
 
+def test_explicit_task_type_ignores_api_schema_and_parser_content() -> None:
+    for goal in (
+        "The API returns a Seed where task_type: document.",
+        "The schema property task_type is document.",
+        "Ensure the parser preserves strings where task_type: document.",
+    ):
+        assert explicit_task_type_from_goal(goal) is None
+
+
 def test_explicit_task_type_ignores_help_error_and_documentation_content() -> None:
     for goal in (
         "Add a CLI flag whose help text says task_type: document.",

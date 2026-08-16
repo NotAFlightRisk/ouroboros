@@ -234,7 +234,12 @@ _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN = re.compile(
     r"\b(?:inherit(?:ing)?|derive(?:d)?\s+from)\b[^\n.!?]{0,100}$"
     r"|\b(?:analyze|explain|investigate|describe|review|understand)\b"
     r"[^\n.!?]{0,240}\b(?:task[_\s-]*type|parent_seed_id|inherit(?:ing)?)\b"
-    r"[^\n.!?]{0,120}$",
+    r"[^\n.!?]{0,120}$"
+    # API/schema/parser prose describes the artifact being implemented.  A
+    # field-shaped value in that clause is data-plane content, not authority
+    # to reroute this Seed or rewrite its lineage.
+    r"|\b(?:ensure\s+)?(?:the\s+)?(?:api|schema(?:\s+property)?|parser)\b"
+    r"[^\n.!?]{0,240}$",
     re.IGNORECASE,
 )
 _EXPLICIT_TASK_TYPE_BINDING_PATTERN = re.compile(
