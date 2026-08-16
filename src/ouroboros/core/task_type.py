@@ -63,6 +63,7 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"|\b(?:am|is|are|was|were)\s+no\s+longer\b"
     r"|\bnot\s+allowed\b"
     r"|\b(?:declin(?:e|ed)|refus(?:e|ed))\s+to\b"
+    r"|\b(?:rejected|abandoned|declined)\b"
     r"|\bchose\s+not\s+to\b"
     r"|\bthere\s+(?:is|was)\s+no\s+(?:requirement|contract|need)\b"
     r"|\b(?:explain(?:ed|ing)?|docs?\s+(?:say|says|said)|legacy\s+exports?)\b"

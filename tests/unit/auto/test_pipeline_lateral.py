@@ -238,6 +238,9 @@ def test_seed_qa_repair_preserves_parent_with_optional_output_modifier() -> None
         "We chose not to inherit seed_bad.",
         "We didn't inherit seed_bad.",
         "We decided not to inherit seed_bad.",
+        "The requirement to inherit seed_bad was declined.",
+        "We rejected inherit seed_bad.",
+        "We abandoned the plan to inherit seed_bad.",
     ),
 )
 def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
@@ -274,6 +277,9 @@ def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
         "The team declined to use task_type: document.",
         "We didn't select task_type: document.",
         "We decided not to use task_type: document.",
+        "The requirement to use task_type: document was declined.",
+        "We rejected task_type: document.",
+        "We abandoned task_type: document.",
     ),
 )
 def test_seed_qa_repair_does_not_apply_rejected_task_type(goal: str) -> None:

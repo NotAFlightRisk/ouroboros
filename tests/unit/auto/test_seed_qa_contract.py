@@ -90,6 +90,9 @@ def test_parent_seed_rejects_ordinary_negative_inheritance_language() -> None:
         "We didn't inherit seed_bad.",
         "We didn’t inherit seed_bad.",
         "We decided not to inherit seed_bad.",
+        "The requirement to inherit seed_bad was declined.",
+        "We rejected inherit seed_bad.",
+        "We abandoned the plan to inherit seed_bad.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
 
