@@ -119,6 +119,86 @@ Reader()._read()
     assert contract.runtime_reads(tmp_path, fields) == fields
 
 
+def test_runtime_scan_executes_public_zero_provenance_callables(contract, tmp_path: Path) -> None:
+    (tmp_path / "public_calls.py").write_text(
+        """
+class Reader:
+    @staticmethod
+    def read():
+        return settings.evaluation.stage1_enabled
+
+    @classmethod
+    def read_class(cls):
+        return settings.evaluation.stage2_enabled
+
+    def __call__(self):
+        return settings.evaluation.stage3_enabled
+
+Reader.read()
+Reader.read_class()
+Reader()()
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name)
+        for name in ("stage1_enabled", "stage2_enabled", "stage3_enabled")
+    )
+
+    assert contract.runtime_reads(tmp_path, fields) == fields
+
+
+def test_runtime_scan_executes_public_call_before_later_overwrite(contract, tmp_path: Path) -> None:
+    (tmp_path / "called_then_overwritten.py").write_text(
+        """
+def read():
+    return settings.evaluation.stage1_enabled
+
+read()
+read = external
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_rejects_public_reader_overwritten_before_call(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "overwritten_then_called.py").write_text(
+        """
+def read():
+    return settings.evaluation.stage1_enabled
+
+read = external
+read()
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+def test_runtime_scan_executes_zero_provenance_iterator_protocol(contract, tmp_path: Path) -> None:
+    (tmp_path / "public_iterator.py").write_text(
+        """
+class Reader:
+    def __iter__(self):
+        yield settings.evaluation.stage1_enabled
+
+for _ in Reader():
+    pass
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
 def test_runtime_scan_requires_generator_consumption(contract, tmp_path: Path) -> None:
     (tmp_path / "deferred.py").write_text(
         """

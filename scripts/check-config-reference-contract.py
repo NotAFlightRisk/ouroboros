@@ -2381,21 +2381,15 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if model_copy_sections:
                 return _origin_value(*model_copy_sections)
             values: list[_AbstractValue] = []
-            direct_local_call = (
-                isinstance(node.func, ast.Name)
-                and node.func.id.startswith("_")
-                or isinstance(node.func, ast.Attribute)
-                and node.func.attr.startswith("_")
-            )
             for function, bound_receiver in self._call_targets(node.func):
-                private_config_reader = direct_local_call and any(
+                syntactic_config_reader = any(
                     isinstance(candidate, ast.Name)
                     and _looks_like_config_name(candidate.id)
                     or isinstance(candidate, ast.Attribute)
                     and candidate.attr in TRACKED_SECTIONS
                     for candidate in ast.walk(function)
                 )
-                if private_config_reader or self._call_has_relevant_provenance(
+                if syntactic_config_reader or self._call_has_relevant_provenance(
                     node, function, bound_receiver
                 ):
                     values.append(self._local_call_value(node, function, bound_receiver))
@@ -3751,6 +3745,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             mode = "one_turn" if node.body and isinstance(node.body[0], ast.Break) else "full"
             self._consume_deferred_generator(node.iter, mode=mode)
             self._consume_deferred_callable_iterator(node.iter, mode=mode)
+            self._consume_local_iterator(node.iter, mode=mode)
         self.visit(node.iter)
         iterable = self._expression_value(node.iter)
         zero_iterations_possible = self._static_truth(node.iter) is not True
