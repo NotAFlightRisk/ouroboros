@@ -269,6 +269,7 @@ def test_parent_seed_ignores_api_schema_and_parser_content() -> None:
         "Store parent_seed_id: seed_demo in the session state.",
         "Expose parent_seed_id: seed_demo in the CLI output.",
         "The config field parent_seed_id: seed_demo controls resume.",
+        "Handle parent_seed_id: seed_historical during migration while preserving current repair lineage.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
 

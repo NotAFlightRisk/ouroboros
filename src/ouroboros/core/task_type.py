@@ -192,7 +192,7 @@ _CANDIDATE_BOUNDARY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _AMBIGUOUS_CONTRACT_PATTERN = re.compile(
-    r"\b(?:if|unless|whether|either|otherwise|depending|choose\s+between|may|might|could)\b"
+    r"\b(?:if|when|whenever|unless|whether|either|otherwise|depending|choose\s+between|may|might|could)\b"
     r"|\bor\b",
     re.IGNORECASE,
 )
@@ -244,7 +244,13 @@ _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN = re.compile(
     r"\b(?:task[_\s-]*type|parent_seed_id)\b[^\n.!?]{0,120}$"
     r"|\b(?:the\s+)?(?:config(?:uration)?(?:\s+field)?|database(?:\s+column)?|"
     r"session\s+state|cli\s+output|log(?:ging)?\s+(?:field|output))\b"
-    r"[^\n.!?]{0,200}\b(?:task[_\s-]*type|parent_seed_id)\b[^\n.!?]{0,120}$",
+    r"[^\n.!?]{0,200}\b(?:task[_\s-]*type|parent_seed_id)\b[^\n.!?]{0,120}$"
+    # A field value governed as an implementation operand is data, independent
+    # of domain nouns. Explicit routing/inheritance verbs remain authoritative.
+    r"|\b(?!(?:use|set|select|choose|keep|inherit|derive|implement|deliver|produce)\b)"
+    r"[A-Za-z][A-Za-z0-9_-]*\s+(?:the\s+)?"
+    r"(?:task[_\s-]*type|parent_seed_id)\b[^\n.!?]{0,100}"
+    r"\b(?:by|during|while|into|for)\b[^\n.!?]{0,160}$",
     re.IGNORECASE,
 )
 _EXPLICIT_TASK_TYPE_BINDING_PATTERN = re.compile(
@@ -305,6 +311,7 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
             candidate_through_match = normalized[segment_start : match.end()]
             artifact_governed = (
                 _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(candidate_through_match) is not None
+                or _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(segment) is not None
                 or _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(governor_prefix) is not None
             )
             if (

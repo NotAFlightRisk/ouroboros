@@ -135,6 +135,8 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
                 or is_non_binding_contract_segment(seed.goal[segment_start : match.end()])
                 or _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(seed.goal[segment_start : match.end()])
                 is not None
+                or _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(seed.goal[segment_start:segment_end])
+                is not None
                 or _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(governor_prefix) is not None
                 or is_quoted_contract(seed.goal, match.start(), match.end())
                 or has_historical_governor(

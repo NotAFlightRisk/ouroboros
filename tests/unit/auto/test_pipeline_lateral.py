@@ -259,6 +259,8 @@ def test_seed_qa_repairs_ignore_api_schema_and_parser_control_field_content() ->
         "Store task_type: document and parent_seed_id: seed_fake in the session state.",
         "Expose task_type: document and parent_seed_id: seed_fake in the CLI output.",
         "The config field task_type: document and parent_seed_id: seed_fake controls resume.",
+        "When task_type: document, render Markdown. Handle parent_seed_id: seed_historical during migration.",
+        "Handle task_type: document by rendering Markdown. Handle parent_seed_id: seed_historical during migration.",
     ):
         seed = _build_seed(seed_id="seed_current").model_copy(
             update={"goal": goal, "task_type": "code"}

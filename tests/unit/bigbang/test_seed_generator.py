@@ -479,6 +479,8 @@ class TestSeedGeneratorAmbiguityGating:
             "Store task_type: document in the session state.",
             "Expose task_type: document in the CLI output.",
             "The config field task_type: document controls rendering.",
+            "When task_type: document, render Markdown output in the existing Python service.",
+            "Handle task_type: document by rendering Markdown while keeping this Python CLI implementation.",
         ),
     )
     @pytest.mark.asyncio
