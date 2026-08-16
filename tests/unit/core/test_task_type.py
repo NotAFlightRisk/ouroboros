@@ -243,6 +243,23 @@ def test_explicit_task_type_ignores_reference_examples_after_binding() -> None:
     )
 
 
+def test_explicit_task_type_preserves_comma_separated_governors() -> None:
+    for reference in ("For example", "For reference", "As an example", "e.g."):
+        assert explicit_task_type_from_goal(f"{reference}, task_type: code.") is None
+        assert (
+            explicit_task_type_from_goal(
+                f"The task type must be document. {reference}, task_type: code."
+            )
+            == "document"
+        )
+    for negated in (
+        "Do not, under any circumstances, use task_type: document.",
+        "Do not, ever, set task_type: document.",
+        "Never, even temporarily, use task_type: document.",
+    ):
+        assert explicit_task_type_from_goal(negated) is None
+
+
 def test_explicit_task_type_rejects_modal_contracts() -> None:
     assert explicit_task_type_from_goal("We may use task_type: document.") is None
     assert explicit_task_type_from_goal("The task type does not need to be document.") is None

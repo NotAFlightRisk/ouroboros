@@ -121,6 +121,13 @@ _AMBIGUOUS_CONTRACT_PATTERN = re.compile(
     r"|\bor\b",
     re.IGNORECASE,
 )
+_COMMA_NON_BINDING_GOVERNOR_PATTERN = re.compile(
+    r"(?:\b(?:for\s+(?:an?\s+)?example|for\s+reference|as\s+an?\s+example)"
+    r"|\be\.g\.)\s*,\s*$"
+    r"|\b(?:do\s+not|don't|doesn't|never|cannot|can't)\s*,"
+    r"[^;.!?\n]{0,120},\s*(?:(?:use|set|select|choose)\s+)?$",
+    re.IGNORECASE,
+)
 
 
 def _candidate_segment(text: str, start: int, end: int) -> tuple[int, int]:
@@ -179,6 +186,7 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
                 or has_negative_governor(
                     normalized, match.start(), _governor_scope_start(normalized, match.start())
                 )
+                or has_comma_non_binding_governor(normalized, match.start())
                 or has_post_match_rejection(normalized, match.end())
                 or _has_contract_local_ambiguity(normalized, match.end(), segment_end)
                 or has_optional_contract_tail(normalized, match.end(), segment_end)
@@ -276,6 +284,17 @@ def has_negative_governor(text: str, start: int, scope_start: int | None = None)
         _NEGATIVE_GOVERNOR_PATTERN.search(text[max(line_start, scope_start or line_start) : start])
         is not None
     )
+
+
+def has_comma_non_binding_governor(text: str, start: int) -> bool:
+    """Return whether a comma-separated marker still governs the contract.
+
+    Commas usually separate candidate clauses, but natural reference markers
+    (``For example,``) and interrupted negations (``Do not, ever, inherit``)
+    remain semantically attached to the contract that follows them.
+    """
+    line_start = text.rfind("\n", 0, start) + 1
+    return _COMMA_NON_BINDING_GOVERNOR_PATTERN.search(text[line_start:start]) is not None
 
 
 def has_post_match_rejection(text: str, end: int) -> bool:

@@ -12,6 +12,7 @@ from ouroboros.core.task_type import (
     _has_contract_local_ambiguity,
     _resolve_authoritative_matches,
     explicit_task_type_from_goal,
+    has_comma_non_binding_governor,
     has_historical_governor,
     has_negative_governor,
     has_optional_contract_tail,
@@ -132,6 +133,7 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
                 or has_negative_governor(
                     seed.goal, match.start(), _governor_scope_start(seed.goal, match.start())
                 )
+                or has_comma_non_binding_governor(seed.goal, match.start())
                 or has_post_match_rejection(seed.goal, match.end())
                 or _has_contract_local_ambiguity(seed.goal, match.end(), segment_end)
                 or has_optional_contract_tail(seed.goal, match.end(), segment_end)

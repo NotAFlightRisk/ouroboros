@@ -178,6 +178,39 @@ def test_seed_qa_repairs_preserve_same_clause_task_and_parent_contracts() -> Non
         assert candidate.metadata.parent_seed_id == "seed_good"
 
 
+def test_seed_qa_repairs_ignore_comma_prefixed_reference_contracts() -> None:
+    seed = _build_seed(seed_id="seed_comma_governors").model_copy(
+        update={
+            "goal": (
+                "The task type must be document. Inherit seed_good. "
+                "For example, task_type: code. For reference, inherit seed_bad."
+            ),
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.61,
+        verdict="revise",
+        differences=("The explicit task and parent contracts are not reflected.",),
+        suggestions=("Preserve the explicit contracts.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Keep only binding contracts authoritative.",
+        text="Apply the requested document task and inherited parent.",
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    lateral = _seed_with_seed_qa_lateral_feedback(
+        seed, lateral_result, qa_result=qa_result, attempt=1
+    )
+
+    for candidate in (repaired, lateral):
+        assert candidate.task_type == "document"
+        assert candidate.metadata.parent_seed_id == "seed_good"
+
+
 def test_seed_qa_repair_persists_only_binding_mixed_clause_contracts() -> None:
     qa_result = EvaluateResult(
         passed=False,

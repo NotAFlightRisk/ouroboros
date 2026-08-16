@@ -176,6 +176,26 @@ class TestPartialSeedFromEvidence:
         assert complete.task_type == "document"
         assert partial.task_type == "document"
 
+    def test_ledgers_ignore_comma_prefixed_reference_task_types(self) -> None:
+        goal = "The task type must be document. For example, task_type: code."
+
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+        )
+
+        assert complete.task_type == "document"
+        assert partial.task_type == "document"
+
+        rejected = "Do not, under any circumstances, use task_type: document."
+        assert synthesize_seed_from_ledger(_populate_complete_ledger(rejected)).task_type == "code"
+        assert (
+            partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(rejected), reason="interview_phase_deadline"
+            ).task_type
+            == "code"
+        )
+
     def test_ledgers_preserve_clause_local_document_contract(self) -> None:
         goal = "Without changing the existing task type, task_type must remain document."
         assert synthesize_seed_from_ledger(_populate_complete_ledger(goal)).task_type == "document"

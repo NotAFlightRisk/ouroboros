@@ -100,6 +100,22 @@ def test_parent_seed_ignores_reference_examples_after_binding() -> None:
     )
 
 
+def test_parent_seed_preserves_comma_separated_governors() -> None:
+    for reference in ("For example", "For reference", "As an example", "e.g."):
+        assert inherited_parent_seed_id(_seed(f"{reference}, inherit seed_bad.")) is None
+        assert (
+            inherited_parent_seed_id(
+                _seed(f"Inherit seed_good. {reference}, inherit seed_bad.")
+            )
+            == "seed_good"
+        )
+    for negated in (
+        "Do not, ever, inherit seed_bad.",
+        "Never, under any circumstances, inherit seed_bad.",
+    ):
+        assert inherited_parent_seed_id(_seed(negated)) is None
+
+
 def test_parent_seed_rejects_ordinary_negative_inheritance_language() -> None:
     for goal in (
         "It is false that we inherit seed_bad.",
