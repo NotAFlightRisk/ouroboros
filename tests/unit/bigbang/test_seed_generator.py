@@ -436,6 +436,8 @@ class TestSeedGeneratorAmbiguityGating:
             "task_type: document isn't required for this Seed.",
             "task_type: document is unnecessary for this Seed.",
             "task_type: document need not be used.",
+            "The task type is document only if requested.",
+            "The task type is document only when explicitly requested.",
             "We won't use task_type: document.",
             "We did not select task_type: document.",
             "We have not selected task_type: document.",

@@ -186,7 +186,8 @@ _PARENT_CONTRACT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _CONTRACT_TAIL_AMBIGUITY_PATTERN = re.compile(
-    r"^\s*(?:,\s*)?(?:if|unless|whether|depending|otherwise)\b"
+    r"^\s*(?:,\s*)?(?:(?:only\s+)?(?:if|when|whenever|unless|whether)\b"
+    r"|depending\b|otherwise\b|provided(?:\s+that)?\b|as\s+long\s+as\b)"
     rf"|^\s*(?:,\s*)?or\s+(?:{_TASK_TYPE_PATTERN}|{_SEED_ID_PATTERN})"
     rf"(?!{_SEED_ID_CONTINUATION_PATTERN})",
     re.IGNORECASE,

@@ -140,6 +140,8 @@ def test_parent_seed_rejects_ordinary_negative_inheritance_language() -> None:
         "Inheriting from seed_bad isn't required for this Seed.",
         "Inheriting seed_bad is unnecessary for this Seed.",
         "Inherit seed_bad need not be used.",
+        "Inherit seed_bad only if requested.",
+        "Use seed_bad as the parent seed only when resuming an interrupted run.",
         "Inherit seed_bad is no longer required.",
         "We won't inherit seed_bad.",
         "There is no requirement to inherit seed_bad.",

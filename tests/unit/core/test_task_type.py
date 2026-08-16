@@ -134,6 +134,8 @@ def test_explicit_task_type_rejects_ordinary_negative_contract_language() -> Non
         "task_type: document isn't required for this Seed.",
         "task_type: document is unnecessary for this Seed.",
         "task_type: document need not be used.",
+        "The task type is document only if requested.",
+        "The task type is document only when explicitly requested.",
         "task_type: document is no longer required.",
         "We won't use task_type: document.",
         "We did not select task_type: document.",
