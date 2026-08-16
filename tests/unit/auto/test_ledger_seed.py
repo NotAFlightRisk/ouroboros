@@ -164,6 +164,10 @@ class TestPartialSeedFromEvidence:
             "We won’t use task_type: document.",
             "task_type: document should be avoided.",
             "Choose between task_type: document or code later.",
+            "We did not select task_type: document.",
+            "We have not selected task_type: document.",
+            "There is no requirement that task_type: document.",
+            "The team declined to use task_type: document.",
         ):
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
             partial = partial_seed_from_evidence(

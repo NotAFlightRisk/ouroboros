@@ -97,6 +97,10 @@ def test_explicit_task_type_rejects_ordinary_negative_contract_language() -> Non
         "task_type: document will not be used.",
         "task_type: document is no longer required.",
         "We won't use task_type: document.",
+        "We did not select task_type: document.",
+        "We have not selected task_type: document.",
+        "There is no requirement that task_type: document.",
+        "The team declined to use task_type: document.",
         "The task type isn't document.",
     ):
         assert explicit_task_type_from_goal(goal) is None

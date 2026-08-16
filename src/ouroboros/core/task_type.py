@@ -50,7 +50,8 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
 
 _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"\b(?:ignore|discard|superseded|obsolete|example|literal|discussed|phrase|proposal)\b"
-    r"|\b(?:do(?:es)?\s+not|don't|doesn't|doesn’t|never|avoid(?:ed|ing)?|cannot|can't|can\s+not|without)\b"
+    r"|\b(?:do(?:es)?|did|have|has|had)\s+not\b"
+    r"|\b(?:don't|doesn't|doesn’t|never|avoid(?:ed|ing)?|cannot|can't|can\s+not|without)\b"
     r"|\b(?:am|is|are|was|were)\s+not\b"
     r"|\bnot\s+true\b"
     r"|\bnot\s+(?=(?:use\s+)?task[_\s-]*type\b|inherit\b|derive\b|parent\b)"
@@ -60,6 +61,9 @@ _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"|\b(?:won’t|wouldn’t|shouldn’t|mustn’t|isn’t|aren’t|wasn’t|weren’t)\b"
     r"|\b(?:am|is|are|was|were)\s+no\s+longer\b"
     r"|\bnot\s+allowed\b"
+    r"|\b(?:declin(?:e|ed)|refus(?:e|ed))\s+to\b"
+    r"|\bchose\s+not\s+to\b"
+    r"|\bthere\s+(?:is|was)\s+no\s+(?:requirement|contract|need)\b"
     r"|\b(?:explain(?:ed|ing)?|docs?\s+(?:say|says|said)|legacy\s+exports?)\b"
     r"|(?:설정하지\s*마세요|(?:상속|계승)하면\s*안\s*(?:됩니다|돼요))",
     re.IGNORECASE,

@@ -83,6 +83,10 @@ def test_parent_seed_rejects_ordinary_negative_inheritance_language() -> None:
         "Inherit seed_bad will not be used.",
         "Inherit seed_bad is no longer required.",
         "We won't inherit seed_bad.",
+        "There is no requirement to inherit seed_bad.",
+        "The team declined to inherit seed_bad.",
+        "We refused to inherit seed_bad.",
+        "We chose not to inherit seed_bad.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
 
