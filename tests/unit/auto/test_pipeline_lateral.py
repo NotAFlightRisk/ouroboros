@@ -564,6 +564,8 @@ def test_seed_qa_repairs_fail_closed_on_validation_content_and_field_retractions
         "The schema must accept parent_seed_id: seed_demo.",
         "Add a test for parent_seed_id: seed_demo.",
         "Fix handling when users inherit seed_demo.",
+        "Analyze why the API accepts task_type: document.",
+        "Analyze why the API accepts parent_seed_id: seed_old.",
     ),
 )
 def test_seed_qa_repairs_ignore_artifact_payload_contract_fields(goal: str) -> None:

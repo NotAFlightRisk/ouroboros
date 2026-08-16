@@ -231,7 +231,10 @@ _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN = re.compile(
     r"[^\n.!?]{0,180}\b(?:task[_\s-]*type|parent_seed_id)\b[^\n.!?]{0,120}$"
     r"|\b(?:add|update|fix|implement|support|test|validate|accept)\b"
     r"[^\n.!?]{0,180}\b(?:when|whether|how)\b[^\n.!?]{0,120}"
-    r"\b(?:inherit(?:ing)?|derive(?:d)?\s+from)\b[^\n.!?]{0,100}$",
+    r"\b(?:inherit(?:ing)?|derive(?:d)?\s+from)\b[^\n.!?]{0,100}$"
+    r"|\b(?:analyze|explain|investigate|describe|review|understand)\b"
+    r"[^\n.!?]{0,240}\b(?:task[_\s-]*type|parent_seed_id|inherit(?:ing)?)\b"
+    r"[^\n.!?]{0,120}$",
     re.IGNORECASE,
 )
 

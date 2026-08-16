@@ -283,6 +283,8 @@ class TestPartialSeedFromEvidence:
             "The schema must accept parent_seed_id: seed_demo.",
             "Add a test for parent_seed_id: seed_demo.",
             "Fix handling when users inherit seed_demo.",
+            "Analyze why the API accepts task_type: document.",
+            "Analyze why the API accepts parent_seed_id: seed_old.",
         )
         for goal in goals:
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))

@@ -439,6 +439,8 @@ def test_explicit_task_type_ignores_artifact_payload_fields() -> None:
         "Add support for task_type: document in the Seed API.",
         "Update the parser to accept task_type: document.",
         "Add a test for task_type: document.",
+        "Analyze why the API accepts task_type: document.",
+        "Explain how the schema stores task_type: document.",
     ):
         assert explicit_task_type_from_goal(goal) is None
 
