@@ -97,6 +97,8 @@ class TestSynthesizeSeedFromLedgerUnchanged:
             "task_type must be code. Actually, task_type must be document.",
             "Use task_type: document. Mention task_type: code in the appendix.",
             "Use task_type: document. Compare it with task_type: code.",
+            "Use task_type: document. This document mentions task_type: code in prose.",
+            "task_type: document should be used.",
         ):
             ledger = _populate_complete_ledger(goal)
 
@@ -147,6 +149,8 @@ class TestPartialSeedFromEvidence:
             "task_type must be code. Actually, task_type must be document.",
             "Use task_type: document. Mention task_type: code in the appendix.",
             "Use task_type: document. Compare it with task_type: code.",
+            "Use task_type: document. This document mentions task_type: code in prose.",
+            "task_type: document should be used.",
         ):
             ledger = SeedDraftLedger.from_goal(goal)
 

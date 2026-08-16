@@ -310,5 +310,16 @@ def test_explicit_task_type_ignores_descriptive_mentions_and_comparisons() -> No
     for goal in (
         "Use task_type: document. Mention task_type: code in the appendix.",
         "Use task_type: document. Compare it with task_type: code.",
+        "Use task_type: document. This document mentions task_type: code in prose.",
     ):
         assert explicit_task_type_from_goal(goal) == "document"
+
+
+def test_explicit_task_type_keeps_affirmative_tail_and_rejects_conditional_conjunction() -> None:
+    assert explicit_task_type_from_goal("task_type: document should be used.") == "document"
+    assert (
+        explicit_task_type_from_goal(
+            "If approved and we use task_type: document, generate the report."
+        )
+        is None
+    )

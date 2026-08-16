@@ -12,12 +12,12 @@ from ouroboros.core.task_type import (
     _has_contract_local_ambiguity,
     _resolve_authoritative_matches,
     explicit_task_type_from_goal,
+    has_ambiguous_contract_governor,
     has_comma_non_binding_governor,
     has_historical_governor,
     has_negative_governor,
     has_optional_contract_tail,
     has_post_match_rejection,
-    is_ambiguous_contract_segment,
     is_non_binding_contract_segment,
     is_quoted_contract,
 )
@@ -137,10 +137,7 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
                 or has_post_match_rejection(seed.goal, match.end())
                 or _has_contract_local_ambiguity(seed.goal, match.end(), segment_end)
                 or has_optional_contract_tail(seed.goal, match.end(), segment_end)
-                or (
-                    is_ambiguous_contract_segment(governor_prefix)
-                    and not re.search(r"\b(?:but|and)\b", governor_prefix, re.IGNORECASE)
-                )
+                or has_ambiguous_contract_governor(governor_prefix)
             ):
                 continue
             matches.append((match.start(), match.end(), match.group("seed_id")))

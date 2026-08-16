@@ -181,8 +181,19 @@ def test_parent_seed_ignores_descriptive_mentions_and_comparisons() -> None:
     for goal in (
         "Inherit seed_good. Mention parent_seed_id: seed_bad in the appendix.",
         "Inherit seed_good. Compare with parent_seed_id: seed_bad.",
+        "Inherit seed_good. This document mentions parent_seed_id: seed_bad in prose.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) == "seed_good"
+
+
+def test_parent_seed_keeps_affirmative_tail_and_rejects_conditional_conjunction() -> None:
+    assert inherited_parent_seed_id(_seed("parent_seed_id: seed_good should be used.")) == (
+        "seed_good"
+    )
+    assert (
+        inherited_parent_seed_id(_seed("If approved and we inherit seed_good, copy its settings."))
+        is None
+    )
 
 
 def test_parent_seed_preserves_korean_inheritance_contract() -> None:

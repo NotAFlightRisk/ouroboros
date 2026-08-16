@@ -50,7 +50,7 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
 
 _NON_BINDING_CONTRACT_PATTERN = re.compile(
     r"\b(?:ignore|discard|superseded|obsolete|literal|discussed|phrase|"
-    r"mention(?:ed|ing)?|compare(?:d|s|ing)?)\b"
+    r"mention(?:s|ed|ing)?|compare(?:d|s|ing)?)\b"
     r"|\b(?:do(?:es)?|did|have|has|had)\s+not\b"
     r"|\b(?:don't|doesn't|doesn’t|didn't|didn’t|never|avoid(?:ed|ing)?|cannot|can't|can\s+not|without)\b"
     r"|\bdecided\s+not\s+to\b"
@@ -106,7 +106,8 @@ _POST_MATCH_REJECTION_PATTERN = re.compile(
     r"|not\s+anymore"
     r"|(?:we\s+)?decided\s+against\s+it"
     r"|scratch\s+that"
-    r"|(?:should|must|may)\s+(?:not\s+)?(?:be\s+)?(?:used|required|adopted|applied|avoided)"
+    r"|(?:should|must|may)\s+not\s+(?:be\s+)?(?:used|required|adopted|applied)"
+    r"|(?:should|must|may)\s+(?:be\s+)?avoided"
     r"|(?:value|requirement|contract|proposal)\s+(?:should|must|may)\s+not\s+(?:be\s+)?(?:used|required|adopted|applied|avoided)"
     r"|(?:value|requirement|contract|proposal)\s+(?:is|was)\s+not\s+allowed"
     r"|(?:is|was)\s+an?\s+example"
@@ -199,10 +200,7 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
                 or has_post_match_rejection(normalized, match.end())
                 or _has_contract_local_ambiguity(normalized, match.end(), segment_end)
                 or has_optional_contract_tail(normalized, match.end(), segment_end)
-                or (
-                    is_ambiguous_contract_segment(governor_prefix)
-                    and not re.search(r"\b(?:but|and)\b", governor_prefix, re.IGNORECASE)
-                )
+                or has_ambiguous_contract_governor(governor_prefix)
             ):
                 continue
             matches.append((match.start(), match.end(), match.group("task_type").casefold()))
@@ -239,6 +237,13 @@ def is_quoted_contract(text: str, start: int, end: int) -> bool:
 def is_ambiguous_contract_segment(segment: str) -> bool:
     """Reject conditional or multi-option language at an authority boundary."""
     return _AMBIGUOUS_CONTRACT_PATTERN.search(segment) is not None
+
+
+def has_ambiguous_contract_governor(prefix: str) -> bool:
+    """Reject clause-local conditional authority, resetting only after `but`."""
+    reset = tuple(re.finditer(r"\bbut\b", prefix, re.IGNORECASE))
+    scope = prefix[reset[-1].end() :] if reset else prefix
+    return is_ambiguous_contract_segment(scope)
 
 
 def has_optional_contract_tail(text: str, end: int, segment_end: int) -> bool:

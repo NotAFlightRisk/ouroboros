@@ -219,6 +219,8 @@ def test_seed_qa_repairs_preserve_descriptive_and_reference_contracts() -> None:
         "Inherit seed_good. Mention parent_seed_id: seed_bad in the appendix.",
         "Use task_type: document. Compare it with task_type: code. "
         "Inherit seed_good. Compare with parent_seed_id: seed_bad.",
+        "Use task_type: document. This document mentions task_type: code in prose. "
+        "Inherit seed_good. This document mentions parent_seed_id: seed_bad in prose.",
         "Use task_type: document. As a reference, task_type: code appears in old docs. "
         "Inherit seed_good. As a reference, inherit seed_bad appears in old docs.",
     ):
