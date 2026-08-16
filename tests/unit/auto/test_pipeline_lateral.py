@@ -259,6 +259,11 @@ def test_seed_qa_repairs_ignore_api_schema_and_parser_control_field_content() ->
         "Store task_type: document and parent_seed_id: seed_fake in the session state.",
         "Expose task_type: document and parent_seed_id: seed_fake in the CLI output.",
         "The config field task_type: document and parent_seed_id: seed_fake controls resume.",
+        "Route task_type: document requests to artifact workers. "
+        "Route records with parent_seed_id: seed_demo to replay.",
+        "Map PDFs to task_type: document in the routing table. "
+        "Treat parent_seed_id: seed_demo as an opaque string.",
+        "Read task_type: document and parent_seed_id: seed_demo from the config.",
         "When the user asks for a document, set task_type: document in the generated Seed. "
         "When parent_seed_id is provided, set parent_seed_id: seed_fake in the result.",
         "When task_type: document, render Markdown. Handle parent_seed_id: seed_historical during migration.",

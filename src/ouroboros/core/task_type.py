@@ -284,6 +284,14 @@ def _governor_scope_start(text: str, start: int) -> int:
     return boundary + 1
 
 
+def has_affirmative_contract_prefix(prefix: str, *, allow_task_linker: bool = False) -> bool:
+    """Require field-shaped values to be current-Seed authority, not operands."""
+    normalized = prefix.strip().casefold()
+    if re.fullmatch(r"(?:(?:a|answer|correction)\s*:|actually\s*,?|the|please)?", normalized):
+        return True
+    return allow_task_linker and re.search(r"\b(?:use|with)\s*$", normalized) is not None
+
+
 def explicit_task_type_from_goal(goal: str) -> str | None:
     """Return the task type only when the goal states a binding contract."""
     normalized = goal
@@ -317,6 +325,8 @@ def explicit_task_type_from_goal(goal: str) -> str | None:
             if (
                 is_non_binding_contract_segment(contract_prefix)
                 or is_non_binding_contract_segment(normalized[segment_start : match.end()])
+                or not has_affirmative_contract_prefix(contract_prefix, allow_task_linker=True)
+                and _EXPLICIT_TASK_TYPE_BINDING_PATTERN.search(candidate_through_match) is None
                 or artifact_governed
                 and _EXPLICIT_TASK_TYPE_BINDING_PATTERN.search(candidate_through_match) is None
                 or is_quoted_contract(normalized, match.start(), match.end())

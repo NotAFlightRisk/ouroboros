@@ -15,6 +15,7 @@ from ouroboros.core.task_type import (
     _has_contract_local_ambiguity,
     _resolve_authoritative_matches,
     explicit_task_type_from_goal,
+    has_affirmative_contract_prefix,
     has_ambiguous_contract_governor,
     has_comma_non_binding_governor,
     has_historical_governor,
@@ -130,9 +131,25 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
                 _governor_scope_start(seed.goal, match.start()) : match.start()
             ]
             contract_prefix = seed.goal[segment_start : match.start()]
+            bare_parent_field = (
+                re.match(r"\s*(?:the\s+)?parent(?:_seed_id|\s+seed)\b", match.group(), re.I)
+                is not None
+            )
+            prior_data_plane_governor = (
+                bare_parent_field
+                and re.search(
+                    r"\b(?:route|map|read|treat|persist|store|expose)\b",
+                    seed.goal[_governor_scope_start(seed.goal, match.start()) : segment_start],
+                    re.IGNORECASE,
+                )
+                is not None
+            )
             if (
                 is_non_binding_contract_segment(contract_prefix)
                 or is_non_binding_contract_segment(seed.goal[segment_start : match.end()])
+                or bare_parent_field
+                and not has_affirmative_contract_prefix(contract_prefix)
+                or prior_data_plane_governor
                 or _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(seed.goal[segment_start : match.end()])
                 is not None
                 or _ARTIFACT_PAYLOAD_GOVERNOR_PATTERN.search(seed.goal[segment_start:segment_end])

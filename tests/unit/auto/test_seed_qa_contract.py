@@ -269,6 +269,9 @@ def test_parent_seed_ignores_api_schema_and_parser_content() -> None:
         "Store parent_seed_id: seed_demo in the session state.",
         "Expose parent_seed_id: seed_demo in the CLI output.",
         "The config field parent_seed_id: seed_demo controls resume.",
+        "Route records with parent_seed_id: seed_demo to replay.",
+        "Treat parent_seed_id: seed_demo as an opaque string.",
+        "Read parent_seed_id: seed_demo from the config.",
         "When parent_seed_id is provided, set parent_seed_id: seed_fake in the result.",
         "Handle parent_seed_id: seed_historical during migration while preserving current repair lineage.",
     ):
