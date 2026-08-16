@@ -101,6 +101,9 @@ def test_explicit_task_type_rejects_ordinary_negative_contract_language() -> Non
         "We have not selected task_type: document.",
         "There is no requirement that task_type: document.",
         "The team declined to use task_type: document.",
+        "We didn't select task_type: document.",
+        "We didn’t select task_type: document.",
+        "We decided not to use task_type: document.",
         "The task type isn't document.",
     ):
         assert explicit_task_type_from_goal(goal) is None
@@ -127,6 +130,10 @@ def test_explicit_task_type_accepts_ordinary_positive_wording() -> None:
         "The task type should be a document.",
     ):
         assert explicit_task_type_from_goal(goal) == "document"
+    assert (
+        explicit_task_type_from_goal("Use task_type: document for the final proposal.")
+        == "document"
+    )
 
 
 def test_explicit_task_type_rejects_typographic_quoted_and_conditional_language() -> None:

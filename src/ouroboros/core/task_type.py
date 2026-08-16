@@ -49,9 +49,10 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
 )
 
 _NON_BINDING_CONTRACT_PATTERN = re.compile(
-    r"\b(?:ignore|discard|superseded|obsolete|example|literal|discussed|phrase|proposal)\b"
+    r"\b(?:ignore|discard|superseded|obsolete|literal|discussed|phrase)\b"
     r"|\b(?:do(?:es)?|did|have|has|had)\s+not\b"
-    r"|\b(?:don't|doesn't|doesn’t|never|avoid(?:ed|ing)?|cannot|can't|can\s+not|without)\b"
+    r"|\b(?:don't|doesn't|doesn’t|didn't|didn’t|never|avoid(?:ed|ing)?|cannot|can't|can\s+not|without)\b"
+    r"|\bdecided\s+not\s+to\b"
     r"|\b(?:am|is|are|was|were)\s+not\b"
     r"|\bnot\s+true\b"
     r"|\bnot\s+(?=(?:use\s+)?task[_\s-]*type\b|inherit\b|derive\b|parent\b)"

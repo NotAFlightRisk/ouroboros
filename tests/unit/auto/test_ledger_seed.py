@@ -168,6 +168,8 @@ class TestPartialSeedFromEvidence:
             "We have not selected task_type: document.",
             "There is no requirement that task_type: document.",
             "The team declined to use task_type: document.",
+            "We didn't select task_type: document.",
+            "We decided not to use task_type: document.",
         ):
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
             partial = partial_seed_from_evidence(
@@ -187,6 +189,7 @@ class TestPartialSeedFromEvidence:
             "The task type must remain document.",
             "Keep the task type as document.",
             "Use document as the task type.",
+            "Use task_type: document for the final proposal.",
         )
         for goal in positive_goals:
             complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))

@@ -401,6 +401,8 @@ class TestSeedGeneratorAmbiguityGating:
             "We have not selected task_type: document.",
             "There is no requirement that task_type: document.",
             "The team declined to use task_type: document.",
+            "We didn't select task_type: document.",
+            "We decided not to use task_type: document.",
         ),
     )
     @pytest.mark.asyncio

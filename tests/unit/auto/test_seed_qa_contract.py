@@ -87,6 +87,9 @@ def test_parent_seed_rejects_ordinary_negative_inheritance_language() -> None:
         "The team declined to inherit seed_bad.",
         "We refused to inherit seed_bad.",
         "We chose not to inherit seed_bad.",
+        "We didn't inherit seed_bad.",
+        "We didn’t inherit seed_bad.",
+        "We decided not to inherit seed_bad.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) is None
 
@@ -102,6 +105,7 @@ def test_parent_seed_accepts_ordinary_positive_wording() -> None:
         "Inherit from seed_parent.",
         "Set parent_seed_id to seed_parent.",
         "Use seed_parent as the parent seed.",
+        "Inherit seed_parent for the final proposal.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) == "seed_parent"
 
