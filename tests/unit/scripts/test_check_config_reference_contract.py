@@ -583,6 +583,8 @@ async def read(config):
 
     reads = contract.runtime_reads(tmp_path, fields)
     assert reads == fields
+    for field in fields:
+        assert _audit_as_documented_inert(contract, field, reads).violations
     report = _audit_as_documented_inert(
         contract, contract.ConfigField("evaluation", "stage1_enabled"), reads
     )
@@ -621,7 +623,45 @@ with contextlib.closing(settings.evaluation) as section:
         contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
     )
 
-    assert contract.runtime_reads(tmp_path, fields) == fields
+    reads = contract.runtime_reads(tmp_path, fields)
+    assert reads == fields
+    for field in fields:
+        assert _audit_as_documented_inert(contract, field, reads).violations
+
+
+def test_runtime_scan_does_not_overreach_class_or_starred_data_provenance(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "inactive_class_and_starred_values.py").write_text(
+        """
+import operator
+
+def read_stage(section):
+    return section.stage2_enabled
+
+class Fields:
+    STAGE = "stage1_enabled"
+
+class Registry:
+    READERS = {"main": read_stage}
+
+GETATTR_ARGS = (report.evaluation, Fields.STAGE)
+GETITEM_ARGS = (report.evaluation.model_dump(), "stage2_enabled")
+
+getattr(*GETATTR_ARGS)
+operator.getitem(*GETITEM_ARGS)
+Registry.READERS["main"](report.evaluation)
+""",
+        encoding="utf-8",
+    )
+    fields = frozenset(
+        contract.ConfigField("evaluation", name) for name in ("stage1_enabled", "stage2_enabled")
+    )
+
+    reads = contract.runtime_reads(tmp_path, fields)
+    assert reads == frozenset()
+    for field in fields:
+        assert _audit_as_documented_inert(contract, field, reads).violations == ()
 
 
 def test_runtime_scan_does_not_enter_unconsumed_context_objects(contract, tmp_path: Path) -> None:
