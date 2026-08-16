@@ -261,6 +261,9 @@ _ASYNCIO_MODULE = "<asyncio-module>"
 _ASYNCIO_CONSUMERS = frozenset({"create_task", "ensure_future", "gather", "run"})
 _ASYNCIO_CONSUMER_ORIGINS = frozenset(f"<asyncio-consumer:{name}>" for name in _ASYNCIO_CONSUMERS)
 _CONTEXTLIB_MODULE = "<contextlib-module>"
+_CONTEXTMANAGER_DECORATORS = frozenset(
+    {"<contextmanager-decorator>", "<asynccontextmanager-decorator>"}
+)
 _NULLCONTEXT_FACTORY = "<nullcontext-factory>"
 _NULLCONTEXT_VALUE = "<nullcontext-value>"
 _CLOSING_FACTORY = "<closing-factory>"
@@ -328,6 +331,17 @@ def _safe_constant_value(node: ast.AST) -> object:
         try:
             return set(values)
         except TypeError:
+            return _STATIC_UNKNOWN
+    if isinstance(node, ast.Dict):
+        if any(key is None for key in node.keys):
+            return _STATIC_UNKNOWN
+        keys = [_safe_constant_value(key) for key in node.keys if key is not None]
+        values = [_safe_constant_value(value) for value in node.values]
+        if any(value is _STATIC_UNKNOWN for value in (*keys, *values)):
+            return _STATIC_UNKNOWN
+        try:
+            return dict(zip(keys, values, strict=True))
+        except (TypeError, ValueError):
             return _STATIC_UNKNOWN
     if isinstance(node, ast.UnaryOp):
         operand = _safe_constant_value(node.operand)
@@ -440,6 +454,79 @@ def _safe_constant_value(node: ast.AST) -> object:
             left = right
         return True
     return _STATIC_UNKNOWN
+
+
+def _static_pattern_matches(pattern: ast.pattern, subject: object) -> bool | None:
+    """Resolve a bounded structural pattern when both sides are literal."""
+    if isinstance(pattern, ast.MatchValue):
+        value = _safe_constant_value(pattern.value)
+        return None if value is _STATIC_UNKNOWN else subject == value
+    if isinstance(pattern, ast.MatchSingleton):
+        return subject is pattern.value
+    if isinstance(pattern, ast.MatchAs):
+        return (
+            True if pattern.pattern is None else _static_pattern_matches(pattern.pattern, subject)
+        )
+    if isinstance(pattern, ast.MatchOr):
+        outcomes = tuple(_static_pattern_matches(child, subject) for child in pattern.patterns)
+        if True in outcomes:
+            return True
+        return False if all(outcome is False for outcome in outcomes) else None
+    if isinstance(pattern, ast.MatchSequence):
+        if not isinstance(subject, (list, tuple)):
+            return False
+        starred = next(
+            (
+                index
+                for index, child in enumerate(pattern.patterns)
+                if isinstance(child, ast.MatchStar)
+            ),
+            None,
+        )
+        if starred is None:
+            if len(pattern.patterns) != len(subject):
+                return False
+            outcomes = tuple(
+                _static_pattern_matches(child, value)
+                for child, value in zip(pattern.patterns, subject, strict=True)
+            )
+        else:
+            suffix_length = len(pattern.patterns) - starred - 1
+            if len(subject) < starred + suffix_length:
+                return False
+            pairs = [*zip(pattern.patterns[:starred], subject[:starred], strict=True)]
+            if suffix_length:
+                pairs.extend(
+                    zip(
+                        pattern.patterns[-suffix_length:],
+                        subject[-suffix_length:],
+                        strict=True,
+                    )
+                )
+            outcomes = tuple(_static_pattern_matches(child, value) for child, value in pairs)
+        if False in outcomes:
+            return False
+        return True if all(outcome is True for outcome in outcomes) else None
+    if isinstance(pattern, ast.MatchMapping):
+        if not isinstance(subject, dict):
+            return False
+        outcomes: list[bool | None] = []
+        for key_node, child in zip(pattern.keys, pattern.patterns, strict=True):
+            key = _safe_constant_value(key_node)
+            if key is _STATIC_UNKNOWN:
+                outcomes.append(None)
+                continue
+            try:
+                present = key in subject
+            except TypeError:
+                return None
+            if not present:
+                return False
+            outcomes.append(_static_pattern_matches(child, subject[key]))
+        if False in outcomes:
+            return False
+        return True if all(outcome is True for outcome in outcomes) else None
+    return None
 
 
 def _origin_value(*origins: str) -> _AbstractValue:
@@ -1548,6 +1635,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(f"<asyncio-consumer:{node.attr}>")
             if _CONTEXTLIB_MODULE in owner.origins and node.attr == "nullcontext":
                 return _origin_value(_NULLCONTEXT_FACTORY)
+            if _CONTEXTLIB_MODULE in owner.origins and node.attr in {
+                "contextmanager",
+                "asynccontextmanager",
+            }:
+                return _origin_value(f"<{node.attr}-decorator>")
             if _CONTEXTLIB_MODULE in owner.origins and node.attr in {"closing", "aclosing"}:
                 return _origin_value(_CLOSING_FACTORY)
             if _CONTEXTLIB_MODULE in owner.origins and node.attr == "ExitStack":
@@ -1557,10 +1649,18 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if node.attr == "deque" and "collections" in owner.modules:
                 return _origin_value("<external-consumer:collections.deque>")
             sections = owner.origins & TRACKED_SECTIONS
+            if _CONFIG_ROOT in owner.origins:
+                sections = TRACKED_SECTIONS
             if node.attr == "__dict__" and sections:
                 return _AbstractValue(serialized_sections=sections)
             if node.attr == "model_dump" and sections:
                 return _AbstractValue(serialized_sections=sections)
+            if (
+                isinstance(node.value, ast.Call)
+                and _callable_name(node.value.func) == "super"
+                and node.attr == "section"
+            ):
+                return _origin_value("evaluation")
             resolved_modules = {
                 child.name
                 for module_name in owner.modules
@@ -1752,7 +1852,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if function_value.serialized_sections:
                 return _AbstractValue(serialized_sections=function_value.serialized_sections)
             if _VARS_BUILTIN in function_value.origins and node.args:
-                sections = self._expression_value(node.args[0]).origins & TRACKED_SECTIONS
+                argument_origins = self._expression_value(node.args[0]).origins
+                sections = argument_origins & TRACKED_SECTIONS
+                if _CONFIG_ROOT in argument_origins:
+                    sections = TRACKED_SECTIONS
                 if sections:
                     return _AbstractValue(serialized_sections=sections)
             partial_values = [
@@ -1847,6 +1950,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if _CONFIG_ROOT in owner.origins:
                 return _origin_value(_CONFIG_ROOT)
             if isinstance(node.slice, ast.Constant):
+                if owner.serialized_sections and isinstance(node.slice.value, str):
+                    if node.slice.value in TRACKED_SECTIONS:
+                        return _origin_value(node.slice.value)
+                    return _UNKNOWN_VALUE
                 if isinstance(node.slice.value, int) and owner.items is not None:
                     try:
                         return owner.items[node.slice.value]
@@ -2160,7 +2267,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             and isinstance(node.slice, ast.Constant)
             and isinstance(node.slice.value, str)
         ):
-            for section in self._expression_value(node.value).serialized_sections:
+            owner = self._expression_value(node.value)
+            for section in owner.serialized_sections | (owner.origins & TRACKED_SECTIONS):
                 self._record(section, node.slice.value)
         self.generic_visit(node)
         if isinstance(node.ctx, ast.Load):
@@ -3045,8 +3153,23 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_Match(self, node: ast.Match) -> None:
         self.visit(node.subject)
         subject = self._expression_value(node.subject)
+        static_subject = _safe_constant_value(node.subject)
+        candidate_cases: list[tuple[ast.match_case, bool | None]] = []
+        for case in node.cases:
+            outcome = (
+                True
+                if isinstance(case.pattern, ast.MatchAs) and case.pattern.pattern is None
+                else None
+                if static_subject is _STATIC_UNKNOWN
+                else _static_pattern_matches(case.pattern, static_subject)
+            )
+            if outcome is False:
+                continue
+            candidate_cases.append((case, outcome))
+            if outcome is True and case.guard is None:
+                break
         if subject.serialized_sections:
-            for case in node.cases:
+            for case, _outcome in candidate_cases:
                 for pattern in ast.walk(case.pattern):
                     if not isinstance(pattern, ast.MatchMapping):
                         continue
@@ -3054,7 +3177,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         if isinstance(key, ast.Constant) and isinstance(key.value, str):
                             for section in subject.serialized_sections:
                                 self._record(section, key.value)
-        for pattern in (candidate for case in node.cases for candidate in ast.walk(case.pattern)):
+        for pattern in (
+            candidate for case, _outcome in candidate_cases for candidate in ast.walk(case.pattern)
+        ):
             if not isinstance(pattern, ast.MatchClass):
                 continue
             class_name = _callable_name(pattern.cls)
@@ -3069,7 +3194,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         initial = self._binding_snapshot()
         branches: list[_FlowResult] = []
         unmatched = True
-        for case in node.cases:
+        for case, pattern_outcome in candidate_cases:
             self._restore_bindings(initial)
             self._visit_pattern_reads(case.pattern)
             self._bind_pattern(case.pattern, subject)
@@ -3078,10 +3203,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 if self._static_truth(case.guard) is False:
                     continue
             branches.append(self._visit_binding_branch(case.body, self._binding_snapshot()))
-            if (
-                isinstance(case.pattern, ast.MatchAs)
-                and case.pattern.pattern is None
-                and (case.guard is None or self._static_truth(case.guard) is True)
+            if pattern_outcome is True and (
+                case.guard is None or self._static_truth(case.guard) is True
             ):
                 unmatched = False
                 break
@@ -3355,6 +3478,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "asyncio" and alias.name in _ASYNCIO_CONSUMERS
                     else _origin_value(_NULLCONTEXT_FACTORY)
                     if node.module == "contextlib" and alias.name == "nullcontext"
+                    else _origin_value(f"<{alias.name}-decorator>")
+                    if node.module == "contextlib"
+                    and alias.name in {"contextmanager", "asynccontextmanager"}
                     else _origin_value(_CLOSING_FACTORY)
                     if node.module == "contextlib" and alias.name in {"closing", "aclosing"}
                     else _origin_value(_EXITSTACK_FACTORY)
@@ -3965,9 +4091,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         original = _AbstractValue(callables=(_CallableTarget(node),))
         value = original
         for decorator in reversed(node.decorator_list):
+            if self._expression_value(decorator).origins & _CONTEXTMANAGER_DECORATORS:
+                continue
             targets = self._call_targets(decorator)
             if not targets:
-                return original
+                return _UNKNOWN_VALUE
             replacements = [
                 self._local_direct_call_value(
                     function,
@@ -3976,12 +4104,12 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 for function, receiver in targets
             ]
             if not replacements:
-                return original
+                return _UNKNOWN_VALUE
             replacement = _join_values(*replacements)
             if not replacement.callables and not replacement.instance_classes:
                 if replacement != _UNKNOWN_VALUE:
                     return replacement
-                return original
+                return _UNKNOWN_VALUE
             value = replacement
         return value
 

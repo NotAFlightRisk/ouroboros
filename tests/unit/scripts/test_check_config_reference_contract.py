@@ -241,6 +241,32 @@ settings.evaluation.__dict__["stage1_enabled"]
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
+@pytest.mark.parametrize(
+    "expression",
+    (
+        'config.model_dump()["evaluation"]["stage1_enabled"]',
+        'vars(config)["evaluation"]["stage1_enabled"]',
+        'config.__dict__["evaluation"]["stage1_enabled"]',
+    ),
+)
+def test_runtime_scan_tracks_full_root_serialization(
+    contract, tmp_path: Path, expression: str
+) -> None:
+    (tmp_path / "root_serialization.py").write_text(expression, encoding="utf-8")
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_ignores_untracked_root_serialization_keys(contract, tmp_path: Path) -> None:
+    (tmp_path / "root_serialization_untracked.py").write_text(
+        'config.model_dump()["untracked"]["stage1_enabled"]', encoding="utf-8"
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
 def test_runtime_scan_tracks_context_manager_entry_values(contract, tmp_path: Path) -> None:
     (tmp_path / "context_entries.py").write_text(
         """
@@ -3158,6 +3184,100 @@ def read_stage(config):
     field = contract.ConfigField("evaluation", "stage2_enabled")
 
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+def test_runtime_scan_fails_closed_for_unresolved_replacement_decorator(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "external_decorator.py").write_text(
+        """
+from external_package import erase
+
+@erase
+def read_stage(config):
+    return config.evaluation.stage2_enabled
+
+read_stage(config)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage2_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+def test_runtime_scan_keeps_exact_local_identity_decorator(contract, tmp_path: Path) -> None:
+    (tmp_path / "identity_decorator.py").write_text(
+        """
+def preserve(function):
+    return function
+
+@preserve
+def read_stage(config):
+    return config.evaluation.stage2_enabled
+
+read_stage(config)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage2_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+def test_runtime_scan_resolves_inherited_super_property(contract, tmp_path: Path) -> None:
+    (tmp_path / "super_property.py").write_text(
+        """
+class Base:
+    @property
+    def section(self):
+        return config.evaluation
+
+class Reader(Base):
+    def read(self):
+        return super().section.stage1_enabled
+
+Reader().read()
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "match 1:\n    case 2:\n        config.evaluation.stage1_enabled\n",
+        "match [1]:\n    case [2]:\n        config.evaluation.stage1_enabled\n",
+        'match {"kind": 1}:\n    case {"kind": 2}:\n        config.evaluation.stage1_enabled\n',
+    ),
+)
+def test_runtime_scan_ignores_statically_impossible_match_cases(
+    contract, tmp_path: Path, source: str
+) -> None:
+    (tmp_path / "impossible_match.py").write_text(source, encoding="utf-8")
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "match 1:\n    case 1:\n        config.evaluation.stage1_enabled\n",
+        "match [1]:\n    case [1]:\n        config.evaluation.stage1_enabled\n",
+        'match {"kind": 1}:\n    case {"kind": 1}:\n        config.evaluation.stage1_enabled\n',
+    ),
+)
+def test_runtime_scan_counts_statically_matching_match_cases(
+    contract, tmp_path: Path, source: str
+) -> None:
+    (tmp_path / "matching_match.py").write_text(source, encoding="utf-8")
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
 
 def test_runtime_scan_keeps_for_break_path_separate_from_loop_else(
