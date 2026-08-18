@@ -882,33 +882,12 @@ async def test_answer_emits_response_diagnostic_event(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_later_answer_overlaps_scoring_and_question_generation(tmp_path: Path) -> None:
-    """Later turns keep the MCP wall clock near the slower model call, not their sum."""
+async def test_later_answer_reports_distinct_phase_timings(tmp_path: Path) -> None:
+    """Each timed collaborator is bracketed and emitted under its own label."""
     state = InterviewState(
         interview_id="interview_answer00000002",
         initial_context="ctx",
         status=InterviewStatus.IN_PROGRESS,
-        ambiguity_score=0.4,
-        ambiguity_breakdown={
-            "goal_clarity": {
-                "name": "Goal Clarity",
-                "clarity_score": 0.6,
-                "weight": 0.4,
-                "justification": "Prior snapshot",
-            },
-            "constraint_clarity": {
-                "name": "Constraint Clarity",
-                "clarity_score": 0.6,
-                "weight": 0.3,
-                "justification": "Prior snapshot",
-            },
-            "success_criteria_clarity": {
-                "name": "Success Criteria Clarity",
-                "clarity_score": 0.6,
-                "weight": 0.3,
-                "justification": "Prior snapshot",
-            },
-        },
     )
     state.rounds.extend(
         [
@@ -931,41 +910,67 @@ async def test_later_answer_overlaps_scoring_and_question_generation(tmp_path: P
         opencode_mode=None,
         data_dir=tmp_path,
     )
-    scoring_started = asyncio.Event()
-    question_started = asyncio.Event()
-    question_scores: list[float | None] = []
+    active_phase = {"name": "turn"}
+    clock_reads = iter(
+        [
+            ("turn", 100.0),
+            ("turn", 101.0),
+            ("ambiguity_scoring", 101.125),
+            ("ambiguity_scoring", 102.0),
+            ("question_generation", 102.25),
+            ("question_generation", 103.0),
+            ("advisory_build", 103.5),
+            ("advisory_build", 104.0),
+        ]
+    )
+
+    def fake_perf_counter() -> float:
+        expected_phase, value = next(clock_reads)
+        assert active_phase["name"] == expected_phase
+        return value
 
     async def score_interview_state(*_args: Any, **_kwargs: Any) -> None:
-        scoring_started.set()
-        await asyncio.wait_for(question_started.wait(), timeout=1)
-        state.store_ambiguity(score=0.3, breakdown=state.ambiguity_breakdown or {})
+        active_phase["name"] = "ambiguity_scoring"
 
     async def ask_next_question(
         _engine: _StubInterviewEngine,
-        question_state: InterviewState,
+        _state: InterviewState,
     ) -> Result[str, MCPServerError]:
-        question_scores.append(question_state.ambiguity_score)
-        question_started.set()
-        await asyncio.wait_for(scoring_started.wait(), timeout=1)
+        active_phase["name"] = "question_generation"
         return Result.ok(engine.next_question)
+
+    def attach_question_assist_requests(*_args: Any, **_kwargs: Any) -> None:
+        active_phase["name"] = "advisory_build"
 
     handler._score_interview_state = AsyncMock(  # type: ignore[method-assign]
         side_effect=score_interview_state
     )
 
-    with patch.object(_StubInterviewEngine, "ask_next_question", new=ask_next_question):
+    with (
+        patch.object(_StubInterviewEngine, "ask_next_question", new=ask_next_question),
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers._attach_question_assist_requests",
+            side_effect=attach_question_assist_requests,
+        ),
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.time.perf_counter",
+            side_effect=fake_perf_counter,
+        ),
+    ):
         outcome = await handler.handle(
             {"session_id": state.interview_id, "answer": "Runs locally."}
         )
     assert outcome.is_ok
     await _drain_bg_tasks(handler)
 
-    assert question_scores == [0.4]
-    assert state.ambiguity_score == 0.3
     diagnostic = _find_event(event_store.events, event_type="interview.response.emitted")
     assert diagnostic is not None
-    assert diagnostic.data["timings_ms"]["ambiguity_scoring"] >= 0
-    assert diagnostic.data["timings_ms"]["question_generation"] >= 0
+    assert diagnostic.data["timings_ms"] == {
+        "total": 4000.0,
+        "ambiguity_scoring": 125.0,
+        "question_generation": 250.0,
+        "advisory_build": 500.0,
+    }
     handler._score_interview_state.assert_awaited_once()
 
 
