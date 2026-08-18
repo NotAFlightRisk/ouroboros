@@ -184,7 +184,11 @@ def _builtin_is_supported(argv: tuple[str, ...]) -> bool:
     if name == "exit":
         if not operands:
             return True
-        return len(operands) == 1 and operands[0].isdigit() and int(operands[0]) <= 255
+        # POSIX truncates the operand to 8 bits, so `exit 256` reports 0 and
+        # `exit -1` reports 255. Accepting the full signed range (normalized
+        # in run_builtin) matters for the vacuity proof: rejecting `exit 256`
+        # here would leave a command that always succeeds unproven.
+        return len(operands) == 1 and _is_integer(operands[0])
     if name == "echo":
         return all(not operand.startswith("-") or operand == "-n" for operand in operands)
     if name == "printf":
@@ -260,6 +264,17 @@ def plan_shell_free_execution(command: str) -> tuple[ShellFreeStep, ...] | None:
         overrides, argv = _split_assignment_prefix(tokens)
         if not argv:
             return None
+        # `command name ...` runs `name` bypassing shell functions — none exist
+        # here, so stripping the prefix is exact. Its option forms (`-v`/`-V`
+        # print, `-p` swaps PATH) change behavior and are refused. A bare
+        # `command` exits 0, same as `true`. Without this, `command true`
+        # would read as an external program and escape the vacuity proof.
+        while argv and argv[0] == "command":
+            if len(argv) > 1 and argv[1].startswith("-"):
+                return None
+            argv = argv[1:]
+        if not argv:
+            argv = ["true"]
         step = ShellFreeStep(
             argv=tuple(argv),
             run_condition=condition,
@@ -283,7 +298,8 @@ def run_builtin(step: ShellFreeStep, *, cwd: str) -> BuiltinResult:
     if name == "false":
         return BuiltinResult(status=1)
     if name == "exit":
-        return BuiltinResult(status=int(operands[0]) if operands else 0)
+        # POSIX: the shell reports the operand's low 8 bits.
+        return BuiltinResult(status=int(operands[0]) % 256 if operands else 0)
     if name == "echo":
         trailing_newline = True
         if operands and operands[0] == "-n":
@@ -377,6 +393,22 @@ def constant_verdict(command: str, output_assertion: str | None = None) -> bool 
     steps = plan_shell_free_execution(command)
     if steps is None:
         return None
+
+    # `bash -c 'exit 0'` is the same constant wearing a wrapper. When the
+    # whole command is one shell invocation of a literal string, the verdict
+    # is the inner command's verdict, recursively. Only flag letters that
+    # cannot change status or output are admitted (`l` login, `e` errexit);
+    # `x`/`v` trace into the combined output, so they stay unproven.
+    if len(steps) == 1 and not steps[0].env_overrides:
+        argv = steps[0].argv
+        if (
+            len(argv) == 3
+            and argv[0] in {"bash", "sh"}
+            and argv[1].startswith("-")
+            and "c" in argv[1][1:]
+            and set(argv[1][1:]) <= set("cle")
+        ):
+            return constant_verdict(argv[2], output_assertion)
 
     status = 0
     output: list[str] = []
