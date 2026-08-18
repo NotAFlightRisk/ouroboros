@@ -78,17 +78,27 @@ def _executable(candidate: str | None) -> str | None:
     return shutil.which(expanded)
 
 
+def _config_value() -> str | None:
+    """Read ``orchestrator.verify_bash_path`` without the environment override.
+
+    The env-first accessor would return the same stale ``OUROBOROS_VERIFY_BASH``
+    this function is called to look past, so a configured shell would never be
+    reached on a machine whose override has gone bad.
+    """
+    try:
+        from ouroboros.config.loader import get_configured_verify_bash_path
+    except ImportError:  # pragma: no cover - loader is always importable in-tree
+        return None
+    return get_configured_verify_bash_path()
+
+
 def _configured_candidate() -> tuple[str, str] | None:
     env_value = os.environ.get(VERIFY_BASH_ENV_VAR, "").strip()
     resolved = _executable(env_value)
     if resolved:
         return resolved, "env"
 
-    try:
-        from ouroboros.config.loader import get_verify_bash_path
-    except ImportError:  # pragma: no cover - loader is always importable in-tree
-        return None
-    resolved = _executable(get_verify_bash_path())
+    resolved = _executable(_config_value())
     if resolved:
         return resolved, "config"
     return None
@@ -159,20 +169,25 @@ def _resolve_uncached() -> VerifyShellRoute | None:
     return None
 
 
-_ROUTE_CACHE: dict[tuple[str, str, str], VerifyShellRoute] = {}
+_ROUTE_CACHE: dict[tuple[str, ...], VerifyShellRoute] = {}
 
 
-def _cache_key() -> tuple[str, str, str]:
-    """Fingerprint the inputs resolution actually reads.
+def _cache_key() -> tuple[str, ...]:
+    """Fingerprint *every* input resolution reads.
 
-    Resolution is deterministic in (OS, explicit override, PATH), so one lookup
-    per ``ooo run`` is enough; a changed override or PATH invalidates itself
-    instead of serving a stale interpreter.
+    Resolution is deterministic in these values, so one lookup per ``ooo run``
+    is enough — but only if the key names all of them. A key that omitted the
+    configured path, the Git-for-Windows install roots or ``%SystemRoot%``
+    would keep serving the first route it ever resolved after those changed,
+    which is exactly the stale interpreter the cache is supposed to avoid.
     """
     return (
         "nt" if _running_on_windows() else "posix",
         os.environ.get(VERIFY_BASH_ENV_VAR, "").strip(),
+        _config_value() or "",
         os.environ.get("PATH", ""),
+        os.environ.get("SYSTEMROOT", ""),
+        *(os.environ.get(variable, "") for variable in _GIT_BASH_PROGRAM_FILES_VARS),
     )
 
 

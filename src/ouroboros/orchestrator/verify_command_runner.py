@@ -32,13 +32,33 @@ COMMAND_NOT_FOUND_STATUS = 127
 COMMAND_NOT_EXECUTABLE_STATUS = 126
 
 
+def _workspace_relative_path(path: str | None, *, cwd: str) -> str | None:
+    """Re-anchor a ``PATH`` value to ``cwd`` the way the shell would read it.
+
+    A shell launched in the workspace resolves every relative ``PATH`` entry —
+    and an empty entry, which POSIX defines as the current directory —
+    against *that* directory. ``shutil.which`` resolves them against the
+    orchestrator's own process directory instead, so an unanchored lookup can
+    both miss a workspace tool and, worse, resolve a same-named binary sitting
+    beside the orchestrator. Absolute entries are left untouched.
+    """
+    if path is None:
+        return None
+    anchored = [
+        entry if os.path.isabs(entry) else os.path.join(cwd, entry or os.curdir)
+        for entry in path.split(os.pathsep)
+    ]
+    return os.pathsep.join(anchored)
+
+
 def _resolve_step_executable(name: str, *, cwd: str, path: str | None) -> tuple[str | None, int]:
     """Resolve a step's command name the way a shell running in ``cwd`` would.
 
     A name containing a path separator never consults PATH: the shell resolves
     it against its own working directory, so ``./check.sh`` must mean the file
     inside the verification workspace — not one relative to wherever the
-    orchestrator process happens to run. Bare names keep the PATH lookup.
+    orchestrator process happens to run. Bare names keep the PATH lookup, with
+    the same workspace anchoring applied to relative ``PATH`` entries.
 
     Returns the executable to spawn, or ``None`` with the POSIX status a shell
     would report (127 not found, 126 found but not executable).
@@ -50,7 +70,7 @@ def _resolve_step_executable(name: str, *, cwd: str, path: str | None) -> tuple[
         if not os.path.isfile(candidate) or not os.access(candidate, os.X_OK):
             return None, COMMAND_NOT_EXECUTABLE_STATUS
         return candidate, 0
-    executable = shutil.which(name, path=path)
+    executable = shutil.which(name, path=_workspace_relative_path(path, cwd=cwd))
     if executable is None:
         return None, COMMAND_NOT_FOUND_STATUS
     return executable, 0
