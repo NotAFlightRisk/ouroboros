@@ -11,9 +11,31 @@ from ouroboros.orchestrator.execution_authority import (
     valid_runtime_effect_capabilities_contract,
 )
 
-CURRENT_EXECUTION_SEMANTICS_VERSION = 5
-PRE_BASELINE_PROBE_EXECUTION_SEMANTICS_VERSION = 4
+CURRENT_EXECUTION_SEMANTICS_VERSION = 6
 PRE_ADAPTIVE_EXECUTION_SEMANTICS_VERSION = 3
+
+# One rung per durable field added after v4, in the order they were added:
+# (highest version that predates the field, field, the value a session created
+# before it actually ran under). `honored` and `observe` are not defaults — they
+# are what those sessions did, so a resume replays them rather than adopting
+# behavior their accepted ACs were never judged by.
+_LEGACY_SCHEMA_LADDER: tuple[tuple[int, str, str], ...] = (
+    (4, "vacuous_contract_evidence", "honored"),
+    (5, "verify_baseline_probe", "observe"),
+)
+
+# What a session does with a `verify_command` that cannot fail.
+#
+# `revoked` is the policy this release introduces: such a contract decides
+# nothing, so the evidence exemption it bought is taken back and the gate does
+# not run it. `honored` is the behavior every session created before that —
+# the contract counted, and its transcript evidence stayed dropped.
+#
+# The distinction is durable because it changes both the required evidence
+# schema and whether the authoritative gate runs for that AC. A session that
+# began under one policy must finish under it: silently re-deciding on resume
+# would change replay behavior for work already done.
+VACUOUS_CONTRACT_EVIDENCE_POLICIES = frozenset({"honored", "revoked"})
 
 
 class ExecutionSemanticsRejection(NamedTuple):
@@ -29,6 +51,7 @@ _CURRENT_KEYS = frozenset(
         "run_verify_commands",
         "verify_command_timeout_seconds",
         "verify_baseline_probe",
+        "vacuous_contract_evidence",
         "ac_retry_attempts",
         "cross_harness_redispatch",
         "enable_decomposition",
@@ -99,6 +122,11 @@ def valid_execution_semantics_contract(value: object) -> bool:
     baseline_probe = value.get("verify_baseline_probe")
     if not isinstance(baseline_probe, str) or baseline_probe not in {"off", "observe"}:
         return False
+    vacuity_policy = value.get("vacuous_contract_evidence")
+    if not isinstance(vacuity_policy, str) or vacuity_policy not in (
+        VACUOUS_CONTRACT_EVIDENCE_POLICIES
+    ):
+        return False
     timeout = value.get("verify_command_timeout_seconds")
     retries = value.get("ac_retry_attempts")
     max_depth = value.get("max_decomposition_depth")
@@ -149,28 +177,42 @@ def valid_execution_semantics_contract(value: object) -> bool:
     )
 
 
-def valid_pre_baseline_probe_execution_semantics_contract(value: object) -> bool:
-    """Recognize the exact v4 shape that predates the baseline-probe field.
+def migrated_legacy_execution_semantics(value: object) -> dict[str, object] | None:
+    """Bring a recognized older contract up to the current schema, or ``None``.
 
-    The probe changes execution effects (pre-dispatch contract runs, verdict
-    tiers, recovery authority), so it belongs to the durable semantics schema.
-    A v4 contract is admitted by migration to the schema default ``observe`` —
-    the value every v4 session would have received had the field existed —
-    rather than rejected, because the migration changes nothing else.
+    Each release that adds a durable field also adds one rung here: the field
+    plus the value a session created before it actually ran under. A v4
+    contract climbs every rung in order, so one migration never has to know
+    about the next. ``None`` means the payload is not a recognized older shape
+    — it is then rejected, never guessed at.
+
+    A field already present in a payload that claims an older version disproves
+    the version, so that payload is refused rather than migrated: it is the
+    shape a forged or corrupted contract would have.
     """
-    if (
-        not isinstance(value, Mapping)
-        or value.get("version") != PRE_BASELINE_PROBE_EXECUTION_SEMANTICS_VERSION
-        or "verify_baseline_probe" in value
-    ):
-        return False
+    if not isinstance(value, Mapping):
+        return None
+    version = value.get("version")
+    if type(version) is not int or version >= CURRENT_EXECUTION_SEMANTICS_VERSION:
+        return None
     migrated = dict(value)
+    climbed = False
+    for from_version, key, ran_under in _LEGACY_SCHEMA_LADDER:
+        if version > from_version:
+            continue
+        if key in migrated:
+            return None
+        migrated[key] = ran_under
+        climbed = True
+    if not climbed:
+        return None
     migrated["version"] = CURRENT_EXECUTION_SEMANTICS_VERSION
-    migrated["verify_baseline_probe"] = "observe"
-    # A v4 legacy-preflight snapshot chains through both migrations.
-    return valid_execution_semantics_contract(
+    # A legacy-preflight snapshot chains through this migration and its own.
+    if valid_execution_semantics_contract(
         migrated
-    ) or valid_legacy_preflight_execution_semantics_contract(migrated)
+    ) or valid_legacy_preflight_execution_semantics_contract(migrated):
+        return migrated
+    return None
 
 
 def valid_legacy_preflight_execution_semantics_contract(value: object) -> bool:
@@ -231,9 +273,10 @@ def pre_adaptive_execution_semantics_rejection(
 
 __all__ = [
     "CURRENT_EXECUTION_SEMANTICS_VERSION",
+    "VACUOUS_CONTRACT_EVIDENCE_POLICIES",
     "ExecutionSemanticsRejection",
     "pre_adaptive_execution_semantics_rejection",
     "valid_execution_semantics_contract",
+    "migrated_legacy_execution_semantics",
     "valid_legacy_preflight_execution_semantics_contract",
-    "valid_pre_baseline_probe_execution_semantics_contract",
 ]

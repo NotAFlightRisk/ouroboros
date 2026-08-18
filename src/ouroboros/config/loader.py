@@ -1365,25 +1365,20 @@ def get_goose_cli_path() -> str | None:
     return None
 
 
-def get_verify_bash_path() -> str | None:
-    """Get the POSIX shell used to run an AC's ``verify_command``.
+def get_configured_verify_bash_path() -> str | None:
+    """Get ``orchestrator.verify_bash_path`` — config only, never the env.
 
-    Priority:
-        1. OUROBOROS_VERIFY_BASH environment variable
-        2. config.yaml orchestrator.verify_bash_path
-        3. None (resolve well-known locations / PATH at runtime)
-
-    Executability is checked by the caller
-    (:func:`ouroboros.orchestrator.verify_shell.resolve_verify_shell`), which
-    falls through to its own candidate list when a configured value is stale.
+    The usual env-then-config accessor shape is deliberately not used here.
+    :func:`ouroboros.orchestrator.verify_shell.resolve_verify_shell` reads
+    ``OUROBOROS_VERIFY_BASH`` itself, and reaches this function only after
+    finding that value stale; an accessor that returned the environment first
+    would hand back the same stale path and hide the configured shell entirely.
+    Executability is checked by that caller, which falls through to its own
+    candidate list when the configured value no longer resolves.
 
     Returns:
         Configured shell path or None.
     """
-    env_path = os.environ.get("OUROBOROS_VERIFY_BASH", "").strip()
-    if env_path:
-        return str(Path(env_path).expanduser())
-
     try:
         config = load_config()
         verify_bash_path = getattr(config.orchestrator, "verify_bash_path", None)

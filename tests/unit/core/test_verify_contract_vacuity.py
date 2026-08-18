@@ -105,7 +105,6 @@ def test_unparseable_commands_are_not_accused() -> None:
         "exit 512",
         "bash -c 'exit 0'",
         'sh -c "true"',
-        "bash -lc 'exit 0'",
         "bash -c 'exit 256'",
         "command true",
         "command exit 0",
@@ -132,7 +131,55 @@ def test_disguised_constant_failures_stay_left_alone(command: str) -> None:
         "bash -xc 'exit 0'",
         "command -v pytest",
         "bash -c 'exit 0' extra-arg",
+        # `-l` runs the login profile, which can exit nonzero or print into
+        # the output an assertion is checked against.
+        "bash -lc 'exit 0'",
+        # `-e` aborts at the first failure: this one exits 1, not 0.
+        "bash -ec 'false; true'",
+        "bash -ce 'false; true'",
+        # No shell can parse this operand: bash exits 255 with "numeric
+        # argument required", so the contract always FAILS. Normalizing it
+        # modulo 256 would prove the opposite and skip the command.
+        "exit 18446744073709551616",
+        "exit -99999999999999999999",
+        # `str.isdigit` accepts these; a shell does not.
+        "exit \u0663",
     ],
 )
 def test_wrappers_that_could_do_real_work_stay_unproven(command: str) -> None:
     assert constant_verdict(command) is not True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "exit 0",
+        "true",
+        ":",
+        "echo ok",
+        "printf READY",
+        "exit 256",
+        "exit +0",
+        "exit -0",
+        "exit 512",
+        "bash -c 'exit 0'",
+        "command true",
+        "true && echo PASS",
+        "false || exit 0",
+        "exit 0 ; false",
+    ],
+)
+def test_a_proven_constant_pass_really_passes_under_bash(command: str) -> None:
+    """The proof's whole authority is that it matches the shell that would run
+    the command. Every command it calls always-passing must actually exit 0."""
+    import shutil
+    import subprocess
+
+    assert constant_verdict(command) is True
+
+    bash = shutil.which("bash")
+    if bash is None:  # pragma: no cover - CI always has bash
+        pytest.skip("no bash on this machine")
+    completed = subprocess.run([bash, "-c", command], capture_output=True, text=True)
+
+    assert completed.returncode == 0, command

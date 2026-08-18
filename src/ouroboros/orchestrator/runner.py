@@ -155,10 +155,11 @@ from ouroboros.orchestrator.execution_runtime_scope import (
 )
 from ouroboros.orchestrator.execution_semantics import (
     CURRENT_EXECUTION_SEMANTICS_VERSION,
+    VACUOUS_CONTRACT_EVIDENCE_POLICIES,
     pre_adaptive_execution_semantics_rejection,
     valid_execution_semantics_contract,
     valid_legacy_preflight_execution_semantics_contract,
-    valid_pre_baseline_probe_execution_semantics_contract,
+    migrated_legacy_execution_semantics,
 )
 from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
@@ -1069,6 +1070,11 @@ class OrchestratorRunner:
         self._run_verify_commands = _execution_config.run_verify_commands
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
         self._verify_baseline_probe = _execution_config.verify_baseline_probe
+        # New sessions revoke the evidence exemption a contract that cannot
+        # fail used to buy. A resumed session adopts the policy it was created
+        # under instead (see `_restore_execution_contract`), because the choice
+        # decides both the required evidence and whether the gate runs at all.
+        self._vacuous_contract_evidence = "revoked"
         self._ac_retry_attempts = _execution_config.ac_retry_attempts
         from ouroboros.config import (
             get_context_pack_enabled,
@@ -3918,6 +3924,7 @@ class OrchestratorRunner:
             "run_verify_commands": self._run_verify_commands,
             "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
             "verify_baseline_probe": self._verify_baseline_probe,
+            "vacuous_contract_evidence": self._vacuous_contract_evidence,
             "ac_retry_attempts": self._ac_retry_attempts,
             "cross_harness_redispatch": self._cross_harness_redispatch_enabled,
             "enable_decomposition": self._enable_decomposition,
@@ -6112,29 +6119,26 @@ class OrchestratorRunner:
                 details=pre_adaptive_rejection.details,
             )
 
-        migrate_pre_baseline_contract = valid_pre_baseline_probe_execution_semantics_contract(
-            raw_execution_semantics
-        )
-        if migrate_pre_baseline_contract:
-            persisted_v4_fingerprint = raw_proof.get("execution_semantics_fingerprint")
+        # Older durable schemas climb one ladder (execution_semantics.py), each
+        # rung restoring the behavior that session actually ran under rather
+        # than this build's defaults.
+        climbed_semantics = migrated_legacy_execution_semantics(raw_execution_semantics)
+        if climbed_semantics is not None:
+            persisted_legacy_schema_fingerprint = raw_proof.get("execution_semantics_fingerprint")
             if not isinstance(
-                persisted_v4_fingerprint, str
-            ) or persisted_v4_fingerprint != self._execution_semantics_fingerprint(
+                persisted_legacy_schema_fingerprint, str
+            ) or persisted_legacy_schema_fingerprint != self._execution_semantics_fingerprint(
                 raw_execution_semantics
             ):
                 raise OrchestratorError(
-                    message="Cannot resume with an invalid pre-baseline-probe contract",
+                    message="Cannot resume with an invalid legacy execution-semantics contract",
                     details={"invalid": "execution_semantics_fingerprint"},
                 )
             migrated_contract = deepcopy(dict(raw_contract))
-            migrated_semantics = migrated_contract["execution_semantics"]
             migrated_proof = migrated_contract["frugality_proof"]
-            assert isinstance(migrated_semantics, dict)
             assert isinstance(migrated_proof, dict)
-            migrated_semantics["version"] = CURRENT_EXECUTION_SEMANTICS_VERSION
-            # The schema default: what every v4 session would have carried had
-            # the field existed. Nothing else about the contract changes.
-            migrated_semantics["verify_baseline_probe"] = "observe"
+            migrated_semantics = climbed_semantics
+            migrated_contract["execution_semantics"] = migrated_semantics
             migrated_proof["execution_semantics_fingerprint"] = (
                 self._execution_semantics_fingerprint(migrated_semantics)
             )
@@ -6666,6 +6670,14 @@ class OrchestratorRunner:
             )
         self._execution_preferences = persisted_preferences
         self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
+        # The vacuity policy belongs to the session, not to this process: a
+        # session that began before the revocation must keep honoring those
+        # contracts, so the persisted value is adopted before the drift check
+        # rather than read as drift against this build's default.
+        persisted_vacuity_policy = raw_execution_semantics.get("vacuous_contract_evidence")
+        if persisted_vacuity_policy in VACUOUS_CONTRACT_EVIDENCE_POLICIES:
+            assert isinstance(persisted_vacuity_policy, str)
+            self._vacuous_contract_evidence = persisted_vacuity_policy
         current_execution_semantics = self._execution_semantics_contract()
         if (
             not migrate_legacy_contract
@@ -10331,6 +10343,7 @@ class OrchestratorRunner:
             run_verify_commands=execution_semantics["run_verify_commands"],
             verify_command_timeout_seconds=execution_semantics["verify_command_timeout_seconds"],
             verify_baseline_probe=execution_semantics["verify_baseline_probe"],
+            vacuous_contract_evidence=execution_semantics["vacuous_contract_evidence"],
             ac_retry_attempts=execution_semantics["ac_retry_attempts"],
             cross_harness_redispatch=execution_semantics["cross_harness_redispatch"],
             shadow_replay_enabled=execution_semantics["shadow_replay_enabled"],

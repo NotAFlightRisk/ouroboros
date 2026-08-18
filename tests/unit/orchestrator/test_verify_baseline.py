@@ -604,9 +604,9 @@ async def test_baseline_is_persisted_before_any_worker_effect(tmp_path: Any) -> 
     assert restored.records[0].probed is True
 
 
-def test_semantics_contract_carries_probe_field_and_migrates_v4() -> None:
+def test_semantics_contract_carries_probe_field_and_climbs_from_v4() -> None:
     from ouroboros.orchestrator.execution_semantics import (
-        valid_pre_baseline_probe_execution_semantics_contract,
+        migrated_legacy_execution_semantics,
     )
 
     v4 = {
@@ -649,18 +649,34 @@ def test_semantics_contract_carries_probe_field_and_migrates_v4() -> None:
 
     v4["runtime_effect_capabilities"] = runtime_effect_capabilities_contract(_Adapter())
 
-    assert valid_pre_baseline_probe_execution_semantics_contract(v4) is True
+    # A v4 contract climbs every rung added since, each restoring what that
+    # session actually ran under rather than this build's default.
+    climbed_v4 = migrated_legacy_execution_semantics(v4)
+    assert climbed_v4 is not None
+    assert climbed_v4["version"] == 6
+    assert climbed_v4["vacuous_contract_evidence"] == "honored"
+    assert climbed_v4["verify_baseline_probe"] == "observe"
+    assert valid_execution_semantics_contract(climbed_v4) is True
+
+    # A v5 contract climbs only the rung it is missing.
     v5 = dict(v4)
     v5["version"] = 5
-    v5["verify_baseline_probe"] = "observe"
-    assert valid_execution_semantics_contract(v5) is True
-    # v5 without the field is invalid; v4 with the field is not a v4 shape.
-    v5_missing = dict(v5)
-    del v5_missing["verify_baseline_probe"]
-    assert valid_execution_semantics_contract(v5_missing) is False
+    v5["vacuous_contract_evidence"] = "revoked"
+    climbed_v5 = migrated_legacy_execution_semantics(v5)
+    assert climbed_v5 is not None
+    assert climbed_v5["version"] == 6
+    assert climbed_v5["vacuous_contract_evidence"] == "revoked"
+    assert climbed_v5["verify_baseline_probe"] == "observe"
+
+    # The current schema requires both fields, and a payload already carrying a
+    # field it claims to predate has disproved its own version.
+    current_missing = dict(climbed_v4)
+    del current_missing["verify_baseline_probe"]
+    assert valid_execution_semantics_contract(current_missing) is False
+    assert migrated_legacy_execution_semantics(climbed_v4) is None
     v4_with = dict(v4)
     v4_with["verify_baseline_probe"] = "observe"
-    assert valid_pre_baseline_probe_execution_semantics_contract(v4_with) is False
+    assert migrated_legacy_execution_semantics(v4_with) is None
 
 
 # ---------------------------------------------------------------------------

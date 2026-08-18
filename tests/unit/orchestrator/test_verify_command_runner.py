@@ -190,3 +190,151 @@ def test_planner_refuses_what_cannot_be_reproduced() -> None:
         "ls *.py",
     ]:
         assert plan_shell_free_execution(command) is None, command
+
+
+@pytest.mark.asyncio
+async def test_relative_path_entries_resolve_against_the_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shell reads `PATH=./bin` relative to the directory it runs in.
+
+    Resolving it against the orchestrator's own process directory can both miss
+    the workspace tool and — the sharp case pinned here — execute a same-named
+    binary that happens to sit beside the orchestrator.
+    """
+    workspace = tmp_path / "workspace" / "bin"
+    workspace.mkdir(parents=True)
+    (workspace / "check").write_text("#!/bin/sh\necho FROM-WORKSPACE\n")
+    (workspace / "check").chmod(0o755)
+
+    decoy = tmp_path / "decoy" / "bin"
+    decoy.mkdir(parents=True)
+    (decoy / "check").write_text("#!/bin/sh\necho FROM-DECOY\n")
+    (decoy / "check").chmod(0o755)
+
+    monkeypatch.chdir(tmp_path / "decoy")
+    steps = plan_shell_free_execution("check")
+    assert steps is not None
+
+    run = await run_shell_free_plan(
+        steps,
+        cwd=str(tmp_path / "workspace"),
+        env={"PATH": "./bin"},
+        timeout_seconds=30.0,
+    )
+
+    assert run.returncode == 0
+    assert "FROM-WORKSPACE" in run.output
+    assert "FROM-DECOY" not in run.output
+
+
+@pytest.mark.asyncio
+async def test_empty_path_entry_means_the_workspace_like_posix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POSIX defines an empty `PATH` element as the current directory."""
+    (tmp_path / "check").write_text("#!/bin/sh\necho HERE\n")
+    (tmp_path / "check").chmod(0o755)
+    monkeypatch.chdir(tmp_path.parent)
+
+    steps = plan_shell_free_execution("check")
+    assert steps is not None
+    run = await run_shell_free_plan(
+        steps,
+        cwd=str(tmp_path),
+        env={"PATH": ""},
+        timeout_seconds=30.0,
+    )
+
+    assert run.returncode == 0
+    assert "HERE" in run.output
+
+
+def test_builtins_this_module_does_not_emulate_are_refused() -> None:
+    """A name the shell interprets itself must never become a PATH lookup.
+
+    `type missing` fails in bash; admitting it would run a caller-controlled
+    `type` binary that can exit 0 instead — a false pass invented by the
+    fallback route. Refusing reports the AC unverifiable, which is honest.
+    """
+    for command in [
+        "type missing",
+        "cd sub",
+        "export FLAG=1",
+        "eval echo hi",
+        "exec true",
+        "read line",
+        "unset FLAG",
+        "source ./env.sh",
+        "pwd",
+        "umask 022",
+        "if true",
+        "for f in a",
+        "while true",
+        "function f",
+    ]:
+        assert plan_shell_free_execution(command) is None, command
+
+
+@pytest.mark.asyncio
+async def test_echo_consumes_every_leading_dash_n_like_bash(tmp_path: Path) -> None:
+    """`echo -n -n x` prints `x` in bash; printing `-n x` would let a contract
+    asserting on `-n` pass here and fail under a real shell."""
+    assert (await _run("echo -n -n x", tmp_path)).output == "x"
+    assert (await _run("echo -n -n -n done", tmp_path)).output == "done"
+    # A `-n` that is not leading is an ordinary operand.
+    assert (await _run("echo x -n", tmp_path)).output == "x -n\n"
+
+
+@pytest.mark.asyncio
+async def test_admitted_commands_match_a_real_bash(tmp_path: Path) -> None:
+    """Cross-check the whole admitted surface against the interpreter it claims
+    to reproduce. Anything that diverges must be refused, not approximated."""
+    import shutil as _shutil
+    import subprocess
+
+    bash = _shutil.which("bash")
+    if bash is None:  # pragma: no cover - CI always has bash
+        pytest.skip("no bash on this machine")
+
+    (tmp_path / "present.txt").write_text("x")
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "tool").write_text("#!/bin/sh\necho TOOL\n")
+    (tmp_path / "bin" / "tool").chmod(0o755)
+
+    for command in [
+        "exit 0",
+        "exit 7",
+        "true",
+        "false",
+        "echo hi",
+        "echo -n hi",
+        "echo -n -n hi",
+        "echo hi -n",
+        "printf READY",
+        "test -f present.txt",
+        "test -f missing.txt",
+        "test -f present.txt && echo FOUND",
+        "test -f missing.txt || echo ABSENT",
+        "false ; echo AFTER",
+        "./bin/tool",
+        "PATH=./bin tool",
+    ]:
+        steps = plan_shell_free_execution(command)
+        assert steps is not None, f"planner refused {command!r}"
+        ours = await run_shell_free_plan(
+            steps,
+            cwd=str(tmp_path),
+            env={"PATH": "/usr/bin:/bin"},
+            timeout_seconds=30.0,
+        )
+        theirs = subprocess.run(
+            [bash, "-c", command],
+            cwd=str(tmp_path),
+            env={"PATH": "/usr/bin:/bin"},
+            capture_output=True,
+            text=True,
+        )
+
+        assert ours.returncode == theirs.returncode, command
+        assert ours.output == theirs.stdout, command
