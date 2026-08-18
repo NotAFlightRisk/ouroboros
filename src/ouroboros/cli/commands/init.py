@@ -5,6 +5,7 @@ Supports both LiteLLM (external API) and Claude Code (Max Plan) modes.
 """
 
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum, auto
 from pathlib import Path
@@ -16,7 +17,13 @@ import structlog
 import typer
 import yaml
 
-from ouroboros.bigbang.ambiguity import AmbiguityScorer
+from ouroboros.bigbang.ambiguity import (
+    AMBIGUITY_THRESHOLD,
+    AmbiguityScore,
+    AmbiguityScorer,
+    get_completion_floor_failures,
+    qualifies_for_seed_completion,
+)
 from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
@@ -58,6 +65,12 @@ from ouroboros.providers import create_llm_adapter, resolve_llm_backend
 from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
+
+# Retry budget for the per-round scorer, which runs between two interactive
+# prompts. ``AmbiguityScorer`` defaults to 10 attempts with doubling token
+# budgets; a person waiting at a prompt should see the score-blind fallback
+# well before that. Matches the MCP live-scoring budget.
+_LOOP_AMBIGUITY_MAX_RETRIES = 3
 
 
 class SeedGenerationResult(Enum):
@@ -257,27 +270,103 @@ async def _get_init_event_store():
     return event_store
 
 
+async def _refresh_ambiguity(
+    engine: InterviewEngine,
+    state: InterviewState,
+    scorer: AmbiguityScorer | None,
+) -> AmbiguityScore | None:
+    """Score the in-progress interview and persist the snapshot on state.
+
+    The stored snapshot is what turns on the seed-closer perspective and the
+    ambiguity block in the question prompt, so a failed score must clear it
+    rather than leave a stale one behind (the same contract the MCP live
+    scoring path follows).
+    """
+    if scorer is None:
+        return None
+
+    with console.status("[cyan]Measuring ambiguity...[/]", spinner="dots"):
+        score_result = await scorer.score(state)
+
+    if score_result.is_err:
+        state.clear_stored_ambiguity()
+        log.warning(
+            "cli.init.live_ambiguity_failed",
+            interview_id=state.interview_id,
+            error=str(score_result.error),
+        )
+    else:
+        score = score_result.value
+        state.store_ambiguity(
+            score=score.overall_score,
+            breakdown=score.breakdown.model_dump(mode="json"),
+        )
+
+    save_result = await engine.save_state(state)
+    if save_result.is_err:
+        log.warning(
+            "cli.init.persist_live_ambiguity_failed",
+            interview_id=state.interview_id,
+            error=str(save_result.error),
+        )
+
+    return None if score_result.is_err else score_result.value
+
+
+@dataclass(frozen=True, slots=True)
+class InterviewLoopOutcome:
+    """How the interview loop ended, not just where it left the state.
+
+    ``seed_generation_approved`` is true only when the user answered the
+    score-aware "proceed to Seed generation?" confirmation. The outer flow
+    consumes it instead of asking the same question a second time, so one
+    affirmative answer means what it says.
+    """
+
+    state: InterviewState
+    seed_generation_approved: bool = False
+    # The score the approval was given for. Reused by seed generation so the
+    # answer cannot be undone by a second, independently sampled score.
+    approved_score: AmbiguityScore | None = None
+
+
 async def _run_interview_loop(
     engine: InterviewEngine,
     state: InterviewState,
     *,
     event_store=None,
     disabled_event_stores: set[int] | None = None,
-) -> InterviewState:
+    scorer: AmbiguityScorer | None = None,
+) -> InterviewLoopOutcome:
     """Run the interview question loop until completion or user exit.
 
-    Implements tiered confirmation:
-    - Rounds 1-3: Auto-continue (minimum context)
-    - Rounds 4-15: Ask "Continue?" after each round
-    - Rounds 16+: Ask "Continue?" with diminishing returns warning
+    Rounds 1-2 auto-continue to gather minimum context. From
+    ``MIN_ROUNDS_BEFORE_EARLY_EXIT`` on, each round ends by measuring ambiguity
+    and asking the question that score implies:
+
+    - Qualifying score (overall threshold *and* every component floor, brownfield
+      aware): "proceed to Seed generation?". Approving ends the interview and is
+      reported in the outcome, so the caller starts generation with the same
+      score instead of asking again or sampling a second one. Declining keeps
+      the interview open.
+    - Otherwise, or with no scorer: "Continue with more questions?", where
+      declining completes the interview without approving generation.
+
+    A scoring failure clears any stored snapshot and falls back to the
+    score-blind prompt for that round rather than deciding on a stale score.
 
     Args:
         engine: Interview engine instance.
         state: Current interview state.
+        scorer: Optional ambiguity scorer. When omitted, the loop keeps the
+            score-blind confirmation prompt.
 
     Returns:
-        Updated interview state.
+        ``InterviewLoopOutcome``: the updated state, whether the user approved
+        Seed generation at the score-aware prompt, and the score they approved.
     """
+    seed_approved = False
+    approved_score: AmbiguityScore | None = None
     while not state.is_complete:
         current_round = state.current_round_number
         console.print(f"[bold]Round {current_round}[/]")
@@ -351,10 +440,27 @@ async def _run_interview_loop(
 
         # Tiered confirmation logic
         if current_round >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
-            should_continue = Confirm.ask(
-                "Continue with more questions?",
-                default=True,
-            )
+            score = await _refresh_ambiguity(engine, state, scorer)
+            if score is not None:
+                console.print(
+                    f"[muted]Ambiguity score: {score.overall_score:.2f} "
+                    f"(Seed threshold: <= {AMBIGUITY_THRESHOLD})[/]"
+                )
+            if score is not None and qualifies_for_seed_completion(
+                score,
+                is_brownfield=state.is_brownfield,
+            ):
+                seed_approved = Confirm.ask(
+                    "[bold cyan]Ambiguity is low enough — proceed to Seed generation?[/]",
+                    default=True,
+                )
+                approved_score = score if seed_approved else None
+                should_continue = not seed_approved
+            else:
+                should_continue = Confirm.ask(
+                    "Continue with more questions?",
+                    default=True,
+                )
             if not should_continue:
                 complete_result = await engine.complete_interview(state)
                 if complete_result.is_ok:
@@ -362,7 +468,11 @@ async def _run_interview_loop(
                 await engine.save_state(state)
                 break
 
-    return state
+    return InterviewLoopOutcome(
+        state=state,
+        seed_generation_approved=seed_approved,
+        approved_score=approved_score,
+    )
 
 
 def _raise_for_aborted_interview(state: InterviewState) -> None:
@@ -408,6 +518,13 @@ async def _run_interview(
         state_dir=state_dir or Path.home() / ".ouroboros" / "data",
         model=get_clarification_model(llm_backend),
     )
+    # Bounded retries: the loop scorer runs between two interactive prompts,
+    # so an unresolvable scoring failure must surface, not retry forever.
+    loop_scorer = AmbiguityScorer(
+        llm_adapter=llm_adapter,
+        model=get_clarification_model(llm_backend),
+        max_retries=_LOOP_AMBIGUITY_MAX_RETRIES,
+    )
 
     # Load or start interview
     if resume_id:
@@ -438,12 +555,14 @@ async def _run_interview(
 
     try:
         loop_event_store = None if event_store is None else event_store
-        state = await _run_interview_loop(
+        outcome = await _run_interview_loop(
             engine,
             state,
             event_store=loop_event_store,
             disabled_event_stores=disabled_event_stores,
+            scorer=loop_scorer,
         )
+        state = outcome.state
 
         # Outer loop for retry on high ambiguity
         while True:
@@ -464,8 +583,12 @@ async def _run_interview(
 
             console.print()
 
-            # Ask if user wants to proceed to Seed generation
-            should_generate_seed = Confirm.ask(
+            # Ask if user wants to proceed to Seed generation — unless the
+            # loop already asked it. Approving the score-aware prompt and then
+            # being asked the same thing again would make that answer mean
+            # nothing, and a decline at the second prompt would contradict the
+            # action the first one named.
+            should_generate_seed = outcome.seed_generation_approved or Confirm.ask(
                 "[bold cyan]Proceed to generate Seed specification?[/]",
                 default=True,
             )
@@ -479,7 +602,11 @@ async def _run_interview(
 
             # Generate Seed
             seed_path, result = await _generate_seed_from_interview(
-                state, llm_adapter, llm_backend, engine=engine
+                state,
+                llm_adapter,
+                llm_backend,
+                engine=engine,
+                approved_score=outcome.approved_score,
             )
 
             if result == SeedGenerationResult.CONTINUE_INTERVIEW:
@@ -495,12 +622,14 @@ async def _run_interview(
                     if event_store is None or id(event_store) in disabled_event_stores
                     else event_store
                 )
-                state = await _run_interview_loop(
+                outcome = await _run_interview_loop(
                     engine,
                     state,
                     event_store=loop_event_store,
                     disabled_event_stores=disabled_event_stores,
+                    scorer=loop_scorer,
                 )
+                state = outcome.state
                 continue
 
             if result == SeedGenerationResult.CANCELLED:
@@ -537,6 +666,7 @@ async def _generate_seed_from_interview(
     llm_backend: str | None = None,
     *,
     engine: InterviewEngine,
+    approved_score: AmbiguityScore | None = None,
 ) -> tuple[Path | None, SeedGenerationResult]:
     """Generate Seed from completed interview.
 
@@ -544,6 +674,10 @@ async def _generate_seed_from_interview(
         state: Completed interview state.
         llm_adapter: LLM adapter for scoring and generation.
         engine: Interview engine that owns durable state persistence.
+        approved_score: The score the user already approved for generation, for
+            the same answers. Reused instead of sampling a second score, which
+            could disagree and drop the user into the "too ambiguous" menu right
+            after they approved generation.
 
     Returns:
         Tuple of (path to generated seed file or None, result status).
@@ -552,18 +686,21 @@ async def _generate_seed_from_interview(
     console.print("[bold cyan]Generating Seed specification...[/]")
 
     # Step 1: Calculate ambiguity score
-    with console.status("[cyan]Calculating ambiguity score...[/]", spinner="dots"):
-        scorer = AmbiguityScorer(
-            llm_adapter=llm_adapter,
-            model=get_clarification_model(llm_backend),
-        )
-        score_result = await scorer.score(state)
+    if approved_score is not None:
+        ambiguity_score = approved_score
+    else:
+        with console.status("[cyan]Calculating ambiguity score...[/]", spinner="dots"):
+            scorer = AmbiguityScorer(
+                llm_adapter=llm_adapter,
+                model=get_clarification_model(llm_backend),
+            )
+            score_result = await scorer.score(state)
 
-    if score_result.is_err:
-        print_error(f"Failed to calculate ambiguity: {score_result.error.message}")
-        return None, SeedGenerationResult.CANCELLED
+        if score_result.is_err:
+            print_error(f"Failed to calculate ambiguity: {score_result.error.message}")
+            return None, SeedGenerationResult.CANCELLED
 
-    ambiguity_score = score_result.value
+        ambiguity_score = score_result.value
     console.print(f"[muted]Ambiguity score: {ambiguity_score.overall_score:.2f}[/]")
 
     # Persist the evaluation like the MCP path does (#1901): without this the
@@ -581,11 +718,33 @@ async def _generate_seed_from_interview(
             error=str(save_result.error),
         )
 
-    if not ambiguity_score.is_ready_for_seed:
-        print_warning(
-            f"Ambiguity score ({ambiguity_score.overall_score:.2f}) is too high. "
-            "Consider more interview rounds to clarify requirements."
-        )
+    # One predicate for one decision. The loop's confirmation already asks
+    # whether the interview is seed-ready using overall ambiguity *and* the
+    # per-component floors; checking only the overall score here let a score
+    # the loop had just classified as not ready walk into generation through
+    # the outer confirmation, unforced and without the warning that exists for
+    # exactly that case.
+    floor_failures = get_completion_floor_failures(
+        ambiguity_score,
+        is_brownfield=state.is_brownfield,
+    )
+    seed_ready = qualifies_for_seed_completion(
+        ambiguity_score,
+        is_brownfield=state.is_brownfield,
+    )
+
+    if not seed_ready:
+        if ambiguity_score.is_ready_for_seed and floor_failures:
+            # Naming the overall score here would read as a contradiction: it
+            # is under the threshold. The blocked dimensions are the reason.
+            print_warning(
+                f"Some requirement dimensions are still unclear: {'; '.join(floor_failures)}."
+            )
+        else:
+            print_warning(
+                f"Ambiguity score ({ambiguity_score.overall_score:.2f}) is too high. "
+                "Consider more interview rounds to clarify requirements."
+            )
         console.print()
         console.print("[bold]What would you like to do?[/]")
         console.print("  [cyan]1[/] - Continue interview with more questions")
@@ -625,7 +784,7 @@ async def _generate_seed_from_interview(
         seed_result = await generator.generate(
             state,
             ambiguity_score,
-            force=not ambiguity_score.is_ready_for_seed,
+            force=not seed_ready,
         )
 
     if seed_result.is_err:
