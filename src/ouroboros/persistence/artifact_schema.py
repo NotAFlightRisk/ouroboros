@@ -31,6 +31,15 @@ def validate_contract_id(contract_id: str) -> str:
     return contract_id
 
 
+# A lane is *not* packed into the contract id.  Naming one lane of a fan-out
+# needs two values, and an encoding that folded them into one string had to be
+# taken apart again by every reader -- which meant deciding what an ordinary id
+# already containing the separator meant.  Length is the whole identity rule
+# above, so ``ordinary#id`` is a valid stored key, and a reader splitting it
+# made a live artifact unreachable.  The two values travel as two values; there
+# is no address to parse and so none to misparse.
+
+
 def validate_json_native(
     value: Any,
     *,

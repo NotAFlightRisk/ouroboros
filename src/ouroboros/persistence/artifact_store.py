@@ -251,6 +251,87 @@ class ArtifactStore:
             )
         return fetched
 
+    def fetch_lane(self, contract_id: str, lane_id: str) -> FetchedArtifact:
+        """Fetch one lane's output from a fan-out body, raising when absent."""
+        fetched = self.fetch_lane_if_exists(contract_id, lane_id)
+        if fetched is None:
+            raise ArtifactNotFoundError(
+                "Artifact contract does not exist",
+                operation="read",
+                details={"contract_id": contract_id, "lane_id": lane_id},
+            )
+        return fetched
+
+    def fetch_lane_if_exists(self, contract_id: str, lane_id: str) -> FetchedArtifact | None:
+        """Fetch one lane's output from a fan-out body, or ``None`` if absent.
+
+        A lane is named by its own argument rather than packed into the contract
+        id, so an ordinary id is never read as an address with a lane in it and
+        this method is unreachable except by a caller that meant it.
+
+        The whole filter is the ``WHERE`` below.  ``$.lane_id`` is the key the
+        fan-out itself assigned from its dispatch roster, so it names the lane
+        the server sent the work to; the ``lane_id`` a child happens to write
+        inside its own output is not read here and is absent from some bodies.
+
+        Selected with ``->`` rather than ``json_extract``, which returns a
+        decoded SQL value: a lane whose whole output is prose would come back
+        with its JSON quotes gone, ``true`` as ``1``, and ``null``
+        indistinguishable from a missing row.  Fan-out submission accepts any
+        JSON-native content, so an extraction that only survives objects and
+        arrays loses the rest silently.  ``->`` returns JSON for every type.
+
+        The lane match is an outer join, deliberately: an inner ``json_each``
+        source removes the artifact's row itself whenever no lane matches --
+        which is also what a pruned body produces -- so a tombstone became
+        indistinguishable from a contract that never existed.  With the row
+        kept, the three absences stay three: no row is no contract, a ``NULL``
+        body is the tombstone ``fetch`` reports for the same id, and a ``NULL``
+        lane match on a live body is a lane this fan-out never carried.
+
+        Returns the lane's output as the body, so a caller that asked for one
+        lane is handed one lane -- there is nothing left in it to select.
+        """
+        contract_id = _validate_contract_id(contract_id)
+        row = self._read_one(
+            "SELECT lane.value -> '$.output', runtime_id, duration_ms,"
+            " events_emitted_count, updated_at, body"
+            " FROM artifacts LEFT JOIN"
+            " json_each(artifacts.body,'$.result.aggregated_outputs') AS lane"
+            " ON json_extract(lane.value,'$.lane_id') = ?2"
+            " WHERE contract_id = ?1",
+            contract_id,
+            lane_id,
+        )
+        if row is None:
+            return None
+        output_json, runtime_id, duration_ms, events_emitted_count, updated_at, body_text = row
+        if body_text is None:
+            raise _tombstoned_read_error(contract_id, tombstoned_at=updated_at)
+        # ``->`` yields SQL NULL for a lane this body never carried and for a
+        # lane entry with no ``output`` key; a JSON ``null`` output arrives as
+        # the four-byte ``null``, exactly as a published body does in
+        # ``fetch_if_exists``.
+        if output_json is None:
+            return None
+        try:
+            output = json.loads(output_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ArtifactIntegrityError(
+                "Artifact body is not valid JSON",
+                operation="read",
+                details={"contract_id": contract_id, "lane_id": lane_id},
+            ) from exc
+        return FetchedArtifact(
+            envelope=_envelope(
+                contract_id,
+                runtime_id=runtime_id,
+                duration_ms=duration_ms,
+                events_emitted_count=events_emitted_count,
+            ),
+            body=output,
+        )
+
     def envelope_if_exists(self, contract_id: str) -> DisposableResultEnvelope | None:
         """Read only a contract's bounded envelope, never its artifact body.
 
@@ -484,7 +565,12 @@ class ArtifactStore:
         connection.close()
         return None
 
-    def _read_one(self, query: str, contract_id: str) -> tuple[Any, ...] | None:
+    def _read_one(
+        self,
+        query: str,
+        contract_id: str,
+        *rest: str,
+    ) -> tuple[Any, ...] | None:
         try:
             # Opening is inside the guard: a file holding no table is absence,
             # but a file that is not a database at all is still an error.
@@ -492,7 +578,7 @@ class ArtifactStore:
             if connection is None:
                 return None
             with closing(connection):
-                return connection.execute(query, (contract_id,)).fetchone()
+                return connection.execute(query, (contract_id, *rest)).fetchone()
         except sqlite3.Error as exc:
             raise ArtifactStoreError(
                 "Artifact read failed",
