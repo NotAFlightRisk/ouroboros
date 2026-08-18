@@ -7,11 +7,17 @@ Windows. Seed-authored verify commands are POSIX bash by contract (``&&``,
 them under an interpreter that cannot parse them.
 
 This module follows gajae-code's ``getShellConfig()`` pattern: **resolve a real
-POSIX shell binary, never translate the command**. Command authors keep writing
-one syntax; the orchestrator guarantees an interpreter that understands it, or
+bash binary, never translate the command**. Command authors keep writing one
+syntax; the orchestrator guarantees the interpreter that understands it, or
 reports that this machine cannot verify the AC at all. The pass/fail signal
 still comes from the exit code of the unmodified command — nothing here is
 allowed to soften what "verified" means.
+
+Bash, specifically — not "some POSIX shell". A ``sh`` substitute reads the same
+text differently (``echo -e X`` prints ``X`` under bash and ``-e X`` under
+``sh``), so its verdict is about a different command than the Seed declared.
+The fallback for a machine without bash is the exact shell-free planner, and
+past that, an honest "unverifiable", not a second interpreter.
 
 Priority mirrors the existing ``get_goose_cli_path`` / ``get_pi_cli_path``
 convention: env override -> config -> well-known locations -> PATH.
@@ -39,15 +45,21 @@ _GIT_BASH_PROGRAM_FILES_VARS = ("ProgramFiles", "ProgramW6432", "ProgramFiles(x8
 class VerifyShellRoute:
     """A concrete interpreter chosen to run ``verify_command`` verbatim.
 
-    ``degraded`` marks a POSIX ``sh`` fallback: it understands the operators and
-    quoting seed commands rely on, but not bash-only syntax (``[[ ]]``, arrays).
-    It is preferred over refusing to verify, and is reported so an unexplained
-    verify failure can be traced back to the interpreter.
+    Bash only. A POSIX ``sh`` reads the same command differently — `echo -e X`
+    prints `X` under bash and `-e X` under `sh`, so a contract asserting on
+    `-e` fails under the shell it was written for and passes under the
+    substitute. Running it there and recording the result as verification
+    would be reporting a verdict about a different command, so a machine with
+    no bash routes through the exact shell-free planner instead, and reports
+    the AC unverifiable when that planner refuses it.
+
+    ``shell_path`` is always absolute: the path checked during resolution must
+    be the path launched, and the gate launches with ``cwd`` set to the
+    verification workspace.
     """
 
     shell_path: str
     source: str
-    degraded: bool = False
 
     def argv(self, command: str) -> tuple[str, ...]:
         """Return the exact argv that runs ``command`` unmodified."""
@@ -65,17 +77,36 @@ def _running_on_windows() -> bool:
     return os.name == "nt"
 
 
+def _is_absolute(path: str) -> bool:
+    """Whether ``path`` is absolute on the platform resolution is running on."""
+    if _running_on_windows():
+        return PureWindowsPath(path).is_absolute()
+    return os.path.isabs(path)
+
+
 def _executable(candidate: str | None) -> str | None:
-    """Return an executable absolute path for ``candidate``, else ``None``.
+    """Return an executable **absolute** path for ``candidate``, else ``None``.
+
+    The absolute requirement is the point, not tidiness. The gate launches the
+    resolved shell with ``cwd`` set to the verification workspace, so a
+    relative result — from an override like ``./tools/bash``, or from a
+    relative ``PATH`` entry — is checked here against one directory and
+    executed there against another. A workspace can then supply the binary
+    that judges its own acceptance criteria. Nothing relative is repaired by
+    guessing which directory was meant: it is refused, and resolution falls
+    through to the next candidate.
 
     Stale env/config values that no longer point at an executable are treated
-    as missing so resolution falls through instead of persisting an unusable
-    path — the same tolerance ``get_goose_cli_path`` applies.
+    as missing for the same reason — the same tolerance ``get_goose_cli_path``
+    applies.
     """
     if not candidate:
         return None
     expanded = str(Path(candidate).expanduser())
-    return shutil.which(expanded)
+    resolved = shutil.which(expanded)
+    if resolved is None or not _is_absolute(resolved):
+        return None
+    return resolved
 
 
 def _config_value() -> str | None:
@@ -104,19 +135,19 @@ def _configured_candidate() -> tuple[str, str] | None:
     return None
 
 
-def _windows_candidates() -> tuple[tuple[str, str, bool], ...]:
-    candidates: list[tuple[str, str, bool]] = []
+def _windows_candidates() -> tuple[tuple[str, str], ...]:
+    candidates: list[tuple[str, str]] = []
     for variable in _GIT_BASH_PROGRAM_FILES_VARS:
         program_files = os.environ.get(variable, "").strip()
         if program_files:
             candidates.append(
-                (str(PureWindowsPath(program_files) / _GIT_BASH_RELATIVE), "git_bash", False)
+                (str(PureWindowsPath(program_files) / _GIT_BASH_RELATIVE), "git_bash")
             )
     # Cygwin / MSYS2 installs that put a real bash on PATH. `%SystemRoot%`
     # entries are filtered below: `System32\bash.exe` is the WSL launcher, not
     # a Windows-side shell.
-    candidates.append(("bash.exe", "path", False))
-    candidates.append(("bash", "path", False))
+    candidates.append(("bash.exe", "path"))
+    candidates.append(("bash", "path"))
     return tuple(candidates)
 
 
@@ -139,15 +170,11 @@ def _is_wsl_launcher(resolved_path: str) -> bool:
         return False
 
 
-def _posix_candidates() -> tuple[tuple[str, str, bool], ...]:
+def _posix_candidates() -> tuple[tuple[str, str], ...]:
     return (
-        ("/bin/bash", "posix_default", False),
-        ("/usr/bin/bash", "posix_default", False),
-        ("bash", "path", False),
-        # Last resort: a POSIX sh still parses the operators, quoting and
-        # redirections seed verify commands are built from.
-        ("/bin/sh", "posix_sh", True),
-        ("sh", "path_sh", True),
+        ("/bin/bash", "posix_default"),
+        ("/usr/bin/bash", "posix_default"),
+        ("bash", "path"),
     )
 
 
@@ -159,13 +186,13 @@ def _resolve_uncached() -> VerifyShellRoute | None:
 
     windows = _running_on_windows()
     candidates = _windows_candidates() if windows else _posix_candidates()
-    for candidate, source, degraded in candidates:
+    for candidate, source in candidates:
         resolved = _executable(candidate)
         if not resolved:
             continue
         if windows and _is_wsl_launcher(resolved):
             continue
-        return VerifyShellRoute(shell_path=resolved, source=source, degraded=degraded)
+        return VerifyShellRoute(shell_path=resolved, source=source)
     return None
 
 
@@ -228,8 +255,8 @@ def verify_shell_unavailable_reason() -> str:
             f"{VERIFY_BASH_ENV_VAR} to a bash executable."
         )
     return (
-        "verify_command needs a POSIX shell: no bash or sh found on this "
-        f"machine. Set {VERIFY_BASH_ENV_VAR} to a POSIX shell executable."
+        "verify_command needs bash: none found on this machine. Install bash "
+        f"or set {VERIFY_BASH_ENV_VAR} to a bash executable (an absolute path)."
     )
 
 
@@ -261,13 +288,37 @@ VERIFY_ENV_STRIPPED_KEYS = frozenset(
         "PYTEST_PLUGINS",
         # Node preload hook, the same class of risk for JS-shaped contracts.
         "NODE_OPTIONS",
+        # Shell startup files. Bash sources `BASH_ENV` before it evaluates a
+        # `-c` command, and a POSIX shell does the same with `ENV`, so a file
+        # containing `exit 0` turns `bash -c 'exit 23'` into a pass. This is
+        # the sharpest of the lot: it does not bend a tool's configuration, it
+        # runs the repository's code inside the gate itself.
+        "BASH_ENV",
+        "ENV",
+        # Shell option state, which reaches the command the same way. Both
+        # carry `set`/`shopt` flags into the child — `xtrace` writes into the
+        # combined output an assertion is checked against, `errexit` changes
+        # which leg of a chain decides the status, and `xpg_echo` changes what
+        # `echo` prints.
+        "SHELLOPTS",
+        "BASHOPTS",
+        "BASH_XTRACEFD",
+        "PS4",
+        # Word splitting, path search for `cd`, and glob suppression: each
+        # changes what the command means without changing its text.
+        "IFS",
+        "CDPATH",
+        "GLOBIGNORE",
     }
 )
 
 # Dynamic-loader preload families, stripped by prefix for the same reason the
 # untrusted-env policy rejects them by prefix: the member names vary by
 # platform and new ones appear.
-VERIFY_ENV_STRIPPED_PREFIXES = ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES")
+# `BASH_FUNC_` carries exported shell *functions*, which a `-c` command
+# resolves before any executable of the same name: one named `pytest` or `git`
+# replaces the tool the contract meant to run.
+VERIFY_ENV_STRIPPED_PREFIXES = ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "BASH_FUNC_")
 
 
 def sanitized_verify_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:

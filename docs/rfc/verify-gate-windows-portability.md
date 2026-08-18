@@ -192,23 +192,36 @@ advisory tier, not a dead end.
 Shipped:
 
 - **Part A, Tier 0 + terminal case.** `src/ouroboros/orchestrator/verify_shell.py`
-  resolves a real POSIX shell (env `OUROBOROS_VERIFY_BASH` -> config
+  resolves a real bash (env `OUROBOROS_VERIFY_BASH` -> config
   `orchestrator.verify_bash_path` -> `/bin/bash`, `/usr/bin/bash`, PATH `bash`;
   Windows: Git Bash under `%ProgramFiles%`/`%ProgramW6432%`/`%ProgramFiles(x86)%`
   -> PATH `bash.exe`). `_run_ac_verify_gate` now runs
   `create_subprocess_exec(shell, "-c", command)` instead of
-  `create_subprocess_shell`. POSIX falls back to `sh`, marked `degraded`;
-  Windows never falls back to `cmd`, and never to
-  `%SystemRoot%\System32\bash.exe` (the WSL launcher, whose filesystem the
-  gate's `cwd` does not name). `OUROBOROS_VERIFY_BASH` is on the
-  untrusted-`.env` denylist. Resolution is memoized per (OS, override, PATH).
+  `create_subprocess_shell`. There is **no `sh` fallback**: `sh` reads the same
+  text differently (`echo -e X` prints `X` under bash and `-e X` under `sh`),
+  so a contract asserting on `-e` fails under the shell it was written for and
+  passes under the substitute — a verdict about a different command. A machine
+  without bash routes through the exact shell-free planner, and reports the AC
+  unverifiable when that planner refuses the command. Windows never falls back
+  to `cmd`, and never to `%SystemRoot%\System32\bash.exe` (the WSL launcher,
+  whose filesystem the gate's `cwd` does not name). Only absolute resolved
+  paths are accepted, because the gate launches with `cwd` set to the
+  verification workspace and a relative path would name a different binary
+  there than the one that was checked. `OUROBOROS_VERIFY_BASH` is on the
+  untrusted-`.env` denylist, together with the shell startup and option
+  controls (`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `BASH_FUNC_*`), which
+  the gate also strips from its own child environment: bash sources `BASH_ENV`
+  before evaluating a `-c` command, so a repo-supplied file containing
+  `exit 0` would otherwise turn any failing contract into a pass. Resolution is
+  memoized per (OS, override, config, PATH, Windows install roots).
 
   Correction to the Decision section above: POSIX behavior is **not**
   equivalent to before. `create_subprocess_shell` runs `/bin/sh -c`, so verify
   commands previously ran under `sh` — `dash` on Debian/Ubuntu. They now run
-  under `bash`. The change is strictly more permissive (a bashism that used to
-  fail the gate now runs as authored), but it is a change in gate outcomes,
-  not a no-op.
+  under `bash`, or not at all. Two directions of change, both intended: a
+  bashism that used to fail the gate now runs as authored, and a machine with
+  no bash now reports unverifiable (retryable) where it used to hand the
+  command to `sh` and record whatever that said.
 - **Part A, unverifiable outcome.** With no interpreter, the gate returns
   `environment_unverifiable` and `verify_quarantine.py` marks the AC `FAILED`
   with `FailureClass.VERIFY_ENVIRONMENT_UNAVAILABLE` (`RETRY` admission). The
