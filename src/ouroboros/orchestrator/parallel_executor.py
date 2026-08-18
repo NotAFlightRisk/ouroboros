@@ -2621,6 +2621,7 @@ class ParallelACExecutor:
         route_economics: Any | None = None,
         run_verify_commands: bool = True,
         verify_command_timeout_seconds: int = 600,
+        vacuous_contract_evidence: str = "revoked",
         ac_retry_attempts: int = 0,
         cross_harness_redispatch: bool | None = None,
         shadow_replay_enabled: bool = False,
@@ -2663,6 +2664,14 @@ class ParallelACExecutor:
                 ``spec.expected_artifacts`` must exist under the run workspace
                 and ``spec.verify_command`` must exit 0 (plus any
                 ``output_assertion``).
+            vacuous_contract_evidence: What this session does with a
+                ``verify_command`` that provably cannot fail. ``"revoked"``
+                treats it as no contract at all, so the transcript evidence it
+                was exempted from applies again and the gate does not run it;
+                ``"honored"`` is the pre-revocation behavior, carried by
+                sessions that started under it so a resume does not change the
+                evidence schema of work already done. Durable: it lives in the
+                execution-semantics contract, not in the Seed.
             verify_command_timeout_seconds: Timeout for an AC verify command.
             ac_retry_attempts: How many times a failed AC is re-dispatched
                 before it is marked FAILED (excludes stall retries). The
@@ -2726,6 +2735,7 @@ class ParallelACExecutor:
         self._execution_profile = execution_profile
         self._fat_harness_mode = fat_harness_mode
         self._run_verify_commands = run_verify_commands
+        self._vacuous_contract_evidence = vacuous_contract_evidence
         self._verify_command_timeout_seconds = max(1, verify_command_timeout_seconds)
         self._ac_retry_attempts = max(0, ac_retry_attempts)
         # Effort-first investment dial (RFC #1405). AC investment metadata may
@@ -9040,10 +9050,9 @@ Respond with either ATOMIC or the structured JSON object only.
             # expected_artifacts, files_touched is delegated to the same
             # filesystem oracle so artifact work does not require fabricated
             # transcript-shaped evidence.
-            has_success_contract = (
-                isinstance(ac_spec, AcceptanceCriterionSpec)
-                and ac_spec.has_evidential_success_contract
-            )
+            has_success_contract = isinstance(
+                ac_spec, AcceptanceCriterionSpec
+            ) and self._contract_carries_evidence(ac_spec)
             has_expected_artifacts = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
                 ac_spec.expected_artifacts
             )
@@ -9598,6 +9607,18 @@ Respond with either ATOMIC or the structured JSON object only.
             return None, None, str(exc)
         return record, validation, None
 
+    def _contract_carries_evidence(self, spec: AcceptanceCriterionSpec) -> bool:
+        """Whether this session lets ``spec``'s contract stand in for evidence.
+
+        The vacuity revocation is a durable session policy, not a property of
+        the Seed: a session created before it keeps counting a contract that
+        cannot fail, because its already-accepted ACs were judged that way and
+        a resume must not re-decide them.
+        """
+        if self._vacuous_contract_evidence == "honored":
+            return spec.has_success_contract
+        return spec.has_evidential_success_contract
+
     async def _run_ac_verify_gate(
         self, *, spec: AcceptanceCriterionSpec, cwd: str
     ) -> _VerifyGateOutcome:
@@ -9769,9 +9790,8 @@ Respond with either ATOMIC or the structured JSON object only.
         spec = seed.acceptance_criteria[ac_index]
         # A declared-but-vacuous verify_command is treated as no contract: the
         # gate must not stamp an AC verified on a command that cannot fail.
-        if (
-            not isinstance(spec, AcceptanceCriterionSpec)
-            or not spec.has_evidential_success_contract
+        if not isinstance(spec, AcceptanceCriterionSpec) or not self._contract_carries_evidence(
+            spec
         ):
             return result
 

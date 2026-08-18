@@ -545,7 +545,8 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
     inputs = contract["execution_inputs"]
     semantics = contract["execution_semantics"]
     assert inputs["schema_version"] == 2
-    assert semantics["version"] == 4
+    assert semantics["version"] == 5
+    assert semantics["vacuous_contract_evidence"] == "revoked"
     assert semantics["adaptive_concurrency_policy"] == {
         "algorithm": "aimd/v2",
         "admission_scope": "provider_call",
@@ -3994,3 +3995,52 @@ async def test_prepare_session_persists_same_execution_contract_in_start_and_pro
     assert persisted["frugality_proof"]["project_root"] == str(Path("/tmp/project").resolve())
     assert len(persisted["frugality_proof"]["routing_fingerprint"]) == 64
     assert len(persisted["frugality_proof"]["seed_fingerprint"]) == 64
+
+
+def test_v4_session_resumes_under_the_policy_it_ran_with() -> None:
+    """A session created before the vacuity revocation keeps honoring a
+    contract that cannot fail: the revocation changes both the evidence an AC
+    must carry and whether its verify gate runs, so re-deciding mid-session
+    would change replay behavior for work already accepted."""
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(), seed=_seed()
+        )
+    )
+    semantics = persisted["execution_semantics"]
+    semantics["version"] = 4
+    del semantics["vacuous_contract_evidence"]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(semantics)
+    )
+
+    runner = _runner()
+    runner._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+        seed=_seed(),
+    )
+
+    restored = runner._execution_contract["execution_semantics"]
+    assert restored["version"] == 5
+    assert restored["vacuous_contract_evidence"] == "honored"
+
+
+def test_v4_resume_rejects_a_forged_pre_vacuity_contract() -> None:
+    """Migration is not a way in: the v4 fingerprint must still match."""
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(), seed=_seed()
+        )
+    )
+    semantics = persisted["execution_semantics"]
+    semantics["version"] = 4
+    del semantics["vacuous_contract_evidence"]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = "not-the-fingerprint"
+
+    with pytest.raises(OrchestratorError, match="pre-vacuity-policy"):
+        _runner()._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )

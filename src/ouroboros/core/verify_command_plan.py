@@ -275,10 +275,14 @@ def _builtin_is_supported(argv: tuple[str, ...]) -> bool:
     if name == "exit":
         if not operands:
             return True
-        # POSIX truncates the operand to 8 bits, so `exit 256` reports 0 and
-        # `exit -1` reports 255. Accepting the full signed range (normalized
-        # in run_builtin) matters for the vacuity proof: rejecting `exit 256`
-        # here would leave a command that always succeeds unproven.
+        # Shells truncate the operand to 8 bits, so `exit 256` reports 0 and
+        # `exit -1` reports 255 — reproducing that (in run_builtin) is what
+        # keeps a disguised constant inside the vacuity proof. The bound in
+        # `_is_integer` is the point: an operand no shell can parse is not a
+        # constant at all. `exit 18446744073709551616` exits 255 under bash
+        # with "numeric argument required", so normalizing it to 0 would prove
+        # a contract that always FAILS vacuously true — skipping it and
+        # letting transcript evidence stand in its place.
         return len(operands) == 1 and _is_integer(operands[0])
     if name == "echo":
         return all(not operand.startswith("-") or operand == "-n" for operand in operands)
@@ -312,7 +316,20 @@ def _test_expression_is_supported(operands: list[str]) -> bool:
 
 
 def _is_integer(value: str) -> bool:
-    return bool(value) and (value.lstrip("+-").isdigit() and value.lstrip("+-") != "")
+    """Whether a shell would read ``value`` as an integer, exactly as bash does.
+
+    Bounded to what ``intmax_t`` holds, and to ASCII digits. Outside that range
+    a shell reports "numeric argument required" instead of a status or a
+    comparison, and other numeric scripts (``"٣"``, ``"²"``) are not integers
+    to it at all — while Python would convert both happily and reach a verdict
+    no shell ever gives. The superscript form would also raise inside ``int``.
+    """
+    if not value.isascii():
+        return False
+    digits = value.lstrip("+-")
+    if not digits or not digits.isdigit():
+        return False
+    return -(2**63) <= int(value) <= 2**63 - 1
 
 
 def _unescape_printf(text: str) -> str | None:
@@ -490,20 +507,18 @@ def constant_verdict(command: str, output_assertion: str | None = None) -> bool 
     if steps is None:
         return None
 
-    # `bash -c 'exit 0'` is the same constant wearing a wrapper. When the
-    # whole command is one shell invocation of a literal string, the verdict
-    # is the inner command's verdict, recursively. Only flag letters that
-    # cannot change status or output are admitted (`l` login, `e` errexit);
-    # `x`/`v` trace into the combined output, so they stay unproven.
+    # `bash -c 'exit 0'` is the same constant wearing a wrapper. When the whole
+    # command is one shell invocation of a literal string, the verdict is the
+    # inner command's verdict, recursively — but only for a plain `-c`. Every
+    # other flag changes the semantics of the string it is handed: `-e` aborts
+    # the chain at the first failure (`bash -ec 'false; true'` exits 1, not 0),
+    # `-l` runs the login profile, which can exit nonzero or print into the
+    # output an assertion is checked against, and `-x`/`-v` trace into that
+    # output. A proof that looked past those would be proving a different
+    # command than the one that runs.
     if len(steps) == 1 and not steps[0].env_overrides:
         argv = steps[0].argv
-        if (
-            len(argv) == 3
-            and argv[0] in {"bash", "sh"}
-            and argv[1].startswith("-")
-            and "c" in argv[1][1:]
-            and set(argv[1][1:]) <= set("cle")
-        ):
+        if len(argv) == 3 and argv[0] in {"bash", "sh"} and argv[1] == "-c":
             return constant_verdict(argv[2], output_assertion)
 
     status = 0

@@ -68,6 +68,7 @@ def _make_executor(
     ac_retry_attempts: int = 0,
     verify_command_timeout_seconds: int = 30,
     runtime_backend: str = "claude",
+    vacuous_contract_evidence: str = "revoked",
 ) -> ParallelACExecutor:
     return ParallelACExecutor(
         adapter=_StubAdapter(working_directory, runtime_backend),
@@ -77,6 +78,7 @@ def _make_executor(
         run_verify_commands=run_verify_commands,
         ac_retry_attempts=ac_retry_attempts,
         verify_command_timeout_seconds=verify_command_timeout_seconds,
+        vacuous_contract_evidence=vacuous_contract_evidence,
     )
 
 
@@ -2238,3 +2240,51 @@ async def test_gate_still_judges_without_a_shell_when_the_command_allows_it(
     assert passed.environment_unverifiable is False
     assert failed.passed is False
     assert failed.environment_unverifiable is False
+
+
+@pytest.mark.asyncio
+async def test_vacuous_contract_is_inert_under_the_revoking_policy(tmp_path: Any) -> None:
+    """A contract that cannot fail decides nothing, so it cannot recover a
+    failed AC either — the gate never runs for it."""
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ac",
+        success=False,
+        error="runtime false negative",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    gated = await executor._apply_verify_gate(
+        seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
+    )
+
+    assert gated is result
+    assert gated.success is False
+
+
+@pytest.mark.asyncio
+async def test_a_session_created_before_the_revocation_keeps_honoring_it(tmp_path: Any) -> None:
+    """The policy is durable, not derived from the Seed: a resumed pre-change
+    session must judge its ACs the way it always did, or the same seed changes
+    meaning halfway through the run."""
+    executor = _make_executor(
+        working_directory=str(tmp_path),
+        vacuous_contract_evidence="honored",
+    )
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ac",
+        success=False,
+        error="runtime false negative",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    gated = await executor._apply_verify_gate(
+        seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
+    )
+
+    assert gated.success is True
+    assert gated.outcome == ACExecutionOutcome.SUCCEEDED

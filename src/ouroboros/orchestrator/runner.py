@@ -155,9 +155,11 @@ from ouroboros.orchestrator.execution_runtime_scope import (
 )
 from ouroboros.orchestrator.execution_semantics import (
     CURRENT_EXECUTION_SEMANTICS_VERSION,
+    VACUOUS_CONTRACT_EVIDENCE_POLICIES,
     pre_adaptive_execution_semantics_rejection,
     valid_execution_semantics_contract,
     valid_legacy_preflight_execution_semantics_contract,
+    valid_pre_vacuity_policy_execution_semantics_contract,
 )
 from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
@@ -1067,6 +1069,11 @@ class OrchestratorRunner:
         _execution_config = _config.execution
         self._run_verify_commands = _execution_config.run_verify_commands
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
+        # New sessions revoke the evidence exemption a contract that cannot
+        # fail used to buy. A resumed session adopts the policy it was created
+        # under instead (see `_restore_execution_contract`), because the choice
+        # decides both the required evidence and whether the gate runs at all.
+        self._vacuous_contract_evidence = "revoked"
         self._ac_retry_attempts = _execution_config.ac_retry_attempts
         from ouroboros.config import (
             get_context_pack_enabled,
@@ -3915,6 +3922,7 @@ class OrchestratorRunner:
             "version": CURRENT_EXECUTION_SEMANTICS_VERSION,
             "run_verify_commands": self._run_verify_commands,
             "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
+            "vacuous_contract_evidence": self._vacuous_contract_evidence,
             "ac_retry_attempts": self._ac_retry_attempts,
             "cross_harness_redispatch": self._cross_harness_redispatch_enabled,
             "enable_decomposition": self._enable_decomposition,
@@ -6109,6 +6117,37 @@ class OrchestratorRunner:
                 details=pre_adaptive_rejection.details,
             )
 
+        migrate_pre_vacuity_contract = valid_pre_vacuity_policy_execution_semantics_contract(
+            raw_execution_semantics
+        )
+        if migrate_pre_vacuity_contract:
+            persisted_v4_fingerprint = raw_proof.get("execution_semantics_fingerprint")
+            if not isinstance(
+                persisted_v4_fingerprint, str
+            ) or persisted_v4_fingerprint != self._execution_semantics_fingerprint(
+                raw_execution_semantics
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid pre-vacuity-policy contract",
+                    details={"invalid": "execution_semantics_fingerprint"},
+                )
+            migrated_contract = deepcopy(dict(raw_contract))
+            migrated_semantics = migrated_contract["execution_semantics"]
+            migrated_proof = migrated_contract["frugality_proof"]
+            assert isinstance(migrated_semantics, dict)
+            assert isinstance(migrated_proof, dict)
+            migrated_semantics["version"] = CURRENT_EXECUTION_SEMANTICS_VERSION
+            # The behavior this session actually ran under. Migrating it to the
+            # new policy instead would change, mid-session, both the evidence an
+            # AC must carry and whether its verify gate runs at all.
+            migrated_semantics["vacuous_contract_evidence"] = "honored"
+            migrated_proof["execution_semantics_fingerprint"] = (
+                self._execution_semantics_fingerprint(migrated_semantics)
+            )
+            raw_contract = migrated_contract
+            raw_proof = migrated_proof
+            raw_execution_semantics = migrated_semantics
+
         migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(
             raw_execution_semantics
         )
@@ -6633,6 +6672,14 @@ class OrchestratorRunner:
             )
         self._execution_preferences = persisted_preferences
         self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
+        # The vacuity policy belongs to the session, not to this process: a
+        # session that began before the revocation must keep honoring those
+        # contracts, so the persisted value is adopted before the drift check
+        # rather than read as drift against this build's default.
+        persisted_vacuity_policy = raw_execution_semantics.get("vacuous_contract_evidence")
+        if persisted_vacuity_policy in VACUOUS_CONTRACT_EVIDENCE_POLICIES:
+            assert isinstance(persisted_vacuity_policy, str)
+            self._vacuous_contract_evidence = persisted_vacuity_policy
         current_execution_semantics = self._execution_semantics_contract()
         if (
             not migrate_legacy_contract
@@ -10297,6 +10344,7 @@ class OrchestratorRunner:
             route_economics=self._route_economics,
             run_verify_commands=execution_semantics["run_verify_commands"],
             verify_command_timeout_seconds=execution_semantics["verify_command_timeout_seconds"],
+            vacuous_contract_evidence=execution_semantics["vacuous_contract_evidence"],
             ac_retry_attempts=execution_semantics["ac_retry_attempts"],
             cross_harness_redispatch=execution_semantics["cross_harness_redispatch"],
             shadow_replay_enabled=execution_semantics["shadow_replay_enabled"],
