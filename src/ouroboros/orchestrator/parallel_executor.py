@@ -417,6 +417,13 @@ from ouroboros.orchestrator.verifier import (
     VerifierVerdict,
     verifier_operational_failure_verdict,
 )
+from ouroboros.orchestrator.verify_baseline import (
+    VerifyBaseline,
+    establish_verify_baseline,
+    restore_verify_baseline,
+    settle_passing_verify_outcome,
+    verify_baseline_checkpoint_state,
+)
 from ouroboros.orchestrator.verify_command_runner import (
     run_shell_free_plan,
     run_with_shell,
@@ -2621,6 +2628,7 @@ class ParallelACExecutor:
         route_economics: Any | None = None,
         run_verify_commands: bool = True,
         verify_command_timeout_seconds: int = 600,
+        verify_baseline_probe: str = "observe",
         ac_retry_attempts: int = 0,
         cross_harness_redispatch: bool | None = None,
         shadow_replay_enabled: bool = False,
@@ -2727,6 +2735,8 @@ class ParallelACExecutor:
         self._fat_harness_mode = fat_harness_mode
         self._run_verify_commands = run_verify_commands
         self._verify_command_timeout_seconds = max(1, verify_command_timeout_seconds)
+        self._verify_baseline_probe = verify_baseline_probe
+        self._verify_baseline: VerifyBaseline | None = None
         self._ac_retry_attempts = max(0, ac_retry_attempts)
         # Effort-first investment dial (RFC #1405). AC investment metadata may
         # impose a floor or authorize one lower notch; decomposition alone never
@@ -3898,6 +3908,9 @@ class ParallelACExecutor:
                             "result_retry_attempts", {}
                         )
                         raw_verify_gate_outcomes = checkpoint_state.get("verify_gate_outcomes", {})
+                        self._verify_baseline = restore_verify_baseline(
+                            checkpoint_state.get("verify_baseline")
+                        )
                         for idx in cp.state.get("failed_indices", []):
                             failed_indices.add(int(idx))
                         for idx in checkpoint_state.get("blocked_indices", []):
@@ -4097,6 +4110,19 @@ class ParallelACExecutor:
             "current_level": resume_from_level + 1,
             "total_levels": total_levels,
         }
+
+        # Stage 1 negative control (#2179): probe every contract against a
+        # disposable copy of the still-pristine workspace, strictly before the
+        # first worker dispatch. Never on a resume — a recognized checkpoint
+        # means workers already ran, so the only honest baselines are the
+        # restored records (or unknown, which grants and revokes nothing).
+        if self._verify_baseline is None and resume_from_level == 0:
+            self._verify_baseline = await establish_verify_baseline(
+                self,
+                seed=seed,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
 
         # Execute groups sequentially, but ACs within each group in parallel.
         # The resilient progress emitter runs as a sibling background task
@@ -4715,6 +4741,9 @@ class ParallelACExecutor:
                                 "verify_gate_outcomes": _checkpoint_verify_gate_outcomes(
                                     all_results
                                 ),
+                                "verify_baseline": verify_baseline_checkpoint_state(
+                                    self._verify_baseline
+                                ),
                                 "ac_outcomes": {
                                     str(result.ac_index): (
                                         result.outcome.value
@@ -4859,6 +4888,9 @@ class ParallelACExecutor:
                             "ac_retry_attempts": {str(k): v for k, v in ac_retry_attempts.items()},
                             "result_retry_attempts": _checkpoint_result_retry_attempts(all_results),
                             "verify_gate_outcomes": _checkpoint_verify_gate_outcomes(all_results),
+                            "verify_baseline": verify_baseline_checkpoint_state(
+                                self._verify_baseline
+                            ),
                             "ac_outcomes": {
                                 str(result.ac_index): (
                                     result.outcome.value
@@ -9791,47 +9823,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 cwd=cwd,
             )
         if outcome.passed:
-            if not result.success and not result.is_blocked and not result.is_invalid:
-                from ouroboros.events.base import BaseEvent
-
-                recovery_message = (
-                    "Runtime reported failure, but the AC success contract passed: "
-                    "expected_artifacts/verify_command satisfied."
-                )
-                await self._safe_emit_event(
-                    BaseEvent(
-                        type="execution.verify.recovered",
-                        aggregate_type="execution",
-                        aggregate_id=execution_id or session_id,
-                        data={
-                            "session_id": session_id,
-                            "execution_id": execution_id,
-                            "ac_index": ac_index,
-                            "ac_content": ac_text(spec),
-                            "verify_command": spec.verify_command,
-                            "expected_artifacts": list(spec.expected_artifacts),
-                            "prior_error": result.error,
-                            "output_tail": outcome.output_tail,
-                        },
-                    )
-                )
-                log.info(
-                    "parallel_executor.ac.verify_gate_recovered",
-                    session_id=session_id,
-                    ac_index=ac_index,
-                    prior_error=result.error,
-                )
-                return replace(
-                    result,
-                    success=True,
-                    error=None,
-                    final_message=(result.final_message or recovery_message),
-                    outcome=ACExecutionOutcome.SUCCEEDED,
-                    verify_gate_outcome=outcome,
-                )
-            if cached_outcome is outcome:
-                return result
-            return replace(result, verify_gate_outcome=outcome)
+            # Tier stamping, failure recovery, and the baseline withhold all
+            # live with the probe that justifies them (#2179 Stage 1).
+            return await settle_passing_verify_outcome(
+                self,
+                spec=spec,
+                ac_index=ac_index,
+                result=result,
+                outcome=outcome,
+                cached_outcome=cached_outcome,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
         if not result.success:
             return result
 

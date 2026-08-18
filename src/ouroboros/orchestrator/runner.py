@@ -1067,6 +1067,7 @@ class OrchestratorRunner:
         _execution_config = _config.execution
         self._run_verify_commands = _execution_config.run_verify_commands
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
+        self._verify_baseline_probe = _execution_config.verify_baseline_probe
         self._ac_retry_attempts = _execution_config.ac_retry_attempts
         from ouroboros.config import (
             get_context_pack_enabled,
@@ -10292,6 +10293,12 @@ class OrchestratorRunner:
             route_economics=self._route_economics,
             run_verify_commands=execution_semantics["run_verify_commands"],
             verify_command_timeout_seconds=execution_semantics["verify_command_timeout_seconds"],
+            # Deliberately NOT part of the durable execution-semantics contract:
+            # resumed behavior is governed by the checkpointed verify_baseline
+            # records, not by re-reading this flag, so widening _CURRENT_KEYS
+            # (and forcing a semantics version bump on every in-flight session)
+            # would buy nothing.
+            verify_baseline_probe=self._verify_baseline_probe,
             ac_retry_attempts=execution_semantics["ac_retry_attempts"],
             cross_harness_redispatch=execution_semantics["cross_harness_redispatch"],
             shadow_replay_enabled=execution_semantics["shadow_replay_enabled"],

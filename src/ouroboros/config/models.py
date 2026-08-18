@@ -241,6 +241,16 @@ class ExecutionConfig(BaseModel, frozen=True):
             must exist under the run workspace and ``verify_command`` must exit
             0 (plus any ``output_assertion``). On by default.
         verify_command_timeout_seconds: Timeout for an AC verify command.
+        verify_baseline_probe: Whether the orchestrator runs each AC's success
+            contract against a disposable copy of the pristine workspace at
+            run start (the Stage 1 negative control, #2179). ``observe`` (the
+            default) probes and records: a contract that already passes at
+            baseline loses the ``discriminating_pass`` verdict tier and its
+            authority to recover a worker-reported failure, but keeps its
+            evidence exemption for this release — the ``enforce`` consequence
+            arrives one release later, mirroring how ``run_verify_commands``
+            and ``seed.verify_command_gate`` staged in. ``off`` disables the
+            probe entirely.
         ac_retry_attempts: How many times a failed AC is re-dispatched before
             it is marked FAILED (per-AC, excludes stall retries).
         cross_harness_redispatch: Whether a terminally failing AC may be
@@ -275,6 +285,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     default_model: str | None = None
     run_verify_commands: bool = True
     verify_command_timeout_seconds: int = Field(default=600, ge=1)
+    verify_baseline_probe: Literal["off", "observe"] = "observe"
     ac_retry_attempts: int = Field(default=2, ge=0)
     cross_harness_redispatch: bool = True
     n_version_tournament: bool = False

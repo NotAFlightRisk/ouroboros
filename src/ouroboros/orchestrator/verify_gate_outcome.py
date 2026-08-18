@@ -24,6 +24,15 @@ from ouroboros.core.seed import (
 _VERIFY_OUTPUT_TAIL_CHARS = 2000
 _WORKSPACE_DIGEST_CHARS = 64
 
+# The two-valued verdict vocabulary (#2179): ``discriminating_pass`` means the
+# contract passed and the baseline negative control held (it failed on the
+# pristine workspace); plain ``pass`` means the contract passed but the probe
+# withheld or could not run. ``None`` covers failed outcomes and checkpoints
+# written before the vocabulary existed — read downstream as plain pass, the
+# conservative direction. String-valued so later probe stages can widen the
+# vocabulary without another schema change.
+_VERDICT_TIERS = frozenset({"pass", "discriminating_pass"})
+
 
 def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
     """Inspect at most one key beyond a finite durable-contract schema."""
@@ -62,6 +71,8 @@ class _VerifyGateOutcome:
     # Distinct from a failing command: nothing was judged, so the AC is
     # quarantined as unverifiable rather than reported as a worker failure.
     environment_unverifiable: bool = False
+    # Verdict tier for a passing outcome; always None while not passed.
+    verdict_tier: str | None = None
 
 
 def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
@@ -76,6 +87,8 @@ def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
         or any(not isinstance(item, str) for item in outcome.missing_artifacts)
         or not isinstance(outcome.workspace_mutated, bool)
         or not isinstance(outcome.environment_unverifiable, bool)
+        or (outcome.verdict_tier is not None and outcome.verdict_tier not in _VERDICT_TIERS)
+        or (outcome.verdict_tier is not None and not outcome.passed)
         or (
             outcome.workspace_digest is not None
             and (
@@ -94,6 +107,7 @@ def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
         "workspace_mutated": outcome.workspace_mutated,
         "workspace_digest": outcome.workspace_digest,
         "environment_unverifiable": outcome.environment_unverifiable,
+        "verdict_tier": outcome.verdict_tier,
     }
 
 
@@ -111,10 +125,15 @@ def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None
     )
     # Checkpoints written before the quarantine flag existed stay readable:
     # re-running a non-idempotent verify_command is worse than defaulting one
-    # boolean that only ever suppressed a pass.
-    expected_keys = legacy_keys | {"environment_unverifiable"}
+    # boolean that only ever suppressed a pass. The same forward-compat rule
+    # covers the verdict-tier vocabulary: a pre-vocabulary checkpoint reads as
+    # a plain pass, which is never a discriminating claim.
+    quarantine_keys = legacy_keys | {"environment_unverifiable"}
+    expected_keys = quarantine_keys | {"verdict_tier"}
     if not (
-        _mapping_has_exact_keys(value, expected_keys) or _mapping_has_exact_keys(value, legacy_keys)
+        _mapping_has_exact_keys(value, expected_keys)
+        or _mapping_has_exact_keys(value, quarantine_keys)
+        or _mapping_has_exact_keys(value, legacy_keys)
     ):
         return None
     assert isinstance(value, Mapping)
@@ -125,7 +144,12 @@ def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None
     workspace_mutated = value.get("workspace_mutated")
     workspace_digest = value.get("workspace_digest")
     environment_unverifiable = value.get("environment_unverifiable", False)
+    verdict_tier = value.get("verdict_tier")
     if not isinstance(environment_unverifiable, bool):
+        return None
+    if verdict_tier is not None and verdict_tier not in _VERDICT_TIERS:
+        return None
+    if verdict_tier is not None and value.get("passed") is not True:
         return None
     if not isinstance(passed, bool) or not isinstance(output_tail, str):
         return None
@@ -152,6 +176,7 @@ def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None
         workspace_mutated=workspace_mutated,
         workspace_digest=workspace_digest,
         environment_unverifiable=environment_unverifiable,
+        verdict_tier=verdict_tier,
     )
 
 
@@ -202,6 +227,8 @@ def _revalidate_cached_verify_gate_outcome(
     missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
     if not missing_artifacts:
         return outcome
+    # Demotion to failure clears the verdict tier: a tier is a claim about a
+    # pass, and this outcome no longer is one.
     return _VerifyGateOutcome(
         passed=False,
         reason="expected_artifacts missing: " + ", ".join(missing_artifacts),
@@ -210,4 +237,5 @@ def _revalidate_cached_verify_gate_outcome(
         workspace_mutated=outcome.workspace_mutated,
         workspace_digest=outcome.workspace_digest,
         environment_unverifiable=outcome.environment_unverifiable,
+        verdict_tier=None,
     )
