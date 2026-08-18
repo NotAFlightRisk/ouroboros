@@ -333,7 +333,6 @@ def _is_interview_completion_signal(answer: str | None) -> bool:
     if any(phrase in normalized for phrase in _INTERVIEW_COMPLETION_NEGATIONS):
         return False
 
-
     if any(phrase in normalized for phrase in _INTERVIEW_COMPLETION_PHRASES):
         return True
 
