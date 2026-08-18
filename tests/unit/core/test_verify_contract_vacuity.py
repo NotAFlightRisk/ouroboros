@@ -94,3 +94,45 @@ def test_a_malformed_assertion_only_contract_still_reaches_the_gate() -> None:
 def test_unparseable_commands_are_not_accused() -> None:
     assert constant_verdict("echo $(date)") is None
     assert constant_verdict("echo ok | tee log") is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "exit 256",
+        "exit -0",
+        "exit +0",
+        "exit 512",
+        "bash -c 'exit 0'",
+        'sh -c "true"',
+        "bash -lc 'exit 0'",
+        "bash -c 'exit 256'",
+        "command true",
+        "command exit 0",
+    ],
+)
+def test_disguised_constants_are_still_proven(command: str) -> None:
+    """POSIX truncation, `command` prefixes, and literal shell wrappers are the
+    same constant wearing a costume; the proof must see through all of them."""
+    assert constant_verdict(command) is True
+    spec = AcceptanceCriterionSpec(description="d", verify_command=command)
+    assert spec.has_evidential_success_contract is False
+
+
+@pytest.mark.parametrize("command", ["exit -1", "bash -c 'exit 1'", "sh -c 'false'"])
+def test_disguised_constant_failures_stay_left_alone(command: str) -> None:
+    assert constant_verdict(command) is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -c 'pytest -q'",
+        "sh -c 'test -f out.txt'",
+        "bash -xc 'exit 0'",
+        "command -v pytest",
+        "bash -c 'exit 0' extra-arg",
+    ],
+)
+def test_wrappers_that_could_do_real_work_stay_unproven(command: str) -> None:
+    assert constant_verdict(command) is not True

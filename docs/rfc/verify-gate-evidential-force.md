@@ -1,6 +1,8 @@
 # RFC - Evidential force for self-authored acceptance contracts
 
-> Status: Proposed (design only — nothing in this RFC is implemented)
+> Status: Partially implemented — the "Current baseline" section is shipped
+> (PR #2180/#2181); the Decision stages (0–4) are design, with Stage 0/1
+> proposed in the stacked follow-up PR
 > Scope: `_run_ac_verify_gate` / `_apply_verify_gate`, `core/verify_command_plan.py`,
 > `core/seed_verify_gate.py`, evidence schema, seed authoring, reflect settled-AC skip
 > Prior art in-repo: PR #1916 (hidden-checklist convergence),

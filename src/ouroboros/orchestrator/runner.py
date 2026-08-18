@@ -8481,7 +8481,10 @@ class OrchestratorRunner:
         if mode == "block":
             return Result.err(
                 OrchestratorError(
-                    message="Acceptance criteria carry no verify_command and no exemption reason",
+                    message=(
+                        "Acceptance criteria carry no deterministic verify_command "
+                        "(missing, or proven to always pass) and no exemption reason"
+                    ),
                     details={
                         "gate": "seed.verify_command_gate",
                         "mode": mode,
@@ -8496,7 +8499,9 @@ class OrchestratorRunner:
             unverifiable_ac_indices=indices,
             unverifiable_ac_count=len(findings),
         )
-        self._console.print(f"[yellow]{render_verify_command_gate_warning(findings)}[/yellow]")
+        # Text, not markup interpolation: descriptions and commands are seed
+        # text and may contain Rich tags (`[/yellow]` would raise MarkupError).
+        self._console.print(Text(render_verify_command_gate_warning(findings), style="yellow"))
         return None
 
     async def prepare_session(

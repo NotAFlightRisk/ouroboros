@@ -130,3 +130,24 @@ async def test_warn_stage_still_prepares_the_session(
             session_id=tracker.session_id,
             execution_id=tracker.execution_id,
         )
+
+
+def test_warn_stage_survives_rich_markup_in_seed_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Descriptions and commands are seed text; a stray Rich closing tag must
+    render as text, not abort session preparation with a MarkupError."""
+    import io
+
+    from rich.console import Console
+
+    monkeypatch.setattr(seed_verify_gate, "verify_command_gate_mode", lambda: "warn")
+    adapter = MagicMock()
+    adapter.working_directory = str(tmp_path)
+    adapter.runtime_backend = "claude"
+    buffer = io.StringIO()
+    runner = OrchestratorRunner(adapter, AsyncMock(), Console(file=buffer, width=200))
+    seed = _seed("Close the [/yellow] tag [bold]boldly[/bold]")
+
+    assert runner._apply_verify_command_gate(seed) is None
+    assert "[/yellow]" in buffer.getvalue()
