@@ -156,10 +156,10 @@ from ouroboros.orchestrator.execution_runtime_scope import (
 from ouroboros.orchestrator.execution_semantics import (
     CURRENT_EXECUTION_SEMANTICS_VERSION,
     VACUOUS_CONTRACT_EVIDENCE_POLICIES,
+    migrated_legacy_execution_semantics,
     pre_adaptive_execution_semantics_rejection,
     valid_execution_semantics_contract,
     valid_legacy_preflight_execution_semantics_contract,
-    migrated_legacy_execution_semantics,
 )
 from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
