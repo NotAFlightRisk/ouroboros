@@ -2288,6 +2288,19 @@ def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
     ]
 
 
+def test_installer_sets_omp_tool_call_timeout_when_omp_is_available(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "omp": '#!/bin/sh\nprintf \'omp %s\\n\' "$*" >> "$OUROBOROS_TEST_CALLS_LOG"\nexit 0\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "omp config set extensionHandlers.toolCallTimeoutMs 60000" in calls
+
+
 def test_explicit_codex_refreshes_runtime_artifacts(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,

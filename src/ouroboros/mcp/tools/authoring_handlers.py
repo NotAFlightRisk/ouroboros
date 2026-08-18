@@ -219,6 +219,10 @@ _INTERVIEW_COMPLETION_PHRASES = (
     "no ambiguity remains",
     "no ambiguity left",
 )
+_INTERVIEW_STRUCTURED_COMPLETION_PREFIXES = (
+    "[from-user][refined][closure]",
+    "[from-user][closure]",
+)
 
 
 def _interview_allowed_tools(runtime_backend: str | None) -> list[str] | None:
@@ -316,6 +320,9 @@ def _is_interview_completion_signal(answer: str | None) -> bool:
     ):
         return False
 
+    if any(stripped.startswith(prefix) for prefix in _INTERVIEW_STRUCTURED_COMPLETION_PREFIXES):
+        return True
+
     normalized = _normalize_interview_answer(answer)
     if not normalized:
         return False
@@ -325,6 +332,7 @@ def _is_interview_completion_signal(answer: str | None) -> bool:
 
     if any(phrase in normalized for phrase in _INTERVIEW_COMPLETION_NEGATIONS):
         return False
+
 
     if any(phrase in normalized for phrase in _INTERVIEW_COMPLETION_PHRASES):
         return True
@@ -3065,6 +3073,11 @@ class InterviewHandler:
                     )
                 )
             state = record_result.value
+            # Question generation may run beside live ambiguity scoring below.
+            # Keep the prior persisted ambiguity snapshot on an isolated copy so
+            # the question prompt retains closure/breadth guidance without racing
+            # the scorer's mutations on the canonical state.
+            question_state = state.model_copy(deep=True)
             state.clear_stored_ambiguity()
 
             # Emit response recorded event
@@ -3088,27 +3101,44 @@ class InterviewHandler:
             # question generation failures downstream
             await engine.save_state(state)
 
-            # Only score ambiguity when completion is actually
-            # possible. Before MIN_ROUNDS_BEFORE_EARLY_EXIT the
-            # result cannot trigger early exit, so the LLM call
-            # (~3-8 s) is pure waste. Once scoring starts, run it
-            # before question generation so the next prompt sees
-            # the latest ambiguity snapshot, closure threshold,
-            # and completion-candidate streak.
+            # Only score ambiguity when completion is actually possible. Before
+            # MIN_ROUNDS_BEFORE_EARLY_EXIT the result cannot trigger early exit,
+            # so the LLM call is pure waste. Once scoring starts, overlap it with
+            # question generation: interactive MCP clients commonly enforce a
+            # 30-second deadline, while the two serial model calls routinely take
+            # 34-48 seconds. The generated question uses the isolated previous
+            # ambiguity snapshot; the canonical state and response metadata use
+            # the fresh score. If the fresh score closes the interview, the
+            # speculative question is discarded.
             answered = _count_answered_rounds(state)
             if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
-                # Scoring must complete before question generation:
-                # _score_interview_state mutates state.ambiguity_score,
-                # completion_candidate_streak, and ambiguity_breakdown.
-                # ask_next_question reads those fields to build the
-                # system prompt (closure mode, seed-ready, streak).
-                # Running them in parallel would give the question
-                # generator stale routing context.
-                ambiguity_scoring_started_at = time.perf_counter()
-                try:
-                    live_score = await self._score_interview_state(llm_adapter, state)
-                finally:
-                    ambiguity_scoring_duration_ms = _elapsed_ms(ambiguity_scoring_started_at)
+
+                async def score_interview() -> AmbiguityScore | None:
+                    nonlocal ambiguity_scoring_duration_ms
+                    started_at = time.perf_counter()
+                    try:
+                        return await self._score_interview_state(llm_adapter, state)
+                    finally:
+                        ambiguity_scoring_duration_ms = _elapsed_ms(started_at)
+
+                async def generate_question() -> Any:
+                    nonlocal question_generation_duration_ms
+                    started_at = time.perf_counter()
+                    try:
+                        return await engine.ask_next_question(question_state)
+                    finally:
+                        question_generation_duration_ms = _elapsed_ms(started_at)
+
+                question_result = None
+                if state.completion_candidate_streak >= AUTO_COMPLETE_STREAK_REQUIRED:
+                    # A stable closure candidate may finish from scoring alone.
+                    # Preserve the established contract that completion does not
+                    # invoke the question generator speculatively.
+                    live_score = await score_interview()
+                else:
+                    live_score, question_result = await asyncio.gather(
+                        score_interview(), generate_question()
+                    )
                 lateral_review_meta = _maybe_record_lateral_review_advisory(
                     state,
                     previous_milestone=previous_milestone,
@@ -3129,12 +3159,10 @@ class InterviewHandler:
                         live_score,
                         turn_started_at=turn_started_at,
                         ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
+                        question_generation_duration_ms=question_generation_duration_ms,
                     )
-                question_generation_started_at = time.perf_counter()
-                try:
-                    question_result = await engine.ask_next_question(state)
-                finally:
-                    question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
+                if question_result is None:
+                    question_result = await generate_question()
             else:
                 live_score = None
                 question_generation_started_at = time.perf_counter()

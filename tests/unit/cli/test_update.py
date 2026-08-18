@@ -46,13 +46,16 @@ runner = CliRunner()
 
 @pytest.fixture(autouse=True)
 def _isolate_runtime_topology() -> Iterator[None]:
-    """Keep CLI-flow tests independent of the developer's real config file."""
-    with patch(
-        "ouroboros.cli.commands.update._configured_runtime_topology",
-        return_value=RuntimeRefreshTopology(
-            runtime_executable="/usr/bin/claude",
-            runtime_executable_env_key="OUROBOROS_CLI_PATH",
+    """Keep CLI-flow tests independent of developer runtime configuration."""
+    with (
+        patch(
+            "ouroboros.cli.commands.update._configured_runtime_topology",
+            return_value=RuntimeRefreshTopology(
+                runtime_executable="/usr/bin/claude",
+                runtime_executable_env_key="OUROBOROS_CLI_PATH",
+            ),
         ),
+        patch("ouroboros.cli.commands.update.configure_omp_tool_call_timeout", return_value=True),
     ):
         yield
 
@@ -1517,6 +1520,10 @@ class TestUpdateFlow:
                 "ouroboros.cli.commands.update.subprocess.run",
                 side_effect=[upgrade, version_probe],
             ) as run,
+            patch(
+                "ouroboros.cli.commands.update.configure_omp_tool_call_timeout",
+                return_value=True,
+            ) as configure_omp,
         ):
             result = runner.invoke(app, ["--yes", "--runtime", "none"])
 
@@ -1525,6 +1532,7 @@ class TestUpdateFlow:
         assert "Updated to v99.0.0" in _plain(result.output)
         assert run.call_count == 2
         topology.assert_not_called()
+        configure_omp.assert_called_once_with(dry_run=False)
 
     def test_failed_package_upgrade_aborts_with_exit_code_one(self) -> None:
         failed_step = MagicMock(returncode=1)

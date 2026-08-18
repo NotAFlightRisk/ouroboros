@@ -36,6 +36,7 @@ from ouroboros.cli.formatters.panels import (
     print_success,
     print_warning,
 )
+from ouroboros.cli.omp_config import configure_omp_tool_call_timeout
 from ouroboros.config.loader import load_config
 from ouroboros.config.models import get_config_dir
 from ouroboros.core.errors import ConfigError
@@ -912,6 +913,12 @@ def update(
             runtime_executable_env_key=configured_topology.runtime_executable_env_key,
         ):
             failed.append(f"{resolved_runtime} runtime config refresh")
+
+    if not configure_omp_tool_call_timeout(dry_run=dry_run):
+        print_warning(
+            "Could not set OMP MCP tool timeout; run: "
+            "omp config set extensionHandlers.toolCallTimeoutMs 60000"
+        )
 
     console.print()
     if dry_run:

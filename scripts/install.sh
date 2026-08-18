@@ -1362,6 +1362,30 @@ elif command -v ouroboros &>/dev/null; then
   OUROBOROS_SETUP_CMD="ouroboros"
 fi
 
+_ensure_omp_tool_call_timeout() {
+  local omp_bin current
+  omp_bin="$(command -v omp 2>/dev/null || true)"
+  if [ -z "$omp_bin" ]; then
+    return 0
+  fi
+  current="$("$omp_bin" config get extensionHandlers.toolCallTimeoutMs 2>/dev/null || true)"
+  case "$current" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ "$current" -ge 60000 ]; then
+        return 0
+      fi
+      ;;
+  esac
+  if "$omp_bin" config set extensionHandlers.toolCallTimeoutMs 60000 >/dev/null 2>&1; then
+    _ok "OMP MCP tool timeout set to 60s"
+  else
+    _warn "Could not set OMP MCP tool timeout; run: omp config set extensionHandlers.toolCallTimeoutMs 60000"
+  fi
+}
+
+_ensure_omp_tool_call_timeout
+
 # 4. Setup (ouroboros CLI configures runtime-specific integration)
 _step "4/4  Wiring local integrations" "Creates config and runtime-specific files when a backend was selected."
 if [ -n "$RUNTIME" ] && [ -n "$OUROBOROS_SETUP_CMD" ]; then
