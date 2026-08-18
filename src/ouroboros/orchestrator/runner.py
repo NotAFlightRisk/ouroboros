@@ -158,6 +158,7 @@ from ouroboros.orchestrator.execution_semantics import (
     pre_adaptive_execution_semantics_rejection,
     valid_execution_semantics_contract,
     valid_legacy_preflight_execution_semantics_contract,
+    valid_pre_baseline_probe_execution_semantics_contract,
 )
 from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
@@ -3916,6 +3917,7 @@ class OrchestratorRunner:
             "version": CURRENT_EXECUTION_SEMANTICS_VERSION,
             "run_verify_commands": self._run_verify_commands,
             "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
+            "verify_baseline_probe": self._verify_baseline_probe,
             "ac_retry_attempts": self._ac_retry_attempts,
             "cross_harness_redispatch": self._cross_harness_redispatch_enabled,
             "enable_decomposition": self._enable_decomposition,
@@ -6109,6 +6111,36 @@ class OrchestratorRunner:
                 message=pre_adaptive_rejection.message,
                 details=pre_adaptive_rejection.details,
             )
+
+        migrate_pre_baseline_contract = valid_pre_baseline_probe_execution_semantics_contract(
+            raw_execution_semantics
+        )
+        if migrate_pre_baseline_contract:
+            persisted_v4_fingerprint = raw_proof.get("execution_semantics_fingerprint")
+            if not isinstance(
+                persisted_v4_fingerprint, str
+            ) or persisted_v4_fingerprint != self._execution_semantics_fingerprint(
+                raw_execution_semantics
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid pre-baseline-probe contract",
+                    details={"invalid": "execution_semantics_fingerprint"},
+                )
+            migrated_contract = deepcopy(dict(raw_contract))
+            migrated_semantics = migrated_contract["execution_semantics"]
+            migrated_proof = migrated_contract["frugality_proof"]
+            assert isinstance(migrated_semantics, dict)
+            assert isinstance(migrated_proof, dict)
+            migrated_semantics["version"] = CURRENT_EXECUTION_SEMANTICS_VERSION
+            # The schema default: what every v4 session would have carried had
+            # the field existed. Nothing else about the contract changes.
+            migrated_semantics["verify_baseline_probe"] = "observe"
+            migrated_proof["execution_semantics_fingerprint"] = (
+                self._execution_semantics_fingerprint(migrated_semantics)
+            )
+            raw_contract = migrated_contract
+            raw_proof = migrated_proof
+            raw_execution_semantics = migrated_semantics
 
         migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(
             raw_execution_semantics
@@ -10298,12 +10330,7 @@ class OrchestratorRunner:
             route_economics=self._route_economics,
             run_verify_commands=execution_semantics["run_verify_commands"],
             verify_command_timeout_seconds=execution_semantics["verify_command_timeout_seconds"],
-            # Deliberately NOT part of the durable execution-semantics contract:
-            # resumed behavior is governed by the checkpointed verify_baseline
-            # records, not by re-reading this flag, so widening _CURRENT_KEYS
-            # (and forcing a semantics version bump on every in-flight session)
-            # would buy nothing.
-            verify_baseline_probe=self._verify_baseline_probe,
+            verify_baseline_probe=execution_semantics["verify_baseline_probe"],
             ac_retry_attempts=execution_semantics["ac_retry_attempts"],
             cross_harness_redispatch=execution_semantics["cross_harness_redispatch"],
             shadow_replay_enabled=execution_semantics["shadow_replay_enabled"],

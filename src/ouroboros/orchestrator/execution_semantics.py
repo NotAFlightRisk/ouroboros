@@ -11,7 +11,8 @@ from ouroboros.orchestrator.execution_authority import (
     valid_runtime_effect_capabilities_contract,
 )
 
-CURRENT_EXECUTION_SEMANTICS_VERSION = 4
+CURRENT_EXECUTION_SEMANTICS_VERSION = 5
+PRE_BASELINE_PROBE_EXECUTION_SEMANTICS_VERSION = 4
 PRE_ADAPTIVE_EXECUTION_SEMANTICS_VERSION = 3
 
 
@@ -27,6 +28,7 @@ _CURRENT_KEYS = frozenset(
         "version",
         "run_verify_commands",
         "verify_command_timeout_seconds",
+        "verify_baseline_probe",
         "ac_retry_attempts",
         "cross_harness_redispatch",
         "enable_decomposition",
@@ -94,6 +96,9 @@ def valid_execution_semantics_contract(value: object) -> bool:
         or any(type(value.get(key)) is not bool for key in _BOOLEAN_KEYS)
     ):
         return False
+    baseline_probe = value.get("verify_baseline_probe")
+    if not isinstance(baseline_probe, str) or baseline_probe not in {"off", "observe"}:
+        return False
     timeout = value.get("verify_command_timeout_seconds")
     retries = value.get("ac_retry_attempts")
     max_depth = value.get("max_decomposition_depth")
@@ -142,6 +147,30 @@ def valid_execution_semantics_contract(value: object) -> bool:
         and 1 <= usage_limit_pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
         and valid_runtime_effect_capabilities_contract(value.get("runtime_effect_capabilities"))
     )
+
+
+def valid_pre_baseline_probe_execution_semantics_contract(value: object) -> bool:
+    """Recognize the exact v4 shape that predates the baseline-probe field.
+
+    The probe changes execution effects (pre-dispatch contract runs, verdict
+    tiers, recovery authority), so it belongs to the durable semantics schema.
+    A v4 contract is admitted by migration to the schema default ``observe`` —
+    the value every v4 session would have received had the field existed —
+    rather than rejected, because the migration changes nothing else.
+    """
+    if (
+        not isinstance(value, Mapping)
+        or value.get("version") != PRE_BASELINE_PROBE_EXECUTION_SEMANTICS_VERSION
+        or "verify_baseline_probe" in value
+    ):
+        return False
+    migrated = dict(value)
+    migrated["version"] = CURRENT_EXECUTION_SEMANTICS_VERSION
+    migrated["verify_baseline_probe"] = "observe"
+    # A v4 legacy-preflight snapshot chains through both migrations.
+    return valid_execution_semantics_contract(
+        migrated
+    ) or valid_legacy_preflight_execution_semantics_contract(migrated)
 
 
 def valid_legacy_preflight_execution_semantics_contract(value: object) -> bool:
@@ -206,4 +235,5 @@ __all__ = [
     "pre_adaptive_execution_semantics_rejection",
     "valid_execution_semantics_contract",
     "valid_legacy_preflight_execution_semantics_contract",
+    "valid_pre_baseline_probe_execution_semantics_contract",
 ]

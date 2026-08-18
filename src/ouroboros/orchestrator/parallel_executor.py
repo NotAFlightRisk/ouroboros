@@ -420,6 +420,7 @@ from ouroboros.orchestrator.verifier import (
 from ouroboros.orchestrator.verify_baseline import (
     VerifyBaseline,
     establish_verify_baseline,
+    persist_verify_baseline_checkpoint,
     restore_verify_baseline,
     settle_passing_verify_outcome,
     verify_baseline_checkpoint_state,
@@ -3827,6 +3828,7 @@ class ParallelACExecutor:
         ac_retry_attempts: dict[int, int] = dict.fromkeys(range(total_acs), 0)
         completed_count = 0
         resume_from_level = 0
+        checkpoint_recognized = False
         recoverable_route_pause = False
         recoverable_coordinator_pause: CoordinatorQuotaPause | None = None
 
@@ -3864,6 +3866,7 @@ class ParallelACExecutor:
                         and checkpoint_state.get("workspace_identity") == current_workspace_identity
                     )
                     if checkpoint_matches_invocation:
+                        checkpoint_recognized = True
                         coordinator_mutated_workspace = bool(
                             checkpoint_state.get("coordinator_mutated_workspace", False)
                         )
@@ -4116,8 +4119,16 @@ class ParallelACExecutor:
         # first worker dispatch. Never on a resume — a recognized checkpoint
         # means workers already ran, so the only honest baselines are the
         # restored records (or unknown, which grants and revokes nothing).
-        if self._verify_baseline is None and resume_from_level == 0:
+        if self._verify_baseline is None and not checkpoint_recognized:
             self._verify_baseline = await establish_verify_baseline(
+                self,
+                seed=seed,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            # Persisted before any worker effect exists, so a crash before the
+            # first level save cannot lead to re-probing a mutated workspace.
+            await persist_verify_baseline_checkpoint(
                 self,
                 seed=seed,
                 session_id=session_id,

@@ -204,15 +204,33 @@ async def test_probe_off_probes_nothing(tmp_path: Any) -> None:
     assert _emitted(executor, BASELINE_PROBE_EVENT) == []
 
 
-def test_snapshot_rejects_escaping_symlink(tmp_path: Any) -> None:
+def test_snapshot_rejects_symlink_back_into_the_live_workspace(tmp_path: Any) -> None:
+    """Through such a link a probed `rm` would reach the tree the snapshot
+    exists to protect."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    outside = tmp_path / "outside.txt"
-    outside.write_text("live filesystem")
-    os.symlink(outside, workspace / "leak")
+    (workspace / "real.txt").write_text("live")
+    os.symlink(workspace / "real.txt", workspace / "leak")
 
     with baseline_snapshot(str(workspace)) as snapshot:
         assert snapshot is None
+
+
+def test_snapshot_keeps_system_symlinks_like_a_venv_interpreter(tmp_path: Any) -> None:
+    """A `.venv/bin/python -> /usr/...` link is the standard virtualenv shape;
+    rejecting it would silently disable the baseline for every Python repo."""
+    import sys
+
+    workspace = tmp_path / "ws"
+    bin_dir = workspace / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    os.symlink(sys.executable, bin_dir / "python")
+    (workspace / "kept.txt").write_text("kept")
+
+    with baseline_snapshot(str(workspace)) as snapshot:
+        assert snapshot is not None
+        assert os.path.islink(os.path.join(snapshot, ".venv", "bin", "python"))
+        assert os.path.exists(os.path.join(snapshot, "kept.txt"))
 
 
 def test_snapshot_excludes_git_and_keeps_untracked(tmp_path: Any) -> None:
@@ -504,6 +522,145 @@ async def test_restored_records_still_revoke_recovery(tmp_path: Any) -> None:
 
     assert settled.success is False
     assert _emitted(executor, "execution.verify.recovered") == []
+
+
+@pytest.mark.asyncio
+async def test_git_dependent_contract_is_unknown_not_judged(tmp_path: Any) -> None:
+    """The snapshot has no `.git`, so a git-consulting contract would be judged
+    in an environment with different semantics — unknown, never a verdict."""
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="ac", verify_command="git diff --check"),
+        AcceptanceCriterionSpec(description="not git", verify_command="test -d ."),
+    )
+
+    baseline = await establish_verify_baseline(
+        executor, seed=seed, session_id="s", execution_id="e"
+    )
+
+    assert baseline is not None
+    assert baseline.records[0].probed is False
+    assert "git" in (baseline.records[0].reason or "")
+    assert baseline.records[1].probed is True
+    # A name merely containing "git" must not trip the detector.
+    assert not any(record.probed is False for record in [baseline.records[1]])
+
+
+@pytest.mark.asyncio
+async def test_git_word_detector_ignores_lookalike_names(tmp_path: Any) -> None:
+    script = tmp_path / "legit.sh"
+    script.write_text("#!/bin/sh\nexit 0\n")
+    script.chmod(0o755)
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="./legit.sh"))
+
+    baseline = await establish_verify_baseline(
+        executor, seed=seed, session_id="s", execution_id="e"
+    )
+
+    assert baseline is not None
+    assert baseline.records[0].probed is True
+
+
+@pytest.mark.asyncio
+async def test_all_pass_claim_requires_full_probe_coverage(tmp_path: Any) -> None:
+    """One unknown contract forbids the 'every contract already passes' claim."""
+    (tmp_path / "pre.txt").write_text("here")
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="pass", verify_command="test -f pre.txt"),
+        AcceptanceCriterionSpec(description="unknown", verify_command="git status"),
+    )
+
+    baseline = await establish_verify_baseline(
+        executor, seed=seed, session_id="s", execution_id="e"
+    )
+
+    assert baseline is not None
+    assert baseline.all_contracts_baseline_pass is False
+    assert _emitted(executor, BASELINE_ALL_PASS_EVENT) == []
+
+
+@pytest.mark.asyncio
+async def test_baseline_is_persisted_before_any_worker_effect(tmp_path: Any) -> None:
+    from ouroboros.orchestrator.verify_baseline import persist_verify_baseline_checkpoint
+
+    executor = _make_executor(working_directory=str(tmp_path))
+    store = MagicMock()
+    executor._checkpoint_store = store
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="test -d ."))
+    executor._verify_baseline = await establish_verify_baseline(
+        executor, seed=seed, session_id="s", execution_id="e"
+    )
+
+    await persist_verify_baseline_checkpoint(executor, seed=seed, session_id="s", execution_id="e")
+
+    assert store.save.called
+    saved_state = store.save.call_args.args[0].state
+    assert saved_state["completed_levels"] == 0
+    assert saved_state["session_id"] == "s"
+    restored = restore_verify_baseline(saved_state["verify_baseline"])
+    assert restored is not None
+    assert restored.records[0].probed is True
+
+
+def test_semantics_contract_carries_probe_field_and_migrates_v4() -> None:
+    from ouroboros.orchestrator.execution_semantics import (
+        valid_pre_baseline_probe_execution_semantics_contract,
+    )
+
+    v4 = {
+        "version": 4,
+        "run_verify_commands": True,
+        "verify_command_timeout_seconds": 600,
+        "ac_retry_attempts": 2,
+        "cross_harness_redispatch": True,
+        "enable_decomposition": True,
+        "decomposition_mode": "bounce_only",
+        "max_decomposition_depth": 2,
+        "max_parallel_workers": 3,
+        "effective_parallel_workers": 3,
+        "adaptive_concurrency_policy": None,  # filled below
+        "fat_harness_mode": False,
+        "shadow_replay_enabled": False,
+        "checkpoint_store_enabled": True,
+        "session_signal_hub_enabled": True,
+        "context_pack_enabled": True,
+        "backend_limits_backend": "claude",
+        "backend_max_concurrency": None,
+        "backend_requests_per_minute": None,
+        "backend_tokens_per_minute": None,
+        "backend_self_governs_rate_limit": True,
+        "usage_limit_pause_seconds": 18000,
+        "runtime_effect_capabilities": None,  # filled below
+    }
+    from ouroboros.orchestrator.adaptive_concurrency import adaptive_concurrency_policy
+
+    v4["adaptive_concurrency_policy"] = adaptive_concurrency_policy(initial_limit=3, max_limit=3)
+    from ouroboros.orchestrator.execution_authority import (
+        runtime_effect_capabilities_contract,
+    )
+    from ouroboros.orchestrator.execution_semantics import (
+        valid_execution_semantics_contract,
+    )
+
+    class _Adapter:
+        runtime_backend = "claude"
+
+    v4["runtime_effect_capabilities"] = runtime_effect_capabilities_contract(_Adapter())
+
+    assert valid_pre_baseline_probe_execution_semantics_contract(v4) is True
+    v5 = dict(v4)
+    v5["version"] = 5
+    v5["verify_baseline_probe"] = "observe"
+    assert valid_execution_semantics_contract(v5) is True
+    # v5 without the field is invalid; v4 with the field is not a v4 shape.
+    v5_missing = dict(v5)
+    del v5_missing["verify_baseline_probe"]
+    assert valid_execution_semantics_contract(v5_missing) is False
+    v4_with = dict(v4)
+    v4_with["verify_baseline_probe"] = "observe"
+    assert valid_pre_baseline_probe_execution_semantics_contract(v4_with) is False
 
 
 # ---------------------------------------------------------------------------

@@ -35,15 +35,17 @@ import contextlib
 from dataclasses import dataclass, replace
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 import time
 from typing import TYPE_CHECKING, Any
 
+from rich.text import Text
+
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text
 from ouroboros.events.base import BaseEvent
 from ouroboros.observability.logging import get_logger
-from ouroboros.orchestrator.shadow_replay import _snapshot_has_escaping_symlink
 from ouroboros.orchestrator.verify_gate_outcome import (
     _missing_expected_artifacts,
     _VerifyGateOutcome,
@@ -89,6 +91,13 @@ _BASELINE_COPY_IGNORE = shutil.ignore_patterns(
 _UNJUDGED_REASON_PREFIX = "verify_command could not start"
 _UNJUDGED_REASON_SUBSTRING = "timed out after"
 
+# The snapshot carries no `.git`, so any contract that consults git would be
+# judged against an environment with different semantics than the live tree —
+# `git diff --check` exits 129 there while passing on the real workspace, a
+# discrimination certificate without worker contribution. Word-boundary match;
+# `legit.sh` or `digit` must not trip it.
+_GIT_WORD = re.compile(r"(?<![\w/.-])git(?![\w.-])")
+
 _RECORD_KEYS = frozenset({"probed", "baseline_verdict", "preexisting_artifacts", "reason"})
 _BASELINE_KEYS = frozenset({"all_contracts_baseline_pass", "records"})
 
@@ -125,7 +134,7 @@ def baseline_snapshot(cwd: str) -> Iterator[str | None]:
             base = tempfile.mkdtemp(prefix="ooo-verify-baseline-")
             target = Path(base) / "workspace"
             shutil.copytree(cwd, target, ignore=_BASELINE_COPY_IGNORE, symlinks=True)
-            has_escaping_symlink = _snapshot_has_escaping_symlink(target)
+            has_link_into_live_tree = _snapshot_links_into_live_workspace(target, Path(cwd))
         except Exception as exc:
             log.warning(
                 "parallel_executor.verify_baseline.snapshot_error",
@@ -134,7 +143,7 @@ def baseline_snapshot(cwd: str) -> Iterator[str | None]:
             )
             yield None
             return
-        if has_escaping_symlink:
+        if has_link_into_live_tree:
             log.warning("parallel_executor.verify_baseline.unsafe_symlink", cwd=cwd)
             yield None
             return
@@ -142,6 +151,32 @@ def baseline_snapshot(cwd: str) -> Iterator[str | None]:
     finally:
         if base is not None:
             shutil.rmtree(base, ignore_errors=True)
+
+
+def _snapshot_links_into_live_workspace(root: Path, live_root: Path) -> bool:
+    """Return whether any copied symlink resolves inside the live workspace.
+
+    Only links back into the live tree are rejected: through one, a probed
+    contract could read or mutate the very workspace the snapshot exists to
+    protect. Links to the wider system — a `.venv/bin/python` pointing at an
+    installed interpreter is the standard shape — are exactly what the same
+    command would use when the gate later runs it against the live tree, so
+    rejecting them would silently disable the baseline for every ordinary
+    Python workspace.
+    """
+    resolved_live = live_root.resolve()
+    for current_root, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in (*dirnames, *filenames):
+            candidate = Path(current_root) / name
+            if not candidate.is_symlink():
+                continue
+            try:
+                resolved = candidate.resolve(strict=False)
+            except (OSError, RuntimeError):
+                return True
+            if resolved.is_relative_to(resolved_live):
+                return True
+    return False
 
 
 def _classify_probe_outcome(outcome: _VerifyGateOutcome) -> ACBaselineRecord:
@@ -169,6 +204,37 @@ def render_verify_baseline_all_pass_warning(display_indices: Sequence[int]) -> s
         f"(AC {rendered}). None of them can distinguish this run's work from "
         "no work at all; their passes will not be counted as discriminating. "
         "Strengthen the contracts so they fail before the work exists."
+    )
+
+
+async def _emit_probe_event(
+    executor: ParallelACExecutor,
+    *,
+    session_id: str,
+    execution_id: str,
+    ac_index: int,
+    spec: AcceptanceCriterionSpec,
+    record: ACBaselineRecord,
+    duration_seconds: float,
+) -> None:
+    await executor._safe_emit_event(
+        BaseEvent(
+            type=BASELINE_PROBE_EVENT,
+            aggregate_type="execution",
+            aggregate_id=execution_id or session_id,
+            data={
+                "session_id": session_id,
+                "execution_id": execution_id,
+                "ac_index": ac_index,
+                "ac_content": ac_text(spec),
+                "verify_command": spec.verify_command,
+                "probed": record.probed,
+                "baseline_verdict": record.baseline_verdict,
+                "preexisting_artifacts": list(record.preexisting_artifacts),
+                "reason": record.reason,
+                "duration_seconds": duration_seconds,
+            },
+        )
     )
 
 
@@ -209,6 +275,26 @@ async def establish_verify_baseline(
             spec = seed.acceptance_criteria[index]
             assert isinstance(spec, AcceptanceCriterionSpec)
             started = time.monotonic()
+            if spec.verify_command and _GIT_WORD.search(spec.verify_command):
+                record = ACBaselineRecord(
+                    probed=False,
+                    baseline_verdict=None,
+                    reason=(
+                        "git-dependent contract cannot be probed against a "
+                        "gitless snapshot; baseline unknown"
+                    ),
+                )
+                records[index] = record
+                await _emit_probe_event(
+                    executor,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    ac_index=index,
+                    spec=spec,
+                    record=record,
+                    duration_seconds=0.0,
+                )
+                continue
             probe_dir: str | None = None
             try:
                 # Fresh copy per AC: the measured contract corpus contains
@@ -245,31 +331,24 @@ async def establish_verify_baseline(
                 if probe_dir is not None:
                     shutil.rmtree(Path(probe_dir).parent, ignore_errors=True)
             records[index] = record
-            await executor._safe_emit_event(
-                BaseEvent(
-                    type=BASELINE_PROBE_EVENT,
-                    aggregate_type="execution",
-                    aggregate_id=execution_id or session_id,
-                    data={
-                        "session_id": session_id,
-                        "execution_id": execution_id,
-                        "ac_index": index,
-                        "ac_content": ac_text(spec),
-                        "verify_command": spec.verify_command,
-                        "probed": record.probed,
-                        "baseline_verdict": record.baseline_verdict,
-                        "preexisting_artifacts": list(record.preexisting_artifacts),
-                        "reason": record.reason,
-                        "duration_seconds": round(time.monotonic() - started, 3),
-                    },
-                )
+            await _emit_probe_event(
+                executor,
+                session_id=session_id,
+                execution_id=execution_id,
+                ac_index=index,
+                spec=spec,
+                record=record,
+                duration_seconds=round(time.monotonic() - started, 3),
             )
 
-    probed = {index: record for index, record in records.items() if record.probed}
-    all_pass = bool(probed) and all(record.baseline_verdict is True for record in probed.values())
+    # The broken-seed claim requires full coverage: one unknown contract means
+    # "every contract already passes" is not a statement this run can make.
+    all_pass = bool(records) and all(
+        record.probed and record.baseline_verdict is True for record in records.values()
+    )
     baseline = VerifyBaseline(records=records, all_contracts_baseline_pass=all_pass)
     if all_pass:
-        display_indices = [index + 1 for index in sorted(probed)]
+        display_indices = [index + 1 for index in sorted(records)]
         warning = render_verify_baseline_all_pass_warning(display_indices)
         await executor._safe_emit_event(
             BaseEvent(
@@ -279,8 +358,8 @@ async def establish_verify_baseline(
                 data={
                     "session_id": session_id,
                     "execution_id": execution_id,
-                    "ac_indices": sorted(probed),
-                    "count": len(probed),
+                    "ac_indices": sorted(records),
+                    "count": len(records),
                     "guidance": warning,
                 },
             )
@@ -288,9 +367,9 @@ async def establish_verify_baseline(
         log.warning(
             "parallel_executor.verify_baseline.all_contracts_pass",
             session_id=session_id,
-            ac_indices=sorted(probed),
+            ac_indices=sorted(records),
         )
-        executor._console.print(f"[yellow]{warning}[/yellow]")
+        executor._console.print(Text(warning, style="yellow"))
     return baseline
 
 
@@ -357,6 +436,56 @@ def restore_verify_baseline(value: object) -> VerifyBaseline | None:
             reason=reason,
         )
     return VerifyBaseline(records=records, all_contracts_baseline_pass=all_pass)
+
+
+async def persist_verify_baseline_checkpoint(
+    executor: ParallelACExecutor,
+    *,
+    seed: Seed,
+    session_id: str,
+    execution_id: str,
+) -> None:
+    """Durably record the baseline before the first worker can touch the tree.
+
+    Levels checkpoint only on completion, so a crash between the first worker
+    effect and the first level save would otherwise re-enter with no recognized
+    checkpoint and re-probe a partially modified workspace as "pristine" — an
+    artifact created before the crash would become a false baseline PASS. This
+    zero-levels checkpoint closes that window: re-entry restores the probed
+    records (or, if the payload is unreadable, fails closed to unknown).
+    """
+    if executor._checkpoint_store is None or executor._verify_baseline is None:
+        # No baseline, nothing to protect: contract-less and probe-off runs
+        # keep their exact pre-existing checkpoint cadence.
+        return
+    from ouroboros.orchestrator.execution_authority import canonical_workspace_authority
+    from ouroboros.persistence.checkpoint import CheckpointData
+
+    try:
+        checkpoint = CheckpointData.create(
+            seed_id=getattr(seed, "id", session_id),
+            phase="parallel_execution",
+            state={
+                "session_id": session_id,
+                "execution_id": execution_id,
+                "workspace_identity": canonical_workspace_authority(
+                    executor._task_cwd
+                    or getattr(executor._adapter, "working_directory", None)
+                    or os.getcwd()
+                ),
+                "completed_levels": 0,
+                "verify_baseline": verify_baseline_checkpoint_state(executor._verify_baseline),
+            },
+        )
+        executor._checkpoint_store.save(checkpoint)
+    except Exception as exc:
+        # Best-effort: losing the early save reopens only the pre-first-level
+        # crash window it exists to close; it must never fail the run.
+        log.warning(
+            "parallel_executor.verify_baseline.early_checkpoint_error",
+            session_id=session_id,
+            error=str(exc),
+        )
 
 
 async def settle_passing_verify_outcome(
