@@ -126,6 +126,12 @@ def _split_on_operators(command: str) -> list[tuple[str, RunCondition]] | None:
             continue
         if char == "&" or char == "|":
             if index + 1 < len(command) and command[index + 1] == char:
+                # An empty segment before an operator (`&& x`, `a ; ; b`,
+                # `a && || b`) is a shell syntax error (status 2), not an
+                # empty command to skip. Silently dropping it would let a
+                # malformed contract produce a verdict bash refuses to give.
+                if not "".join(current).strip():
+                    return None
                 segments.append(("".join(current), condition))
                 condition = "on_success" if char == "&" else "on_failure"
                 current = []
@@ -134,6 +140,8 @@ def _split_on_operators(command: str) -> list[tuple[str, RunCondition]] | None:
             # A lone `&` backgrounds; a lone `|` pipes.
             return None
         if char == ";":
+            if not "".join(current).strip():
+                return None
             segments.append(("".join(current), condition))
             condition = "always"
             current = []
@@ -146,8 +154,14 @@ def _split_on_operators(command: str) -> list[tuple[str, RunCondition]] | None:
 
     if quote is not None:
         return None
-    segments.append(("".join(current), condition))
-    return [(text, cond) for text, cond in segments if text.strip()] or None
+    tail = "".join(current)
+    if tail.strip():
+        segments.append((tail, condition))
+    elif condition != "always":
+        # A trailing `;` is valid POSIX; a trailing `&&`/`||` leaves the
+        # shell waiting for a command and exits 2 under `-c`.
+        return None
+    return segments or None
 
 
 def _split_assignment_prefix(tokens: list[str]) -> tuple[tuple[tuple[str, str], ...], list[str]]:

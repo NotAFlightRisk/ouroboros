@@ -226,15 +226,17 @@ Shipped:
   `resolve_verify_shell` caches only *successful* resolutions: a cached "no
   shell" keyed on PATH would never notice a Git Bash install (discovered via
   `%ProgramFiles%`) and would defeat the retry it exists to serve.
-- **Part B3, reclassification.** A fully empty `support_messages` now yields
-  `FailureClass.TRANSCRIPT_MISSING_INFRASTRUCTURE` with the
+- **Part B3, reclassification** — *ships in the stacked follow-up PR, not
+  this one* (only the `TRANSCRIPT_MISSING_INFRASTRUCTURE` failure class and
+  its retry policy land here; the producer follows). There, a fully empty
+  `support_messages` yields that class with the
   `transcript_missing_infrastructure:` reason code and a `RETRY` admission,
   instead of a generic evidence-missing worker rejection.
-- **Part B1, warn stage.** `AcceptanceCriterionSpec.verify_exemption_reason`
-  (authored as the optional `exempt` key in the extraction JSON),
-  `core/seed_verify_gate.py`, and config `seed.verify_command_gate`
-  (`warn` default, `block` available). The gate runs in
-  `OrchestratorRunner._prepare_session_scoped`, so sessions already in flight
+- **Part B1, warn stage** — *ships in the stacked follow-up PR, not this
+  one*: `AcceptanceCriterionSpec.verify_exemption_reason` (authored as the
+  optional `exempt` key in the extraction JSON), `core/seed_verify_gate.py`,
+  and config `seed.verify_command_gate` (`warn` default, `block` available).
+  The gate runs at new-session preparation, so sessions already in flight
   are never re-judged under a tightened gate.
 
 Deferred, with the reason:
