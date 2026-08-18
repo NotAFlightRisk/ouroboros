@@ -11,6 +11,8 @@ grants nothing and revokes nothing.
 from __future__ import annotations
 
 import os
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -47,6 +49,8 @@ from ouroboros.orchestrator.verify_gate_outcome import (
     _revalidate_cached_verify_gate_outcome,
 )
 
+_UNSET: Any = object()
+
 
 class _StubAdapter:
     def __init__(self, working_directory: str) -> None:
@@ -56,12 +60,28 @@ class _StubAdapter:
         self.permission_mode = "acceptEdits"
 
 
+class _StubCheckpointStore:
+    """A store whose saves land, unless told otherwise."""
+
+    def __init__(self, *, saves: bool = True) -> None:
+        self.saves = saves
+        self.saved: list[Any] = []
+
+    def save(self, checkpoint: Any) -> Any:
+        self.saved.append(checkpoint)
+        return SimpleNamespace(is_ok=self.saves, error=None if self.saves else "disk full")
+
+    def load(self, seed_id: str) -> Any:
+        return SimpleNamespace(is_ok=False, value=None, error="not found")
+
+
 def _make_executor(
     *,
     working_directory: str,
     verify_baseline_probe: str = "observe",
     run_verify_commands: bool = True,
     verify_command_timeout_seconds: int = 30,
+    checkpoint_store: Any | None = _UNSET,
 ) -> ParallelACExecutor:
     return ParallelACExecutor(
         adapter=_StubAdapter(working_directory),
@@ -71,6 +91,9 @@ def _make_executor(
         run_verify_commands=run_verify_commands,
         verify_command_timeout_seconds=verify_command_timeout_seconds,
         verify_baseline_probe=verify_baseline_probe,
+        checkpoint_store=(
+            _StubCheckpointStore() if checkpoint_store is _UNSET else checkpoint_store
+        ),
     )
 
 
@@ -216,21 +239,63 @@ def test_snapshot_rejects_symlink_back_into_the_live_workspace(tmp_path: Any) ->
         assert snapshot is None
 
 
-def test_snapshot_keeps_system_symlinks_like_a_venv_interpreter(tmp_path: Any) -> None:
-    """A `.venv/bin/python -> /usr/...` link is the standard virtualenv shape;
-    rejecting it would silently disable the baseline for every Python repo."""
-    import sys
+def test_snapshot_keeps_a_usable_interpreter_without_a_write_path_out(tmp_path: Any) -> None:
+    """A `.venv/bin/python -> /usr/...` link is the standard virtualenv shape,
+    so the snapshot must keep the interpreter — but as a copy. Left as a link,
+    a probed contract writing through it would edit the real installation."""
+    external = tmp_path / "outside" / "python3"
+    external.parent.mkdir(parents=True)
+    external.write_text("#!/bin/sh\necho REAL\n")
+    external.chmod(0o755)
 
     workspace = tmp_path / "ws"
     bin_dir = workspace / ".venv" / "bin"
     bin_dir.mkdir(parents=True)
-    os.symlink(sys.executable, bin_dir / "python")
+    os.symlink(external, bin_dir / "python")
     (workspace / "kept.txt").write_text("kept")
 
     with baseline_snapshot(str(workspace)) as snapshot:
         assert snapshot is not None
-        assert os.path.islink(os.path.join(snapshot, ".venv", "bin", "python"))
+        copied = Path(snapshot) / ".venv" / "bin" / "python"
+        assert copied.is_file() and not copied.is_symlink()
+        assert copied.read_text() == external.read_text()
+        assert os.access(copied, os.X_OK)
         assert os.path.exists(os.path.join(snapshot, "kept.txt"))
+
+        copied.write_text("MUTATED BY PROBE")
+
+    assert external.read_text() == "#!/bin/sh\necho REAL\n"
+
+
+def test_snapshot_refuses_a_link_to_an_external_directory(tmp_path: Any) -> None:
+    """No containment preserves its meaning, so the baseline stays unknown
+    rather than leaving a probe a writable path into that directory."""
+    outside = tmp_path / "outside"
+    (outside / "data").mkdir(parents=True)
+    (outside / "data" / "keep.txt").write_text("precious")
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    os.symlink(outside / "data", workspace / "data")
+
+    with baseline_snapshot(str(workspace)) as snapshot:
+        assert snapshot is None
+
+    assert (outside / "data" / "keep.txt").read_text() == "precious"
+
+
+def test_snapshot_keeps_links_that_stay_inside_it(tmp_path: Any) -> None:
+    workspace = tmp_path / "ws"
+    (workspace / "pkg").mkdir(parents=True)
+    (workspace / "pkg" / "cli.js").write_text("run")
+    (workspace / "node_modules" / ".bin").mkdir(parents=True)
+    os.symlink("../../pkg/cli.js", workspace / "node_modules" / ".bin" / "tool")
+
+    with baseline_snapshot(str(workspace)) as snapshot:
+        assert snapshot is not None
+        link = Path(snapshot) / "node_modules" / ".bin" / "tool"
+        assert link.is_symlink()
+        assert link.resolve().is_relative_to(Path(snapshot).resolve())
 
 
 def test_snapshot_excludes_git_and_keeps_untracked(tmp_path: Any) -> None:
@@ -693,3 +758,158 @@ def test_execution_config_defaults_to_observe_and_rejects_unknown_modes() -> Non
     assert ExecutionConfig(verify_baseline_probe="off").verify_baseline_probe == "off"
     with pytest.raises(ValidationError):
         ExecutionConfig(verify_baseline_probe="enforce")
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        # "0" and "00" both normalize to index 0: the later record would
+        # silently replace the earlier authoritative one.
+        {
+            "0": {
+                "probed": False,
+                "baseline_verdict": None,
+                "preexisting_artifacts": [],
+                "reason": None,
+            },
+            "00": {
+                "probed": True,
+                "baseline_verdict": True,
+                "preexisting_artifacts": [],
+                "reason": None,
+            },
+        },
+        # Non-canonical spellings on their own are not this run's keys either.
+        {
+            "007": {
+                "probed": True,
+                "baseline_verdict": True,
+                "preexisting_artifacts": [],
+                "reason": None,
+            }
+        },
+        # `str.isdigit` accepts other numeric scripts; `int` reads some and
+        # raises on others.
+        {
+            "٣": {
+                "probed": True,
+                "baseline_verdict": True,
+                "preexisting_artifacts": [],
+                "reason": None,
+            }
+        },
+        {
+            "²": {
+                "probed": True,
+                "baseline_verdict": True,
+                "preexisting_artifacts": [],
+                "reason": None,
+            }
+        },
+    ],
+)
+def test_non_canonical_record_keys_are_wholly_unknown(records: Any) -> None:
+    """Salvaging part of a malformed payload is how a crafted record replaces
+    an authoritative one; the whole baseline becomes unknown instead."""
+    assert (
+        restore_verify_baseline(
+            {"all_contracts_baseline_pass": False, "records": records},
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_baseline_that_cannot_be_persisted_is_reported_as_such(tmp_path: Any) -> None:
+    """`CheckpointStore.save` reports ordinary failures as `Result.err` rather
+    than raising, so the returned value is the only place they are visible."""
+    from ouroboros.orchestrator.verify_baseline import persist_verify_baseline_checkpoint
+
+    executor = _make_executor(
+        working_directory=str(tmp_path),
+        checkpoint_store=_StubCheckpointStore(saves=False),
+    )
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="test -d ."))
+    executor._verify_baseline = await establish_verify_baseline(
+        executor, seed=seed, session_id="s", execution_id="e"
+    )
+    assert executor._verify_baseline is not None
+
+    durable = await persist_verify_baseline_checkpoint(
+        executor, seed=seed, session_id="s", execution_id="e"
+    )
+
+    assert durable is False
+
+
+@pytest.mark.asyncio
+async def test_a_raising_checkpoint_store_is_also_not_durable(tmp_path: Any) -> None:
+    from ouroboros.orchestrator.verify_baseline import persist_verify_baseline_checkpoint
+
+    store = MagicMock()
+    store.save.side_effect = OSError("disk full")
+    executor = _make_executor(working_directory=str(tmp_path), checkpoint_store=store)
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="test -d ."))
+    executor._verify_baseline = await establish_verify_baseline(
+        executor, seed=seed, session_id="s", execution_id="e"
+    )
+
+    assert (
+        await persist_verify_baseline_checkpoint(
+            executor, seed=seed, session_id="s", execution_id="e"
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_checkpoint_store_means_no_baseline_at_all(tmp_path: Any) -> None:
+    """A baseline the next process cannot see is authority it cannot check:
+    without a store the probe does not run, and everything reads unknown."""
+    executor = _make_executor(working_directory=str(tmp_path), checkpoint_store=None)
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="test -d ."))
+
+    baseline = await establish_verify_baseline(
+        executor, seed=seed, session_id="s", execution_id="e"
+    )
+
+    assert baseline is None
+    assert _emitted(executor, BASELINE_PROBE_EVENT) == []
+
+
+@pytest.mark.asyncio
+async def test_workers_do_not_dispatch_under_an_unpersistable_baseline(tmp_path: Any) -> None:
+    """The failed save is the whole point: without it a crash before the first
+    level checkpoint re-enters with nothing recognized and probes a
+    worker-modified tree as pristine. Nothing has been dispatched yet, so
+    refusing here leaves the workspace exactly as the operator left it."""
+    from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
+
+    (tmp_path / "pre.txt").write_text("here")
+    executor = _make_executor(
+        working_directory=str(tmp_path),
+        checkpoint_store=_StubCheckpointStore(saves=False),
+    )
+    dispatched = AsyncMock(return_value=[])
+    executor._execute_ac_batch = dispatched  # type: ignore[method-assign]
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="ac", verify_command="test -f pre.txt")
+    )
+    graph = DependencyGraph(
+        nodes=(ACNode(index=0, content="ac", depends_on=()),),
+        execution_levels=((0,),),
+    )
+
+    with pytest.raises(RuntimeError, match="verify baseline could not be persisted"):
+        await executor.execute_parallel(
+            seed=seed,
+            execution_plan=graph.to_execution_plan(),
+            session_id="s",
+            execution_id="e",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="sys",
+        )
+
+    assert dispatched.await_count == 0
+    assert executor._verify_baseline is None

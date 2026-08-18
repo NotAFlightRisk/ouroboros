@@ -4138,12 +4138,23 @@ class ParallelACExecutor:
             )
             # Persisted before any worker effect exists, so a crash before the
             # first level save cannot lead to re-probing a mutated workspace.
-            await persist_verify_baseline_checkpoint(
+            # If that save cannot land, the baseline is authority only this
+            # process can see: a later re-entry would find no checkpoint and
+            # probe a worker-modified tree as pristine. Nothing has been
+            # dispatched yet, so refusing here leaves the workspace exactly as
+            # the operator left it and the run can simply be started again.
+            durable = await persist_verify_baseline_checkpoint(
                 self,
                 seed=seed,
                 session_id=session_id,
                 execution_id=execution_id,
             )
+            if not durable:
+                self._verify_baseline = None
+                raise RuntimeError(
+                    "verify baseline could not be persisted before dispatch; "
+                    "refusing to run workers under a baseline no resume can see"
+                )
 
         # Execute groups sequentially, but ACs within each group in parallel.
         # The resilient progress emitter runs as a sibling background task

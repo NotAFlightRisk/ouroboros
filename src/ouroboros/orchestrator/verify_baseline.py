@@ -125,8 +125,10 @@ def baseline_snapshot(cwd: str) -> Iterator[str | None]:
     """Yield a frozen master copy of ``cwd``, or ``None`` when unsafe.
 
     ``None`` means the probe is skipped for the whole run — never that the run
-    stops. Escaping symlinks reject the snapshot for the same reason as shadow
-    replay: a probed command must not be able to reach the live filesystem.
+    stops. A snapshot no probe can write out of is the whole point: the
+    measured contract corpus contains ``rm``, and a copied symlink is a hole
+    straight through the copy, so every one of them is either contained or the
+    snapshot is refused.
     """
     base: str | None = None
     try:
@@ -134,7 +136,7 @@ def baseline_snapshot(cwd: str) -> Iterator[str | None]:
             base = tempfile.mkdtemp(prefix="ooo-verify-baseline-")
             target = Path(base) / "workspace"
             shutil.copytree(cwd, target, ignore=_BASELINE_COPY_IGNORE, symlinks=True)
-            has_link_into_live_tree = _snapshot_links_into_live_workspace(target, Path(cwd))
+            contained = _contain_escaping_symlinks(target, Path(cwd))
         except Exception as exc:
             log.warning(
                 "parallel_executor.verify_baseline.snapshot_error",
@@ -143,7 +145,7 @@ def baseline_snapshot(cwd: str) -> Iterator[str | None]:
             )
             yield None
             return
-        if has_link_into_live_tree:
+        if not contained:
             log.warning("parallel_executor.verify_baseline.unsafe_symlink", cwd=cwd)
             yield None
             return
@@ -153,18 +155,27 @@ def baseline_snapshot(cwd: str) -> Iterator[str | None]:
             shutil.rmtree(base, ignore_errors=True)
 
 
-def _snapshot_links_into_live_workspace(root: Path, live_root: Path) -> bool:
-    """Return whether any copied symlink resolves inside the live workspace.
+def _contain_escaping_symlinks(root: Path, live_root: Path) -> bool:
+    """Make every copied symlink harmless, or report that it cannot be.
 
-    Only links back into the live tree are rejected: through one, a probed
-    contract could read or mutate the very workspace the snapshot exists to
-    protect. Links to the wider system — a `.venv/bin/python` pointing at an
-    installed interpreter is the standard shape — are exactly what the same
-    command would use when the gate later runs it against the live tree, so
-    rejecting them would silently disable the baseline for every ordinary
-    Python workspace.
+    A symlink survives ``copytree(symlinks=True)`` as a link, and a probe
+    writing through one writes wherever it points — outside the disposable
+    copy, into the live workspace or the wider filesystem. Preserving them is
+    not optional either: an ordinary Python workspace reaches its interpreter
+    through ``.venv/bin/python``, and dropping that would disable the baseline
+    for most repositories. So each link is handled by what it points at:
+
+    * inside the snapshot — kept. It is already contained.
+    * a regular file outside — replaced by a copy of that file, which is what
+      the link gave the command to read, minus the write-through.
+    * anything else outside (a directory, a device, a dangling target, one
+      pointing back into the live tree) — no containment exists that preserves
+      its meaning, so the snapshot is refused and the baseline stays unknown.
+
+    Returns whether the tree is now fully contained.
     """
     resolved_live = live_root.resolve()
+    resolved_root = root.resolve()
     for current_root, dirnames, filenames in os.walk(root, followlinks=False):
         for name in (*dirnames, *filenames):
             candidate = Path(current_root) / name
@@ -173,10 +184,19 @@ def _snapshot_links_into_live_workspace(root: Path, live_root: Path) -> bool:
             try:
                 resolved = candidate.resolve(strict=False)
             except (OSError, RuntimeError):
-                return True
+                return False
+            if resolved.is_relative_to(resolved_root):
+                continue
             if resolved.is_relative_to(resolved_live):
-                return True
-    return False
+                return False
+            try:
+                if not resolved.is_file():
+                    return False
+                candidate.unlink()
+                shutil.copy2(resolved, candidate, follow_symlinks=True)
+            except (OSError, shutil.Error):
+                return False
+    return True
 
 
 def _classify_probe_outcome(outcome: _VerifyGateOutcome) -> ACBaselineRecord:
@@ -251,6 +271,12 @@ async def establish_verify_baseline(
     both indistinguishable, downstream, from "baseline unknown".
     """
     if executor._verify_baseline_probe == "off" or not executor._run_verify_commands:
+        return None
+    if executor._checkpoint_store is None:
+        # Without a store the probe's records could never be written down, and
+        # a baseline that cannot be replayed is not one a resume may trust —
+        # it would re-probe a worker-modified tree as pristine. No store, no
+        # baseline; everything downstream reads that as unknown.
         return None
     contract_indices = [
         index
@@ -407,7 +433,20 @@ def restore_verify_baseline(value: object) -> VerifyBaseline | None:
         return None
     records: dict[int, ACBaselineRecord] = {}
     for raw_index, raw_record in raw_records.items():
-        if not isinstance(raw_index, str) or not raw_index.isdigit():
+        # The key must be the one canonical spelling of its index. `"0"` and
+        # `"00"` are both accepted by `isdigit` and both normalize to 0, so a
+        # payload carrying each would silently keep only the last — letting a
+        # crafted or corrupted record replace an authoritative one (an unknown
+        # overwritten by a baseline PASS revokes recovery). Non-ASCII digits
+        # are excluded for the same reason: `int` reads some of them and
+        # raises on others.
+        if (
+            not isinstance(raw_index, str)
+            or not raw_index.isascii()
+            or not raw_index.isdigit()
+            or str(int(raw_index)) != raw_index
+            or int(raw_index) in records
+        ):
             return None
         if not isinstance(raw_record, Mapping) or set(raw_record.keys()) != _RECORD_KEYS:
             return None
@@ -444,7 +483,7 @@ async def persist_verify_baseline_checkpoint(
     seed: Seed,
     session_id: str,
     execution_id: str,
-) -> None:
+) -> bool:
     """Durably record the baseline before the first worker can touch the tree.
 
     Levels checkpoint only on completion, so a crash between the first worker
@@ -453,11 +492,17 @@ async def persist_verify_baseline_checkpoint(
     artifact created before the crash would become a false baseline PASS. This
     zero-levels checkpoint closes that window: re-entry restores the probed
     records (or, if the payload is unreadable, fails closed to unknown).
+
+    Returns whether the baseline is now replay-safe. ``False`` means the save
+    did not land, which the caller must treat as disqualifying: a baseline that
+    only exists in this process is authority the next process cannot see.
     """
-    if executor._checkpoint_store is None or executor._verify_baseline is None:
-        # No baseline, nothing to protect: contract-less and probe-off runs
-        # keep their exact pre-existing checkpoint cadence.
-        return
+    if executor._verify_baseline is None:
+        # Nothing to protect: contract-less and probe-off runs keep their exact
+        # pre-existing checkpoint cadence.
+        return True
+    if executor._checkpoint_store is None:
+        return False
     from ouroboros.orchestrator.execution_authority import canonical_workspace_authority
     from ouroboros.persistence.checkpoint import CheckpointData
 
@@ -477,15 +522,24 @@ async def persist_verify_baseline_checkpoint(
                 "verify_baseline": verify_baseline_checkpoint_state(executor._verify_baseline),
             },
         )
-        executor._checkpoint_store.save(checkpoint)
+        save_result = executor._checkpoint_store.save(checkpoint)
     except Exception as exc:
-        # Best-effort: losing the early save reopens only the pre-first-level
-        # crash window it exists to close; it must never fail the run.
         log.warning(
             "parallel_executor.verify_baseline.early_checkpoint_error",
             session_id=session_id,
             error=str(exc),
         )
+        return False
+    # The store reports ordinary failures as `Result.err` rather than raising,
+    # so the returned value is the only place a failed save is visible.
+    if not bool(getattr(save_result, "is_ok", False)):
+        log.warning(
+            "parallel_executor.verify_baseline.early_checkpoint_failed",
+            session_id=session_id,
+            error=str(getattr(save_result, "error", "unknown error")),
+        )
+        return False
+    return True
 
 
 async def settle_passing_verify_outcome(

@@ -220,6 +220,23 @@ decouples the probe from dispatch ordering (parallel ACs share `_task_cwd`,
 so a live-tree baseline would have to race the first dispatch; an immutable
 snapshot can be probed at any time).
 
+**Two containment rules the implementation settled (PR 1).** A copy is only
+disposable if nothing inside it points out of it, and a baseline is only
+authority if the next process can see it:
+
+- Every symlink the copy inherits is contained or the snapshot is refused.
+  Links that stay inside the copy are kept; a link to a regular file outside
+  it (the `.venv/bin/python -> installed interpreter` shape every Python
+  workspace has) is replaced by a copy of that file, which is what the link
+  gave the command to read minus the write-through; anything else outside —
+  a directory, a dangling target, a link back into the live tree — has no
+  containment that preserves its meaning, so the baseline stays unknown.
+- No checkpoint store, no baseline. The probe's records are written in a
+  zero-levels checkpoint before the first dispatch; if that write cannot
+  land, workers do not run under a baseline no resume can see. Nothing has
+  been dispatched at that point, so the workspace is untouched and the run
+  can simply be started again.
+
 ### Stage 1 — Baseline negative control (dynamic vacuity proof)
 
 **Mechanism.** For every contract-carrying AC, run the full contract —
