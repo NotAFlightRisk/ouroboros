@@ -63,8 +63,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 <tr>
 <td align="center" width="33%"><img src="./docs/images/host-hermes.gif" width="300" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — a kart-racing game, run as a chat bot, ending at <code>Final ambiguity: 0.15</code></sub></td>
 <td align="center" width="33%"><img src="./docs/images/host-dsh.gif" width="300" alt="Screen recording of DeepSeek Harness calling the Ouroboros interview tool and submitting advisory fan-out results"><br><sub><b>DeepSeek Harness</b> — an OSS-trend outreach script, driven from a dsh chat: <code>mcp__ouroboros__ouroboros_interview</code> turn by turn, fan-out results submitted between rounds</sub></td>
-<!-- Kiro: drop the recording at ./docs/images/host-kiro.gif and replace this cell with an <img> like its siblings. -->
-<td align="center" width="33%"><sub><b>Kiro</b> — recording on the way</sub></td>
+<td align="center" width="33%"><img src="./docs/images/host-kiro.gif" width="300" alt="10x screen recording of Kiro CLI running an Ouroboros interview"><br><sub><b>Kiro</b> — the Kiro CLI running the Ouroboros interview flow, turning a vague request into a structured, testable Seed</sub></td>
 </tr>
 </table>
 
