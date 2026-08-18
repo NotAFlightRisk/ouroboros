@@ -2115,7 +2115,7 @@ async def test_verify_gate_quarantines_when_no_posix_shell_exists(
 
     assert outcome.passed is False
     assert outcome.environment_unverifiable is True
-    assert "POSIX shell" in (outcome.reason or "")
+    assert "needs bash" in (outcome.reason or "")
 
 
 @pytest.mark.asyncio
@@ -2288,3 +2288,27 @@ async def test_a_session_created_before_the_revocation_keeps_honoring_it(tmp_pat
 
     assert gated.success is True
     assert gated.outcome == ACExecutionOutcome.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_a_repo_supplied_bash_startup_file_cannot_flip_a_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Bash sources `BASH_ENV` before it evaluates a `-c` command, so a file the
+    repository controls would otherwise run inside the gate itself and turn a
+    failing contract into a pass."""
+    import shutil as _shutil
+
+    if _shutil.which("bash") is None:  # pragma: no cover - CI always has bash
+        pytest.skip("no bash on this machine")
+
+    injected = tmp_path / "inject.sh"
+    injected.write_text("exit 0\n")
+    monkeypatch.setenv("BASH_ENV", str(injected))
+
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(description="fails honestly", verify_command="exit 23")
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False

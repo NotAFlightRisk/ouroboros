@@ -107,21 +107,19 @@ def test_posix_prefers_bash_over_sh(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert route is not None
     assert route.shell_path == "/bin/bash"
-    assert route.degraded is False
 
 
-def test_posix_falls_back_to_sh_and_marks_it_degraded(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_posix_never_substitutes_sh_for_bash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`sh` reads the same text differently — `echo -e X` prints `X` under bash
+    and `-e X` under `sh` — so its verdict is about a different command. A
+    machine with only `sh` has no verify shell, which routes the command
+    through the exact shell-free planner instead."""
     monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: False)
     monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
-    monkeypatch.setattr(verify_shell.shutil, "which", _which_over({"/bin/sh"}))
+    monkeypatch.setattr(verify_shell, "_config_value", lambda: None)
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_over({"/bin/sh", "/usr/bin/sh"}))
 
-    route = resolve_verify_shell()
-
-    assert route is not None
-    assert route.shell_path == "/bin/sh"
-    assert route.degraded is True
+    assert resolve_verify_shell() is None
 
 
 def test_windows_resolves_git_bash_when_nothing_is_on_path(
@@ -148,12 +146,18 @@ def test_windows_falls_back_to_a_bash_on_path(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.delenv("ProgramFiles", raising=False)
     monkeypatch.delenv("ProgramW6432", raising=False)
     monkeypatch.delenv("ProgramFiles(x86)", raising=False)
-    monkeypatch.setattr(verify_shell.shutil, "which", _which_over({"bash.exe"}))
+    # A real `which` returns the PATH directory it found the name in; a bare
+    # name would be refused, since the gate launches from the workspace.
+    monkeypatch.setattr(
+        verify_shell.shutil,
+        "which",
+        _which_resolving({"bash.exe"}, "C:\\msys64\\usr\\bin\\bash.exe"),
+    )
 
     route = resolve_verify_shell()
 
     assert route is not None
-    assert route.shell_path == "bash.exe"
+    assert route.shell_path == "C:\\msys64\\usr\\bin\\bash.exe"
     assert route.source == "path"
 
 
@@ -359,3 +363,59 @@ def test_resolution_cache_notices_a_changed_git_bash_install_root(
 
     assert second is not None
     assert second.shell_path.startswith("D:\\Apps")
+
+
+def test_a_relative_override_is_refused_not_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate launches with `cwd` set to the verification workspace, so a
+    relative path names one binary at resolution and another at launch — the
+    workspace could supply the shell that judges its own criteria."""
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: False)
+    monkeypatch.setenv(VERIFY_BASH_ENV_VAR, "./tools/bash")
+    monkeypatch.setattr(verify_shell, "_config_value", lambda: None)
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_over({"./tools/bash", "/bin/bash"}))
+
+    route = resolve_verify_shell()
+
+    assert route is not None
+    assert route.shell_path == "/bin/bash"
+    assert route.source == "posix_default"
+
+
+def test_a_relative_configured_shell_is_refused_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: False)
+    monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+    monkeypatch.setattr(verify_shell, "_config_value", lambda: "tools/bash")
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_over({"tools/bash"}))
+
+    assert resolve_verify_shell() is None
+
+
+def test_a_relative_path_entry_cannot_supply_the_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`PATH=./bin` makes `which` hand back a relative path for a bare name."""
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: False)
+    monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+    monkeypatch.setattr(verify_shell, "_config_value", lambda: None)
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_over({"./bin/bash"}))
+
+    assert resolve_verify_shell() is None
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "BASH_XTRACEFD", "PS4", "IFS", "CDPATH"],
+)
+def test_shell_startup_and_option_controls_are_stripped(key: str) -> None:
+    """Bash sources `BASH_ENV` before evaluating a `-c` command, so a file
+    holding `exit 0` would turn every failing contract into a pass."""
+    assert key not in verify_shell.sanitized_verify_environment(
+        {key: "/tmp/injected.sh", "PATH": "/usr/bin"}
+    )
+
+
+def test_exported_shell_functions_are_stripped() -> None:
+    """A function named `pytest` resolves before the executable of that name."""
+    sanitized = verify_shell.sanitized_verify_environment(
+        {"BASH_FUNC_pytest%%": "() { exit 0; }", "PATH": "/usr/bin"}
+    )
+
+    assert list(sanitized) == ["PATH"]
