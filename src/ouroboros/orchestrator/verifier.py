@@ -93,6 +93,10 @@ _VALID_FAILURE_CLASSES: frozenset[str] = frozenset(
         "SCOPE_CREEP",
         "STALL",
         "BLOCKED",
+        # Kept in sync by hand with FailureClass: failure_taxonomy imports this
+        # module, so the vocabulary cannot be derived from the enum here.
+        "TRANSCRIPT_MISSING_INFRASTRUCTURE",
+        "VERIFY_ENVIRONMENT_UNAVAILABLE",
     }
 )
 
@@ -263,7 +267,16 @@ def _default_retry_admission_for_failure_class(
         return RetryAdmission.REDISPATCH
     if failure_class == "BLOCKED":
         return RetryAdmission.BLOCK
-    if failure_class in {"EVIDENCE_MISSING", "EVIDENCE_FORM_MISMATCH"}:
+    if failure_class in {
+        "EVIDENCE_MISSING",
+        "EVIDENCE_FORM_MISMATCH",
+        # The leaf's output was never judged, so re-splitting the AC would
+        # discard completed work on a fault that has nothing to do with it.
+        "TRANSCRIPT_MISSING_INFRASTRUCTURE",
+        # Same shape, different missing piece: the machine had no shell to run
+        # the contract in. A retry re-resolves it.
+        "VERIFY_ENVIRONMENT_UNAVAILABLE",
+    }:
         return RetryAdmission.RETRY
     return RetryAdmission.REDISPATCH
 

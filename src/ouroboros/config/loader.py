@@ -1365,6 +1365,36 @@ def get_goose_cli_path() -> str | None:
     return None
 
 
+def get_verify_bash_path() -> str | None:
+    """Get the POSIX shell used to run an AC's ``verify_command``.
+
+    Priority:
+        1. OUROBOROS_VERIFY_BASH environment variable
+        2. config.yaml orchestrator.verify_bash_path
+        3. None (resolve well-known locations / PATH at runtime)
+
+    Executability is checked by the caller
+    (:func:`ouroboros.orchestrator.verify_shell.resolve_verify_shell`), which
+    falls through to its own candidate list when a configured value is stale.
+
+    Returns:
+        Configured shell path or None.
+    """
+    env_path = os.environ.get("OUROBOROS_VERIFY_BASH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        verify_bash_path = getattr(config.orchestrator, "verify_bash_path", None)
+        if verify_bash_path:
+            return str(Path(verify_bash_path).expanduser())
+    except ConfigError:
+        pass
+
+    return None
+
+
 def get_pi_cli_path() -> str | None:
     """Get Pi CLI path from environment variable or config file.
 

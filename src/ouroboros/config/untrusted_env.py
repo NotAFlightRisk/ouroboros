@@ -65,6 +65,11 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_OUROCODE_CLI_PATH",
         "OUROBOROS_ZCODE_CLI_PATH",
         "OUROBOROS_DSH_CLI_PATH",
+        # POSIX shell the orchestrator runs every AC verify_command through.
+        # A repo .env pointing this at its own binary would execute arbitrary
+        # code inside the verification gate — the one place that must stay
+        # untamperable.
+        "OUROBOROS_VERIFY_BASH",
         # Not an executable path, but it selects the Cordis composition the
         # spawned Node process loads — plugin rows in that file execute
         # arbitrary code inside `dsh-acp-demo`, so an untrusted repo .env must

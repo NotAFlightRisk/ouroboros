@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 import json
@@ -20,6 +21,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
+from ouroboros.orchestrator import parallel_executor
 from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
 from ouroboros.orchestrator.decomposition_policy import (
     DecompositionChild,
@@ -29,17 +31,24 @@ from ouroboros.orchestrator.decomposition_policy import (
     SemanticAttestationStatus,
     StructuralCheckStatus,
 )
+from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.model_routing import ModelRouter, decide_model
 from ouroboros.orchestrator.parallel_executor import (
     ACExecutionOutcome,
     ACExecutionResult,
     ParallelACExecutor,
+    ParallelExecutionResult,
     _build_success_contract_block,
     _complete_sibling_acs_from_evidence,
+    _deserialize_verify_gate_outcome,
     _missing_expected_artifacts,
+    _serialize_verify_gate_outcome,
     _VerifyGateOutcome,
+    render_parallel_verification_report,
 )
-from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.orchestrator.retry_hints import is_retryable_failure
+from ouroboros.orchestrator.verifier import RetryAdmission, VerifierVerdict
+from ouroboros.orchestrator.verify_shell import VerifyShellRoute
 
 
 class _StubAdapter:
@@ -497,7 +506,9 @@ async def test_final_verify_settlement_invalidates_prior_success_after_mutation(
 @pytest.mark.asyncio
 async def test_apply_verify_gate_recovers_failed_result_once(tmp_path: Any) -> None:
     executor = _make_executor(working_directory=str(tmp_path))
-    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
+    # A real check, not `exit 0`: a contract that always passes no longer
+    # engages the gate at all (it cannot recover anything it never judged).
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="test -d ."))
     result = ACExecutionResult(
         ac_index=0,
         ac_content="ac",
@@ -2053,3 +2064,177 @@ class TestSuccessContractBlock:
         assert "pytest -q" not in block
         assert "Expected artifacts" not in block
         assert "Expected output" not in block
+
+
+# ---------------------------------------------------------------------------
+# RFC Part A — Windows-safe verify_command execution + quarantine
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_gate_runs_the_command_through_a_resolved_posix_shell(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The gate must exec a real interpreter, not inherit the platform shell."""
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(description="ok", verify_command="exit 0")
+    recorded: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        parallel_executor,
+        "resolve_verify_shell",
+        lambda: VerifyShellRoute(shell_path="/bin/bash", source="posix_default"),
+    )
+    real_exec = asyncio.create_subprocess_exec
+
+    async def spy_exec(*argv: str, **kwargs: Any) -> Any:
+        recorded["argv"] = argv
+        return await real_exec("/bin/sh", "-c", "exit 0", **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spy_exec)
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is True
+    assert recorded["argv"] == ("/bin/bash", "-c", "exit 0")
+
+
+@pytest.mark.asyncio
+async def test_verify_gate_quarantines_when_no_posix_shell_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    executor = _make_executor(working_directory=str(tmp_path))
+    # A pipeline cannot be reproduced without an interpreter, so the shell-free
+    # path refuses it — the only remaining answer is "this machine cannot say".
+    spec = AcceptanceCriterionSpec(description="ok", verify_command="echo ok | tee log")
+    monkeypatch.setattr(parallel_executor, "resolve_verify_shell", lambda: None)
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False
+    assert outcome.environment_unverifiable is True
+    assert "POSIX shell" in (outcome.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_unverifiable_ac_keeps_its_retries_and_never_passes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Not a pass, and not a human handoff: the next attempt may find a shell."""
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(description="ok", verify_command="echo ok | tee log")
+    seed = _seed_with_specs(spec)
+    monkeypatch.setattr(parallel_executor, "resolve_verify_shell", lambda: None)
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ok",
+        success=True,
+        messages=(),
+        final_message="done",
+        outcome=ACExecutionOutcome.SUCCEEDED,
+    )
+
+    gated = await executor._apply_verify_gate(
+        seed=seed,
+        ac_index=0,
+        result=result,
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert gated.success is False
+    assert gated.outcome is ACExecutionOutcome.FAILED
+    # BLOCKED would forecloses every recovery route and demand a human handoff
+    # (route_escalation: "blocked failures cannot escalate"). A missing shell is
+    # a machine fact an operator can fix while the run keeps going.
+    assert gated.is_blocked is False
+    assert is_retryable_failure(gated) is True
+    assert gated.atomic_verifier_verdict is not None
+    assert (
+        gated.atomic_verifier_verdict.failure_class
+        == FailureClass.VERIFY_ENVIRONMENT_UNAVAILABLE.value
+    )
+    assert gated.atomic_verifier_verdict.retry_admission is RetryAdmission.RETRY
+    assert "unverifiable" in (gated.error or "")
+
+
+def test_report_surfaces_unverifiable_acs_outside_the_success_count() -> None:
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason="verify_command needs a POSIX shell",
+        output_tail="",
+        environment_unverifiable=True,
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ok",
+        success=False,
+        messages=(),
+        final_message="",
+        outcome=ACExecutionOutcome.FAILED,
+        verify_gate_outcome=outcome,
+    )
+    parallel_result = ParallelExecutionResult(
+        results=[result],
+        success_count=0,
+        failure_count=1,
+        blocked_count=0,
+        skipped_count=0,
+        total_duration_seconds=0.0,
+    )
+
+    report = render_parallel_verification_report(parallel_result, 1)
+
+    assert "Success: 0/1" in report
+    assert "needs manual confirmation: AC 1" in report
+
+
+def test_verify_gate_outcome_roundtrips_the_quarantine_flag() -> None:
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason="no shell",
+        output_tail="",
+        environment_unverifiable=True,
+    )
+
+    payload = _serialize_verify_gate_outcome(outcome)
+    assert payload is not None
+    assert _deserialize_verify_gate_outcome(payload) == outcome
+
+
+def test_legacy_verify_gate_checkpoints_stay_readable() -> None:
+    legacy_payload = {
+        "passed": True,
+        "reason": None,
+        "output_tail": "",
+        "missing_artifacts": [],
+        "workspace_mutated": False,
+        "workspace_digest": None,
+    }
+
+    restored = _deserialize_verify_gate_outcome(legacy_payload)
+
+    assert restored is not None
+    assert restored.passed is True
+    assert restored.environment_unverifiable is False
+
+
+@pytest.mark.asyncio
+async def test_gate_still_judges_without_a_shell_when_the_command_allows_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A missing shell is not the same as an unjudgeable contract."""
+    (tmp_path / "a.txt").write_text("seed")
+    executor = _make_executor(working_directory=str(tmp_path))
+    monkeypatch.setattr(parallel_executor, "resolve_verify_shell", lambda: None)
+
+    present = AcceptanceCriterionSpec(description="ok", verify_command="test -f a.txt")
+    absent = AcceptanceCriterionSpec(description="ok", verify_command="test -f missing.txt")
+
+    passed = await executor._run_ac_verify_gate(spec=present, cwd=str(tmp_path))
+    failed = await executor._run_ac_verify_gate(spec=absent, cwd=str(tmp_path))
+
+    assert passed.passed is True
+    assert passed.environment_unverifiable is False
+    assert failed.passed is False
+    assert failed.environment_unverifiable is False

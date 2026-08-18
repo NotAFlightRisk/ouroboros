@@ -46,6 +46,19 @@ class FailureClass(StrEnum):
         BLOCKED: Leaf surfaced a hard precondition it could not satisfy
             (missing tool, missing access, env variable). Verifier-
             classified.
+        VERIFY_ENVIRONMENT_UNAVAILABLE: The orchestrator could not run the
+            AC's ``verify_command`` at all because this machine exposes no
+            POSIX shell. Nothing about the leaf was judged. Deliberately NOT
+            BLOCKED: BLOCKED forecloses route escalation and demands a human
+            handoff, whereas this condition is a machine fact the operator can
+            fix mid-run (install Git Bash, set ``OUROBOROS_VERIFY_BASH``), so
+            the AC keeps its retries and the shell is re-resolved on each one.
+        TRANSCRIPT_MISSING_INFRASTRUCTURE: The leaf's runtime transcript
+            reached the verifier completely empty, so there was nothing to
+            check its evidence against. This is a collection failure, not a
+            worker failure: a gaming leaf leaves plausible-looking messages,
+            not none. Kept distinct from EVIDENCE_MISSING so an infrastructure
+            fault is never reported — or counted — as a worker rejection.
     """
 
     EVIDENCE_MISSING = "EVIDENCE_MISSING"
@@ -54,6 +67,8 @@ class FailureClass(StrEnum):
     SCOPE_CREEP = "SCOPE_CREEP"
     STALL = "STALL"
     BLOCKED = "BLOCKED"
+    TRANSCRIPT_MISSING_INFRASTRUCTURE = "TRANSCRIPT_MISSING_INFRASTRUCTURE"
+    VERIFY_ENVIRONMENT_UNAVAILABLE = "VERIFY_ENVIRONMENT_UNAVAILABLE"
 
 
 _HARD_PRECONDITION_VALUE_KEY_TOKENS = frozenset(
@@ -248,6 +263,24 @@ _POLICY_TABLE: dict[FailureClass, RecoveryPolicy] = {
         rationale=(
             "Leaf reported a hard precondition the harness cannot "
             "satisfy automatically (missing tool / access / config)."
+        ),
+    ),
+    FailureClass.VERIFY_ENVIRONMENT_UNAVAILABLE: RecoveryPolicy(
+        action=RecoveryAction.RETRY,
+        rationale=(
+            "No POSIX shell was available to run verify_command, so the AC was "
+            "never judged. Retry re-resolves the shell, which is what lets an "
+            "operator fix the machine without stopping the run; the AC is never "
+            "counted as passed while it stays unverifiable."
+        ),
+    ),
+    FailureClass.TRANSCRIPT_MISSING_INFRASTRUCTURE: RecoveryPolicy(
+        action=RecoveryAction.RETRY,
+        rationale=(
+            "The harness lost the leaf's transcript, so its work could not be "
+            "checked at all. Nothing about the leaf's output is in doubt; the "
+            "collection is. Retry re-dispatches because no durable per-AC "
+            "transcript exists to re-read instead."
         ),
     ),
 }

@@ -55,9 +55,9 @@ from ouroboros.core.seed import (
     InvestmentSpec,
     ac_text,
     derive_semantic_ac_key,
-    expected_artifact_workspace_path_error,
 )
 from ouroboros.core.session_signal import SessionSignalMode
+from ouroboros.core.verify_command_plan import plan_shell_free_execution
 from ouroboros.events.session_signal import (
     create_session_signal_applied_event,
     create_session_signal_completed_event,
@@ -416,6 +416,28 @@ from ouroboros.orchestrator.verifier import (
     VerifierContractError,
     VerifierVerdict,
     verifier_operational_failure_verdict,
+)
+from ouroboros.orchestrator.verify_command_runner import (
+    run_shell_free_plan,
+    run_with_shell,
+)
+from ouroboros.orchestrator.verify_gate_outcome import (
+    _VERIFY_OUTPUT_TAIL_CHARS,
+    _deserialize_verify_gate_outcome,
+    _mapping_has_exact_keys,
+    _missing_expected_artifacts,
+    _revalidate_cached_verify_gate_outcome,
+    _serialize_verify_gate_outcome,
+    _VerifyGateOutcome,
+)
+from ouroboros.orchestrator.verify_quarantine import (
+    quarantine_unverifiable_result,
+    render_unverifiable_summary,
+)
+from ouroboros.orchestrator.verify_shell import (
+    resolve_verify_shell,
+    sanitized_verify_environment,
+    verify_shell_unavailable_reason,
 )
 from ouroboros.orchestrator.workspace_evidence_paths import (
     is_untracked_top_level_evidence_path,
@@ -1742,7 +1764,6 @@ MIN_SUB_ACS = MIN_DECOMPOSITION_CHILDREN
 MAX_SUB_ACS = MAX_DECOMPOSITION_CHILDREN
 DECOMPOSITION_TIMEOUT_SECONDS = 60.0
 _IMPLEMENTATION_SESSION_KIND = "implementation_session"
-_VERIFY_OUTPUT_TAIL_CHARS = 2000  # How much verify-command output to attach
 _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES = frozenset(
     {
         ".git",
@@ -1763,121 +1784,6 @@ _COMPOSITE_RESULT_TEXT_CHARS = 4_000
 # by CLI, Seed, runner, and executor admission.  Do not hand-tune it separately.
 _COMPOSITE_RESULT_MAX_NODES = MAX_DECOMPOSITION_REPLAY_NODES
 _COMPOSITE_RESULT_MAX_DEPTH = 8
-_WORKSPACE_DIGEST_CHARS = 64
-
-
-def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
-    """Inspect at most one key beyond a finite durable-contract schema."""
-
-    if not isinstance(value, Mapping):
-        return False
-    try:
-        iterator = iter(value)
-    except Exception:
-        return False
-    seen: set[str] = set()
-    for index in range(len(expected) + 1):
-        try:
-            key = next(iterator)
-        except StopIteration:
-            return len(seen) == len(expected)
-        except Exception:
-            return False
-        if index >= len(expected) or type(key) is not str or key not in expected or key in seen:
-            return False
-        seen.add(key)
-    return False
-
-
-@dataclass(frozen=True)
-class _VerifyGateOutcome:
-    """Outcome of the orchestrator-run AC success-contract gate (PR-V V1)."""
-
-    passed: bool
-    reason: str | None
-    output_tail: str
-    missing_artifacts: tuple[str, ...] = ()
-    workspace_mutated: bool = False
-    workspace_digest: str | None = None
-
-
-def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
-    """Encode verify evidence into the JSON-safe checkpoint state."""
-    if not isinstance(outcome, _VerifyGateOutcome):
-        return None
-    if (
-        (outcome.reason is not None and not isinstance(outcome.reason, str))
-        or not isinstance(outcome.output_tail, str)
-        or len(outcome.output_tail) > _VERIFY_OUTPUT_TAIL_CHARS
-        or not isinstance(outcome.missing_artifacts, tuple)
-        or any(not isinstance(item, str) for item in outcome.missing_artifacts)
-        or not isinstance(outcome.workspace_mutated, bool)
-        or (
-            outcome.workspace_digest is not None
-            and (
-                not isinstance(outcome.workspace_digest, str)
-                or len(outcome.workspace_digest) != _WORKSPACE_DIGEST_CHARS
-                or any(char not in "0123456789abcdef" for char in outcome.workspace_digest)
-            )
-        )
-    ):
-        raise RuntimeError("verify gate outcome exceeds its durable evidence bounds")
-    return {
-        "passed": outcome.passed,
-        "reason": outcome.reason,
-        "output_tail": outcome.output_tail,
-        "missing_artifacts": list(outcome.missing_artifacts),
-        "workspace_mutated": outcome.workspace_mutated,
-        "workspace_digest": outcome.workspace_digest,
-    }
-
-
-def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None:
-    """Decode checkpointed verify evidence, rejecting malformed payloads."""
-    expected_keys = frozenset(
-        {
-            "passed",
-            "reason",
-            "output_tail",
-            "missing_artifacts",
-            "workspace_mutated",
-            "workspace_digest",
-        }
-    )
-    if not _mapping_has_exact_keys(value, expected_keys):
-        return None
-    assert isinstance(value, Mapping)
-    passed = value.get("passed")
-    reason = value.get("reason")
-    output_tail = value.get("output_tail")
-    raw_missing = value.get("missing_artifacts")
-    workspace_mutated = value.get("workspace_mutated")
-    workspace_digest = value.get("workspace_digest")
-    if not isinstance(passed, bool) or not isinstance(output_tail, str):
-        return None
-    if reason is not None and not isinstance(reason, str):
-        return None
-    if len(output_tail) > _VERIFY_OUTPUT_TAIL_CHARS:
-        return None
-    if not isinstance(raw_missing, list) or not all(isinstance(item, str) for item in raw_missing):
-        return None
-    if not isinstance(workspace_mutated, bool):
-        return None
-    if workspace_digest is not None:
-        if (
-            not isinstance(workspace_digest, str)
-            or len(workspace_digest) != _WORKSPACE_DIGEST_CHARS
-            or any(char not in "0123456789abcdef" for char in workspace_digest)
-        ):
-            return None
-    return _VerifyGateOutcome(
-        passed=passed,
-        reason=reason,
-        output_tail=output_tail,
-        missing_artifacts=tuple(raw_missing),
-        workspace_mutated=workspace_mutated,
-        workspace_digest=workspace_digest,
-    )
 
 
 def _checkpoint_result_retry_attempts(
@@ -2579,63 +2485,6 @@ def _deserialize_composite_completion_result(
     )
 
 
-def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[str, ...]:
-    """Return the expected artifacts absent relative to ``cwd``.
-
-    Each entry must resolve to an existing file or directory under ``cwd``.
-    Absolute paths and ``..`` escapes are rejected — treated as missing with the
-    escape named — so a contract cannot be satisfied by files outside the run
-    workspace.
-    """
-    root = Path(cwd).resolve()
-    missing: list[str] = []
-    for artifact in artifacts:
-        path_error = expected_artifact_workspace_path_error(artifact, str(root))
-        if path_error is not None:
-            missing.append(f"{artifact!r} ({path_error})")
-            continue
-        try:
-            candidate = (root / artifact).resolve()
-        except (OSError, RuntimeError, ValueError) as exc:
-            missing.append(f"{artifact!r} (invalid path: {exc})")
-            continue
-        if not candidate.is_relative_to(root):
-            missing.append(f"{artifact} (escapes workspace)")
-            continue
-        if not candidate.exists():
-            missing.append(artifact)
-    return tuple(missing)
-
-
-def _revalidate_cached_verify_gate_outcome(
-    *,
-    spec: AcceptanceCriterionSpec,
-    cwd: str,
-    outcome: _VerifyGateOutcome,
-) -> _VerifyGateOutcome:
-    """Refresh filesystem evidence without replaying a cached command.
-
-    Verify commands may be non-idempotent, so an atomic result caches their
-    outcome for finalization. Expected artifacts live in the shared workspace,
-    however, and sibling ACs can delete or replace them after the atomic gate.
-    A cached success is therefore valid only while its artifact leg still
-    passes at the final acceptance boundary.
-    """
-    if not outcome.passed or not spec.expected_artifacts:
-        return outcome
-    missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
-    if not missing_artifacts:
-        return outcome
-    return _VerifyGateOutcome(
-        passed=False,
-        reason="expected_artifacts missing: " + ", ".join(missing_artifacts),
-        output_tail=outcome.output_tail,
-        missing_artifacts=missing_artifacts,
-        workspace_mutated=outcome.workspace_mutated,
-        workspace_digest=outcome.workspace_digest,
-    )
-
-
 def render_parallel_verification_report(
     parallel_result: ParallelExecutionResult,
     total_acceptance_criteria: int,
@@ -2654,6 +2503,16 @@ def render_parallel_verification_report(
         lines.append(f"Failed: {parallel_result.failure_count}")
     if parallel_result.skipped_count > 0:
         lines.append(f"Skipped: {parallel_result.skipped_count}")
+    unverifiable_indices = [
+        result.ac_index + 1
+        for result in parallel_result.results
+        if isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
+        and result.verify_gate_outcome.environment_unverifiable
+    ]
+    if unverifiable_indices:
+        # Never folded into Success: no shell existed to judge these, so they
+        # are surfaced as owed manual confirmation instead of a silent pass.
+        lines.append(render_unverifiable_summary(unverifiable_indices))
 
     warning_paths: list[str] = []
     for user_facing_idx, result in enumerate(parallel_result.results, start=1):
@@ -9750,7 +9609,6 @@ Respond with either ATOMIC or the structured JSON object only.
         then exit 0 and, when ``output_assertion`` is set, print that substring
         in the combined output.
         """
-        import contextlib
 
         def workspace_digest() -> str | None:
             return self._workspace_content_digest(
@@ -9805,39 +9663,48 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
             return None
 
-        subprocess_kwargs: dict[str, Any] = {}
-        if os.name != "nt":
-            subprocess_kwargs["start_new_session"] = True
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
+        # verify_command is POSIX bash by contract. Resolve a real POSIX
+        # interpreter instead of inheriting the platform shell default, which
+        # is cmd.exe on native Windows and cannot parse that syntax. The
+        # command text itself is never rewritten — the pass/fail signal stays
+        # the exit code of exactly what the seed declared.
+        verify_env = sanitized_verify_environment()
+        route = resolve_verify_shell()
+        if route is not None:
+            run = await run_with_shell(
+                route.argv(command),
                 cwd=cwd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                **subprocess_kwargs,
+                env=verify_env,
+                timeout_seconds=self._verify_command_timeout_seconds,
             )
-        except Exception as exc:  # pragma: no cover - spawn failure is environmental
+        else:
+            # No shell on this machine. Most verify commands do not need one —
+            # a shell only word-splits `pytest -q`. Run the command without an
+            # interpreter when its meaning can be reproduced exactly; the
+            # planner refuses everything else, so this never loosens a check.
+            steps = plan_shell_free_execution(command)
+            if steps is None:
+                return _VerifyGateOutcome(
+                    passed=False,
+                    reason=verify_shell_unavailable_reason(),
+                    output_tail="",
+                    workspace_digest=workspace_before,
+                    environment_unverifiable=True,
+                )
+            run = await run_shell_free_plan(
+                steps,
+                cwd=cwd,
+                env=verify_env,
+                timeout_seconds=self._verify_command_timeout_seconds,
+            )
+
+        if run.start_error is not None:
             return _VerifyGateOutcome(
                 passed=False,
-                reason=f"verify_command could not start: {exc}",
+                reason=f"verify_command could not start: {run.start_error}",
                 output_tail="",
             )
-        try:
-            stdout_bytes, _ = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=self._verify_command_timeout_seconds,
-            )
-        except TimeoutError:
-            if os.name != "nt":
-                import signal
-
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(proc.pid, signal.SIGKILL)
-            else:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-            with contextlib.suppress(Exception):
-                await proc.wait()
+        if run.timed_out:
             mutated = workspace_mutation_outcome("")
             if mutated is not None:
                 return mutated
@@ -9848,12 +9715,12 @@ Respond with either ATOMIC or the structured JSON object only.
                 workspace_digest=workspace_digest(),
             )
 
-        combined = (stdout_bytes or b"").decode("utf-8", errors="replace")
+        combined = run.output
         tail = combined[-_VERIFY_OUTPUT_TAIL_CHARS:]
         mutated = workspace_mutation_outcome(tail)
         if mutated is not None:
             return mutated
-        returncode = proc.returncode
+        returncode = run.returncode
         if returncode != 0:
             return _VerifyGateOutcome(
                 passed=False,
@@ -9964,6 +9831,19 @@ Respond with either ATOMIC or the structured JSON object only.
 
         from ouroboros.events.base import BaseEvent
         from ouroboros.orchestrator.failure_taxonomy import FailureClass
+
+        if outcome.environment_unverifiable:
+            return await quarantine_unverifiable_result(
+                result=result,
+                spec=spec,
+                ac_content=ac_text(spec),
+                ac_index=ac_index,
+                gate_reason=outcome.reason,
+                verify_gate_outcome=outcome,
+                session_id=session_id,
+                execution_id=execution_id,
+                emit_event=self._safe_emit_event,
+            )
 
         reason = f"Verify gate failed: {outcome.reason}"
         detail = reason

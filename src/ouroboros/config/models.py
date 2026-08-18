@@ -718,6 +718,10 @@ class OrchestratorConfig(BaseModel, frozen=True):
     # executable itself, but it names the plugins the Node process loads, so it
     # is treated with the same untrusted-source caution as a CLI path.
     dsh_config_path: str | None = None
+    # POSIX shell used to run an AC's verify_command. Not an agent CLI, but it
+    # is an executable path fed straight into a subprocess, so it carries the
+    # same untrusted-source caution.
+    verify_bash_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
     max_parallel_workers: int = Field(default=3, ge=1)
     usage_limit_pause_hours: float = Field(default=5.0, gt=0.0)
@@ -745,6 +749,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "zcode_cli_path",
         "dsh_cli_path",
         "dsh_config_path",
+        "verify_bash_path",
     )
     @classmethod
     def expand_cli_path(cls, v: str | None) -> str | None:

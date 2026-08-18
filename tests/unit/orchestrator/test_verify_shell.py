@@ -1,0 +1,292 @@
+"""Tests for POSIX-shell resolution behind the AC verify gate (RFC Part A).
+
+Windows branches are covered without Windows CI by patching the platform seam,
+``os.environ`` and ``shutil.which`` — the resolver reads nothing else.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path, PureWindowsPath
+from typing import Any
+
+import pytest
+
+from ouroboros.orchestrator import verify_shell
+from ouroboros.orchestrator.verify_shell import (
+    VERIFY_BASH_ENV_VAR,
+    VerifyShellRoute,
+    resolve_verify_shell,
+    verify_shell_unavailable_reason,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_route_cache() -> Any:
+    verify_shell.reset_verify_shell_cache()
+    yield
+    verify_shell.reset_verify_shell_cache()
+
+
+def _which_over(available: set[str]) -> Any:
+    def fake_which(candidate: str, *args: Any, **kwargs: Any) -> str | None:
+        return candidate if candidate in available else None
+
+    return fake_which
+
+
+def _which_always(resolved: str) -> Any:
+    def fake_which(candidate: str, *args: Any, **kwargs: Any) -> str:
+        return resolved
+
+    return fake_which
+
+
+def _which_resolving(names: set[str], resolved: str) -> Any:
+    """Model the real `which`: a bare name resolves to a full path."""
+
+    def fake_which(candidate: str, *args: Any, **kwargs: Any) -> str | None:
+        return resolved if candidate in names else None
+
+    return fake_which
+
+
+def test_route_argv_runs_the_command_verbatim() -> None:
+    route = VerifyShellRoute(shell_path="/bin/bash", source="posix_default")
+
+    assert route.argv("grep -q ok out.txt && exit 0") == (
+        "/bin/bash",
+        "-c",
+        "grep -q ok out.txt && exit 0",
+    )
+
+
+def test_env_override_wins_over_every_discovered_candidate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    override = tmp_path / "custom-bash"
+    override.write_text("")
+    monkeypatch.setenv(VERIFY_BASH_ENV_VAR, str(override))
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_over({str(override), "/bin/bash"}))
+
+    route = resolve_verify_shell()
+
+    assert route is not None
+    assert route.shell_path == str(override)
+    assert route.source == "env"
+
+
+def test_stale_env_override_falls_through_instead_of_dead_ending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: False)
+    monkeypatch.setenv(VERIFY_BASH_ENV_VAR, "/nonexistent/bash")
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_over({"/bin/bash"}))
+
+    route = resolve_verify_shell()
+
+    assert route is not None
+    assert route.shell_path == "/bin/bash"
+    assert route.source == "posix_default"
+
+
+def test_posix_prefers_bash_over_sh(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: False)
+    monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_over({"/bin/bash", "/bin/sh"}))
+
+    route = resolve_verify_shell()
+
+    assert route is not None
+    assert route.shell_path == "/bin/bash"
+    assert route.degraded is False
+
+
+def test_posix_falls_back_to_sh_and_marks_it_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: False)
+    monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_over({"/bin/sh"}))
+
+    route = resolve_verify_shell()
+
+    assert route is not None
+    assert route.shell_path == "/bin/sh"
+    assert route.degraded is True
+
+
+def test_windows_resolves_git_bash_when_nothing_is_on_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: True)
+    monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+    monkeypatch.delenv("ProgramW6432", raising=False)
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    git_bash = str(PureWindowsPath(r"C:\Program Files") / "Git" / "bin" / "bash.exe")
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_over({git_bash}))
+
+    route = resolve_verify_shell()
+
+    assert route is not None
+    assert route.shell_path == git_bash
+    assert route.source == "git_bash"
+
+
+def test_windows_falls_back_to_a_bash_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: True)
+    monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+    monkeypatch.delenv("ProgramFiles", raising=False)
+    monkeypatch.delenv("ProgramW6432", raising=False)
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_over({"bash.exe"}))
+
+    route = resolve_verify_shell()
+
+    assert route is not None
+    assert route.shell_path == "bash.exe"
+    assert route.source == "path"
+
+
+def test_windows_never_falls_back_to_cmd_or_sh(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: True)
+    monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+    monkeypatch.delenv("ProgramFiles", raising=False)
+    monkeypatch.delenv("ProgramW6432", raising=False)
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_over({"cmd.exe", "powershell.exe"}))
+
+    assert resolve_verify_shell() is None
+    assert "Git for Windows" in verify_shell_unavailable_reason()
+
+
+def test_resolution_is_cached_per_path_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: False)
+    monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    calls: list[str] = []
+
+    def counting_which(candidate: str, *args: Any, **kwargs: Any) -> str | None:
+        calls.append(candidate)
+        return "/bin/bash" if candidate == "/bin/bash" else None
+
+    monkeypatch.setattr(verify_shell.shutil, "which", counting_which)
+
+    assert resolve_verify_shell() is not None
+    first_call_count = len(calls)
+    assert resolve_verify_shell() is not None
+    assert len(calls) == first_call_count
+
+    # A changed PATH must not serve the previous machine's answer.
+    monkeypatch.setenv("PATH", "/usr/bin:/opt/bin")
+    assert resolve_verify_shell() is not None
+    assert len(calls) > first_call_count
+
+
+def test_windows_never_routes_verification_through_the_wsl_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`System32\\bash.exe` runs the command against a different filesystem."""
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: True)
+    monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+    for variable in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("SYSTEMROOT", r"C:\Windows")
+    wsl = str(PureWindowsPath(r"C:\Windows") / "System32" / "bash.exe")
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_always(wsl))
+
+    assert resolve_verify_shell() is None
+
+
+def test_windows_still_accepts_a_real_bash_outside_system32(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: True)
+    monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+    for variable in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("SYSTEMROOT", r"C:\Windows")
+    msys = str(PureWindowsPath(r"C:\msys64\usr\bin") / "bash.exe")
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_resolving({"bash.exe", "bash"}, msys))
+
+    route = resolve_verify_shell()
+
+    assert route is not None
+    assert route.shell_path == msys
+
+
+def test_a_failed_resolution_is_never_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retrying an unverifiable AC only helps if a mid-run fix is noticed.
+
+    Git Bash is discovered through `%ProgramFiles%`, not PATH, so a cached
+    "no shell" keyed on PATH would survive the very install it should pick up.
+    """
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: False)
+    monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+    available: set[str] = set()
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_over(available))
+
+    assert resolve_verify_shell() is None
+
+    # The operator installs bash while the run continues.
+    available.add("/bin/bash")
+
+    route = resolve_verify_shell()
+    assert route is not None
+    assert route.shell_path == "/bin/bash"
+
+
+def test_a_successful_resolution_is_still_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: False)
+    monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+    calls: list[str] = []
+
+    def counting_which(candidate: str, *args: Any, **kwargs: Any) -> str | None:
+        calls.append(candidate)
+        return "/bin/bash" if candidate == "/bin/bash" else None
+
+    monkeypatch.setattr(verify_shell.shutil, "which", counting_which)
+
+    assert resolve_verify_shell() is not None
+    settled = len(calls)
+    assert resolve_verify_shell() is not None
+    assert len(calls) == settled
+
+
+# ---------------------------------------------------------------------------
+# The environment a verdict may be computed in
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "PYTHONHOME",
+        "PYTEST_ADDOPTS",
+        "PYTEST_PLUGINS",
+        "NODE_OPTIONS",
+        "LD_PRELOAD",
+        "DYLD_INSERT_LIBRARIES",
+    ],
+)
+def test_verdict_bending_variables_are_stripped(key: str) -> None:
+    """`PYTEST_ADDOPTS="--collect-only"` makes any pytest contract exit 0."""
+    sanitized = verify_shell.sanitized_verify_environment({key: "hostile", "HOME": "/home/u"})
+
+    assert key not in sanitized
+    assert sanitized["HOME"] == "/home/u"
+
+
+def test_path_is_kept_because_contracts_need_real_tools() -> None:
+    """Stripping PATH would break `uv`/`pytest`, including a project `.venv/bin`."""
+    sanitized = verify_shell.sanitized_verify_environment({"PATH": "/w/.venv/bin:/usr/bin"})
+
+    assert sanitized["PATH"] == "/w/.venv/bin:/usr/bin"
+
+
+def test_stripping_is_case_insensitive() -> None:
+    sanitized = verify_shell.sanitized_verify_environment({"pytest_addopts": "-p no:randomly"})
+
+    assert sanitized == {}
