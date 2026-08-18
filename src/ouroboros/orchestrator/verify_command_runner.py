@@ -27,6 +27,33 @@ from ouroboros.core.verify_command_plan import ShellFreeStep, run_builtin
 # rather than raised so a missing tool reads as a failing contract, which is
 # what a shell would have reported.
 COMMAND_NOT_FOUND_STATUS = 127
+# POSIX exit status for a resolved path that cannot be executed (a directory,
+# or a file without the execute bit) — a shell reports 126, not 127.
+COMMAND_NOT_EXECUTABLE_STATUS = 126
+
+
+def _resolve_step_executable(name: str, *, cwd: str, path: str | None) -> tuple[str | None, int]:
+    """Resolve a step's command name the way a shell running in ``cwd`` would.
+
+    A name containing a path separator never consults PATH: the shell resolves
+    it against its own working directory, so ``./check.sh`` must mean the file
+    inside the verification workspace — not one relative to wherever the
+    orchestrator process happens to run. Bare names keep the PATH lookup.
+
+    Returns the executable to spawn, or ``None`` with the POSIX status a shell
+    would report (127 not found, 126 found but not executable).
+    """
+    if os.sep in name or (os.altsep is not None and os.altsep in name):
+        candidate = name if os.path.isabs(name) else os.path.join(cwd, name)
+        if not os.path.exists(candidate):
+            return None, COMMAND_NOT_FOUND_STATUS
+        if not os.path.isfile(candidate) or not os.access(candidate, os.X_OK):
+            return None, COMMAND_NOT_EXECUTABLE_STATUS
+        return candidate, 0
+    executable = shutil.which(name, path=path)
+    if executable is None:
+        return None, COMMAND_NOT_FOUND_STATUS
+    return executable, 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,10 +169,17 @@ async def run_shell_free_plan(
 
         step_env = dict(env)
         step_env.update(step.env_overrides)
-        executable = shutil.which(step.argv[0], path=step_env.get("PATH"))
+        executable, not_found_status = _resolve_step_executable(
+            step.argv[0], cwd=cwd, path=step_env.get("PATH")
+        )
         if executable is None:
-            output.append(f"{step.argv[0]}: command not found\n")
-            status = COMMAND_NOT_FOUND_STATUS
+            detail = (
+                "command not found"
+                if not_found_status == COMMAND_NOT_FOUND_STATUS
+                else "Permission denied"
+            )
+            output.append(f"{step.argv[0]}: {detail}\n")
+            status = not_found_status
             continue
 
         remaining = deadline - time.monotonic()

@@ -15,6 +15,7 @@ import pytest
 
 from ouroboros.core.verify_command_plan import plan_shell_free_execution
 from ouroboros.orchestrator.verify_command_runner import (
+    COMMAND_NOT_EXECUTABLE_STATUS,
     COMMAND_NOT_FOUND_STATUS,
     run_shell_free_plan,
 )
@@ -120,6 +121,64 @@ async def test_timeout_is_a_budget_across_the_whole_sequence(tmp_path: Path) -> 
 
     assert run.timed_out is True
     assert "REACHED" not in run.output
+
+
+@pytest.mark.asyncio
+async def test_path_bearing_command_resolves_against_the_workspace(tmp_path: Path) -> None:
+    """`./check.sh` means the file in the verification cwd, never PATH or the
+    orchestrator process directory — a shell running in cwd resolves it there."""
+    script = tmp_path / "check.sh"
+    script.write_text("#!/bin/sh\necho WORKSPACE-OK\n")
+    script.chmod(0o755)
+
+    run = await _run("./check.sh", tmp_path)
+
+    assert run.returncode == 0
+    assert "WORKSPACE-OK" in run.output
+
+
+@pytest.mark.asyncio
+async def test_missing_path_bearing_command_reports_127(tmp_path: Path) -> None:
+    run = await _run("./nope.sh", tmp_path)
+
+    assert run.returncode == COMMAND_NOT_FOUND_STATUS
+    assert "command not found" in run.output
+
+
+@pytest.mark.asyncio
+async def test_non_executable_path_bearing_command_reports_126(tmp_path: Path) -> None:
+    script = tmp_path / "check.sh"
+    script.write_text("#!/bin/sh\necho NEVER\n")
+    script.chmod(0o644)
+
+    run = await _run("./check.sh", tmp_path)
+
+    assert run.returncode == COMMAND_NOT_EXECUTABLE_STATUS
+    assert "Permission denied" in run.output
+    assert "NEVER" not in run.output
+
+
+def test_planner_rejects_shell_syntax_errors_instead_of_repairing_them() -> None:
+    """Bash exits 2 on these; silently dropping the empty segment would let a
+    malformed contract produce a verdict the shell refuses to give."""
+    for command in [
+        "&& echo PASS",
+        "|| echo PASS",
+        "; echo PASS",
+        "echo PASS &&",
+        "echo PASS ||",
+        "echo PASS ; ; echo TWO",
+        "echo PASS && && echo TWO",
+    ]:
+        assert plan_shell_free_execution(command) is None, command
+
+
+@pytest.mark.asyncio
+async def test_trailing_semicolon_stays_valid_like_a_shell(tmp_path: Path) -> None:
+    run = await _run("echo DONE ;", tmp_path)
+
+    assert run.returncode == 0
+    assert "DONE" in run.output
 
 
 def test_planner_refuses_what_cannot_be_reproduced() -> None:
