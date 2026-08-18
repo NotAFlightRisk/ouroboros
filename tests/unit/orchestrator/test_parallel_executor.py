@@ -70,6 +70,7 @@ from ouroboros.orchestrator.execution_runtime_scope import (
     ExecutionNodeIdentity,
     build_level_coordinator_runtime_scope,
 )
+from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.leaf_dispatcher import (
     _attach_bash_filesystem_effects,
     _BashFilesystemLeaseTracker,
@@ -9703,7 +9704,14 @@ class TestParallelACExecutor:
         assert result.success is False
         assert result.error is not None
         assert "Fat-harness verifier failed" in result.error
-        assert "no runtime transcript evidence supports" in result.error
+        # A fully empty transcript is reported as a collection fault, not as a
+        # worker rejection (RFC verify-gate-windows-portability, Part B3).
+        assert "transcript_missing_infrastructure" in result.error
+        assert result.atomic_verifier_verdict is not None
+        assert (
+            result.atomic_verifier_verdict.failure_class
+            == FailureClass.TRANSCRIPT_MISSING_INFRASTRUCTURE.value
+        )
 
         evidence_event = next(
             event
@@ -9713,7 +9721,10 @@ class TestParallelACExecutor:
         assert evidence_event.data["typed_evidence_valid"] is True
         assert evidence_event.data["verifier_ran"] is True
         assert evidence_event.data["verifier_passed"] is False
-        assert evidence_event.data["verifier_failure_class"] == "EVIDENCE_MISSING"
+        assert (
+            evidence_event.data["verifier_failure_class"]
+            == FailureClass.TRANSCRIPT_MISSING_INFRASTRUCTURE.value
+        )
 
     @pytest.mark.asyncio
     async def test_fat_harness_verifier_allows_bash_generated_file_and_whole_suite_test(

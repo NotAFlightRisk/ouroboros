@@ -777,6 +777,23 @@ class TelemetryConfig(BaseModel, frozen=True):
     enabled: bool = True
 
 
+class SeedConfig(BaseModel, frozen=True):
+    """Seed-authoring gates applied before a Seed is executed.
+
+    Attributes:
+        verify_command_gate: How to treat an acceptance criterion that declares
+            neither a ``verify_command`` nor a ``verify_exemption_reason``.
+            ``warn`` surfaces it and continues; ``block`` refuses the run.
+            Such an AC can only be judged from the leaf's own transcript, which
+            is both the gameable path and the one that breaks when transcript
+            collection fails — so the default moves toward ``block`` over time.
+            There is no permanent opt-out; the exemption reason is the escape
+            hatch, and it is per-AC and explicit.
+    """
+
+    verify_command_gate: Literal["warn", "block"] = "warn"
+
+
 class OuroborosConfig(BaseModel, frozen=True):
     """Top-level Ouroboros configuration.
 
@@ -797,6 +814,7 @@ class OuroborosConfig(BaseModel, frozen=True):
         drift: Drift monitoring configuration
         runtime_controls: Long-running workflow timeout/progress controls
         logging: Logging configuration
+        seed: Seed-authoring gates applied before execution
     """
 
     economics: EconomicsConfig = Field(default_factory=EconomicsConfig)
@@ -814,6 +832,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    seed: SeedConfig = Field(default_factory=SeedConfig)
 
 
 def get_default_config() -> OuroborosConfig:

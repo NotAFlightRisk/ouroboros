@@ -9041,7 +9041,8 @@ Respond with either ATOMIC or the structured JSON object only.
             # filesystem oracle so artifact work does not require fabricated
             # transcript-shaped evidence.
             has_success_contract = (
-                isinstance(ac_spec, AcceptanceCriterionSpec) and ac_spec.has_success_contract
+                isinstance(ac_spec, AcceptanceCriterionSpec)
+                and ac_spec.has_evidential_success_contract
             )
             has_expected_artifacts = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
                 ac_spec.expected_artifacts
@@ -9766,7 +9767,12 @@ Respond with either ATOMIC or the structured JSON object only.
         if ac_index < 0 or ac_index >= len(seed.acceptance_criteria):
             return result
         spec = seed.acceptance_criteria[ac_index]
-        if not isinstance(spec, AcceptanceCriterionSpec) or not spec.has_success_contract:
+        # A declared-but-vacuous verify_command is treated as no contract: the
+        # gate must not stamp an AC verified on a command that cannot fail.
+        if (
+            not isinstance(spec, AcceptanceCriterionSpec)
+            or not spec.has_evidential_success_contract
+        ):
             return result
 
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()

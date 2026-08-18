@@ -473,6 +473,15 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
         default=None,
         description="Literal string required in verify_command combined stdout and stderr",
     )
+    verify_exemption_reason: str | None = Field(
+        default=None,
+        description=(
+            "Why this criterion cannot carry a verify_command. Required by the "
+            "seed verify-command gate for criteria the orchestrator cannot "
+            "judge deterministically; it is a per-AC, explicit escape hatch, "
+            "never a blanket opt-out"
+        ),
+    )
     investment: InvestmentSpec | None = Field(default=None)
 
     @model_validator(mode="before")
@@ -501,6 +510,16 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
     def _strip_description(cls, value: Any) -> Any:
         if isinstance(value, str):
             return value.strip()
+        return value
+
+    @field_validator("verify_exemption_reason", mode="before")
+    @classmethod
+    def _strip_verify_exemption_reason(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped or _is_none_sentinel(stripped):
+                return None
+            return stripped
         return value
 
     @field_validator("verify_command", mode="before")
@@ -570,8 +589,48 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
 
     @property
     def has_success_contract(self) -> bool:
-        """Return True when explicit evidence fields are populated."""
+        """Return True when explicit evidence fields are populated.
+
+        Declaration only. This stays true for a vacuous ``verify_command`` so
+        the field round-trips through :meth:`to_seed_value` unchanged; whether
+        the contract can actually decide anything is
+        :attr:`has_evidential_success_contract`.
+        """
         return bool(self.verify_command or self.expected_artifacts or self.output_assertion)
+
+    @property
+    def verify_contract_always_passes(self) -> bool:
+        """Return True when this contract reports a pass whatever happened.
+
+        ``verify_command: "exit 0"`` is the case that matters. A contract that
+        can only ever *refuse* (``exit 1``) is information-free too, but it
+        cannot manufacture a pass, so it is left alone to fail honestly.
+        """
+        from ouroboros.core.verify_command_plan import verify_contract_always_passes
+
+        if not self.verify_command:
+            return False
+        return verify_contract_always_passes(self.verify_command, self.output_assertion)
+
+    @property
+    def has_evidential_success_contract(self) -> bool:
+        """Return True when the contract can actually decide this criterion.
+
+        Declaring a ``verify_command`` drops ``commands_run`` and
+        ``tests_passed`` from the required evidence, because the orchestrator
+        running that command is meant to replace them. A command that always
+        passes replaces them with nothing, which would leave the AC checked
+        less than one that declared no contract at all. Such a criterion is
+        treated as contract-less, so the transcript-backed evidence it was
+        exempted from applies again.
+        """
+        if self.expected_artifacts:
+            return True
+        if self.verify_command:
+            return not self.verify_contract_always_passes
+        # An assertion with no command to produce it is a malformed contract.
+        # The gate must still run so it can reject it, rather than skip it.
+        return bool(self.output_assertion)
 
     def with_materialized_semantic_key(self) -> AcceptanceCriterionSpec:
         """Return this criterion with a deterministic legacy semantic identity."""
@@ -585,6 +644,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             not self.has_success_contract
             and self.investment is None
             and self.semantic_ac_key is None
+            and self.verify_exemption_reason is None
         ):
             return self.description
         data: dict[str, Any] = {"description": self.description}
@@ -596,6 +656,8 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             data["expected_artifacts"] = list(self.expected_artifacts)
         if self.output_assertion:
             data["output_assertion"] = self.output_assertion
+        if self.verify_exemption_reason:
+            data["verify_exemption_reason"] = self.verify_exemption_reason
         if self.investment is not None:
             data["investment"] = self.investment.model_dump(mode="json", exclude_none=True)
         return data
