@@ -40,6 +40,97 @@ RunCondition = Literal["always", "on_success", "on_failure"]
 
 _SUPPORTED_BUILTINS = frozenset({"exit", "true", "false", ":", "echo", "printf", "test", "["})
 
+# Everything a shell would have interpreted itself. Whatever is not in
+# `_SUPPORTED_BUILTINS` is refused rather than spawned: without this, a name
+# the shell never resolves through PATH — `cd`, `type`, `export`, `eval` — is
+# handed to whatever same-named executable happens to exist, and the two can
+# disagree about both the workspace and the verdict (`type missing` fails in
+# bash; a PATH `type` binary can exit 0). Reserved words are listed for the
+# same reason: `if`/`for`/`function` reaching this module at all means the
+# command was misparsed, and refusing is the only honest answer.
+_SHELL_INTERPRETED_WORDS = (
+    frozenset(
+        {
+            # POSIX special builtins.
+            ".",
+            "break",
+            "continue",
+            "eval",
+            "exec",
+            "export",
+            "readonly",
+            "return",
+            "set",
+            "shift",
+            "times",
+            "trap",
+            "unset",
+            # POSIX / bash regular builtins.
+            "alias",
+            "bg",
+            "bind",
+            "builtin",
+            "caller",
+            "cd",
+            "command",
+            "compgen",
+            "complete",
+            "compopt",
+            "declare",
+            "dirs",
+            "disown",
+            "enable",
+            "fc",
+            "fg",
+            "getopts",
+            "hash",
+            "help",
+            "history",
+            "jobs",
+            "kill",
+            "let",
+            "local",
+            "logout",
+            "mapfile",
+            "popd",
+            "pushd",
+            "pwd",
+            "read",
+            "readarray",
+            "shopt",
+            "source",
+            "suspend",
+            "type",
+            "typeset",
+            "ulimit",
+            "umask",
+            "unalias",
+            "wait",
+            # Reserved words.
+            "case",
+            "coproc",
+            "do",
+            "done",
+            "elif",
+            "else",
+            "esac",
+            "fi",
+            "for",
+            "function",
+            "if",
+            "in",
+            "select",
+            "then",
+            "time",
+            "until",
+            "while",
+            "[[",
+            "]]",
+        }
+    )
+    - _SUPPORTED_BUILTINS
+)
+
 # Builtins whose exit status and output are fixed by their literal arguments:
 # nothing about the workspace, the environment, or any external program can
 # change what they report. A verify_command built only from these cannot fail,
@@ -265,6 +356,8 @@ def plan_shell_free_execution(command: str) -> tuple[ShellFreeStep, ...] | None:
             run_condition=condition,
             env_overrides=overrides,
         )
+        if step.argv[0] in _SHELL_INTERPRETED_WORDS:
+            return None
         if step.is_builtin and not _builtin_is_supported(step.argv):
             return None
         steps.append(step)
@@ -286,7 +379,10 @@ def run_builtin(step: ShellFreeStep, *, cwd: str) -> BuiltinResult:
         return BuiltinResult(status=int(operands[0]) if operands else 0)
     if name == "echo":
         trailing_newline = True
-        if operands and operands[0] == "-n":
+        # Bash consumes *every* leading `-n`, not just the first: `echo -n -n x`
+        # prints `x`. Stopping after one would print `-n x` and let a contract
+        # asserting on `-n` pass here while failing under a real shell.
+        while operands and operands[0] == "-n":
             trailing_newline = False
             operands = operands[1:]
         text = " ".join(operands)

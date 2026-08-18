@@ -41,6 +41,15 @@ def _which_always(resolved: str) -> Any:
     return fake_which
 
 
+def _which_echoing() -> Any:
+    """Model a machine where every candidate path exists as given."""
+
+    def fake_which(candidate: str, *args: Any, **kwargs: Any) -> str:
+        return candidate
+
+    return fake_which
+
+
 def _which_resolving(names: set[str], resolved: str) -> Any:
     """Model the real `which`: a bare name resolves to a full path."""
 
@@ -290,3 +299,63 @@ def test_stripping_is_case_insensitive() -> None:
     sanitized = verify_shell.sanitized_verify_environment({"pytest_addopts": "-p no:randomly"})
 
     assert sanitized == {}
+
+
+def test_stale_env_override_does_not_mask_a_valid_configured_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The env-first accessor would return the same stale value, so a machine
+    with no default bash would report "cannot verify" despite valid config."""
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: False)
+    monkeypatch.setenv(VERIFY_BASH_ENV_VAR, "/nonexistent/bash")
+    monkeypatch.setattr(verify_shell, "_config_value", lambda: "/opt/bash")
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_over({"/opt/bash"}))
+
+    route = resolve_verify_shell()
+
+    assert route is not None
+    assert route.shell_path == "/opt/bash"
+    assert route.source == "config"
+
+
+def test_resolution_cache_notices_a_changed_configured_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Config is a resolution input, so it must be in the cache fingerprint."""
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: False)
+    monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_over({"/a/bash", "/b/bash"}))
+
+    monkeypatch.setattr(verify_shell, "_config_value", lambda: "/a/bash")
+    first = resolve_verify_shell()
+    assert first is not None and first.shell_path == "/a/bash"
+
+    monkeypatch.setattr(verify_shell, "_config_value", lambda: "/b/bash")
+    second = resolve_verify_shell()
+
+    assert second is not None
+    assert second.shell_path == "/b/bash"
+
+
+def test_resolution_cache_notices_a_changed_git_bash_install_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git Bash is found through `%ProgramFiles%`, never PATH: a key without it
+    keeps serving the route resolved before the install moved."""
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: True)
+    monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+    monkeypatch.setattr(verify_shell, "_config_value", lambda: None)
+    monkeypatch.setenv("ProgramFiles", "C:\\Program Files")
+    monkeypatch.delenv("ProgramW6432", raising=False)
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_echoing())
+
+    first = resolve_verify_shell()
+    assert first is not None
+    assert first.shell_path.startswith("C:\\Program Files")
+
+    monkeypatch.setenv("ProgramFiles", "D:\\Apps")
+    second = resolve_verify_shell()
+
+    assert second is not None
+    assert second.shell_path.startswith("D:\\Apps")
