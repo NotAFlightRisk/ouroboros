@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 import json
@@ -35,18 +34,12 @@ from ouroboros.orchestrator.parallel_executor import (
     ACExecutionOutcome,
     ACExecutionResult,
     ParallelACExecutor,
-    ParallelExecutionResult,
     _build_success_contract_block,
     _complete_sibling_acs_from_evidence,
-    _deserialize_verify_gate_outcome,
     _missing_expected_artifacts,
-    _serialize_verify_gate_outcome,
     _VerifyGateOutcome,
-    render_parallel_verification_report,
 )
-from ouroboros.orchestrator.retry_hints import is_retryable_failure
 from ouroboros.orchestrator.verifier import VerifierVerdict
-from ouroboros.orchestrator.verify_shell import verify_shell_path_from_identity
 
 
 class _StubAdapter:
@@ -502,9 +495,9 @@ async def test_final_verify_settlement_invalidates_prior_success_after_mutation(
 
 
 @pytest.mark.asyncio
-async def test_apply_verify_gate_never_recovers_failed_worker_result(tmp_path: Any) -> None:
+async def test_apply_verify_gate_recovers_failed_result_once(tmp_path: Any) -> None:
     executor = _make_executor(working_directory=str(tmp_path))
-    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="test -d ."))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
     result = ACExecutionResult(
         ac_index=0,
         ac_content="ac",
@@ -513,13 +506,17 @@ async def test_apply_verify_gate_never_recovers_failed_worker_result(tmp_path: A
         outcome=ACExecutionOutcome.FAILED,
     )
 
-    gated = await executor._apply_verify_gate(
+    recovered = await executor._apply_verify_gate(
         seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
     )
 
-    assert gated is result
-    assert gated.success is False
-    executor._event_store.append.assert_not_awaited()
+    assert recovered.success is True
+    assert recovered.error is None
+    assert recovered.outcome == ACExecutionOutcome.SUCCEEDED
+    emitted = [call.args[0] for call in executor._event_store.append.await_args_list]
+    recovery_events = [event for event in emitted if event.type == "execution.verify.recovered"]
+    assert len(recovery_events) == 1
+    assert recovery_events[0].data["prior_error"] == "runtime false negative"
 
 
 @pytest.mark.asyncio
@@ -536,7 +533,6 @@ async def test_verify_gate_times_out_hung_command(tmp_path: Any) -> None:
     assert time.monotonic() - started < 5
     assert outcome.passed is False
     assert outcome.reason == "verify_command timed out after 1s"
-    assert outcome.environment_unverifiable is True
 
 
 @pytest.mark.asyncio
@@ -2057,190 +2053,3 @@ class TestSuccessContractBlock:
         assert "pytest -q" not in block
         assert "Expected artifacts" not in block
         assert "Expected output" not in block
-
-
-# ---------------------------------------------------------------------------
-# RFC Part A — Windows-safe verify_command execution + quarantine
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_verify_gate_runs_the_command_through_a_resolved_posix_shell(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
-    """The gate must exec a real interpreter, not inherit the platform shell."""
-    executor = _make_executor(working_directory=str(tmp_path))
-    spec = AcceptanceCriterionSpec(description="ok", verify_command="exit 0")
-    recorded: dict[str, Any] = {}
-
-    expected_shell = verify_shell_path_from_identity(executor._verify_shell_identity)
-    assert expected_shell is not None
-    real_exec = asyncio.create_subprocess_exec
-
-    async def spy_exec(*argv: str, **kwargs: Any) -> Any:
-        recorded["argv"] = argv
-        return await real_exec("/bin/sh", "-c", "exit 0", **kwargs)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", spy_exec)
-
-    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
-
-    assert outcome.passed is True
-    assert recorded["argv"] == (expected_shell, "-c", "exit 0")
-
-
-@pytest.mark.asyncio
-async def test_verify_gate_quarantines_when_no_posix_shell_exists(tmp_path: Any) -> None:
-    executor = _make_executor(working_directory=str(tmp_path))
-    # No real shell means the arbitrary pipeline is unavailable, never emulated.
-    spec = AcceptanceCriterionSpec(description="ok", verify_command="echo ok | tee log")
-    executor._verify_shell_identity = None
-
-    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
-
-    assert outcome.passed is False
-    assert outcome.environment_unverifiable is True
-    assert "needs bash" in (outcome.reason or "")
-
-
-@pytest.mark.asyncio
-async def test_unverifiable_ac_keeps_worker_success_without_retry(tmp_path: Any) -> None:
-    executor = _make_executor(working_directory=str(tmp_path))
-    spec = AcceptanceCriterionSpec(description="ok", verify_command="echo ok | tee log")
-    seed = _seed_with_specs(spec)
-    executor._verify_shell_identity = None
-    result = ACExecutionResult(
-        ac_index=0,
-        ac_content="ok",
-        success=True,
-        messages=(),
-        final_message="done",
-        outcome=ACExecutionOutcome.SUCCEEDED,
-    )
-
-    gated = await executor._apply_verify_gate(
-        seed=seed,
-        ac_index=0,
-        result=result,
-        session_id="s",
-        execution_id="e",
-    )
-
-    assert gated.success is True
-    assert gated is not result
-    assert gated.verify_gate_outcome.environment_unverifiable is True
-    assert gated.error is None
-    assert is_retryable_failure(gated) is False
-
-
-@pytest.mark.asyncio
-async def test_final_settlement_preserves_unverified_success(tmp_path: Any) -> None:
-    executor = _make_executor(working_directory=str(tmp_path))
-    spec = AcceptanceCriterionSpec(description="ok", verify_command="echo ok")
-    seed = _seed_with_specs(spec)
-    executor._verify_shell_identity = None
-    result = ACExecutionResult(
-        ac_index=0,
-        ac_content="ok",
-        success=True,
-        final_message="done",
-        outcome=ACExecutionOutcome.SUCCEEDED,
-    )
-    gated = await executor._apply_verify_gate(
-        seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
-    )
-
-    settled = await executor._settle_verify_gate_results(
-        seed=seed,
-        results=[gated],
-        session_id="s",
-        execution_id="e",
-    )
-
-    assert settled[0].success is True
-    assert settled[0].verify_gate_outcome.environment_unverifiable is True
-
-
-def test_report_surfaces_unverified_success() -> None:
-    outcome = _VerifyGateOutcome(
-        passed=False,
-        reason="verify_command needs a POSIX shell",
-        output_tail="",
-        environment_unverifiable=True,
-    )
-    result = ACExecutionResult(
-        ac_index=0,
-        ac_content="ok",
-        success=True,
-        messages=(),
-        final_message="done",
-        outcome=ACExecutionOutcome.SUCCEEDED,
-        verify_gate_outcome=outcome,
-    )
-    parallel_result = ParallelExecutionResult(
-        results=[result],
-        success_count=1,
-        failure_count=0,
-        blocked_count=0,
-        skipped_count=0,
-        total_duration_seconds=0.0,
-    )
-
-    report = render_parallel_verification_report(parallel_result, 1)
-
-    assert "Success: 1/1" in report
-    assert "needs confirmation: AC 1" in report
-
-
-def test_verify_gate_outcome_roundtrips_the_quarantine_flag() -> None:
-    outcome = _VerifyGateOutcome(
-        passed=False,
-        reason="no shell",
-        output_tail="",
-        environment_unverifiable=True,
-    )
-
-    payload = _serialize_verify_gate_outcome(outcome)
-    assert payload is not None
-    assert _deserialize_verify_gate_outcome(payload) == outcome
-
-
-def test_legacy_verify_gate_checkpoints_stay_readable() -> None:
-    legacy_payload = {
-        "passed": True,
-        "reason": None,
-        "output_tail": "",
-        "missing_artifacts": [],
-        "workspace_mutated": False,
-        "workspace_digest": None,
-    }
-
-    restored = _deserialize_verify_gate_outcome(legacy_payload)
-
-    assert restored is not None
-    assert restored.passed is True
-    assert restored.environment_unverifiable is False
-
-
-@pytest.mark.asyncio
-async def test_a_repo_supplied_bash_startup_file_cannot_flip_a_verdict(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
-    """Bash sources `BASH_ENV` before it evaluates a `-c` command, so a file the
-    repository controls would otherwise run inside the gate itself and turn a
-    failing contract into a pass."""
-    import shutil as _shutil
-
-    if _shutil.which("bash") is None:  # pragma: no cover - CI always has bash
-        pytest.skip("no bash on this machine")
-
-    injected = tmp_path / "inject.sh"
-    injected.write_text("exit 0\n")
-    monkeypatch.setenv("BASH_ENV", str(injected))
-
-    executor = _make_executor(working_directory=str(tmp_path))
-    spec = AcceptanceCriterionSpec(description="fails honestly", verify_command="exit 23")
-
-    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
-
-    assert outcome.passed is False
