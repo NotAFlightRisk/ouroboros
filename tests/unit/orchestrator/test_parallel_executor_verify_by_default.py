@@ -1315,6 +1315,8 @@ def test_retry_prompt_drops_transformed_hidden_assertion(
         ("<=>", "&amp;amp;amp;lt;=&amp;amp;amp;gt;"),
         ("!!!", "!\u200b!\u200b!"),
         ("<=>", "<\u2060=\u2060>"),
+        ("!!!", "!\ufe0f!\ufe0f!"),
+        ("<=>", "&" + "amp;" * 65 + "lt;=&" + "amp;" * 65 + "gt;"),
     ),
 )
 def test_retry_prompt_drops_deep_entities_and_invisible_formats(

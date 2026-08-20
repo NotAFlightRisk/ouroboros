@@ -41,21 +41,27 @@ _UNSUPPORTED_TERMINAL_CONTROL_RE = re.compile(
 )
 
 
-def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str:
+_MAX_HTML_ENTITY_DECODE_PASSES = 64
+
+
+def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str | None:
     """Normalize routine verifier-output transformations for leak detection."""
     unescaped = text
-    for _ in range(12):
+    for _ in range(_MAX_HTML_ENTITY_DECODE_PASSES):
         decoded = html.unescape(unescaped)
         if decoded == unescaped:
             break
         unescaped = decoded
+    else:
+        return None
     unescaped = unicodedata.normalize("NFKC", unescaped)
     without_ansi = _ANSI_ESCAPE_RE.sub("", unescaped)
     without_ansi = _OSC_ESCAPE_RE.sub("", without_ansi)
     without_ansi = "".join(
         char
         for char in without_ansi
-        if (ord(char) >= 32 or char in "\n\r\t") and unicodedata.category(char) != "Cf"
+        if (ord(char) >= 32 or char in "\n\r\t")
+        and unicodedata.category(char) not in {"Cf", "Mn", "Me"}
     )
     without_prefixes = _LINE_PREFIX_RE.sub("", without_ansi)
     if preserve_punctuation:
@@ -90,12 +96,16 @@ def contains_transformed_hidden_contract_value(
             preserve_punctuation=False,
         )
         normalized_hidden = _normalized_contract_text(hidden, preserve_punctuation=False)
+        if normalized_remaining is None or normalized_hidden is None:
+            return True
         if normalized_hidden:
             if normalized_hidden in normalized_remaining:
                 return True
             continue
         compact_remaining = _normalized_contract_text(remaining, preserve_punctuation=True)
         compact_hidden = _normalized_contract_text(hidden, preserve_punctuation=True)
+        if compact_remaining is None or compact_hidden is None:
+            return True
         if compact_hidden and compact_hidden in compact_remaining:
             return True
     return False
