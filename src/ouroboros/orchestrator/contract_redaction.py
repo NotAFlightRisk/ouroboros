@@ -47,7 +47,8 @@ _ESCAPED_UNICODE_RE = re.compile(
     r"\\(?:x(?P<byte>[0-9a-fA-F]{2})|u(?P<short>[0-9a-fA-F]{4})|U(?P<long>[0-9a-fA-F]{8}))"
 )
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:(?P<decimal>\d+)|[xX](?P<hex>[0-9a-fA-F]+));?")
-_LINE_PREFIX_RE = re.compile(r"(?m)^\s*(?:[EIWF]\s+|[+>~-]\s?)")
+_ESCAPED_BYTE_RUN_RE = re.compile(r"(?:\\x[0-9a-fA-F]{2})+")
+_LINE_PREFIX_RE = re.compile(r"(?m)^[ \t]*(?:[EIWF][ \t]+|[+>~-][ \t]?)")
 _UNSUPPORTED_TERMINAL_CONTROL_RE = re.compile(
     r"(?:\x1b(?:P|_|\^|X)|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9c)",
     re.DOTALL,
@@ -94,23 +95,59 @@ def _decode_escaped_unicode(text: str) -> str | None:
     return None if invalid else decoded
 
 
+def _decode_escaped_byte_runs(text: str) -> str | None:
+    invalid = False
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal invalid
+        raw = bytes.fromhex(match.group(0).replace("\\x", ""))
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            invalid = True
+            return ""
+
+    decoded = _ESCAPED_BYTE_RUN_RE.sub(replace, text)
+    return None if invalid else decoded
+
+
+def _decode_escaped_whitespace(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        token = match.group(0).lower()
+        if token in {r"\n", r"\x0a", r"\u000a", r"\u0000000a", r"\012"}:
+            return "\n"
+        if token in {r"\r", r"\x0d", r"\u000d", r"\u0000000d", r"\015"}:
+            return "\r"
+        return "\t"
+
+    return _ESCAPED_WHITESPACE_RE.sub(replace, text)
+
+
 def _decode_contract_encodings(text: str) -> str | None:
     decoded_text = text
     for _ in range(_MAX_HTML_ENTITY_DECODE_PASSES):
         html_decoded = _decode_html_entities(decoded_text)
         if html_decoded is None:
             return None
-        unicode_decoded = _decode_escaped_unicode(html_decoded)
+        byte_decoded = _decode_escaped_byte_runs(html_decoded)
+        if byte_decoded is None:
+            return None
+        unicode_decoded = _decode_escaped_unicode(byte_decoded)
         if unicode_decoded is None:
             return None
-        decoded = _ESCAPED_WHITESPACE_RE.sub(" ", unicode_decoded)
+        decoded = _decode_escaped_whitespace(unicode_decoded)
         if decoded == decoded_text:
             return decoded_text
         decoded_text = decoded
     return None
 
 
-def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str | None:
+def _normalized_contract_text(
+    text: str,
+    *,
+    preserve_punctuation: bool,
+    strip_line_prefixes: bool = True,
+) -> str | None:
     """Normalize routine verifier-output transformations for leak detection."""
     unescaped = _decode_contract_encodings(text)
     if unescaped is None:
@@ -124,7 +161,9 @@ def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str |
         if (ord(char) >= 32 or char in "\n\r\t")
         and unicodedata.category(char) not in {"Cf", "Mn", "Me"}
     )
-    without_prefixes = _LINE_PREFIX_RE.sub("", without_ansi)
+    without_prefixes = (
+        _LINE_PREFIX_RE.sub("", without_ansi) if strip_line_prefixes else without_ansi
+    )
     folded = "".join(char.casefold() for char in without_prefixes)
     if preserve_punctuation:
         return "".join(
@@ -142,7 +181,9 @@ def contains_unsupported_terminal_control(text: str) -> bool:
         return True
     if _ESCAPED_TERMINAL_CONTROL_RE.search(decoded):
         return True
-    without_known = _ANSI_ESCAPE_RE.sub("", _OSC_ESCAPE_RE.sub("", decoded))
+    if _OSC_ESCAPE_RE.search(decoded):
+        return True
+    without_known = _ANSI_ESCAPE_RE.sub("", decoded)
     if _UNSUPPORTED_TERMINAL_CONTROL_RE.search(without_known):
         return True
     return any(
@@ -162,23 +203,34 @@ def contains_transformed_hidden_contract_value(
         remaining = text
         for variant in hidden_contract_variants((hidden,)):
             remaining = remaining.replace(variant, "")
-        normalized_remaining = _normalized_contract_text(
-            remaining,
-            preserve_punctuation=False,
-        )
         normalized_hidden = _normalized_contract_text(hidden, preserve_punctuation=False)
-        if normalized_remaining is None or normalized_hidden is None:
+        if normalized_hidden is None:
             return True
-        if normalized_hidden:
-            if normalized_hidden in normalized_remaining:
+        for strip_prefixes in (True, False):
+            normalized_remaining = _normalized_contract_text(
+                remaining,
+                preserve_punctuation=False,
+                strip_line_prefixes=strip_prefixes,
+            )
+            if normalized_remaining is None:
                 return True
+            if normalized_hidden and normalized_hidden in normalized_remaining:
+                return True
+        if normalized_hidden:
             continue
-        compact_remaining = _normalized_contract_text(remaining, preserve_punctuation=True)
         compact_hidden = _normalized_contract_text(hidden, preserve_punctuation=True)
-        if compact_remaining is None or compact_hidden is None:
+        if compact_hidden is None:
             return True
-        if compact_hidden and compact_hidden in compact_remaining:
-            return True
+        for strip_prefixes in (True, False):
+            compact_remaining = _normalized_contract_text(
+                remaining,
+                preserve_punctuation=True,
+                strip_line_prefixes=strip_prefixes,
+            )
+            if compact_remaining is None:
+                return True
+            if compact_hidden and compact_hidden in compact_remaining:
+                return True
     return False
 
 
