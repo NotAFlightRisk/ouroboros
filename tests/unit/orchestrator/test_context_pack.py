@@ -8,6 +8,7 @@ import subprocess
 import pytest
 
 from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
     BrownfieldContext,
     ContextReference,
     EvaluationPrinciple,
@@ -290,6 +291,49 @@ class TestSystemPromptInjection:
 
         assert "## Project Context (auto-detected facts)" in enabled_prompt
         assert "## Project Context (auto-detected facts)" not in disabled_prompt
+
+    def test_context_pack_redacts_criterion_verify_command_collision(self, tmp_path: Path) -> None:
+        _write_fixture_repo(tmp_path)
+        hidden = "uv run pytest --criterion-token EXACT_CRITERION_SECRET"
+        (tmp_path / ".ouroboros" / "mechanical.toml").write_text(
+            f'test = "{hidden}"\nlint = "ruff check ."\n',
+            encoding="utf-8",
+        )
+        seed = _sample_seed().model_copy(
+            update={
+                "acceptance_criteria": (
+                    AcceptanceCriterionSpec(
+                        description="Implement the feature",
+                        verify_command=hidden,
+                    ),
+                )
+            }
+        )
+
+        prompt = build_system_prompt(seed, repo_root=tmp_path, context_pack_enabled=True)
+
+        assert "EXACT_CRITERION_SECRET" not in prompt
+        assert hidden not in prompt
+        assert "ruff check ." in prompt
+
+    def test_frozen_context_pack_reapplies_contract_redaction(self) -> None:
+        hidden = "uv run pytest --criterion-token EXACT_CRITERION_SECRET"
+        seed = _sample_seed().model_copy(
+            update={
+                "acceptance_criteria": (
+                    AcceptanceCriterionSpec(
+                        description="Implement the feature",
+                        verify_command=hidden,
+                    ),
+                )
+            }
+        )
+        frozen = f"## Project Context\n- test: {hidden}\n- lint: ruff check ."
+
+        prompt = build_system_prompt(seed, resolved_context_pack_fragment=frozen)
+
+        assert "EXACT_CRITERION_SECRET" not in prompt
+        assert "ruff check ." in prompt
 
     def test_pack_absent_for_empty_dir(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "1")

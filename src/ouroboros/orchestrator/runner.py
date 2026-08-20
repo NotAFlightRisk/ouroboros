@@ -94,6 +94,7 @@ from ouroboros.orchestrator.capabilities import (
     build_capability_graph,
     serialize_capability_graph,
 )
+from ouroboros.orchestrator.contract_redaction import redact_hidden_contract_values
 from ouroboros.orchestrator.control_plane import (
     build_control_plane_state,
     serialize_control_plane_state,
@@ -600,6 +601,13 @@ def build_system_prompt(
         )
     )
     if context_pack_fragment:
+        hidden_values = (
+            hidden
+            for criterion in seed.acceptance_criteria
+            if isinstance(criterion, AcceptanceCriterionSpec)
+            for hidden in (criterion.verify_command, criterion.output_assertion)
+        )
+        context_pack_fragment = redact_hidden_contract_values(context_pack_fragment, hidden_values)
         prompt = f"{prompt}\n\n{context_pack_fragment}"
     return prompt
 

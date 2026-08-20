@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.orchestrator.ac_execution_capsule import ACExecutionCapsule
+from ouroboros.orchestrator.contract_redaction import redact_hidden_contract_values
 from ouroboros.orchestrator.evidence.ac_classification import (
     _effective_evidence_schema_for_ac,
     _is_documentation_only_ac,
@@ -100,6 +101,15 @@ class AtomicPromptBuilder:
             seed_goal = capsule.seed_goal
             retry_attempt = capsule.retry_attempt
 
+        worker_ac_content = (
+            redact_hidden_contract_values(
+                ac_content,
+                (ac_spec.verify_command, ac_spec.output_assertion),
+            )
+            if ac_spec is not None
+            else ac_content
+        )
+
         # Build prompt
         if node_identity is not None:
             label = (
@@ -117,7 +127,7 @@ class AtomicPromptBuilder:
 
         task_section, context_governance_audit = executor._build_atomic_dispatch_context(
             ac_index=ac_index,
-            ac_content=ac_content,
+            ac_content=worker_ac_content,
             label=label,
             level_contexts=level_contexts,
             sibling_acs=sibling_acs,
@@ -300,6 +310,11 @@ Files present:
 {legacy_context_section}{retry_section}{parallel_section}
 {completion_instruction}
 """
+        if ac_spec is not None:
+            prompt = redact_hidden_contract_values(
+                prompt,
+                (ac_spec.verify_command, ac_spec.output_assertion),
+            )
 
         return AtomicPromptBundle(
             prompt=prompt,
