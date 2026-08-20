@@ -1340,6 +1340,7 @@ def test_retry_prompt_drops_transformed_hidden_assertion(
         ("PRIVATE_SENTINEL", "PRIVATE%255FSENTINEL"),
         ("PRIVATE_SENTINEL", "%50%52%49%56%41%54%45%5F%53%45%4E%54%49%4E%45%4C"),
         ("PRIVATE_SENTINEL", "PRIVATE&#37;5FSENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\400SENTINEL"),
     ),
 )
 def test_retry_prompt_drops_deep_entities_and_invisible_formats(

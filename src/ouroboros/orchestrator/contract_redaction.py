@@ -125,8 +125,12 @@ def _decode_escaped_byte_runs(text: str) -> str | None:
         return decode_bytes(bytes.fromhex(match.group(0).replace("\\x", "")))
 
     def replace_octal(match: re.Match[str]) -> str:
-        values = re.findall(r"\\([0-7]{3})", match.group(0))
-        return decode_bytes(bytes(int(value, 8) for value in values))
+        nonlocal invalid
+        values = [int(value, 8) for value in re.findall(r"\\([0-7]{3})", match.group(0))]
+        if any(value > 0xFF for value in values):
+            invalid = True
+            return ""
+        return decode_bytes(bytes(values))
 
     decoded = _ESCAPED_BYTE_RUN_RE.sub(replace_hex, text)
     decoded = _ESCAPED_OCTAL_RUN_RE.sub(replace_octal, decoded)
