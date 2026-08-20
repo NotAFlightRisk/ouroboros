@@ -1393,25 +1393,67 @@ def _unsupported_verify_command_reason(command: str) -> str | None:
 
 
 _SHELL_COMMANDS = frozenset({"bash", "dash", "ksh", "sh", "zsh"})
+_ALWAYS_SUCCESS_COMMANDS = frozenset({"echo", "printf", "true", ":"})
+
+
+def _success_command_end(tokens: list[str], start: int) -> int | None:
+    """Return the end of a known-success command after ``||``."""
+    index = start
+    while index < len(tokens) and (
+        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index])
+        or tokens[index] in {"command", "exec", "builtin", "nohup"}
+    ):
+        index += 1
+    if index < len(tokens) and tokens[index] == "env":
+        index += 1
+        while (
+            index < len(tokens)
+            and "=" in tokens[index]
+            and not tokens[index].startswith(("-", "/"))
+        ):
+            index += 1
+    if index >= len(tokens):
+        return None
+    if tokens[index] in {"{", "("}:
+        close = "}" if tokens[index] == "{" else ")"
+        close_index = tokens.index(close, index + 1) if close in tokens[index + 1 :] else -1
+        inner = tokens[index + 1 : close_index]
+        return close_index + 1 if inner and _success_command_end(inner, 0) == len(inner) else None
+    if tokens[index] not in _ALWAYS_SUCCESS_COMMANDS:
+        return None
+    index += 1
+    while index < len(tokens) and tokens[index] not in {"||", "&&", "|", ";"}:
+        index += 1
+    return index
 
 
 def _contains_unconditional_success_fallback(command: str) -> bool:
-    """Reject ``|| true``/``|| :`` without matching quoted data literals."""
+    """Reject a known-success ``||`` branch when it supplies the final status."""
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;<>")
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;<>()")
         lexer.whitespace_split = True
         lexer.commenters = ""
         tokens = list(lexer)
     except ValueError:
         return False
     for index, token in enumerate(tokens):
-        if token == "||" and index + 1 < len(tokens) and tokens[index + 1] in {"true", ":"}:
-            return True
+        if token == "||":
+            end = _success_command_end(tokens, index + 1)
+            if end is not None and end < len(tokens) and tokens[end] in {"&&", "||", "|", ";"}:
+                continue
+            if end is not None:
+                return True
         if token.rsplit("/", 1)[-1] not in _SHELL_COMMANDS or index + 2 >= len(tokens):
             continue
-        options = tokens[index + 1]
+        options_index = index + 1
+        options = tokens[options_index]
         if options.startswith("-") and "c" in options[1:]:
-            if _contains_unconditional_success_fallback(tokens[index + 2]):
+            body_index = options_index + 1
+            if body_index < len(tokens) and tokens[body_index] == "--":
+                body_index += 1
+            if body_index < len(tokens) and _contains_unconditional_success_fallback(
+                tokens[body_index]
+            ):
                 return True
     return False
 

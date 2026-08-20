@@ -58,8 +58,8 @@ Multi-artifact example: `[{"description":"Build outputs exist","verify":"NONE","
 
 `verify` / `verify_command` semantics:
 - Use exactly one single-line shell command.
-- The command must verify the criterion directly and exit 0 on success without masking a failure. NEVER append unconditional fallbacks such as `|| true` or `|| :`; if a criterion cannot be checked by one command, use `verify: NONE` and provide exact artifacts instead.
-- Keep the command portable across the supported host shells. NEVER rely on POSIX-only fallback commands or shell-control syntax that changes the exit contract on Windows.
+- The command must verify the criterion directly and exit 0 on success without masking a failure. NEVER append an unconditional success fallback such as `|| true`, `|| :`, or an equivalent known-success command; if a criterion cannot be checked by one command, use `verify: NONE` and provide exact artifacts instead.
+- Keep the command portable across supported Bash installations. Do not rely on host-specific shell features that the verifier cannot execute.
 - NEVER use heredoc or multiline shell syntax such as `<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts, or an unterminated command block. The AC contract format is one line, so multiline command bodies will be lost.
 - For Python snippets, use `python -c "..."` / `python3 -c "..."`; for longer checks, require a pytest-discoverable test artifact and use `python -m pytest -q`.
 

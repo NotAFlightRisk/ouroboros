@@ -2383,6 +2383,22 @@ class TestSeedGeneratorExtraction:
             "verify_command masks failure with an unconditional success fallback"
         )
 
+    def test_verify_command_allows_later_failure_to_determine_status(self) -> None:
+        assert _unsupported_verify_command_reason("false || true && false") is None
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "false || env X=1 true",
+            "false || VAR=x command true",
+            "bash -c -- 'false || true'",
+        ),
+    )
+    def test_verify_command_rejects_equivalent_success_fallbacks(self, command: str) -> None:
+        assert _unsupported_verify_command_reason(command) == (
+            "verify_command masks failure with an unconditional success fallback"
+        )
+
     def test_verify_command_allows_fallback_text_inside_python_literal(self) -> None:
         command = '''python -c "print('document `|| true` as unsupported')"'''
 
