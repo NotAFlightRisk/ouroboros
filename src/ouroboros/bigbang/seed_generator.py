@@ -1394,68 +1394,147 @@ def _unsupported_verify_command_reason(command: str) -> str | None:
 
 _SHELL_COMMANDS = frozenset({"bash", "dash", "ksh", "sh", "zsh"})
 _ALWAYS_SUCCESS_COMMANDS = frozenset({"echo", "printf", "true", ":"})
+_ALWAYS_FAIL_COMMANDS = frozenset({"false"})
+_SHELL_OPTIONS_WITH_VALUES = frozenset({"--init-file", "--rcfile", "-O"})
+_SHELL_CONTROL_TOKENS = frozenset({"&&", "||", "|", ";", ")", "}"})
 
 
-def _success_command_end(tokens: list[str], start: int) -> int | None:
-    """Return the end of a known-success command after ``||``."""
-    index = start
-    while index < len(tokens) and (
-        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index])
-        or tokens[index] in {"command", "exec", "builtin", "nohup"}
+def _mask_command_substitutions(command: str) -> str:
+    """Hide nested substitutions whose exit status does not decide the outer list."""
+    pieces: list[str] = []
+    index = 0
+    while index < len(command):
+        if command.startswith("$(", index) or command.startswith("${", index):
+            end = _posix_expansion_end(command, index)
+            if end is not None:
+                pieces.append("SUBSTITUTION")
+                index = end
+                continue
+        if command[index] == "`":
+            end = _posix_backtick_substitution_end(command, index)
+            if end is not None:
+                pieces.append("SUBSTITUTION")
+                index = end
+                continue
+        pieces.append(command[index])
+        index += 1
+    return "".join(pieces)
+
+
+def _simple_command_status(tokens: list[str], index: int) -> tuple[frozenset[int], bool, int]:
+    """Parse one simple/group command into possible statuses and fallback evidence."""
+    if index < len(tokens) and tokens[index] in {"(", "{"}:
+        close = ")" if tokens[index] == "(" else "}"
+        statuses, masked, index = _shell_sequence_status(tokens, index + 1, stop=close)
+        return (
+            statuses,
+            masked,
+            index + 1 if index < len(tokens) and tokens[index] == close else index,
+        )
+    segment: list[str] = []
+    while index < len(tokens) and tokens[index] not in _SHELL_CONTROL_TOKENS:
+        segment.append(tokens[index])
+        index += 1
+    command_index = 0
+    while command_index < len(segment) and (
+        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[command_index])
+        or segment[command_index] in {"command", "exec", "builtin", "nohup"}
     ):
-        index += 1
-    if index < len(tokens) and tokens[index] == "env":
-        index += 1
-        while (
-            index < len(tokens)
-            and "=" in tokens[index]
-            and not tokens[index].startswith(("-", "/"))
+        command_index += 1
+    if command_index < len(segment) and segment[command_index] == "env":
+        command_index += 1
+        while command_index < len(segment) and re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[command_index]
         ):
-            index += 1
-    if index >= len(tokens):
-        return None
-    if tokens[index] in {"{", "("}:
-        close = "}" if tokens[index] == "{" else ")"
-        close_index = tokens.index(close, index + 1) if close in tokens[index + 1 :] else -1
-        inner = tokens[index + 1 : close_index]
-        return close_index + 1 if inner and _success_command_end(inner, 0) == len(inner) else None
-    if tokens[index] not in _ALWAYS_SUCCESS_COMMANDS:
-        return None
-    index += 1
-    while index < len(tokens) and tokens[index] not in {"||", "&&", "|", ";"}:
-        index += 1
-    return index
+            command_index += 1
+    executable = (
+        segment[command_index].rsplit("/", 1)[-1] if command_index < len(segment) else "true"
+    )
+    if executable in _ALWAYS_SUCCESS_COMMANDS:
+        return frozenset({0}), False, index
+    if executable in _ALWAYS_FAIL_COMMANDS:
+        return frozenset({1}), False, index
+    return frozenset({0, 1}), False, index
+
+
+def _shell_pipeline_status(tokens: list[str], index: int) -> tuple[frozenset[int], bool, int]:
+    statuses, masked, index = _simple_command_status(tokens, index)
+    while index < len(tokens) and tokens[index] == "|":
+        right, right_masked, index = _simple_command_status(tokens, index + 1)
+        statuses, masked = right, masked or right_masked
+    return statuses, masked, index
+
+
+def _shell_and_or_status(tokens: list[str], index: int) -> tuple[frozenset[int], bool, int]:
+    statuses, masked, index = _shell_pipeline_status(tokens, index)
+    while index < len(tokens) and tokens[index] in {"&&", "||"}:
+        operator = tokens[index]
+        right, right_masked, index = _shell_pipeline_status(tokens, index + 1)
+        if operator == "&&":
+            statuses = frozenset(
+                ({1} if 1 in statuses else set()) | (set(right) if 0 in statuses else set())
+            )
+        else:
+            masked = masked or (1 in statuses and right == frozenset({0}))
+            statuses = frozenset(
+                ({0} if 0 in statuses else set()) | (set(right) if 1 in statuses else set())
+            )
+        masked = masked or right_masked
+    return statuses, masked, index
+
+
+def _shell_sequence_status(
+    tokens: list[str], index: int = 0, *, stop: str | None = None
+) -> tuple[frozenset[int], bool, int]:
+    statuses, masked, index = _shell_and_or_status(tokens, index)
+    while index < len(tokens) and tokens[index] == ";":
+        if stop is not None and index + 1 < len(tokens) and tokens[index + 1] == stop:
+            return statuses, masked, index + 1
+        statuses, right_masked, index = _shell_and_or_status(tokens, index + 1)
+        masked = masked or right_masked
+    return statuses, masked, index
+
+
+def _wrapped_shell_bodies(tokens: list[str]) -> tuple[str, ...]:
+    bodies: list[str] = []
+    for index, token in enumerate(tokens):
+        if token.rsplit("/", 1)[-1] not in _SHELL_COMMANDS:
+            continue
+        option_index = index + 1
+        while option_index < len(tokens):
+            option = tokens[option_index]
+            if option == "--" or not option.startswith("-"):
+                break
+            if option == "-c" or (not option.startswith("--") and "c" in option[1:]):
+                body_index = option_index + 1
+                if body_index < len(tokens) and tokens[body_index] == "--":
+                    body_index += 1
+                if body_index < len(tokens):
+                    bodies.append(tokens[body_index])
+                break
+            option_index += 2 if option in _SHELL_OPTIONS_WITH_VALUES else 1
+    return tuple(bodies)
 
 
 def _contains_unconditional_success_fallback(command: str) -> bool:
-    """Reject a known-success ``||`` branch when it supplies the final status."""
+    """Reject Bash lists whose known-success fallback determines final exit 0."""
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;<>()")
+        lexer = shlex.shlex(
+            _mask_command_substitutions(command),
+            posix=True,
+            punctuation_chars="|&;<>(){}",
+        )
         lexer.whitespace_split = True
         lexer.commenters = ""
         tokens = list(lexer)
     except ValueError:
         return False
-    for index, token in enumerate(tokens):
-        if token == "||":
-            end = _success_command_end(tokens, index + 1)
-            if end is not None and end < len(tokens) and tokens[end] in {"&&", "||", "|", ";"}:
-                continue
-            if end is not None:
-                return True
-        if token.rsplit("/", 1)[-1] not in _SHELL_COMMANDS or index + 2 >= len(tokens):
-            continue
-        options_index = index + 1
-        options = tokens[options_index]
-        if options.startswith("-") and "c" in options[1:]:
-            body_index = options_index + 1
-            if body_index < len(tokens) and tokens[body_index] == "--":
-                body_index += 1
-            if body_index < len(tokens) and _contains_unconditional_success_fallback(
-                tokens[body_index]
-            ):
-                return True
-    return False
+    if any(
+        _contains_unconditional_success_fallback(body) for body in _wrapped_shell_bodies(tokens)
+    ):
+        return True
+    statuses, masked, _index = _shell_sequence_status(tokens)
+    return masked and statuses == frozenset({0})
 
 
 def _contains_posix_heredoc_operator(command: str) -> bool:
