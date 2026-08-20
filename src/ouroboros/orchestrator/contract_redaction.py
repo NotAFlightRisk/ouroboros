@@ -50,20 +50,24 @@ def contains_transformed_hidden_contract_value(
     values: Iterable[str | None],
 ) -> bool:
     """Return whether a non-exact normalized copy carries a hidden value."""
-    normalized_text = _normalized_contract_text(text, preserve_punctuation=False)
-    compact_text = _normalized_contract_text(text, preserve_punctuation=True)
     for hidden in values:
         if not hidden:
             continue
-        if any(variant in text for variant in hidden_contract_variants((hidden,))):
-            continue
+        remaining = text
+        for variant in hidden_contract_variants((hidden,)):
+            remaining = remaining.replace(variant, "")
+        normalized_remaining = _normalized_contract_text(
+            remaining,
+            preserve_punctuation=False,
+        )
         normalized_hidden = _normalized_contract_text(hidden, preserve_punctuation=False)
         if normalized_hidden:
-            if normalized_hidden in normalized_text:
+            if normalized_hidden in normalized_remaining:
                 return True
             continue
+        compact_remaining = _normalized_contract_text(remaining, preserve_punctuation=True)
         compact_hidden = _normalized_contract_text(hidden, preserve_punctuation=True)
-        if compact_hidden and compact_hidden in compact_text:
+        if compact_hidden and compact_hidden in compact_remaining:
             return True
     return False
 

@@ -1309,6 +1309,35 @@ def test_retry_prompt_drops_transformed_hidden_assertion(
     assert transformed not in prompt
 
 
+def test_retry_prompt_drops_mixed_exact_and_transformed_hidden_copies() -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"expected {assertion} but received private_ sentinel",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "Harness verification output" not in prompt
+
+
 def test_retry_prompt_preserves_safe_context_around_exact_hidden_value() -> None:
     assertion = "PRIVATE_SENTINEL"
     spec = AcceptanceCriterionSpec(
