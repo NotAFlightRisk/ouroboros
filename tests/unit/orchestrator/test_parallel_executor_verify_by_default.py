@@ -1312,6 +1312,39 @@ def test_retry_prompt_drops_transformed_hidden_assertion(
 @pytest.mark.parametrize(
     ("assertion", "transformed"),
     (
+        ("<=>", "&amp;amp;amp;lt;=&amp;amp;amp;gt;"),
+        ("!!!", "!\u200b!\u200b!"),
+        ("<=>", "<\u2060=\u2060>"),
+    ),
+)
+def test_retry_prompt_drops_deep_entities_and_invisible_formats(
+    assertion: str,
+    transformed: str,
+) -> None:
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(passed=False, reason=None, output_tail=transformed)
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+    assert "Harness verification output" not in prompt
+
+
+@pytest.mark.parametrize(
+    ("assertion", "transformed"),
+    (
         ("café", "cafe\u0301"),
         ("ＳＥＣＲＥＴ", "SECRET"),
         ("MIGRATION<COMPLETE>", "MIGRATION&amp;lt;COMPLETE&amp;gt;"),
