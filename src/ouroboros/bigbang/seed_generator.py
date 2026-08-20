@@ -16,6 +16,7 @@ import json
 import math
 from pathlib import Path
 import re
+import shlex
 from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
@@ -1386,7 +1387,33 @@ def _unsupported_verify_command_reason(command: str) -> str | None:
         return "verify_command must be a single-line command"
     if _contains_posix_heredoc_operator(command):
         return "verify_command uses heredoc/multiline shell syntax; use python -c or pytest instead"
+    if _contains_unconditional_success_fallback(command):
+        return "verify_command masks failure with an unconditional success fallback"
     return None
+
+
+_SHELL_COMMANDS = frozenset({"bash", "dash", "ksh", "sh", "zsh"})
+
+
+def _contains_unconditional_success_fallback(command: str) -> bool:
+    """Reject ``|| true``/``|| :`` without matching quoted data literals."""
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    for index, token in enumerate(tokens):
+        if token == "||" and index + 1 < len(tokens) and tokens[index + 1] in {"true", ":"}:
+            return True
+        if token.rsplit("/", 1)[-1] not in _SHELL_COMMANDS or index + 2 >= len(tokens):
+            continue
+        options = tokens[index + 1]
+        if options.startswith("-") and "c" in options[1:]:
+            if _contains_unconditional_success_fallback(tokens[index + 2]):
+                return True
+    return False
 
 
 def _contains_posix_heredoc_operator(command: str) -> bool:

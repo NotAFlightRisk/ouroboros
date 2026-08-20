@@ -32,6 +32,7 @@ from ouroboros.bigbang.seed_generator import (
     _parse_extracted_acceptance_criteria,
     _parse_ontology_fields,
     _parse_string_array_values,
+    _unsupported_verify_command_reason,
     load_seed,
     save_seed_sync,
 )
@@ -2369,7 +2370,79 @@ class TestSeedGeneratorExtraction:
             assert isinstance(second, AcceptanceCriterionSpec)
             assert second.output_assertion == "5 passed"
 
+    @pytest.mark.parametrize(
+        "command",
+        (
+            'python -c "raise SystemExit(1)" 2>&1 || true',
+            'python -c "raise SystemExit(1)" || :',
+            "bash -lc 'python -m pytest -q || true'",
+        ),
+    )
+    def test_verify_command_rejects_unconditional_success_fallback(self, command: str) -> None:
+        assert _unsupported_verify_command_reason(command) == (
+            "verify_command masks failure with an unconditional success fallback"
+        )
+
+    def test_verify_command_allows_fallback_text_inside_python_literal(self) -> None:
+        command = '''python -c "print('document `|| true` as unsupported')"'''
+
+        assert _unsupported_verify_command_reason(command) is None
+
     @pytest.mark.asyncio
+    async def test_generate_retries_when_verify_command_masks_failure(self) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+        bad_command = (
+            'python -c "import subprocess; '
+            "subprocess.run(['python', '-m', 'http.server', '8000'], timeout=1)\" "
+            "2>&1 || true"
+        )
+        bad_response = create_valid_extraction_response(
+            acceptance_criteria=json.dumps(
+                [
+                    {
+                        "description": "Widget persists after refresh",
+                        "verify": bad_command,
+                        "artifacts": ["app/widgets/weekly-review.js"],
+                        "expect": "NONE",
+                    }
+                ]
+            )
+        )
+        repaired_response = create_valid_extraction_response(
+            acceptance_criteria=json.dumps(
+                [
+                    {
+                        "description": "Widget implementation exists",
+                        "verify": "NONE",
+                        "artifacts": ["app/widgets/weekly-review.js"],
+                        "expect": "NONE",
+                    }
+                ]
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bad_response)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.verify_command is None
+        assert criterion.expected_artifacts == ("app/widgets/weekly-review.js",)
+
     @pytest.mark.parametrize(
         "heredoc_command",
         (
