@@ -602,10 +602,9 @@ def build_system_prompt(
     )
     if context_pack_fragment:
         hidden_values = (
-            hidden
+            criterion.verify_command
             for criterion in seed.acceptance_criteria
             if isinstance(criterion, AcceptanceCriterionSpec)
-            for hidden in (criterion.verify_command, criterion.output_assertion)
         )
         context_pack_fragment = redact_hidden_contract_values(context_pack_fragment, hidden_values)
         prompt = f"{prompt}\n\n{context_pack_fragment}"

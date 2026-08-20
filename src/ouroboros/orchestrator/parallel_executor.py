@@ -111,6 +111,7 @@ from ouroboros.orchestrator.backend_limits import (
 )
 from ouroboros.orchestrator.backend_outcomes import outcome_weights as _safe_backend_outcome_weights
 from ouroboros.orchestrator.context_governor import SiblingStatus, compose_context
+from ouroboros.orchestrator.contract_redaction import redact_hidden_contract_prompt_values
 from ouroboros.orchestrator.coordinator import (
     CoordinatorReview,
     FileConflict,
@@ -2645,6 +2646,7 @@ class ParallelACExecutor:
         _foundation_a_internal_entry_roots: _FoundationAInternalEntryRoots | None = None,
         _foundation_a_internal_entry_roots_are_closed: bool = False,
     ):
+        self._active_hidden_contract_values: tuple[str | None, ...] = ()
         """Initialize executor.
 
         Args:
@@ -3807,6 +3809,12 @@ class ParallelACExecutor:
         Returns:
             ParallelExecutionResult with outcomes for all ACs.
         """
+        self._active_hidden_contract_values = tuple(
+            hidden
+            for criterion in seed.acceptance_criteria
+            if isinstance(criterion, AcceptanceCriterionSpec)
+            for hidden in (criterion.verify_command, criterion.output_assertion)
+        )
         if execution_plan is None:
             if dependency_graph is None:
                 msg = "execution_plan is required when dependency_graph is not provided"
@@ -8031,6 +8039,10 @@ Respond with either ATOMIC or the structured JSON object only.
         label = prompt_bundle.label
         indent = prompt_bundle.indent
         context_governance_audit = prompt_bundle.context_governance_audit
+        worker_system_prompt = redact_hidden_contract_prompt_values(
+            system_prompt,
+            self._active_hidden_contract_values,
+        )
 
         messages: list[AgentMessage] = []
         final_message = ""
@@ -8109,14 +8121,14 @@ Respond with either ATOMIC or the structured JSON object only.
             context_audit=context_governance_audit,
         )
         await self._wait_for_memory(label)
-        self._announce_param_degradations(system_prompt=system_prompt, tools=tools)
+        self._announce_param_degradations(system_prompt=worker_system_prompt, tools=tools)
         # Pace delivery within the backend's shared rate budget (dormant unless
         # an RPM/TPM is configured for this backend) before the stall-scoped run.
         await _invoke_execution_authority_entry(
             self,
             _FOUNDATION_A_ENTRY_AWAIT_DISPATCH_RATE_BUDGET,
             prompt=prompt,
-            system_prompt=system_prompt,
+            system_prompt=worker_system_prompt,
         )
 
         investment_assessment = assess_investment(investment_spec)

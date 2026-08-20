@@ -1204,6 +1204,39 @@ def test_retry_prompt_redacts_secret_like_failure_values() -> None:
     assert prompt.count("[REDACTED]") == 3
 
 
+@pytest.mark.parametrize("assertion", ("a", "json"))
+def test_atomic_prompt_preserves_artifacts_for_short_assertions(
+    tmp_path: Any,
+    assertion: str,
+) -> None:
+    executor = _make_executor(working_directory=str(tmp_path))
+    artifact = "dist/result.json"
+    spec = AcceptanceCriterionSpec(
+        description=f"Emit {assertion}",
+        verify_command="python hidden_grader.py",
+        expected_artifacts=(artifact,),
+        output_assertion=assertion,
+    )
+
+    bundle = AtomicPromptBuilder(executor).build(
+        ac_index=0,
+        ac_content=spec.description,
+        seed_goal="Build a stable artifact",
+        is_sub_ac=False,
+        parent_ac_index=None,
+        sub_ac_index=None,
+        node_identity=None,
+        level_contexts=None,
+        sibling_acs=None,
+        retry_attempt=0,
+        retry_prompt_extra="",
+        ac_spec=spec,
+    )
+
+    assert artifact in bundle.prompt
+    assert "SUCCESS CONTRACT for this AC" in bundle.prompt
+
+
 def test_atomic_prompt_redacts_hidden_values_repeated_in_worker_surfaces(tmp_path: Any) -> None:
     executor = _make_executor(working_directory=str(tmp_path))
     assertion = "PRIVATE_SENTINEL"

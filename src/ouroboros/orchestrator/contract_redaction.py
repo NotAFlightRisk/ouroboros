@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 import json
+import re
 import shlex
 
 
@@ -40,4 +41,24 @@ def redact_hidden_contract_values(
     redacted = text
     for hidden in hidden_contract_variants(values):
         redacted = redacted.replace(hidden, replacement)
+    return redacted
+
+
+def redact_hidden_contract_prompt_values(
+    text: str,
+    values: Iterable[str | None],
+    *,
+    replacement: str = "[REDACTED CONTRACT VALUE]",
+) -> str:
+    """Redact prompt-field collisions without rewriting incidental substrings."""
+    redacted = text
+    for hidden in hidden_contract_variants(values):
+        if len(hidden) <= 3 and hidden.isalnum():
+            redacted = re.sub(
+                rf"(?<!\w){re.escape(hidden)}(?!\w)",
+                replacement,
+                redacted,
+            )
+        else:
+            redacted = redacted.replace(hidden, replacement)
     return redacted
