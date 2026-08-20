@@ -7,6 +7,7 @@ import html
 import json
 import re
 import shlex
+import unicodedata
 
 
 def hidden_contract_variants(values: Iterable[str | None]) -> tuple[str, ...]:
@@ -42,7 +43,13 @@ _UNSUPPORTED_TERMINAL_CONTROL_RE = re.compile(
 
 def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str:
     """Normalize routine verifier-output transformations for leak detection."""
-    unescaped = html.unescape(text)
+    unescaped = text
+    for _ in range(3):
+        decoded = html.unescape(unescaped)
+        if decoded == unescaped:
+            break
+        unescaped = decoded
+    unescaped = unicodedata.normalize("NFKC", unescaped)
     without_ansi = _ANSI_ESCAPE_RE.sub("", unescaped)
     without_ansi = _OSC_ESCAPE_RE.sub("", without_ansi)
     without_ansi = "".join(char for char in without_ansi if ord(char) >= 32 or char in "\n\r\t")
