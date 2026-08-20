@@ -94,16 +94,28 @@ def _decode_escaped_unicode(text: str) -> str | None:
     return None if invalid else decoded
 
 
+def _decode_contract_encodings(text: str) -> str | None:
+    decoded_text = text
+    for _ in range(_MAX_HTML_ENTITY_DECODE_PASSES):
+        html_decoded = _decode_html_entities(decoded_text)
+        if html_decoded is None:
+            return None
+        unicode_decoded = _decode_escaped_unicode(html_decoded)
+        if unicode_decoded is None:
+            return None
+        decoded = _ESCAPED_WHITESPACE_RE.sub(" ", unicode_decoded)
+        if decoded == decoded_text:
+            return decoded_text
+        decoded_text = decoded
+    return None
+
+
 def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str | None:
     """Normalize routine verifier-output transformations for leak detection."""
-    unescaped = _decode_html_entities(text)
-    if unescaped is None:
-        return None
-    unescaped = _decode_escaped_unicode(unescaped)
+    unescaped = _decode_contract_encodings(text)
     if unescaped is None:
         return None
     unescaped = unicodedata.normalize("NFKC", unescaped)
-    unescaped = _ESCAPED_WHITESPACE_RE.sub(" ", unescaped)
     without_ansi = _ANSI_ESCAPE_RE.sub("", unescaped)
     without_ansi = _OSC_ESCAPE_RE.sub("", without_ansi)
     without_ansi = "".join(
@@ -125,10 +137,7 @@ def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str |
 
 def contains_unsupported_terminal_control(text: str) -> bool:
     """Return whether output carries controls outside normalized CSI/OSC."""
-    decoded = _decode_html_entities(text)
-    if decoded is None:
-        return True
-    decoded = _decode_escaped_unicode(decoded)
+    decoded = _decode_contract_encodings(text)
     if decoded is None:
         return True
     if _ESCAPED_TERMINAL_CONTROL_RE.search(decoded):
