@@ -32,6 +32,7 @@ def hidden_contract_variants(values: Iterable[str | None]) -> tuple[str, ...]:
 
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_OSC_ESCAPE_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _LINE_PREFIX_RE = re.compile(r"(?m)^\s*(?:[EIWF]\s+|[+>~-]\s?)")
 
 
@@ -39,6 +40,8 @@ def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str:
     """Normalize routine verifier-output transformations for leak detection."""
     unescaped = html.unescape(text)
     without_ansi = _ANSI_ESCAPE_RE.sub("", unescaped)
+    without_ansi = _OSC_ESCAPE_RE.sub("", without_ansi)
+    without_ansi = "".join(char for char in without_ansi if ord(char) >= 32 or char in "\n\r\t")
     without_prefixes = _LINE_PREFIX_RE.sub("", without_ansi)
     if preserve_punctuation:
         return "".join(char.casefold() for char in without_prefixes if not char.isspace())
