@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any
 from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.orchestrator.ac_execution_capsule import ACExecutionCapsule
-from ouroboros.orchestrator.contract_redaction import redact_hidden_contract_prompt_values
 from ouroboros.orchestrator.evidence.ac_classification import (
     _effective_evidence_schema_for_ac,
     _is_documentation_only_ac,
@@ -101,18 +100,6 @@ class AtomicPromptBuilder:
             seed_goal = capsule.seed_goal
             retry_attempt = capsule.retry_attempt
 
-        active_hidden_values = getattr(executor, "_active_hidden_contract_values", ())
-        hidden_values = (
-            *active_hidden_values,
-            *((ac_spec.verify_command, ac_spec.output_assertion) if ac_spec is not None else ()),
-        )
-        worker_ac_content = redact_hidden_contract_prompt_values(ac_content, hidden_values)
-        worker_seed_goal = redact_hidden_contract_prompt_values(seed_goal, hidden_values)
-        worker_retry_prompt_extra = redact_hidden_contract_prompt_values(
-            retry_prompt_extra,
-            hidden_values,
-        )
-
         # Build prompt
         if node_identity is not None:
             label = (
@@ -130,7 +117,7 @@ class AtomicPromptBuilder:
 
         task_section, context_governance_audit = executor._build_atomic_dispatch_context(
             ac_index=ac_index,
-            ac_content=worker_ac_content,
+            ac_content=ac_content,
             label=label,
             level_contexts=level_contexts,
             sibling_acs=sibling_acs,
@@ -159,7 +146,7 @@ class AtomicPromptBuilder:
             # Verify-by-default retry enrichment (failure taxonomy, error tail,
             # verify-command output, and — on the final attempt — a lateral
             # change-of-approach directive) built by the batch retry loop.
-            retry_section += "\n" + worker_retry_prompt_extra + "\n"
+            retry_section += "\n" + retry_prompt_extra + "\n"
 
         # Build parallel awareness section
         parallel_section = ""
@@ -303,7 +290,7 @@ Files present:
 **Important**: Use Glob to discover files. Never guess absolute paths.
 
 ## Goal Context
-{worker_seed_goal}
+{seed_goal}
 
 {capsule.to_prompt_reference_block() if capsule is not None else ""}
 

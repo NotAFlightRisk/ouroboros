@@ -863,6 +863,22 @@ class Seed(BaseModel, frozen=True):
             for criterion in self.acceptance_criteria
         )
         object.__setattr__(self, "acceptance_criteria", materialized_criteria)
+        worker_visible_values = (
+            self.goal,
+            *self.constraints,
+            *(criterion.description for criterion in materialized_criteria),
+            *(
+                artifact
+                for criterion in materialized_criteria
+                for artifact in criterion.expected_artifacts
+            ),
+        )
+        for criterion in materialized_criteria:
+            for hidden in (criterion.verify_command, criterion.output_assertion):
+                if hidden and any(hidden in visible for visible in worker_visible_values):
+                    raise ValueError(
+                        "hidden success-contract value appears in a worker-visible Seed field"
+                    )
         frozen_extra: dict[str, Any] = {}
         for key, value in (self.model_extra or {}).items():
             if not isinstance(key, str):

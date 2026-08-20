@@ -702,6 +702,49 @@ class TestSeed:
         assert ok.output_assertion == "OK"
         assert pytest_literal.output_assertion == "5 passed"
 
+    @pytest.mark.parametrize(
+        "seed_field",
+        ("goal", "constraint", "current_description", "sibling_description", "artifact"),
+    )
+    def test_seed_rejects_hidden_contract_collisions_in_worker_fields(
+        self,
+        seed_field: str,
+    ) -> None:
+        hidden = "PRIVATE_SENTINEL"
+        criterion = AcceptanceCriterionSpec(
+            description=(
+                f"Write output containing {hidden}"
+                if seed_field == "current_description"
+                else "Write the output"
+            ),
+            verify_command="python hidden_grader.py",
+            expected_artifacts=(
+                f"dist/{hidden}.json" if seed_field == "artifact" else "dist/result.json",
+            ),
+            output_assertion=hidden,
+        )
+        sibling = AcceptanceCriterionSpec(
+            description=(
+                f"Sibling requires {hidden}"
+                if seed_field == "sibling_description"
+                else "Document the output"
+            )
+        )
+
+        with pytest.raises(
+            PydanticValidationError,
+            match="hidden success-contract value appears",
+        ):
+            Seed(
+                goal=f"Build {hidden}" if seed_field == "goal" else "Build safely",
+                constraints=(
+                    f"Preserve {hidden}" if seed_field == "constraint" else "Stay offline",
+                ),
+                acceptance_criteria=(criterion, sibling),
+                ontology_schema=OntologySchema(name="Output", description="Output domain"),
+                metadata=SeedMetadata(ambiguity_score=0.1),
+            )
+
     def test_seed_acceptance_criteria_materialize_semantic_keys(self) -> None:
         """Legacy description-only ACs gain deterministic persisted identities."""
         seed = Seed(

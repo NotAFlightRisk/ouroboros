@@ -22,7 +22,6 @@ from ouroboros.core.seed import (
 )
 from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
 from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
-from ouroboros.orchestrator.atomic_prompt_builder import AtomicPromptBuilder
 from ouroboros.orchestrator.decomposition_policy import (
     DecompositionChild,
     DecompositionDecisionRecord,
@@ -1202,70 +1201,6 @@ def test_retry_prompt_redacts_secret_like_failure_values() -> None:
     assert "secret-value" not in prompt
     assert long_secret[-100:] not in prompt
     assert prompt.count("[REDACTED]") == 3
-
-
-@pytest.mark.parametrize("assertion", ("a", "json"))
-def test_atomic_prompt_preserves_artifacts_for_short_assertions(
-    tmp_path: Any,
-    assertion: str,
-) -> None:
-    executor = _make_executor(working_directory=str(tmp_path))
-    artifact = "dist/result.json"
-    spec = AcceptanceCriterionSpec(
-        description=f"Emit {assertion}",
-        verify_command="python hidden_grader.py",
-        expected_artifacts=(artifact,),
-        output_assertion=assertion,
-    )
-
-    bundle = AtomicPromptBuilder(executor).build(
-        ac_index=0,
-        ac_content=spec.description,
-        seed_goal="Build a stable artifact",
-        is_sub_ac=False,
-        parent_ac_index=None,
-        sub_ac_index=None,
-        node_identity=None,
-        level_contexts=None,
-        sibling_acs=None,
-        retry_attempt=0,
-        retry_prompt_extra="",
-        ac_spec=spec,
-    )
-
-    assert artifact in bundle.prompt
-    assert "SUCCESS CONTRACT for this AC" in bundle.prompt
-
-
-def test_atomic_prompt_redacts_hidden_values_repeated_in_worker_surfaces(tmp_path: Any) -> None:
-    executor = _make_executor(working_directory=str(tmp_path))
-    assertion = "PRIVATE_SENTINEL"
-    command = 'python hidden_grader.py --expect "PRIVATE_SENTINEL"'
-    spec = AcceptanceCriterionSpec(
-        description=f"Write output containing {assertion}",
-        verify_command=command,
-        output_assertion=assertion,
-    )
-
-    bundle = AtomicPromptBuilder(executor).build(
-        ac_index=0,
-        ac_content=spec.description,
-        seed_goal=f"Build safely without exposing {command}",
-        is_sub_ac=False,
-        parent_ac_index=None,
-        sub_ac_index=None,
-        node_identity=None,
-        level_contexts=None,
-        sibling_acs=None,
-        retry_attempt=1,
-        retry_prompt_extra=f"grader output repeated {assertion}",
-        ac_spec=spec,
-    )
-
-    assert assertion not in bundle.prompt
-    assert "hidden_grader.py" not in bundle.prompt
-    assert spec.description not in bundle.prompt
-    assert "[REDACTED CONTRACT VALUE]" in bundle.prompt
 
 
 def test_retry_prompt_uses_trace_facts_without_hidden_contract_values() -> None:

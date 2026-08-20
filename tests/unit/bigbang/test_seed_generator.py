@@ -2415,7 +2415,7 @@ class TestSeedGeneratorExtraction:
         repaired_response = create_valid_extraction_response(
             acceptance_criteria=(
                 "\n"
-                "AC: Import check prints OK | "
+                "AC: Import check emits the completion marker | "
                 'verify: python -c "from hello import greet; '
                 "assert greet('Alice') == 'Hello, Alice'; print('OK')\" | "
                 "artifacts: hello.py | expect: OK\n"

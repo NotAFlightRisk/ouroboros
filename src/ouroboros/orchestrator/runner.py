@@ -94,7 +94,6 @@ from ouroboros.orchestrator.capabilities import (
     build_capability_graph,
     serialize_capability_graph,
 )
-from ouroboros.orchestrator.contract_redaction import redact_hidden_contract_values
 from ouroboros.orchestrator.control_plane import (
     build_control_plane_state,
     serialize_control_plane_state,
@@ -525,6 +524,24 @@ def _seed_has_investment_metadata(seed: Seed) -> bool:
     )
 
 
+def _redact_context_pack_contract_collisions(seed: Seed, fragment: str) -> str:
+    """Drop project-fact lines that reproduce hidden verifier values."""
+    hidden_values = tuple(
+        hidden
+        for criterion in seed.acceptance_criteria
+        if isinstance(criterion, AcceptanceCriterionSpec)
+        for hidden in (criterion.verify_command, criterion.output_assertion)
+        if hidden
+    )
+    if not hidden_values:
+        return fragment
+    return "\n".join(
+        line
+        for line in fragment.splitlines()
+        if not any(hidden in line for hidden in hidden_values)
+    )
+
+
 def build_system_prompt(
     seed: Seed,
     strategy: ExecutionStrategy | None = None,
@@ -601,12 +618,10 @@ def build_system_prompt(
         )
     )
     if context_pack_fragment:
-        hidden_values = (
-            criterion.verify_command
-            for criterion in seed.acceptance_criteria
-            if isinstance(criterion, AcceptanceCriterionSpec)
+        context_pack_fragment = _redact_context_pack_contract_collisions(
+            seed,
+            context_pack_fragment,
         )
-        context_pack_fragment = redact_hidden_contract_values(context_pack_fragment, hidden_values)
         prompt = f"{prompt}\n\n{context_pack_fragment}"
     return prompt
 
