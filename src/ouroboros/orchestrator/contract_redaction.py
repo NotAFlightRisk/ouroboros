@@ -53,8 +53,14 @@ def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str:
 
 
 def contains_unsupported_terminal_control(text: str) -> bool:
-    """Return whether verifier output carries a non-CSI/OSC control string."""
-    return bool(_UNSUPPORTED_TERMINAL_CONTROL_RE.search(text))
+    """Return whether output carries controls outside normalized CSI/OSC."""
+    without_known = _ANSI_ESCAPE_RE.sub("", _OSC_ESCAPE_RE.sub("", text))
+    if _UNSUPPORTED_TERMINAL_CONTROL_RE.search(without_known):
+        return True
+    return any(
+        char == "\x1b" or 0x80 <= ord(char) <= 0x9F or (ord(char) < 32 and char not in "\n\r\t")
+        for char in without_known
+    )
 
 
 def contains_transformed_hidden_contract_value(
