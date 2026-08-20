@@ -9,7 +9,10 @@ from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.harness.deliver_gate import load_ac_evidence_manifest
 from ouroboros.harness.journal import EvidenceKind, EvidenceManifest
 from ouroboros.observability.logging import get_logger
-from ouroboros.orchestrator.contract_redaction import redact_hidden_contract_values
+from ouroboros.orchestrator.contract_redaction import (
+    contains_transformed_hidden_contract_value,
+    redact_hidden_contract_values,
+)
 from ouroboros.orchestrator.decomposition_policy import redact_and_truncate_text
 from ouroboros.orchestrator.evidence.runtime_metadata import _STALL_SENTINEL
 from ouroboros.orchestrator.execution_runtime_scope import build_ac_runtime_identity
@@ -27,13 +30,14 @@ log = get_logger(__name__)
 
 
 def _sanitize_fragment(text: str, spec: AcceptanceCriterionSpec | None) -> str:
-    """Redact secrets and hidden contract values without discarding clean facts."""
+    """Redact exact values and drop fragments carrying transformed variants."""
 
-    sanitized = (
-        redact_hidden_contract_values(text, (spec.verify_command, spec.output_assertion))
-        if spec is not None
-        else text
-    )
+    if spec is None:
+        return redact_and_truncate_text(text, max_chars=_MAX_HINT_CHARS)
+    hidden_values = (spec.verify_command, spec.output_assertion)
+    sanitized = redact_hidden_contract_values(text, hidden_values)
+    if contains_transformed_hidden_contract_value(sanitized, hidden_values):
+        return ""
     return redact_and_truncate_text(sanitized, max_chars=_MAX_HINT_CHARS)
 
 

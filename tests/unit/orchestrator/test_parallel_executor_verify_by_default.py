@@ -1264,6 +1264,53 @@ def test_retry_prompt_uses_trace_facts_without_hidden_contract_values() -> None:
 
 
 @pytest.mark.parametrize(
+    ("assertion", "transformed"),
+    (
+        ("MIGRATION_COMPLETE_v2", "MIGRATION_COMPLETE_\nv2"),
+        ("MIGRATION_COMPLETE_v2", "+ MIGRATION_COMPLETE_\n+ v2"),
+        ("MIGRATION_COMPLETE_v2", "\x1b[31mMIGRATION\x1b[0m_COMPLETE_v2"),
+        ("MIGRATION_COMPLETE_v2", "migration_complete_V2"),
+        ("MIGRATION<COMPLETE>&v2", "MIGRATION&lt;COMPLETE&gt;&amp;v2"),
+        (
+            "MIGRATION_COMPLETE_v2",
+            "E   assert 'MIGRATION_COMPLETE_' +\nE       'v2'",
+        ),
+    ),
+)
+def test_retry_prompt_drops_transformed_hidden_assertion(
+    assertion: str,
+    transformed: str,
+) -> None:
+    executor = _make_executor()
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=transformed,
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = executor._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "Harness verification output" not in prompt
+    assert transformed not in prompt
+
+
+@pytest.mark.parametrize(
     "render_hidden",
     [
         pytest.param(lambda value: value, id="raw"),
