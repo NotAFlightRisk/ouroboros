@@ -665,6 +665,25 @@ async def test_sequential_lateral_synthesis_precedes_interview_continuation() ->
 
 
 @pytest.mark.asyncio
+async def test_unknown_host_defaults_to_capability_neutral_host_driven_dispatch() -> None:
+    handler = LateralThinkHandler(agent_runtime_backend=None, opencode_mode=None)
+
+    result = await handler.handle(
+        {
+            "problem_context": "stuck on X",
+            "current_approach": "tried Y",
+            "persona": "all",
+        }
+    )
+
+    assert result.is_ok
+    payload = result.unwrap()
+    assert payload.meta["dispatch_mode"] == "host_driven"
+    assert payload.meta["host_action"] == "spawn_subagents"
+    assert "no native parallel subagent primitive" not in payload.text_content
+
+
+@pytest.mark.asyncio
 async def test_multi_persona_subprocess_mode_falls_back_inline() -> None:
     """Subprocess mode → no envelope, inline concatenated prompt text."""
     handler = LateralThinkHandler(

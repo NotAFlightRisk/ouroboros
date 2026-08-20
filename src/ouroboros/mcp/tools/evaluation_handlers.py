@@ -1750,7 +1750,8 @@ class LateralThinkHandler(BridgeAwareMixin):
             #     from inline payloads via its own primitive (e.g. Codex). Emit
             #     the inline result stamped with ``host_action=spawn_subagents``.
             #   - SEQUENTIAL: no parallel surface at all → plain inline fallback.
-            dispatch = resolve_subagent_dispatch(self.agent_runtime_backend, self.opencode_mode)
+            dispatch_backend = self.agent_runtime_backend or "claude_code"
+            dispatch = resolve_subagent_dispatch(dispatch_backend, self.opencode_mode)
             if dispatch is SubagentDispatchMode.PLUGIN_PASSIVE:
                 # Preserve public response shape (#442): ouroboros_lateral_think
                 # natural response documents alternative-thinking metadata.
@@ -1818,11 +1819,8 @@ class LateralThinkHandler(BridgeAwareMixin):
             host_driven = dispatch is SubagentDispatchMode.HOST_DRIVEN
             payload_dicts = [p.to_dict() for p in payloads]
             panel_metadata = lateral_persona_panel_metadata_from_capability_definitions()
-            contract_backend = self.agent_runtime_backend
-            if not contract_backend:
-                contract_backend = "codex" if host_driven else "gemini"
             contract = build_runtime_subagent_orchestration_contract(
-                contract_backend,
+                dispatch_backend,
                 directive_metadata=panel_metadata,
                 opencode_mode=self.opencode_mode,
             )
