@@ -1309,6 +1309,39 @@ def test_retry_prompt_drops_transformed_hidden_assertion(
     assert transformed not in prompt
 
 
+@pytest.mark.parametrize(
+    "control",
+    ("\x1bP1;2\x1b\\", "\x90payload\x9c"),
+)
+def test_retry_prompt_drops_unsupported_terminal_control_strings(control: str) -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"PRIVATE_{control}SENTINEL",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "Harness verification output" not in prompt
+
+
 def test_retry_prompt_drops_osc_split_hidden_assertion() -> None:
     assertion = "PRIVATE_SENTINEL"
     spec = AcceptanceCriterionSpec(

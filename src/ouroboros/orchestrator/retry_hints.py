@@ -11,6 +11,7 @@ from ouroboros.harness.journal import EvidenceKind, EvidenceManifest
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.contract_redaction import (
     contains_transformed_hidden_contract_value,
+    contains_unsupported_terminal_control,
     redact_hidden_contract_values,
 )
 from ouroboros.orchestrator.decomposition_policy import redact_and_truncate_text
@@ -34,6 +35,8 @@ def _sanitize_fragment(text: str, spec: AcceptanceCriterionSpec | None) -> str:
 
     if spec is None:
         return redact_and_truncate_text(text, max_chars=_MAX_HINT_CHARS)
+    if contains_unsupported_terminal_control(text):
+        return ""
     hidden_values = (spec.verify_command, spec.output_assertion)
     if contains_transformed_hidden_contract_value(text, hidden_values):
         return ""
