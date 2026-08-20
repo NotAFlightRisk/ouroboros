@@ -64,18 +64,28 @@ _MAX_HTML_ENTITY_DECODE_PASSES = 64
 
 
 def _decode_html_entities(text: str) -> str | None:
+    invalid = False
+
     def decode_numeric(match: re.Match[str]) -> str:
+        nonlocal invalid
         encoded = match.group("decimal") or match.group("hex")
         assert encoded is not None
         base = 10 if match.group("decimal") is not None else 16
         try:
-            return chr(int(encoded, base))
+            codepoint = int(encoded, base)
+            if codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+                invalid = True
+                return ""
+            return chr(codepoint)
         except (ValueError, OverflowError):
-            return match.group(0)
+            invalid = True
+            return ""
 
     decoded_text = text
     for _ in range(_MAX_HTML_ENTITY_DECODE_PASSES):
         numeric_decoded = _NUMERIC_ENTITY_RE.sub(decode_numeric, decoded_text)
+        if invalid:
+            return None
         decoded = html.unescape(numeric_decoded)
         if decoded == decoded_text:
             return decoded_text
@@ -232,7 +242,8 @@ def contains_unsupported_terminal_control(text: str) -> bool:
     if _UNSUPPORTED_TERMINAL_CONTROL_RE.search(without_known):
         return True
     return any(
-        (unicodedata.category(char) == "Cc" and char not in "\n\r\t") or 0x80 <= ord(char) <= 0x9F
+        (unicodedata.category(char) in {"Cc", "Cf"} and char not in "\n\r\t")
+        or 0x80 <= ord(char) <= 0x9F
         for char in without_known
     )
 
