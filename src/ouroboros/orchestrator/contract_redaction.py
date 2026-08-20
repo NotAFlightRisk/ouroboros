@@ -51,7 +51,7 @@ _ESCAPED_SURROGATE_PAIR_RE = re.compile(
 )
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:(?P<decimal>\d+)|[xX](?P<hex>[0-9a-fA-F]+));?")
 _ESCAPED_BYTE_RUN_RE = re.compile(r"(?:\\x[0-9a-fA-F]{2})+")
-_ESCAPED_OCTAL_RUN_RE = re.compile(r"(?:\\[0-7]{3})+")
+_ESCAPED_OCTAL_RUN_RE = re.compile(r"(?:\\[0-7]{1,3})+")
 _PERCENT_BYTE_RUN_RE = re.compile(r"(?:%[0-9a-fA-F]{2})+")
 _LINE_PREFIX_RE = re.compile(r"(?m)^[ \t]*(?:[EIWF][ \t]+|[+>~-][ \t]?)")
 _MALFORMED_ENCODING_RE = re.compile(
@@ -146,7 +146,7 @@ def _decode_escaped_byte_runs(text: str) -> str | None:
 
     def replace_octal(match: re.Match[str]) -> str:
         nonlocal invalid
-        values = [int(value, 8) for value in re.findall(r"\\([0-7]{3})", match.group(0))]
+        values = [int(value, 8) for value in re.findall(r"\\([0-7]{1,3})", match.group(0))]
         if any(value > 0xFF for value in values):
             invalid = True
             return ""
