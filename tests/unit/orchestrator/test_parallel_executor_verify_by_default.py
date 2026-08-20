@@ -1317,6 +1317,11 @@ def test_retry_prompt_drops_transformed_hidden_assertion(
         ("<=>", "<\u2060=\u2060>"),
         ("!!!", "!\ufe0f!\ufe0f!"),
         ("<=>", "&" + "amp;" * 65 + "lt;=&" + "amp;" * 65 + "gt;"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\u200bSENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\U0000200bSENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\uFE0FSENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE_&#27;[31mSENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE_&#27;[5DSENTINEL"),
     ),
 )
 def test_retry_prompt_drops_deep_entities_and_invisible_formats(

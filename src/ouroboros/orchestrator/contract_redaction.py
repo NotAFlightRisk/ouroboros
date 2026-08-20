@@ -43,6 +43,10 @@ _ESCAPED_TERMINAL_CONTROL_RE = re.compile(
 _ESCAPED_WHITESPACE_RE = re.compile(
     r"(?ix)\\(?:n|r|t|x0[9ad]|u000[9ad]|U0000000[9ad]|0(?:11|12|15))"
 )
+_ESCAPED_UNICODE_RE = re.compile(
+    r"\\(?:x(?P<byte>[0-9a-fA-F]{2})|u(?P<short>[0-9a-fA-F]{4})|U(?P<long>[0-9a-fA-F]{8}))"
+)
+_NUMERIC_ENTITY_RE = re.compile(r"&#(?:(?P<decimal>\d+)|[xX](?P<hex>[0-9a-fA-F]+));?")
 _LINE_PREFIX_RE = re.compile(r"(?m)^\s*(?:[EIWF]\s+|[+>~-]\s?)")
 _UNSUPPORTED_TERMINAL_CONTROL_RE = re.compile(
     r"(?:\x1b(?:P|_|\^|X)|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9c)",
@@ -53,16 +57,45 @@ _UNSUPPORTED_TERMINAL_CONTROL_RE = re.compile(
 _MAX_HTML_ENTITY_DECODE_PASSES = 64
 
 
+def _decode_html_entities(text: str) -> str | None:
+    def decode_numeric(match: re.Match[str]) -> str:
+        encoded = match.group("decimal") or match.group("hex")
+        assert encoded is not None
+        base = 10 if match.group("decimal") is not None else 16
+        try:
+            return chr(int(encoded, base))
+        except (ValueError, OverflowError):
+            return match.group(0)
+
+    decoded_text = text
+    for _ in range(_MAX_HTML_ENTITY_DECODE_PASSES):
+        numeric_decoded = _NUMERIC_ENTITY_RE.sub(decode_numeric, decoded_text)
+        decoded = html.unescape(numeric_decoded)
+        if decoded == decoded_text:
+            return decoded_text
+        decoded_text = decoded
+    return None
+
+
+def _decode_escaped_invisible_chars(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        encoded = match.group("byte") or match.group("short") or match.group("long")
+        assert encoded is not None
+        char = chr(int(encoded, 16))
+        category = unicodedata.category(char)
+        if category in {"Cc", "Cf", "Mn", "Me"} or 0x80 <= ord(char) <= 0x9F:
+            return char
+        return match.group(0)
+
+    return _ESCAPED_UNICODE_RE.sub(replace, text)
+
+
 def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str | None:
     """Normalize routine verifier-output transformations for leak detection."""
-    unescaped = text
-    for _ in range(_MAX_HTML_ENTITY_DECODE_PASSES):
-        decoded = html.unescape(unescaped)
-        if decoded == unescaped:
-            break
-        unescaped = decoded
-    else:
+    unescaped = _decode_html_entities(text)
+    if unescaped is None:
         return None
+    unescaped = _decode_escaped_invisible_chars(unescaped)
     unescaped = unicodedata.normalize("NFKC", unescaped)
     unescaped = _ESCAPED_WHITESPACE_RE.sub(" ", unescaped)
     without_ansi = _ANSI_ESCAPE_RE.sub("", unescaped)
@@ -86,9 +119,13 @@ def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str |
 
 def contains_unsupported_terminal_control(text: str) -> bool:
     """Return whether output carries controls outside normalized CSI/OSC."""
-    if _ESCAPED_TERMINAL_CONTROL_RE.search(text):
+    decoded = _decode_html_entities(text)
+    if decoded is None:
         return True
-    without_known = _ANSI_ESCAPE_RE.sub("", _OSC_ESCAPE_RE.sub("", text))
+    decoded = _decode_escaped_invisible_chars(decoded)
+    if _ESCAPED_TERMINAL_CONTROL_RE.search(decoded):
+        return True
+    without_known = _ANSI_ESCAPE_RE.sub("", _OSC_ESCAPE_RE.sub("", decoded))
     if _UNSUPPORTED_TERMINAL_CONTROL_RE.search(without_known):
         return True
     return any(
