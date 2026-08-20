@@ -256,7 +256,7 @@ def contains_unsupported_terminal_control(text: str) -> bool:
     if _UNSUPPORTED_TERMINAL_CONTROL_RE.search(without_known):
         return True
     return any(
-        (unicodedata.category(char) in {"Cc", "Cf"} and char not in "\n\r\t")
+        (unicodedata.category(char) in {"Cc", "Cf", "Cs"} and char not in "\n\r\t")
         or 0x80 <= ord(char) <= 0x9F
         for char in without_known
     )

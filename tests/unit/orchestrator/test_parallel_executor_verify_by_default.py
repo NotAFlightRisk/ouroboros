@@ -1353,6 +1353,7 @@ def test_retry_prompt_drops_transformed_hidden_assertion(
         ("PRIVATE_SENTINEL", r"PRIVATE_\11SENTINEL"),
         ("PRIVATE_SENTINEL", r"PRIVATE_\15SENTINEL"),
         ("PRIVATE_SENTINEL", r"PRIVATE_\0SENTINEL"),
+        ("PRIVATE_SENTINEL", "safe\ud800diagnostic"),
     ),
 )
 def test_retry_prompt_drops_deep_entities_and_invisible_formats(
