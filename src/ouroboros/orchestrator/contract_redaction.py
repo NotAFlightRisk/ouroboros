@@ -52,6 +52,7 @@ _ESCAPED_SURROGATE_PAIR_RE = re.compile(
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:(?P<decimal>\d+)|[xX](?P<hex>[0-9a-fA-F]+));?")
 _ESCAPED_BYTE_RUN_RE = re.compile(r"(?:\\x[0-9a-fA-F]{2})+")
 _ESCAPED_OCTAL_RUN_RE = re.compile(r"(?:\\[0-7]{3})+")
+_PERCENT_BYTE_RUN_RE = re.compile(r"(?:%[0-9a-fA-F]{2})+")
 _LINE_PREFIX_RE = re.compile(r"(?m)^[ \t]*(?:[EIWF][ \t]+|[+>~-][ \t]?)")
 _UNSUPPORTED_TERMINAL_CONTROL_RE = re.compile(
     r"(?:\x1b(?:P|_|\^|X)|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9c)",
@@ -144,6 +145,22 @@ def _decode_escaped_whitespace(text: str) -> str:
     return _ESCAPED_WHITESPACE_RE.sub(replace, text)
 
 
+def _decode_percent_runs(text: str) -> str | None:
+    invalid = False
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal invalid
+        raw = bytes.fromhex(match.group(0).replace("%", ""))
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            invalid = True
+            return ""
+
+    decoded = _PERCENT_BYTE_RUN_RE.sub(replace, text)
+    return None if invalid else decoded
+
+
 def _decode_contract_encodings(text: str) -> str | None:
     decoded_text = text
     for _ in range(_MAX_HTML_ENTITY_DECODE_PASSES):
@@ -157,7 +174,10 @@ def _decode_contract_encodings(text: str) -> str | None:
         unicode_decoded = _decode_escaped_unicode(byte_decoded)
         if unicode_decoded is None:
             return None
-        decoded = _decode_escaped_whitespace(unicode_decoded)
+        percent_decoded = _decode_percent_runs(unicode_decoded)
+        if percent_decoded is None:
+            return None
+        decoded = _decode_escaped_whitespace(percent_decoded)
         if decoded == decoded_text:
             return decoded
         decoded_text = decoded
