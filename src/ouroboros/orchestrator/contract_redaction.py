@@ -77,17 +77,21 @@ def _decode_html_entities(text: str) -> str | None:
     return None
 
 
-def _decode_escaped_invisible_chars(text: str) -> str:
+def _decode_escaped_unicode(text: str) -> str | None:
+    invalid = False
+
     def replace(match: re.Match[str]) -> str:
+        nonlocal invalid
         encoded = match.group("byte") or match.group("short") or match.group("long")
         assert encoded is not None
-        char = chr(int(encoded, 16))
-        category = unicodedata.category(char)
-        if category in {"Cc", "Cf", "Mn", "Me"} or 0x80 <= ord(char) <= 0x9F:
-            return char
-        return match.group(0)
+        try:
+            return chr(int(encoded, 16))
+        except (ValueError, OverflowError):
+            invalid = True
+            return ""
 
-    return _ESCAPED_UNICODE_RE.sub(replace, text)
+    decoded = _ESCAPED_UNICODE_RE.sub(replace, text)
+    return None if invalid else decoded
 
 
 def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str | None:
@@ -95,7 +99,9 @@ def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str |
     unescaped = _decode_html_entities(text)
     if unescaped is None:
         return None
-    unescaped = _decode_escaped_invisible_chars(unescaped)
+    unescaped = _decode_escaped_unicode(unescaped)
+    if unescaped is None:
+        return None
     unescaped = unicodedata.normalize("NFKC", unescaped)
     unescaped = _ESCAPED_WHITESPACE_RE.sub(" ", unescaped)
     without_ansi = _ANSI_ESCAPE_RE.sub("", unescaped)
@@ -122,7 +128,9 @@ def contains_unsupported_terminal_control(text: str) -> bool:
     decoded = _decode_html_entities(text)
     if decoded is None:
         return True
-    decoded = _decode_escaped_invisible_chars(decoded)
+    decoded = _decode_escaped_unicode(decoded)
+    if decoded is None:
+        return True
     if _ESCAPED_TERMINAL_CONTROL_RE.search(decoded):
         return True
     without_known = _ANSI_ESCAPE_RE.sub("", _OSC_ESCAPE_RE.sub("", decoded))
