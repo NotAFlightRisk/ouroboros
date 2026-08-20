@@ -35,9 +35,9 @@ def _sanitize_fragment(text: str, spec: AcceptanceCriterionSpec | None) -> str:
     if spec is None:
         return redact_and_truncate_text(text, max_chars=_MAX_HINT_CHARS)
     hidden_values = (spec.verify_command, spec.output_assertion)
-    sanitized = redact_hidden_contract_values(text, hidden_values)
-    if contains_transformed_hidden_contract_value(sanitized, hidden_values):
+    if contains_transformed_hidden_contract_value(text, hidden_values):
         return ""
+    sanitized = redact_hidden_contract_values(text, hidden_values)
     return redact_and_truncate_text(sanitized, max_chars=_MAX_HINT_CHARS)
 
 

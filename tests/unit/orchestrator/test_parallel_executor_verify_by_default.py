@@ -1305,9 +1305,39 @@ def test_retry_prompt_drops_transformed_hidden_assertion(
         is_final_attempt=False,
         spec=spec,
     )
-
     assert "Harness verification output" not in prompt
     assert transformed not in prompt
+
+
+def test_retry_prompt_drops_transformed_command_with_exact_assertion() -> None:
+    assertion = "PRIVATE_SENTINEL"
+    command = "python hidden_grader.py --expect PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command=command,
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail="PYTHON HIDDEN_GRADER.PY --EXPECT PRIVATE_SENTINEL",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "Harness verification output" not in prompt
+    assert "HIDDEN_GRADER" not in prompt
 
 
 @pytest.mark.parametrize(
