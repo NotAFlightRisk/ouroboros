@@ -1335,6 +1335,7 @@ def test_retry_prompt_drops_transformed_hidden_assertion(
         ("!!!", "!\x7f!!"),
         ("PRIVATE", "＼ｘ５０＼ｘ５２＼ｘ４９＼ｘ５６＼ｘ４１＼ｘ５４＼ｘ４５"),
         ("PRIVATE", r"\120\122\111\126\101\124\105"),
+        ("😀", r"\ud83d\ude00"),
     ),
 )
 def test_retry_prompt_drops_deep_entities_and_invisible_formats(

@@ -46,6 +46,9 @@ _ESCAPED_WHITESPACE_RE = re.compile(
 _ESCAPED_UNICODE_RE = re.compile(
     r"\\(?:x(?P<byte>[0-9a-fA-F]{2})|u(?P<short>[0-9a-fA-F]{4})|U(?P<long>[0-9a-fA-F]{8}))"
 )
+_ESCAPED_SURROGATE_PAIR_RE = re.compile(
+    r"\\u(?P<high>[dD][89aAbB][0-9a-fA-F]{2})\\u(?P<low>[dD][c-fC-F][0-9a-fA-F]{2})"
+)
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:(?P<decimal>\d+)|[xX](?P<hex>[0-9a-fA-F]+));?")
 _ESCAPED_BYTE_RUN_RE = re.compile(r"(?:\\x[0-9a-fA-F]{2})+")
 _ESCAPED_OCTAL_RUN_RE = re.compile(r"(?:\\[0-7]{3})+")
@@ -82,17 +85,27 @@ def _decode_html_entities(text: str) -> str | None:
 def _decode_escaped_unicode(text: str) -> str | None:
     invalid = False
 
+    def replace_pair(match: re.Match[str]) -> str:
+        high = int(match.group("high"), 16)
+        low = int(match.group("low"), 16)
+        return chr(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00))
+
     def replace(match: re.Match[str]) -> str:
         nonlocal invalid
         encoded = match.group("byte") or match.group("short") or match.group("long")
         assert encoded is not None
         try:
-            return chr(int(encoded, 16))
+            codepoint = int(encoded, 16)
+            if 0xD800 <= codepoint <= 0xDFFF:
+                invalid = True
+                return ""
+            return chr(codepoint)
         except (ValueError, OverflowError):
             invalid = True
             return ""
 
-    decoded = _ESCAPED_UNICODE_RE.sub(replace, text)
+    decoded = _ESCAPED_SURROGATE_PAIR_RE.sub(replace_pair, text)
+    decoded = _ESCAPED_UNICODE_RE.sub(replace, decoded)
     return None if invalid else decoded
 
 
