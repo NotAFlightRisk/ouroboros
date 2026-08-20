@@ -32,7 +32,7 @@ def hidden_contract_variants(values: Iterable[str | None]) -> tuple[str, ...]:
     )
 
 
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;:]*m")
 _OSC_ESCAPE_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _LINE_PREFIX_RE = re.compile(r"(?m)^\s*(?:[EIWF]\s+|[+>~-]\s?)")
 _UNSUPPORTED_TERMINAL_CONTROL_RE = re.compile(

@@ -1377,7 +1377,7 @@ def test_retry_prompt_drops_unicode_and_nested_entity_equivalents(
     assert "Harness verification output" not in prompt
 
 
-@pytest.mark.parametrize("control", ("\x9b31m", "\x1b(B", "\b"))
+@pytest.mark.parametrize("control", ("\x9b31m", "\x1b(B", "\x1b[5D", "\b"))
 def test_retry_prompt_drops_residual_terminal_controls(control: str) -> None:
     assertion = "PRIVATE_SENTINEL"
     spec = AcceptanceCriterionSpec(
