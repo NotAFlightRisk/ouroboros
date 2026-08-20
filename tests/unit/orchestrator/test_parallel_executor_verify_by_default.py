@@ -1350,6 +1350,7 @@ def test_retry_prompt_drops_deep_entities_and_invisible_formats(
         ("café", "cafe\u0301"),
         ("ＳＥＣＲＥＴ", "SECRET"),
         ("MIGRATION<COMPLETE>", "MIGRATION&amp;lt;COMPLETE&amp;gt;"),
+        ("PRİVATE_SENTINEL", "private_sentinel"),
     ),
 )
 def test_retry_prompt_drops_unicode_and_nested_entity_equivalents(
@@ -1362,6 +1363,34 @@ def test_retry_prompt_drops_unicode_and_nested_entity_equivalents(
         output_assertion=assertion,
     )
     outcome = _VerifyGateOutcome(passed=False, reason=None, output_tail=transformed)
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+    assert "Harness verification output" not in prompt
+
+
+@pytest.mark.parametrize("escaped_whitespace", (r"\n", r"\r", r"\t", r"\x0a", r"\u0009"))
+def test_retry_prompt_drops_pytest_escaped_whitespace(escaped_whitespace: str) -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"E assert 'PRIVATE_{escaped_whitespace}SENTINEL'",
+    )
     result = ACExecutionResult(
         ac_index=0,
         ac_content=spec.description,

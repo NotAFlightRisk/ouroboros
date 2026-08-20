@@ -40,6 +40,9 @@ _ESCAPED_TERMINAL_CONTROL_RE = re.compile(
     r"|\\?\^\["
     r")"
 )
+_ESCAPED_WHITESPACE_RE = re.compile(
+    r"(?ix)\\(?:n|r|t|x0[9ad]|u000[9ad]|U0000000[9ad]|0(?:11|12|15))"
+)
 _LINE_PREFIX_RE = re.compile(r"(?m)^\s*(?:[EIWF]\s+|[+>~-]\s?)")
 _UNSUPPORTED_TERMINAL_CONTROL_RE = re.compile(
     r"(?:\x1b(?:P|_|\^|X)|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9c)",
@@ -61,6 +64,7 @@ def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str |
     else:
         return None
     unescaped = unicodedata.normalize("NFKC", unescaped)
+    unescaped = _ESCAPED_WHITESPACE_RE.sub(" ", unescaped)
     without_ansi = _ANSI_ESCAPE_RE.sub("", unescaped)
     without_ansi = _OSC_ESCAPE_RE.sub("", without_ansi)
     without_ansi = "".join(
@@ -70,9 +74,14 @@ def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str |
         and unicodedata.category(char) not in {"Cf", "Mn", "Me"}
     )
     without_prefixes = _LINE_PREFIX_RE.sub("", without_ansi)
+    folded = "".join(char.casefold() for char in without_prefixes)
     if preserve_punctuation:
-        return "".join(char.casefold() for char in without_prefixes if not char.isspace())
-    return "".join(char.casefold() for char in without_prefixes if char.isalnum())
+        return "".join(
+            char
+            for char in folded
+            if not char.isspace() and unicodedata.category(char) not in {"Cf", "Mn", "Me"}
+        )
+    return "".join(char for char in folded if char.isalnum())
 
 
 def contains_unsupported_terminal_control(text: str) -> bool:
