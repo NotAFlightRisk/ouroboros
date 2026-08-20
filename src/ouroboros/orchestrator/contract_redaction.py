@@ -35,11 +35,13 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _LINE_PREFIX_RE = re.compile(r"(?m)^\s*(?:[EIWF]\s+|[+>~-]\s?)")
 
 
-def _normalized_contract_text(text: str) -> str:
+def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str:
     """Normalize routine verifier-output transformations for leak detection."""
     unescaped = html.unescape(text)
     without_ansi = _ANSI_ESCAPE_RE.sub("", unescaped)
     without_prefixes = _LINE_PREFIX_RE.sub("", without_ansi)
+    if preserve_punctuation:
+        return "".join(char.casefold() for char in without_prefixes if not char.isspace())
     return "".join(char.casefold() for char in without_prefixes if char.isalnum())
 
 
@@ -47,13 +49,21 @@ def contains_transformed_hidden_contract_value(
     text: str,
     values: Iterable[str | None],
 ) -> bool:
-    """Return whether normalized output still carries a readable hidden value."""
-    normalized_text = _normalized_contract_text(text)
+    """Return whether a non-exact normalized copy carries a hidden value."""
+    normalized_text = _normalized_contract_text(text, preserve_punctuation=False)
+    compact_text = _normalized_contract_text(text, preserve_punctuation=True)
     for hidden in values:
         if not hidden:
             continue
-        normalized_hidden = _normalized_contract_text(hidden)
-        if normalized_hidden and normalized_hidden in normalized_text:
+        if any(variant in text for variant in hidden_contract_variants((hidden,))):
+            continue
+        normalized_hidden = _normalized_contract_text(hidden, preserve_punctuation=False)
+        if normalized_hidden:
+            if normalized_hidden in normalized_text:
+                return True
+            continue
+        compact_hidden = _normalized_contract_text(hidden, preserve_punctuation=True)
+        if compact_hidden and compact_hidden in compact_text:
             return True
     return False
 

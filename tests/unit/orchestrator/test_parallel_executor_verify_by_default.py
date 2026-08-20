@@ -1309,6 +1309,66 @@ def test_retry_prompt_drops_transformed_hidden_assertion(
     assert transformed not in prompt
 
 
+def test_retry_prompt_preserves_safe_context_around_exact_hidden_value() -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"actual result; expected {assertion}",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "actual result; expected [REDACTED CONTRACT VALUE]" in prompt
+
+
+@pytest.mark.parametrize(
+    ("assertion", "transformed"),
+    (("!!!", "! ! !"), ("<=>", "&lt; = &gt;")),
+)
+def test_retry_prompt_drops_transformed_punctuation_only_assertion(
+    assertion: str,
+    transformed: str,
+) -> None:
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(passed=False, reason=None, output_tail=transformed)
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "Harness verification output" not in prompt
+
+
 def test_retry_prompt_drops_transformed_command_with_exact_assertion() -> None:
     assertion = "PRIVATE_SENTINEL"
     command = "python hidden_grader.py --expect PRIVATE_SENTINEL"
