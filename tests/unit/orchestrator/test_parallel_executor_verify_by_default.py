@@ -1332,6 +1332,9 @@ def test_retry_prompt_drops_transformed_hidden_assertion(
         ("+++", r"+\n+\n+"),
         ("café", r"b'caf\xc3\xa9'"),
         ("PRIVATE_SENTINEL", "\x1b]0;PRIVATE_SENTINEL\x07"),
+        ("!!!", "!\x7f!!"),
+        ("PRIVATE", "＼ｘ５０＼ｘ５２＼ｘ４９＼ｘ５６＼ｘ４１＼ｘ５４＼ｘ４５"),
+        ("PRIVATE", r"\120\122\111\126\101\124\105"),
     ),
 )
 def test_retry_prompt_drops_deep_entities_and_invisible_formats(

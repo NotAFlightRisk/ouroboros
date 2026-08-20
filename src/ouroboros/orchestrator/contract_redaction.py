@@ -48,6 +48,7 @@ _ESCAPED_UNICODE_RE = re.compile(
 )
 _NUMERIC_ENTITY_RE = re.compile(r"&#(?:(?P<decimal>\d+)|[xX](?P<hex>[0-9a-fA-F]+));?")
 _ESCAPED_BYTE_RUN_RE = re.compile(r"(?:\\x[0-9a-fA-F]{2})+")
+_ESCAPED_OCTAL_RUN_RE = re.compile(r"(?:\\[0-7]{3})+")
 _LINE_PREFIX_RE = re.compile(r"(?m)^[ \t]*(?:[EIWF][ \t]+|[+>~-][ \t]?)")
 _UNSUPPORTED_TERMINAL_CONTROL_RE = re.compile(
     r"(?:\x1b(?:P|_|\^|X)|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9c)",
@@ -98,16 +99,23 @@ def _decode_escaped_unicode(text: str) -> str | None:
 def _decode_escaped_byte_runs(text: str) -> str | None:
     invalid = False
 
-    def replace(match: re.Match[str]) -> str:
+    def decode_bytes(raw: bytes) -> str:
         nonlocal invalid
-        raw = bytes.fromhex(match.group(0).replace("\\x", ""))
         try:
             return raw.decode("utf-8")
         except UnicodeDecodeError:
             invalid = True
             return ""
 
-    decoded = _ESCAPED_BYTE_RUN_RE.sub(replace, text)
+    def replace_hex(match: re.Match[str]) -> str:
+        return decode_bytes(bytes.fromhex(match.group(0).replace("\\x", "")))
+
+    def replace_octal(match: re.Match[str]) -> str:
+        values = re.findall(r"\\([0-7]{3})", match.group(0))
+        return decode_bytes(bytes(int(value, 8) for value in values))
+
+    decoded = _ESCAPED_BYTE_RUN_RE.sub(replace_hex, text)
+    decoded = _ESCAPED_OCTAL_RUN_RE.sub(replace_octal, decoded)
     return None if invalid else decoded
 
 
@@ -126,7 +134,8 @@ def _decode_escaped_whitespace(text: str) -> str:
 def _decode_contract_encodings(text: str) -> str | None:
     decoded_text = text
     for _ in range(_MAX_HTML_ENTITY_DECODE_PASSES):
-        html_decoded = _decode_html_entities(decoded_text)
+        normalized_text = unicodedata.normalize("NFKC", decoded_text)
+        html_decoded = _decode_html_entities(normalized_text)
         if html_decoded is None:
             return None
         byte_decoded = _decode_escaped_byte_runs(html_decoded)
@@ -137,7 +146,7 @@ def _decode_contract_encodings(text: str) -> str | None:
             return None
         decoded = _decode_escaped_whitespace(unicode_decoded)
         if decoded == decoded_text:
-            return decoded_text
+            return decoded
         decoded_text = decoded
     return None
 
@@ -158,8 +167,7 @@ def _normalized_contract_text(
     without_ansi = "".join(
         char
         for char in without_ansi
-        if (ord(char) >= 32 or char in "\n\r\t")
-        and unicodedata.category(char) not in {"Cf", "Mn", "Me"}
+        if char in "\n\r\t" or unicodedata.category(char) not in {"Cc", "Cf", "Mn", "Me"}
     )
     without_prefixes = (
         _LINE_PREFIX_RE.sub("", without_ansi) if strip_line_prefixes else without_ansi
@@ -187,7 +195,7 @@ def contains_unsupported_terminal_control(text: str) -> bool:
     if _UNSUPPORTED_TERMINAL_CONTROL_RE.search(without_known):
         return True
     return any(
-        char == "\x1b" or 0x80 <= ord(char) <= 0x9F or (ord(char) < 32 and char not in "\n\r\t")
+        (unicodedata.category(char) == "Cc" and char not in "\n\r\t") or 0x80 <= ord(char) <= 0x9F
         for char in without_known
     )
 
