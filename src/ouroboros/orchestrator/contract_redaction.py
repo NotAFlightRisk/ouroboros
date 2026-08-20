@@ -54,6 +54,16 @@ _ESCAPED_BYTE_RUN_RE = re.compile(r"(?:\\x[0-9a-fA-F]{2})+")
 _ESCAPED_OCTAL_RUN_RE = re.compile(r"(?:\\[0-7]{3})+")
 _PERCENT_BYTE_RUN_RE = re.compile(r"(?:%[0-9a-fA-F]{2})+")
 _LINE_PREFIX_RE = re.compile(r"(?m)^[ \t]*(?:[EIWF][ \t]+|[+>~-][ \t]?)")
+_MALFORMED_ENCODING_RE = re.compile(
+    r"(?ix)(?:"
+    r"\\x(?![0-9a-f]{2})"
+    r"|\\u(?![0-9a-f]{4})"
+    r"|\\U(?![0-9a-f]{8})"
+    r"|%(?=[0-9a-z]{2})(?=[0-9a-z]?\d)(?![0-9a-f]{2})"
+    r"|&\#x(?![0-9a-f]+;?)"
+    r"|&\#(?!x?[0-9a-f]+;?)"
+    r")"
+)
 _UNSUPPORTED_TERMINAL_CONTROL_RE = re.compile(
     r"(?:\x1b(?:P|_|\^|X)|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9c)",
     re.DOTALL,
@@ -176,6 +186,8 @@ def _decode_percent_runs(text: str) -> str | None:
 
 
 def _decode_contract_encodings(text: str) -> str | None:
+    if _MALFORMED_ENCODING_RE.search(text):
+        return None
     decoded_text = text
     for _ in range(_MAX_HTML_ENTITY_DECODE_PASSES):
         normalized_text = unicodedata.normalize("NFKC", decoded_text)
@@ -194,6 +206,8 @@ def _decode_contract_encodings(text: str) -> str | None:
         decoded = _decode_escaped_whitespace(percent_decoded)
         if decoded == decoded_text:
             return decoded
+        if _MALFORMED_ENCODING_RE.search(decoded):
+            return None
         decoded_text = decoded
     return None
 
