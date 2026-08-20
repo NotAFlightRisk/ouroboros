@@ -34,6 +34,12 @@ def hidden_contract_variants(values: Iterable[str | None]) -> tuple[str, ...]:
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;:]*m")
 _OSC_ESCAPE_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_ESCAPED_TERMINAL_CONTROL_RE = re.compile(
+    r"(?ix)(?:"
+    r"\\(?:x(?:1b|08|9[08bef])|u(?:001b|0008|009[08bef])|U(?:0000001b|00000008|0000009[08bef])|0(?:33|10)|e|b)"
+    r"|\\?\^\["
+    r")"
+)
 _LINE_PREFIX_RE = re.compile(r"(?m)^\s*(?:[EIWF]\s+|[+>~-]\s?)")
 _UNSUPPORTED_TERMINAL_CONTROL_RE = re.compile(
     r"(?:\x1b(?:P|_|\^|X)|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9c)",
@@ -71,6 +77,8 @@ def _normalized_contract_text(text: str, *, preserve_punctuation: bool) -> str |
 
 def contains_unsupported_terminal_control(text: str) -> bool:
     """Return whether output carries controls outside normalized CSI/OSC."""
+    if _ESCAPED_TERMINAL_CONTROL_RE.search(text):
+        return True
     without_known = _ANSI_ESCAPE_RE.sub("", _OSC_ESCAPE_RE.sub("", text))
     if _UNSUPPORTED_TERMINAL_CONTROL_RE.search(without_known):
         return True
