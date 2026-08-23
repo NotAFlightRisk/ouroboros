@@ -58,7 +58,31 @@ async def test_start_fanout_publishes_server_provenance_and_is_reusable(tmp_path
             "correlation_key": "context.lane_id",
             "results": [
                 {"key": "code_context", "content": {"claim": "local fact"}},
-                {"key": "web_context", "content": {"claim": "external fact"}},
+                {
+                    "key": "web_context",
+                    "content": {
+                        "question_identity": question_identity,
+                        "lane_id": "web_context",
+                        "status": "references_found",
+                        "search_queries": ["subscription billing official guidance"],
+                        "references": [
+                            {
+                                "title": "Stripe Billing documentation",
+                                "url": "https://docs.stripe.com/billing",
+                                "source_type": "official",
+                                "relevance": "Primary billing lifecycle reference.",
+                                "verified_at": "2026-08-24T00:00:00Z",
+                            },
+                            {
+                                "title": "W3C Web Payments",
+                                "url": "https://www.w3.org/Payments/WG/",
+                                "source_type": "standard",
+                                "relevance": "Standards context for web payments.",
+                                "verified_at": "2026-08-24T00:00:00Z",
+                            },
+                        ],
+                    },
+                },
             ],
         }
     )

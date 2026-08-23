@@ -36,6 +36,7 @@ from ouroboros.mcp.tools.question_advisory import (
 )
 from ouroboros.mcp.tools.recent_findings import (
     RECENT_FINDINGS_WINDOW,
+    interview_baseline_by_lane,
     recent_findings_by_lane,
 )
 from ouroboros.orchestrator.capabilities.pm_schemas import pm_repository_roster
@@ -133,6 +134,179 @@ def _attach(
     return meta
 
 
+def _publish_interview_baseline(
+    store: ArtifactStore,
+    *,
+    session_id: str,
+    phase: str = "start",
+    lanes: tuple[str, ...] = ("code_context", "web_context"),
+) -> str:
+    body = {
+        "kind": "question_advisory",
+        "provenance": {
+            "session_id": session_id,
+            "phase": phase,
+            "question_identity": "interview-question:0123456789abcdef",
+        },
+        "result": {
+            "aggregated_outputs": [
+                {"lane_id": lane, "output": {"finding": f"baseline:{lane}"}} for lane in lanes
+            ]
+        },
+    }
+    canonical = json.dumps(body, sort_keys=True).encode("utf-8")
+    return _publish_body(store, body, contract_id=f"fanout:{hashlib.sha256(canonical).hexdigest()}")
+
+
+def test_follow_up_uses_same_session_start_baseline_without_new_subagents(
+    roster: list[dict[str, str]], store: ArtifactStore
+) -> None:
+    contract_id = _publish_interview_baseline(store, session_id="interview-1")
+
+    meta = _attach(
+        roster,
+        store,
+        tool_name="ouroboros_interview",
+        session_id="interview-1",
+        phase="answer",
+    )
+
+    cached = meta["question_advisory_cached_lanes"]
+    assert cached == {
+        "code_context": {
+            "contract_id": contract_id,
+            "lane_id": "code_context",
+            "published_at": cached["code_context"]["published_at"],
+        },
+        "web_context": {
+            "contract_id": contract_id,
+            "lane_id": "web_context",
+            "published_at": cached["web_context"]["published_at"],
+        },
+    }
+    assert "question_advisory_subagents" not in meta
+    assert "question_advisory_fanout_id" not in meta
+    assert "question_advisory_host_action" not in meta
+    assert meta["question_advisory_preserve_content"] is True
+    assert "question_advisory_request" not in meta
+
+
+@pytest.mark.parametrize("session_id,phase", [("other", "start"), ("interview-1", "answer")])
+def test_baseline_authority_requires_same_session_start_phase(
+    roster: list[dict[str, str]],
+    store: ArtifactStore,
+    session_id: str,
+    phase: str,
+) -> None:
+    _publish_interview_baseline(store, session_id=session_id, phase=phase)
+
+    meta = _attach(
+        roster,
+        store,
+        tool_name="ouroboros_interview",
+        session_id="interview-1",
+        phase="answer",
+    )
+
+    assert "question_advisory_cached_lanes" not in meta
+    assert [payload["context"]["lane_id"] for payload in meta["question_advisory_subagents"]] == [
+        "code_context",
+        "web_context",
+    ]
+
+
+def test_partial_baseline_skips_only_the_lane_it_carries(
+    roster: list[dict[str, str]], store: ArtifactStore
+) -> None:
+    _publish_interview_baseline(
+        store,
+        session_id="interview-1",
+        lanes=("code_context",),
+    )
+
+    meta = _attach(
+        roster,
+        store,
+        tool_name="ouroboros_interview",
+        session_id="interview-1",
+        phase="answer",
+    )
+
+    assert set(meta["question_advisory_cached_lanes"]) == {"code_context"}
+    assert [payload["context"]["lane_id"] for payload in meta["question_advisory_subagents"]] == [
+        "web_context"
+    ]
+
+
+def test_malformed_start_artifact_falls_back_to_full_fanout(
+    roster: list[dict[str, str]], store: ArtifactStore
+) -> None:
+    body = {
+        "kind": "question_advisory",
+        "provenance": {
+            "session_id": "interview-1",
+            "phase": "start",
+            "question_identity": "interview-question:0123456789abcdef",
+        },
+        "result": {"aggregated_outputs": "not-a-list"},
+    }
+    _publish_body(store, body, contract_id="fanout:malformed-start")
+
+    meta = _attach(
+        roster,
+        store,
+        tool_name="ouroboros_interview",
+        session_id="interview-1",
+        phase="answer",
+    )
+
+    assert "question_advisory_cached_lanes" not in meta
+    assert [payload["context"]["lane_id"] for payload in meta["question_advisory_subagents"]] == [
+        "code_context",
+        "web_context",
+    ]
+
+
+def test_start_turn_builds_full_factual_baseline_without_consuming_it(
+    roster: list[dict[str, str]], store: ArtifactStore
+) -> None:
+    _publish_interview_baseline(store, session_id="interview-1")
+
+    meta = _attach(
+        roster,
+        store,
+        tool_name="ouroboros_interview",
+        session_id="interview-1",
+        phase="start",
+        research_subject="Add subscription billing to the existing service",
+    )
+
+    assert "question_advisory_cached_lanes" not in meta
+    assert [payload["context"]["lane_id"] for payload in meta["question_advisory_subagents"]] == [
+        "code_context",
+        "web_context",
+    ]
+    prompts = _lane_prompts(meta)
+    assert "## Research Subject" in prompts["code_context"]
+    assert "Add subscription billing" in prompts["code_context"]
+    assert "## Web Reference Contract" in prompts["web_context"]
+    assert "Issue real web searches" in prompts["web_context"]
+    assert "Add subscription billing" in prompts["web_context"]
+
+
+def test_baseline_older_than_reuse_window_is_ignored(store: ArtifactStore) -> None:
+    _publish_interview_baseline(store, session_id="interview-1")
+    later = datetime.now(UTC) + RECENT_FINDINGS_WINDOW + timedelta(minutes=1)
+
+    assert interview_baseline_by_lane(store, session_id="interview-1", now=later) == {}
+
+
+def test_artifact_without_server_provenance_is_not_a_baseline(store: ArtifactStore) -> None:
+    _publish(store, lanes=("code_context",))
+
+    assert interview_baseline_by_lane(store, session_id="interview-1") == {}
+
+
 def test_a_lane_is_told_where_its_findings_are_and_not_what_they_say(
     roster: list[dict[str, str]], store: ArtifactStore
 ) -> None:
@@ -190,7 +364,7 @@ def test_a_lane_answering_under_a_closed_contract_is_offered_none(
     pm = _lane_prompts(pm_meta)
 
     assert "## Recently Found Here" in interview["code_context"]
-    assert "## Recently Found Here" not in interview["data_context"]
+    assert set(interview) == {"code_context", "web_context"}
     for prompt in pm.values():
         assert "## Recently Found Here" not in prompt
 

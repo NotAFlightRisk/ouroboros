@@ -14,6 +14,7 @@ required lane that can always answer.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from typing import Any
 
@@ -33,14 +34,96 @@ from ouroboros.mcp.tools.fanout import (
     _validate_against_contract,
     submit_fanout_results,
 )
+import ouroboros.mcp.tools.question_advisory as question_advisory_module
 from ouroboros.mcp.tools.subagent import build_interview_question_advisory_subagents
+import ouroboros.orchestrator.capabilities as capabilities
+from ouroboros.orchestrator.capabilities import interview_schemas as schemas
 from ouroboros.orchestrator.capabilities.interview_schemas import (
-    _interview_question_advisory_fanout_metadata,
-    _interview_question_advisory_request_schema,
     interview_data_evidence_answer_contract,
 )
 
 QUESTION = "How many enterprise accounts asked for SSO last quarter?"
+
+_PRODUCTION_ADVISORY_METADATA = schemas._interview_question_advisory_fanout_metadata
+_PRODUCTION_TOOL_METADATA = capabilities.ouroboros_tool_capability_metadata
+
+
+def _standalone_tool_metadata(tool_name: str) -> dict[str, Any]:
+    metadata = deepcopy(_PRODUCTION_TOOL_METADATA(tool_name))
+    if tool_name == "ouroboros_interview":
+        metadata["orchestration"]["question_advisory_fanout"] = (
+            schemas._interview_question_advisory_fanout_metadata()
+        )
+    return metadata
+
+
+_PRODUCTION_REQUEST_SCHEMA = schemas._interview_question_advisory_request_schema
+
+
+def _interview_question_advisory_request_schema() -> dict[str, Any]:
+    """Test-only request schema for the standalone data-lane contract."""
+    schema = deepcopy(_PRODUCTION_REQUEST_SCHEMA())
+    properties = schema["properties"]
+    properties["allowed_capabilities"]["items"]["enum"].append("read_data")
+    lane_properties = properties["lanes"]["items"]["properties"]
+    lane_properties["lane_id"]["enum"].append("data_context")
+    lane_properties["capability"]["enum"].append("read_data")
+    return schema
+
+
+def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
+    """Test-only catalog preserving data contracts outside ordinary interviews."""
+    metadata = deepcopy(_PRODUCTION_ADVISORY_METADATA())
+    metadata["allowed_capabilities"] = ["inspect_code", "web_research", "read_data"]
+    metadata["request_model_schema"] = _interview_question_advisory_request_schema()
+    metadata["lanes"] = [
+        {
+            "lane_id": "code_context",
+            "purpose": "Find repo-local facts.",
+            "capability": "inspect_code",
+            "required": False,
+        },
+        {
+            "lane_id": "web_context",
+            "purpose": "Find current web facts.",
+            "capability": "web_research",
+            "required": False,
+        },
+        {
+            "lane_id": "data_context",
+            "purpose": "Take the measurement that informs the question.",
+            "capability": "read_data",
+            "required": True,
+            "answer_contract": interview_data_evidence_answer_contract(),
+        },
+    ]
+    return metadata
+
+
+@pytest.fixture(autouse=True)
+def _standalone_data_lane_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep data-lane tests strong without restoring blanket interview fan-out."""
+    for module in (schemas, capabilities):
+        monkeypatch.setattr(
+            module,
+            "_interview_question_advisory_fanout_metadata",
+            _interview_question_advisory_fanout_metadata,
+        )
+        monkeypatch.setattr(
+            module,
+            "_interview_question_advisory_request_schema",
+            _interview_question_advisory_request_schema,
+        )
+    monkeypatch.setattr(
+        capabilities,
+        "ouroboros_tool_capability_metadata",
+        _standalone_tool_metadata,
+    )
+    monkeypatch.setattr(
+        question_advisory_module,
+        "ouroboros_tool_capability_metadata",
+        _standalone_tool_metadata,
+    )
 
 
 def _advisory_payloads() -> list[dict[str, Any]]:
@@ -855,7 +938,7 @@ def test_the_record_never_holds_what_a_child_said(tmp_path: Any) -> None:
     assert "advice" not in on_disk
     record = registry.load(fanout_id)
     assert record is not None
-    assert set(record.synthesizer_input) == {"lane_ids"}
+    assert set(record.synthesizer_input) == {"lane_ids", "phase"}
 
 
 # --------------------------------------------------------------------------- #
@@ -1079,19 +1162,12 @@ def test_the_host_receives_every_read_request_field_verbatim(tmp_path: Any) -> N
     assert delivered["output"] == proposal
 
 
-def test_the_surviving_boundary_is_stated_in_both_host_contracts() -> None:
-    """Both copies, because only one of them ships to each host.
+def test_data_boundary_survives_outside_ordinary_interview_fanout() -> None:
+    """The data contract remains strict while ordinary interviews stop auto-spawning it."""
+    contract_instruction = interview_data_evidence_answer_contract()["runtime_instruction"]
+    assert "interview answer is the user's own words, never yours" in contract_instruction
+    assert "material for their judgment" in contract_instruction
 
-    `skills/` is the canonical source and the wheel's payload;
-    `.claude-plugin/skills/` is what a marketplace install reads. An instruction
-    present in one and absent from the other is absent for half the hosts.
-
-    What each must carry changed with the lane. There is no confirmation
-    surface to describe any more, and correspondingly less standing between a
-    measurement and the Seed: the host putting the number beside the question
-    rather than into the answer is now the whole of it, so that is the sentence
-    that has to be in both.
-    """
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[4]
@@ -1100,21 +1176,10 @@ def test_the_surviving_boundary_is_stated_in_both_host_contracts() -> None:
         root / ".claude-plugin" / "skills" / "interview" / "SKILL.md",
     ):
         content = skill.read_text(encoding="utf-8")
-        assert "there is no `[from-data]` answer to" in content, skill
-        assert "material for the user's" in content, skill
-        # The drop-after-answer duty is what a measurement crossing issuances is
-        # weighed against (see the cross-issuance test above): the server cannot
-        # tell when a payload was produced, so this rule — not a token the child
-        # echoes — is what keeps a late number from re-opening a settled
-        # decision. It is a host duty, so the duty being *stated* is the whole of
-        # what this side can pin, and losing the sentence would silently retire
-        # the guard the accepted risk rests on.
-        assert "already answered the question by the time the measurement" in content, skill
-        assert "drop it" in content, skill
-        assert "evidence informs a\n     decision, it does not revisit one" in content, skill
-        # The retired gate: leaving it would have hosts waiting to confirm a
-        # read that already ran.
-        assert "Run a read only after the user confirms" not in content, skill
+        assert "Do not add data, contrarian, simplifier, or architecture subagents" in content
+        assert "Take a measurement directly only when" in content
+        assert "data_context" not in content
+        assert "[from-data]" not in content
 
 
 # --------------------------------------------------------------------------- #
@@ -1914,14 +1979,8 @@ def test_no_surface_still_asks_the_child_for_a_time() -> None:
     assert "observed_at" not in instruction
 
 
-def test_the_host_is_no_longer_told_to_caption_a_measurement_with_its_time() -> None:
-    """Both copies, because only one of them ships to each host.
-
-    The say-when duty was the field's only consumer — a caption the user read
-    once. It goes with the field, while the drop-after-answer duty stays: with
-    ageing accepted unconditionally, that rule is the whole of what keeps a late
-    measurement from re-opening a settled decision.
-    """
+def test_ordinary_interview_has_no_timestamped_measurement_surface() -> None:
+    """Ordinary interview skills no longer own an automatic measurement lane."""
     from pathlib import Path
 
     for skill in (
@@ -1931,4 +1990,4 @@ def test_the_host_is_no_longer_told_to_caption_a_measurement_with_its_time() -> 
         content = skill.read_text(encoding="utf-8")
         assert "observed_at" not in content, skill
         assert "Say when each was measured" not in content, skill
-        assert "already answered the question by the time the measurement" in content, skill
+        assert "Take a measurement directly only when" in content, skill

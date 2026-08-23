@@ -1183,11 +1183,11 @@ def build_interview_subagent(
     system_prompt = load_agent_prompt("socratic-interviewer")
     seed_closer_summary = _load_seed_closer_summary()
     plugin_question_advisory = """
-## Question-first Advisory Fanout
+## Factual Research Snapshot
 1. Show the interview question first.
-2. Then add a compact helper from: code_context, web_context, ambiguity_contrarian,
-   answer_simplifier, architecture_implications.
-3. Offer options, a draft, or unresolved ambiguities; preserve user agency."""
+2. On start, build code_context and source-backed web_context once.
+3. Reuse scoped artifacts on later turns; emit no ordinary per-question reasoning panel.
+4. Milestone lateral review and closure checks remain separate fresh gates."""
 
     transcript_section = ""
     if transcript:
@@ -1289,7 +1289,7 @@ Continue the interview."""
             else turn_context
         ),
         "adapter_question": adapter_question,
-        "question_advisory_strategy": "plugin_child_question_first_advisory",
+        "question_advisory_strategy": "plugin_child_factual_snapshot",
     }
 
     return build_subagent_payload(

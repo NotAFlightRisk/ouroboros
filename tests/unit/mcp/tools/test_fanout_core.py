@@ -509,26 +509,31 @@ def _emitted_advisory_contract(
 
 
 def _advisory_lane_outputs(meta: Mapping[str, Any], lane_keys: list[str]) -> dict[str, Any]:
-    """Return one contract-satisfying output per emitted lane.
-
-    Only ``data_context`` carries an answer contract, and it is satisfied here
-    with its no-op answer — the response a child gives when the question's
-    honest answer is not a measurement. Every other lane completes on the
-    generic advisory shape, so a plain string stands in for its advice.
-    """
-    identity = ""
-    for payload in meta["question_advisory_subagents"]:
-        context = payload.get("context") or {}
-        if context.get("lane_id") == "data_context":
-            identity = str(context.get("question_identity") or "")
-    outputs: dict[str, Any] = {key: f"{key}-advice" for key in lane_keys}
-    if "data_context" in outputs:
-        outputs["data_context"] = {
+    """Return one contract-satisfying factual output per emitted lane."""
+    identity = str(meta["question_advisory_request"]["question_identity"])
+    outputs: dict[str, Any] = {key: f"{key}-facts" for key in lane_keys}
+    if "web_context" in outputs:
+        outputs["web_context"] = {
             "question_identity": identity,
-            "lane_id": "data_context",
-            "data_needed": False,
-            "read_requests": [],
-            "no_evidence_reason": "not_a_measurement",
+            "lane_id": "web_context",
+            "status": "references_found",
+            "search_queries": ["subscription billing UX official guidance"],
+            "references": [
+                {
+                    "title": "Stripe Billing documentation",
+                    "url": "https://docs.stripe.com/billing",
+                    "source_type": "official",
+                    "relevance": "Primary implementation and lifecycle reference.",
+                    "verified_at": "2026-08-24T00:00:00Z",
+                },
+                {
+                    "title": "W3C Web Payments overview",
+                    "url": "https://www.w3.org/Payments/WG/",
+                    "source_type": "standard",
+                    "relevance": "Standards context for web payment experiences.",
+                    "verified_at": "2026-08-24T00:00:00Z",
+                },
+            ],
         }
     return outputs
 
@@ -584,26 +589,134 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     assert out["kind"] == FANOUT_KIND_QUESTION_ADVISORY
     assert out["correlation_key"] == correlation_key
     assert out["contract_violations"] == {}
+    assert out["provenance"] == {
+        "session_id": session_id,
+        "phase": "answer",
+        "question_identity": str(meta["question_advisory_request"]["question_identity"]),
+    }
     aggregated = out["result"]["aggregated_outputs"]
     assert [item["lane_id"] for item in aggregated] == lane_keys
     assert [item["output"] for item in aggregated] == [outputs[key] for key in lane_keys]
+
+
+def test_generic_web_noop_is_rejected_by_reference_contract(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-web-noop"
+    fanout_id, correlation_key, lane_keys, _meta = _emitted_advisory_contract(registry, session_id)
+    assert lane_keys == ["code_context", "web_context"]
+
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {"key": "code_context", "content": "code facts"},
+            {"key": "web_context", "content": "external research is unnecessary"},
+        ],
+    )
+
+    assert outcome["status"] == "partial"
+    assert outcome["missing_required_keys"] == ["web_context"]
+    assert "web_context" in outcome["contract_violations"]
+
+
+@pytest.mark.asyncio
+async def test_start_fanout_artifact_reduces_follow_up_to_delta_lanes(tmp_path: Any) -> None:
+    """Exercise producer -> submit -> SQLite -> follow-up cache lookup end to end."""
+    registry = FanoutRegistry(tmp_path / "fanout")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = ArtifactStore.for_project(workspace)
+    store.initialize()
+    disposable = DisposableMemory(artifact_store=store)
+    submit = SubmitFanoutResultsHandler(
+        fanout_registry=registry,
+        disposable_memory=disposable,
+    )
+    session_id = "sess-baseline-smoke"
+    start_meta: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        start_meta,
+        session_id=session_id,
+        question="Who is the first user?",
+        phase="start",
+        score=None,
+        research_subject="Add subscription billing to this service",
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+        fanout_registry=registry,
+        findings_store=store,
+    )
+    start_keys = [
+        _resolve_correlated_key(payload, start_meta["question_advisory_result_correlation_key"])
+        for payload in start_meta["question_advisory_subagents"]
+    ]
+    assert start_keys == ["code_context", "web_context"]
+    outputs = _advisory_lane_outputs(start_meta, start_keys)
+
+    submitted = await submit.handle(
+        {
+            "session_id": session_id,
+            "fanout_id": start_meta["question_advisory_fanout_id"],
+            "correlation_key": start_meta["question_advisory_result_correlation_key"],
+            "results": [{"key": key, "content": outputs[key]} for key in start_keys],
+        }
+    )
+    assert submitted.is_ok
+    contract_id = submitted.unwrap().meta["contract_id"]
+    published = disposable.fetch(contract_id).body
+    assert published["provenance"]["session_id"] == session_id
+    assert published["provenance"]["phase"] == "start"
+
+    follow_up: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        follow_up,
+        session_id=session_id,
+        question="What should happen when payment fails?",
+        phase="answer",
+        score=None,
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+        fanout_registry=registry,
+        findings_store=store,
+    )
+
+    assert set(follow_up["question_advisory_cached_lanes"]) == {
+        "code_context",
+        "web_context",
+    }
+    assert {
+        reference["contract_id"]
+        for reference in follow_up["question_advisory_cached_lanes"].values()
+    } == {contract_id}
+    fetch = FetchArtifactHandler(disposable_memory=disposable)
+    for lane_id, reference in follow_up["question_advisory_cached_lanes"].items():
+        fetched = await fetch.handle(
+            {
+                "contract_id": reference["contract_id"],
+                "lane_id": reference["lane_id"],
+            }
+        )
+        assert fetched.is_ok
+        fetched_body = fetched.unwrap().meta
+        assert fetched_body["lane_id"] == lane_id
+        assert fetched_body["body"] == outputs[lane_id]
+    assert "question_advisory_subagents" not in follow_up
+    assert "question_advisory_fanout_id" not in follow_up
+    assert "question_advisory_host_action" not in follow_up
 
 
 @pytest.mark.asyncio
 async def test_advisory_reentry_partial_set_lists_missing_required_lane_ids(
     tmp_path: Any,
 ) -> None:
-    """A subset submission reports the REQUIRED lanes still outstanding.
-
-    Optional lanes are not listed as missing here: their absence does not block
-    completion, so naming them would tell the host to chase output it was never
-    obliged to produce.
-    """
+    """One factual result remains partial until the other required lane arrives."""
     registry = FanoutRegistry(tmp_path)
     session_id = "sess-advisory-partial"
     fanout_id, correlation_key, lane_keys, _meta = _emitted_advisory_contract(registry, session_id)
-    assert len(lane_keys) > 1, "partial-set case needs multiple advisory lanes"
-    optional_first = next(key for key in lane_keys if key not in _required_advisory_lanes())
+    assert lane_keys == ["code_context", "web_context"]
+    first = lane_keys[0]
 
     submit = SubmitFanoutResultsHandler(fanout_registry=registry)
     submit_result = await submit.handle(
@@ -611,15 +724,15 @@ async def test_advisory_reentry_partial_set_lists_missing_required_lane_ids(
             "session_id": session_id,
             "fanout_id": fanout_id,
             "correlation_key": correlation_key,
-            "results": [{"key": optional_first, "content": f"{optional_first}-advice"}],
+            "results": [{"key": first, "content": f"{first}-facts"}],
         }
     )
     assert submit_result.is_ok, submit_result
     out = submit_result.unwrap().meta
     assert out["status"] == "partial"
-    assert out["missing_required_keys"] == _required_advisory_lanes()
-    assert out["missing_keys"] == out["missing_required_keys"]
-    assert out["received_keys"] == [optional_first]
+    assert out["missing_required_keys"] == ["web_context"]
+    assert out["missing_keys"] == ["web_context"]
+    assert out["received_keys"] == [first]
 
 
 @pytest.mark.asyncio
@@ -660,8 +773,8 @@ async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
         assert result.is_ok, result
         return result.unwrap().meta
 
-    optional_first = next(key for key in lane_keys if key not in _required_advisory_lanes())
-    partial = await reply([{"key": optional_first, "content": f"{optional_first}-advice"}])
+    first = lane_keys[0]
+    partial = await reply([{"key": first, "content": f"{first}-facts"}])
     invalid = await reply([{"key": lane_keys[0]}])
     complete = await reply([{"key": key, "content": outputs[key]} for key in lane_keys])
 
@@ -674,7 +787,7 @@ async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
     # And the incomplete replies keep saying why, which is the other half of
     # what the skills act on.
     assert partial["status"] == "partial"
-    assert partial["missing_required_keys"]
+    assert partial["missing_required_keys"] == ["web_context"]
     assert invalid["status"] == "invalid_result_entry"
     assert "status" not in complete
 
@@ -696,6 +809,19 @@ async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
         assert "dispatch_subagents_if_supported" in skill, root
         assert "process_payloads_sequentially" in skill, root
         assert "host action selects the execution strategy" in skill, root
+
+
+def test_interview_skill_surfaces_match_on_snapshot_contract() -> None:
+    roots = (Path("skills/interview/SKILL.md"), Path(".claude-plugin/skills/interview/SKILL.md"))
+    marker = "**Factual research snapshot**"
+    end = "   **Milestone lateral-review dispatch**"
+    sections: list[str] = []
+    for root in roots:
+        skill = root.read_text(encoding="utf-8")
+        start = skill.index(marker)
+        stop = skill.index(end, start)
+        sections.append(skill[start:stop])
+    assert sections[0] == sections[1]
 
 
 @pytest.mark.asyncio

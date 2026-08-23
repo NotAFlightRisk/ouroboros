@@ -2288,7 +2288,7 @@ class InterviewHandler:
                 "action": action,
                 "status": DELEGATED_TO_SUBAGENT,
                 "dispatch_mode": "plugin",
-                "question_advisory_strategy": "plugin_child_question_first_advisory",
+                "question_advisory_strategy": "plugin_child_factual_snapshot",
                 "question_advisory_recommended": True,
                 **_interview_reasoning_meta(
                     state=plugin_state,
@@ -2665,6 +2665,7 @@ class InterviewHandler:
                             question=question,
                             phase="start",
                             score=live_score,
+                            research_subject=resolved_context.value,
                             dispatch_mode=resolve_request_subagent_dispatch(
                                 self.agent_runtime_backend, self.opencode_mode
                             ),
@@ -3313,6 +3314,7 @@ class InterviewHandler:
                             question=pending_question,
                             phase="resume_pending",
                             score=_load_state_ambiguity_score(state),
+                            research_subject=state.initial_context,
                             dispatch_mode=resolve_request_subagent_dispatch(
                                 self.agent_runtime_backend, self.opencode_mode
                             ),
@@ -3592,6 +3594,7 @@ class InterviewHandler:
                     question=question,
                     phase="answer",
                     score=live_score,
+                    research_subject=state.initial_context,
                     dispatch_mode=resolve_request_subagent_dispatch(
                         self.agent_runtime_backend, self.opencode_mode
                     ),
