@@ -125,6 +125,40 @@ _REQUIRE_CLIENT_GATES_ENV = "OUROBOROS_REQUIRE_CLIENT_GATES"
 _NORMALIZED_TURN_CONTEXT_KEY = "_normalized_interview_turn_context"
 
 
+def _engine_supports_calibration(engine: Any) -> bool:
+    """Return whether *engine* accepts the ``language_calibration`` keyword.
+
+    The check uses signature inspection so that injected/custom/fake engines
+    that implement only the established ``ask_next_question(state)`` contract
+    are never passed the unsupported keyword.
+    """
+    import inspect
+
+    method = getattr(engine, "ask_next_question", None)
+    if method is None:
+        return False
+    try:
+        sig = inspect.signature(method)
+    except (ValueError, TypeError):
+        return False
+    return "language_calibration" in sig.parameters
+
+
+async def _ask_next_question(
+    engine: Any,
+    state: Any,
+    calibration: Any | None,
+) -> Any:
+    """Call *engine.ask_next_question* with optional calibration support.
+
+    If the engine supports the ``language_calibration`` keyword it is
+    forwarded; otherwise the call uses the established one-argument form.
+    """
+    if calibration is not None and _engine_supports_calibration(engine):
+        return await engine.ask_next_question(state, language_calibration=calibration)
+    return await engine.ask_next_question(state)
+
+
 def _elapsed_ms(started_at: float) -> float:
     """Return a stable monotonic duration suitable for diagnostic events."""
     return round((time.perf_counter() - started_at) * 1000, 3)
@@ -2599,9 +2633,7 @@ class InterviewHandler:
                 live_score = None
                 question_generation_started_at = time.perf_counter()
                 try:
-                    question_result = await engine.ask_next_question(
-                        state, language_calibration=calibration
-                    )
+                    question_result = await _ask_next_question(engine, state, calibration)
                 finally:
                     question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
                 if question_result.is_err:
@@ -3275,18 +3307,14 @@ class InterviewHandler:
                     )
                 question_generation_started_at = time.perf_counter()
                 try:
-                    question_result = await engine.ask_next_question(
-                        state, language_calibration=calibration
-                    )
+                    question_result = await _ask_next_question(engine, state, calibration)
                 finally:
                     question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
             else:
                 live_score = None
                 question_generation_started_at = time.perf_counter()
                 try:
-                    question_result = await engine.ask_next_question(
-                        state, language_calibration=calibration
-                    )
+                    question_result = await _ask_next_question(engine, state, calibration)
                 finally:
                     question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
             return await self._respond_with_next_question(
@@ -3459,9 +3487,7 @@ class InterviewHandler:
             live_score = _load_state_ambiguity_score(state)
             question_generation_started_at = time.perf_counter()
             try:
-                question_result = await engine.ask_next_question(
-                    state, language_calibration=calibration
-                )
+                question_result = await _ask_next_question(engine, state, calibration)
             finally:
                 question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
             return await self._respond_with_next_question(

@@ -48,7 +48,7 @@ wording safely. Otherwise continue immediately.
 
 ### 2. Estimate a local level and confidence
 
-Assign each mentioned domain or concept one of these explanation levels:
+Assign one overall interview explanation level based on the user's evidence:
 
 - **Foundational** — use plain language, define necessary terms before using
   them, and give one concrete example.
@@ -57,9 +57,14 @@ Assign each mentioned domain or concept one of these explanation levels:
 - **Fluent** — use precise domain terminology and concise trade-off language;
   skip definitions unless requested.
 
+When the user mentions multiple domains with mixed familiarity, select the level
+that ensures the least-familiar domain remains accessible (conservative default:
+choose the lower level). The session carries one active level and applies it to
+all subsequent interview questions.
+
 Also record confidence as `low`, `medium`, or `high` based on how direct and
 specific the evidence is. Prefer the less aggressive inference when evidence is
-mixed. Different domains may have different levels.
+mixed.
 
 ### 3. Produce the active calibration
 

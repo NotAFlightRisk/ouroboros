@@ -80,13 +80,22 @@ async def handle_interview_calibration_turn(
         "- Adaptation: define terms first and add at most one neutral example.",
     ]
     if pending_question is not None:
-        lines.extend(
-            [
-                "",
-                "Here is the same decision in plainer language:",
-                rephrased_question or pending_question,
-            ]
-        )
+        if rephrased_question is not None:
+            lines.extend(
+                [
+                    "",
+                    "Here is the same decision in plainer language:",
+                    rephrased_question,
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "",
+                    "Rephrasing was not available. The pending question is unchanged:",
+                    pending_question,
+                ]
+            )
     else:
         lines.extend(["", "This calibration applies to the next interview question."])
 
