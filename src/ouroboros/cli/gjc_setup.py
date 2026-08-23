@@ -16,6 +16,57 @@ from ouroboros.runtime_instruction_artifacts import gjc_agent_dir
 _GJC_MCP_BRIDGE_CONFIG_CONTENT = "# Managed by ouroboros setup --runtime gjc\nmcp_servers: []\n"
 
 
+_GJC_AUTOLOAD_HELP_MARKERS = (
+    "ordinary standalone sessions load at startup",
+    "registrations are consumed by ordinary standalone gjc sessions at startup",
+    "conventional autoload",
+)
+_GJC_STORAGE_ONLY_HELP_MARKERS = (
+    "storage-only",
+    "standalone sessions do not load stored registrations",
+    "standalone sessions don't load stored registrations",
+)
+
+
+def gjc_supports_standalone_mcp_autoload(
+    gjc_path: str,
+    *,
+    run_command: Callable[..., subprocess.CompletedProcess[str]],
+) -> bool:
+    """Prove that this GJC build loads stored MCP registrations at runtime."""
+    try:
+        completed = run_command(
+            [gjc_path, "mcp", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        print_error(f"Could not verify GJC standalone MCP support: {exc}")
+        return False
+    help_text = f"{completed.stdout}\n{completed.stderr}".lower()
+    if completed.returncode == 0 and not any(
+        marker in help_text for marker in _GJC_STORAGE_ONLY_HELP_MARKERS
+    ) and any(marker in help_text for marker in _GJC_AUTOLOAD_HELP_MARKERS):
+        return True
+    if any(marker in help_text for marker in _GJC_STORAGE_ONLY_HELP_MARKERS):
+        print_error(
+            "This GJC release stores MCP registrations but does not load them in ordinary "
+            "standalone sessions. Ouroboros setup stopped before changing the GJC projection "
+            "or removing the legacy input bridge. Upgrade to a GJC release whose `gjc mcp "
+            "--help` documents conventional autoload; until then, run Ouroboros commands "
+            "from the `ouroboros` CLI with `--runtime gjc`."
+        )
+    else:
+        print_error(
+            "GJC did not provide a verifiable standalone MCP autoload contract. Ouroboros "
+            "setup stopped before changing the GJC projection or removing the legacy input "
+            "bridge."
+        )
+    return False
+
+
 def gjc_mcp_bridge_config_path() -> Path:
     """Return the setup-owned empty upstream bridge config for GJC sessions."""
     return gjc_agent_dir() / "ouroboros" / "mcp-bridge.yaml"
@@ -94,12 +145,14 @@ def is_setup_managed_gjc_mcp_entry(entry: object) -> bool:
         and _is_exact_launcher_args(command, args)
     )
 
+
 def is_runtime_loaded_gjc_mcp_entry(entry: object) -> bool:
-    """Return whether GJC will autoload the exact setup-owned endpoint."""
+    """Return whether GJC reports the exact endpoint as runtime-loaded."""
     return (
         is_setup_managed_gjc_mcp_entry(entry)
         and isinstance(entry, dict)
         and entry.get("runtimeStatus") == "autoload"
+        and entry.get("runtimeLoadedByStandalone", True) is not False
     )
 
 
@@ -196,9 +249,11 @@ def register_gjc_mcp_server(
     detected: dict[str, object] | None = None,
     registration_state: dict[str, bool] | None = None,
 ) -> bool:
-    """Register and validate the isolated Ouroboros MCP server through GJC."""
+    """Register the isolated server only when standalone GJC can load it."""
     if registration_state is not None:
         registration_state.update(created=False, changed=False)
+    if not gjc_supports_standalone_mcp_autoload(gjc_path, run_command=run_command):
+        return False
     detected = detected or detect_mcp_entry(package_spec="ouroboros-ai[mcp]")
     if detected is None:
         print_error(
@@ -219,8 +274,9 @@ def register_gjc_mcp_server(
             return False
         if not is_runtime_loaded_gjc_mcp_entry(existing):
             print_error(
-                "The stored Ouroboros MCP server is not autoloaded by ordinary GJC sessions. "
-                "Upgrade GJC or enable conventional MCP autoload, then re-run setup."
+                "GJC did not report the stored Ouroboros MCP server as loaded by ordinary "
+                "standalone sessions. The existing registration and legacy input bridge "
+                "were preserved."
             )
             return False
         print_info("Ouroboros MCP server in GJC is already active and up to date.")
@@ -260,13 +316,14 @@ def register_gjc_mcp_server(
     validated_ok, validated = _listed_gjc_mcp_entry(gjc_path, run_command)
     if not validated_ok or not is_runtime_loaded_gjc_mcp_entry(validated):
         print_warning(
-            "GJC did not expose the expected Ouroboros MCP server as an autoloaded runtime endpoint."
+            "GJC accepted the registration but did not report it as a runtime-loaded "
+            "standalone endpoint."
         )
         if existing is None and remove_gjc_mcp_server(gjc_path, run_command=run_command):
             if registration_state is not None:
                 registration_state.update(created=False, changed=False)
         return False
-    print_success("Registered autoloaded Ouroboros MCP server in GJC.")
+    print_success("Registered runtime-loaded Ouroboros MCP server in GJC.")
     return True
 
 

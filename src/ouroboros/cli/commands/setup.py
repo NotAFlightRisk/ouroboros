@@ -3797,10 +3797,10 @@ def _install_gjc_runtime_artifacts(
     try:
         snapshots = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
         succeeded = (
-            _install_gjc_mcp_bridge_config()
+            _register_gjc_mcp_server(gjc_path, registration_state=state)
+            and _install_gjc_mcp_bridge_config()
             and _install_gjc_skills()
             and _install_runtime_instruction_artifact("gjc")
-            and _register_gjc_mcp_server(gjc_path, registration_state=state)
             and _remove_legacy_gjc_bridge()
         )
     except OSError as exc:

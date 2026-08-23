@@ -9781,6 +9781,84 @@ class TestGjcSetup:
         bridge_config = agent_dir / "ouroboros" / "mcp-bridge.yaml"
         assert bridge_config.read_text(encoding="utf-8").endswith("mcp_servers: []\n")
 
+    @staticmethod
+    def _gjc_autoload_help() -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            ["gjc", "mcp", "--help"],
+            0,
+            stdout=(
+                "Register MCP servers that ordinary standalone sessions load at startup\n"
+                "Registrations are consumed by ordinary standalone gjc sessions at startup "
+                "(conventional autoload)."
+            ),
+            stderr="",
+        )
+
+    def test_register_gjc_mcp_fails_before_registration_for_storage_only_cli(self) -> None:
+        storage_only_help = subprocess.CompletedProcess(
+            ["gjc", "mcp", "--help"],
+            0,
+            stdout=(
+                "This command stores MCP definitions only. Normal standalone sessions do not "
+                "load stored registrations (storage-only)."
+            ),
+            stderr="",
+        )
+
+        with patch(
+            "ouroboros.cli.commands.setup.subprocess.run", return_value=storage_only_help
+        ) as run:
+            assert not setup_cmd._register_gjc_mcp_server(
+                "/opt/bin/gjc",
+                detected={"command": "uvx", "args": []},
+            )
+
+        run.assert_called_once_with(
+            ["/opt/bin/gjc", "mcp", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+    def test_setup_gjc_storage_only_preserves_legacy_route_and_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n"
+        config_path.write_text(original, encoding="utf-8")
+        agent_dir = tmp_path / "gjc-agent"
+        bridge = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text("legacy user route\n", encoding="utf-8")
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+        storage_only_help = subprocess.CompletedProcess(
+            ["gjc", "mcp", "--help"],
+            0,
+            stdout="Standalone sessions do not load stored registrations (storage-only).",
+            stderr="",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup.subprocess.run", return_value=storage_only_help),
+        ):
+            result = CliRunner().invoke(
+                setup_cmd.app, ["--runtime", "gjc", "--non-interactive"]
+            )
+
+        assert result.exit_code == 1
+        assert "stores MCP registrations but does not load them" in result.output
+        assert "Setup complete!" not in result.output
+        assert config_path.read_text(encoding="utf-8") == original
+        assert bridge.read_text(encoding="utf-8") == "legacy user route\n"
+        assert not (agent_dir / "skills").exists()
+        assert not (agent_dir / "rules").exists()
+        assert not (agent_dir / "ouroboros").exists()
+
     def test_register_gjc_mcp_uses_public_cli_and_binds_gjc_backends(self) -> None:
         listed = subprocess.CompletedProcess(
             ["gjc", "mcp", "list", "--json"],
@@ -9817,7 +9895,7 @@ class TestGjcSetup:
         )
         with patch(
             "ouroboros.cli.commands.setup.subprocess.run",
-            side_effect=[listed, added, validated],
+            side_effect=[self._gjc_autoload_help(), listed, added, validated],
         ) as run:
             assert setup_cmd._register_gjc_mcp_server(
                 "/opt/bin/gjc",
@@ -9827,7 +9905,7 @@ class TestGjcSetup:
                 },
             )
 
-        add_args = run.call_args_list[1].args[0]
+        add_args = run.call_args_list[2].args[0]
         assert add_args[:5] == ["/opt/bin/gjc", "mcp", "add", "ouroboros", "--command"]
         forwarded_args = [
             value.removeprefix("--arg=") for value in add_args if value.startswith("--arg=")
@@ -9876,12 +9954,33 @@ class TestGjcSetup:
             check=False,
         )
         try:
+            help_result = subprocess.run(
+                [gjc_path, "mcp", "--help"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            help_text = f"{help_result.stdout}\n{help_result.stderr}".lower()
+            supports_autoload = (
+                help_result.returncode == 0
+                and "storage-only" not in help_text
+                and "standalone sessions do not load stored registrations" not in help_text
+                and "ordinary standalone sessions" in help_text
+                and "autoload" in help_text
+            )
             assert added.returncode == 0, added.stderr
             assert listed.returncode == 0, listed.stderr
             entry = next(
-                item for item in json.loads(listed.stdout)["servers"] if item["name"] == "ouroboros"
+                item
+                for item in json.loads(listed.stdout)["servers"]
+                if item["name"] == "ouroboros"
             )
-            assert entry["runtimeStatus"] == "autoload"
+            if supports_autoload:
+                assert entry["runtimeStatus"] == "autoload"
+                assert entry.get("runtimeLoadedByStandalone", True) is not False
+            else:
+                assert entry["runtimeStatus"] == "storage-only"
+                assert entry.get("runtimeLoadedByStandalone") is False
         finally:
             subprocess.run(
                 [gjc_path, "mcp", "remove", "ouroboros", "--json"],
@@ -9901,7 +10000,7 @@ class TestGjcSetup:
         removed = subprocess.CompletedProcess(["gjc", "mcp", "remove"], 0, stdout="{}", stderr="")
         with patch(
             "ouroboros.cli.commands.setup.subprocess.run",
-            side_effect=[empty, added, empty, removed],
+            side_effect=[self._gjc_autoload_help(), empty, added, empty, removed],
         ) as run:
             assert not setup_cmd._register_gjc_mcp_server(
                 "/opt/bin/gjc",
@@ -9949,12 +10048,15 @@ class TestGjcSetup:
             ),
             stderr="",
         )
-        with patch("ouroboros.cli.commands.setup.subprocess.run", return_value=listed) as run:
+        with patch(
+            "ouroboros.cli.commands.setup.subprocess.run",
+            side_effect=[self._gjc_autoload_help(), listed],
+        ) as run:
             assert not setup_cmd._register_gjc_mcp_server(
                 "/opt/bin/gjc",
                 detected={"command": "uvx", "args": ["--from", "ouroboros-ai[mcp]"]},
             )
-        run.assert_called_once()
+        assert run.call_count == 2
 
     @pytest.mark.parametrize("runtime_status", ["storage-only", "disabled", None])
     def test_register_gjc_mcp_rejects_non_autoloaded_managed_entry(
@@ -9986,7 +10088,10 @@ class TestGjcSetup:
             stdout=json.dumps({"servers": [entry]}),
             stderr="",
         )
-        with patch("ouroboros.cli.commands.setup.subprocess.run", return_value=listed):
+        with patch(
+            "ouroboros.cli.commands.setup.subprocess.run",
+            side_effect=[self._gjc_autoload_help(), listed],
+        ):
             assert not setup_cmd._register_gjc_mcp_server(
                 "/opt/bin/gjc",
                 detected={"command": "uvx", "args": []},

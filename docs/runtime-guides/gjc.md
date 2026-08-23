@@ -31,9 +31,10 @@ GJC agent events
 
 So "GJC is an Ouroboros runtime" means step 2b exists and is selectable. It
 does not mean GJC internals are imported into Ouroboros. Interactive GJC gains
-the Ouroboros command surface only after setup projects namespaced skills,
-an always-applied exact-command routing table, and the Ouroboros MCP registration
-into the active GJC agent profile.
+the Ouroboros command surface only when the installed GJC release can load its
+stored MCP registrations in ordinary standalone sessions and setup has projected
+the namespaced skills, always-applied exact-command routing table, and isolated
+Ouroboros MCP registration into the active GJC agent profile.
 
 ## Prerequisites
 
@@ -50,14 +51,21 @@ into the active GJC agent profile.
 gjc
 
 # 2. Point Ouroboros at GJC and install the GJC skill/MCP projection
+#    Setup fails without changing the existing route on storage-only releases.
 ouroboros setup --runtime gjc
 
-# 3. Restart GJC so it loads the projected skills, routing rule, and MCP server
+# 3. After successful setup, restart GJC so it loads the projection
 gjc
 
 # 4. Use Ouroboros commands in the GJC session
 ooo auto build a small CLI
 ```
+
+GJC 0.12.7 stores `gjc mcp add` definitions but does not load them in ordinary
+standalone sessions. Setup detects that storage-only contract before writing
+projection files or runtime configuration and before removing an existing
+legacy input bridge. Upgrade GJC for the interactive command surface, or use
+the executable `ouroboros` CLI path with `--runtime gjc` in the meantime.
 
 If GJC is installed outside `PATH`, set:
 
@@ -148,7 +156,9 @@ skills. The always-applied rule maps exact `ooo <command>` prefixes to the match
 `/skill:ouroboros-<command>` entry before generic planning, search, or GJC's own
 `deep-interview` routing. Arguments after the prefix are preserved verbatim.
 
-GJC autoloads the isolated Ouroboros MCP server from its own native MCP config.
+On a supported release, GJC autoloads the isolated Ouroboros MCP server from its
+own native MCP config. Setup proves this capability from the installed CLI
+before mutating the projection; accepting `gjc mcp add` alone is not sufficient.
 The GJC-specific child uses an empty setup-owned upstream bridge config because
 GJC already owns the host tool catalog; this avoids recursively starting the
 user's separate `~/.ouroboros/mcp_servers.yaml` fan-in during session startup.
@@ -200,8 +210,8 @@ JSON extraction and validation rather than provider-native schema enforcement.
 | Native permission override | No; RPC mode is headless but exposes no per-invocation approval flag, so `permission_mode_support=ignored` |
 | Structured schema responses as LLM backend | Soft-enforced and validated |
 | Hard tool/schema envelope | No in v1 |
-| GJC extension loading | GJC-owned; Ouroboros installs no executable GJC extension |
-| Interactive GJC `ooo` frontdoor | Yes, via namespaced skills + always-applied routing + native MCP autoload |
+| GJC extension loading | GJC-owned; successful setup installs no executable GJC extension |
+| Interactive GJC `ooo` frontdoor | Yes only when the installed GJC reports conventional standalone MCP autoload; storage-only releases fail setup without replacing the prior route |
 
 ## v1 Limitations
 
@@ -229,6 +239,10 @@ provider error and prompt output; malformed JSON or schema-invalid payloads are
 rejected by Ouroboros after extraction and validation.
 
 **`ooo ...` is sent to the wrong GJC workflow**
-Run `ouroboros setup --runtime gjc`, restart GJC, and verify that
-`gjc skills discover --source user --json` lists `ouroboros-interview` and
-`gjc mcp list --json` reports `ouroboros` with `runtimeStatus: "autoload"`.
+Run `gjc mcp --help` first. It must state that ordinary standalone sessions load
+registrations at startup; GJC 0.12.7's storage-only registration is not an
+interactive integration path. After `ouroboros setup --runtime gjc` succeeds,
+restart GJC and verify that `gjc skills discover --source user --json` lists
+`ouroboros-interview` and `gjc mcp list --json` reports `ouroboros` with
+`runtimeStatus: "autoload"` and does not report
+`runtimeLoadedByStandalone: false`.

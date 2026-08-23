@@ -253,10 +253,14 @@ ouroboros setup [OPTIONS]
 For Pi, setup also installs `~/.pi/agent/extensions/ouroboros-ooo-bridge.ts`.
 Restart Pi or run `/reload` and interactive Pi/roach-pi sessions can dispatch
 `ooo ...` commands into Ouroboros through the shared skill router.
-For GJC, setup installs namespaced `ouroboros-*` skills, an always-applied exact
-`ooo` routing rule, and an isolated Ouroboros MCP registration into the active
-`<agent-dir>` profile. No executable GJC extension is installed. Restart GJC to
-load the projected command surface.
+For GJC, setup first verifies that the installed CLI loads stored MCP
+registrations in ordinary standalone sessions. Supported releases receive
+namespaced `ouroboros-*` skills, an always-applied exact `ooo` routing rule, and
+an isolated Ouroboros MCP registration in the active `<agent-dir>` profile;
+restart GJC to load that projected command surface. Storage-only releases such
+as GJC 0.12.7 are rejected before setup writes the projection, changes the
+Ouroboros runtime configuration, or removes an existing legacy input bridge.
+Use the `ouroboros` CLI with `--runtime gjc` until GJC is upgraded.
 
 **Examples:**
 
