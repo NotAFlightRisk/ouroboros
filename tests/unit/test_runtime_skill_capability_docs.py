@@ -73,6 +73,20 @@ def test_architecture_runtime_inventory_matches_backend_registry() -> None:
         assert aliases == set(capability.aliases)
 
 
+def test_readme_runtime_summary_defers_to_canonical_registry() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+    summary = next(
+        line for line in readme.splitlines() if line.startswith("- **Runtime backends**")
+    )
+
+    # The public summary deliberately names the registry as the exhaustive
+    # source instead of maintaining a second list that can drift.
+    assert "every canonical backend returned by `runtime_backend_choices()`" in summary
+    highlighted_backends = {"gjc", "antigravity", "grok", "zcode"}
+    assert highlighted_backends <= set(runtime_backend_choices())
+    assert all(backend.casefold() in summary.casefold() for backend in highlighted_backends)
+
+
 def test_cli_reference_documents_recovery_and_inspection_commands() -> None:
     docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
     overview = docs.split("## Commands Overview", 1)[1].split("\n---\n", 1)[0]
