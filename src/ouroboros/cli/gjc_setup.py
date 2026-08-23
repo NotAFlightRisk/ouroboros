@@ -15,6 +15,15 @@ from ouroboros.runtime_instruction_artifacts import gjc_agent_dir
 
 _GJC_MCP_BRIDGE_CONFIG_CONTENT = "# Managed by ouroboros setup --runtime gjc\nmcp_servers: []\n"
 
+_GJC_MCP_SHARING = "per-session"
+_GJC_MCP_TIMEOUT = 30000
+_GJC_MCP_RUNTIME_STATUS = "autoload"
+
+
+def gjc_mcp_config_path() -> Path:
+    """Return GJC's durable user MCP registration file."""
+    return gjc_agent_dir() / "mcp.json"
+
 
 def gjc_mcp_bridge_config_path() -> Path:
     """Return the setup-owned empty upstream bridge config for GJC sessions."""
@@ -79,20 +88,76 @@ def _is_exact_launcher_args(command: str, args: Sequence[object]) -> bool:
     return list(args) == expected
 
 
-def is_setup_managed_gjc_mcp_entry(entry: object) -> bool:
-    """Return whether *entry* exactly matches a setup-owned GJC launcher."""
+def _gjc_mcp_config(entry: object) -> dict[str, object] | None:
+    """Return the execution config from either a CLI row or persistent entry."""
     if not isinstance(entry, dict):
-        return False
-    config = entry.get("config")
-    if not isinstance(config, dict) or config.get("type") != "stdio":
+        return None
+    nested = entry.get("config")
+    if isinstance(nested, dict):
+        return nested
+    return entry
+
+
+def is_setup_managed_gjc_mcp_entry(
+    entry: object, *, allow_redacted_env: bool = False
+) -> bool:
+    """Return whether *entry* exactly matches setup's execution contract."""
+    config = _gjc_mcp_config(entry)
+    if config is None:
         return False
     command = config.get("command")
     args = config.get("args")
+    env = config.get("env")
+    expected_env_values = {str(gjc_mcp_bridge_config_path())}
+    if allow_redacted_env:
+        expected_env_values.add("<redacted>")
     return (
-        isinstance(command, str)
+        config.get("type") == "stdio"
+        and isinstance(command, str)
         and isinstance(args, list)
         and _is_exact_launcher_args(command, args)
+        and isinstance(env, dict)
+        and set(env) == {"OUROBOROS_MCP_CONFIG"}
+        and env.get("OUROBOROS_MCP_CONFIG") in expected_env_values
+        and config.get("sharing") == _GJC_MCP_SHARING
+        and config.get("timeout") == _GJC_MCP_TIMEOUT
     )
+
+
+def is_active_gjc_mcp_entry(entry: object) -> bool:
+    """Return whether GJC reports the registration as session-autoloaded."""
+    return isinstance(entry, dict) and entry.get("runtimeStatus") == _GJC_MCP_RUNTIME_STATUS
+
+
+def persisted_gjc_mcp_entry(path: Path | None = None) -> dict[str, object] | None:
+    """Read the durable Ouroboros registration without requiring the GJC launcher."""
+    config_path = path or gjc_mcp_config_path()
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    servers = payload.get("mcpServers") if isinstance(payload, dict) else None
+    entry = servers.get("ouroboros") if isinstance(servers, dict) else None
+    return entry if isinstance(entry, dict) else None
+
+
+def remove_persisted_gjc_mcp_server(path: Path | None = None) -> bool:
+    """Remove only an exactly setup-owned durable entry, preserving sibling servers."""
+    config_path = path or gjc_mcp_config_path()
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    servers = payload.get("mcpServers") if isinstance(payload, dict) else None
+    entry = servers.get("ouroboros") if isinstance(servers, dict) else None
+    if not is_setup_managed_gjc_mcp_entry(entry):
+        return False
+    del servers["ouroboros"]
+    try:
+        config_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
 
 
 def _listed_gjc_mcp_entry(
@@ -181,10 +246,24 @@ def register_gjc_mcp_server(
     if not listed_ok:
         return False
     if existing is not None:
-        if not is_setup_managed_gjc_mcp_entry(existing):
-            print_info("Preserved existing user-managed Ouroboros MCP config in GJC.")
-        else:
-            print_info("Ouroboros MCP server in GJC is already up to date.")
+        persisted = persisted_gjc_mcp_entry()
+        if not (
+            is_setup_managed_gjc_mcp_entry(existing, allow_redacted_env=True)
+            and is_setup_managed_gjc_mcp_entry(persisted)
+        ):
+            print_error(
+                "GJC already has an MCP server named 'ouroboros' that is not the "
+                "complete setup-owned registration. Preserved it, but native "
+                "Ouroboros activation cannot be verified."
+            )
+            return False
+        if not is_active_gjc_mcp_entry(existing):
+            print_error(
+                "The existing Ouroboros MCP server is not autoloaded by GJC; "
+                "preserved it and kept the legacy route intact."
+            )
+            return False
+        print_info("Ouroboros MCP server in GJC is already up to date and autoloaded.")
         return True
     command = detected.get("command")
     raw_args = detected.get("args")
@@ -206,9 +285,9 @@ def register_gjc_mcp_server(
         *(f"--arg={arg}" for arg in server_args),
         f"--env=OUROBOROS_MCP_CONFIG={gjc_mcp_bridge_config_path()}",
         "--sharing",
-        "per-session",
+        _GJC_MCP_SHARING,
         "--timeout",
-        "30000",
+        str(_GJC_MCP_TIMEOUT),
         "--json",
     ]
     try:
@@ -229,9 +308,19 @@ def register_gjc_mcp_server(
     if registration_state is not None:
         registration_state.update(created=existing is None, changed=True)
     validated_ok, validated = _listed_gjc_mcp_entry(gjc_path, run_command)
-    if not validated_ok or not is_setup_managed_gjc_mcp_entry(validated):
-        print_warning("GJC did not retain the expected Ouroboros MCP registration.")
-        if existing is None:
+    persisted = persisted_gjc_mcp_entry()
+    if (
+        not validated_ok
+        or not is_setup_managed_gjc_mcp_entry(validated, allow_redacted_env=True)
+        or not is_setup_managed_gjc_mcp_entry(persisted)
+        or not is_active_gjc_mcp_entry(validated)
+    ):
+        print_warning("GJC did not retain and autoload the expected Ouroboros MCP registration.")
+        if existing is None and (
+            is_setup_managed_gjc_mcp_entry(validated, allow_redacted_env=True)
+            and is_setup_managed_gjc_mcp_entry(persisted)
+            and is_active_gjc_mcp_entry(validated)
+        ):
             remove_gjc_mcp_server(gjc_path, run_command=run_command)
             if registration_state is not None:
                 registration_state.update(created=False, changed=False)
@@ -271,7 +360,6 @@ def remove_legacy_gjc_bridge() -> bool:
     print_info("Removed obsolete GJC input bridge; native skills now own ooo routing.")
     return True
 
-
 def setup_gjc_runtime(
     gjc_path: str,
     *,
@@ -280,23 +368,25 @@ def setup_gjc_runtime(
     snapshot_path: Callable[..., object],
     restore_path_snapshot: Callable[..., None],
 ) -> bool:
-    """Configure GJC and roll back every owned path when activation fails."""
+    """Configure GJC and roll back only unchanged setup-owned generations."""
     from ouroboros.config.loader import create_default_config, ensure_config_dir
-    from ouroboros.gjc import gjc_skills_root
+    from ouroboros.gjc import setup_owned_gjc_skill_paths
     from ouroboros.runtime_instruction_artifacts import gjc_instruction_path
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
+    agent_dir = gjc_agent_dir()
     paths = (
         config_path,
         config_dir / "credentials.yaml",
-        gjc_skills_root(gjc_agent_dir()),
-        gjc_instruction_path().parent,
-        gjc_mcp_bridge_config_path().parent,
-        gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge",
+        *setup_owned_gjc_skill_paths(agent_dir=agent_dir),
+        gjc_instruction_path(),
+        gjc_mcp_bridge_config_path(),
+        agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts",
     )
     registration_state: dict[str, bool] = {}
     snapshots: tuple[tuple[Path, Any], ...] = ()
+    expected: tuple[tuple[Path, Any], ...] = ()
     try:
         snapshots = tuple((path, snapshot_path(path, follow_links=False)) for path in paths)
         if config_path.exists():
@@ -304,9 +394,11 @@ def setup_gjc_runtime(
         else:
             create_default_config(config_dir)
             config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        expected = tuple((path, snapshot_path(path, follow_links=False)) for path in paths)
+        config_generation = dict(expected)[config_path]
         if not isinstance(config, dict):
             print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting GJC setup.")
-            _restore_gjc_paths(snapshots, restore_path_snapshot)
+            _restore_gjc_paths(snapshots, expected, restore_path_snapshot, snapshot_path)
             return False
 
         orchestrator = config.get("orchestrator")
@@ -322,12 +414,18 @@ def setup_gjc_runtime(
 
         if not install_runtime_artifacts(gjc_path, registration_state=registration_state):
             raise OSError("runtime artifact activation failed")
+        current_after_activation = {
+            path: snapshot_path(path, follow_links=False) for path in paths
+        }
+        current_after_activation[config_path] = config_generation
+        expected = tuple(current_after_activation.items())
         atomic_write_text(
             config_path,
             yaml.dump(config, default_flow_style=False, sort_keys=False),
+            expected_current=config_generation,
         )
     except (OSError, yaml.YAMLError) as exc:
-        _restore_gjc_paths(snapshots, restore_path_snapshot)
+        _restore_gjc_paths(snapshots, expected, restore_path_snapshot, snapshot_path)
         _rollback_new_gjc_mcp_registration(gjc_path, registration_state)
         print_error(f"GJC setup failed; restored the previous state: {exc}")
         return False
@@ -339,11 +437,18 @@ def setup_gjc_runtime(
 
 def _restore_gjc_paths(
     snapshots: tuple[tuple[Path, Any], ...],
+    expected: tuple[tuple[Path, Any], ...],
     restore_path_snapshot: Callable[..., None],
+    snapshot_path: Callable[..., object],
 ) -> None:
     failures: list[str] = []
+    expected_by_path = dict(expected)
     for path, snapshot in reversed(snapshots):
         try:
+            expected_current = expected_by_path.get(path)
+            if expected_current is not None and snapshot_path(path, follow_links=False) != expected_current:
+                print_warning(f"Preserved concurrently changed GJC setup path: {path}")
+                continue
             restore_path_snapshot(path, snapshot, restore_link_targets=False)
         except OSError as exc:
             failures.append(f"{path}: {exc}")
@@ -351,8 +456,20 @@ def _restore_gjc_paths(
         print_warning("GJC setup rollback was incomplete: " + "; ".join(failures))
 
 
+
 def _rollback_new_gjc_mcp_registration(gjc_path: str, registration_state: dict[str, bool]) -> None:
     if not registration_state.get("created"):
+        return
+    listed_ok, current = _listed_gjc_mcp_entry(gjc_path, subprocess.run)
+    persisted = persisted_gjc_mcp_entry()
+    if not listed_ok or not (
+        is_setup_managed_gjc_mcp_entry(current, allow_redacted_env=True)
+        and is_setup_managed_gjc_mcp_entry(persisted)
+        and is_active_gjc_mcp_entry(current)
+    ):
+        print_warning(
+            "Preserved the GJC MCP registration because it changed after setup created it."
+        )
         return
     if remove_gjc_mcp_server(gjc_path, run_command=subprocess.run):
         registration_state.update(created=False, changed=False)
@@ -362,11 +479,13 @@ def _rollback_new_gjc_mcp_registration(gjc_path: str, registration_state: dict[s
 
 def rollback_gjc_activation(
     snapshots: tuple[tuple[Path, Any], ...],
+    expected: tuple[tuple[Path, Any], ...],
     *,
     restore_path_snapshot: Callable[..., None],
+    snapshot_path: Callable[..., object],
     gjc_path: str,
     registration_state: dict[str, bool],
 ) -> None:
-    """Restore owned paths and remove only a registration created by this activation."""
-    _restore_gjc_paths(snapshots, restore_path_snapshot)
+    """Restore unchanged owned generations and remove a registration created here."""
+    _restore_gjc_paths(snapshots, expected, restore_path_snapshot, snapshot_path)
     _rollback_new_gjc_mcp_registration(gjc_path, registration_state)

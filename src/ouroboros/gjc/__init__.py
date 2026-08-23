@@ -6,6 +6,7 @@ from ouroboros.gjc.artifacts import (
     gjc_skills_root,
     install_gjc_skills,
     remove_gjc_skills,
+    setup_owned_gjc_skill_paths,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "gjc_skills_root",
     "install_gjc_skills",
     "remove_gjc_skills",
+    "setup_owned_gjc_skill_paths",
 ]

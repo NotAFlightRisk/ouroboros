@@ -1,15 +1,8 @@
-"""Uninstall command for Ouroboros.
+"""Cleanly reverse setup-owned runtime integrations and local state.
 
-Cleanly reverses everything `ouroboros setup` did:
-  1. MCP server registration  (~/.claude/mcp.json, ~/.codex/config.toml)
-  2. CLAUDE.md integration block (<!-- ooo:START --> … <!-- ooo:END -->)
-  3. Codex artifacts          (current packaged rules/skills plus legacy ~/.codex/skills/ouroboros/)
-  4. Data directory           (~/.ouroboros/)
-
-Does NOT remove:
-  - The Python package itself (user runs pip/uv/pipx uninstall separately)
-  - The Claude Code plugin   (user runs `claude plugin uninstall ouroboros`)
-  - Project source code or git history
+This includes MCP registrations, runtime-specific skills and routing guides,
+bridge configuration, project integration blocks, and Ouroboros data. It does
+not remove the Python package, runtime plugins, project source, or git history.
 """
 
 from __future__ import annotations
@@ -300,13 +293,20 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
         _is_setup_managed_gjc_mcp_bridge_config,
         _is_setup_managed_gjc_mcp_entry,
     )
+    from ouroboros.cli.gjc_setup import (
+        persisted_gjc_mcp_entry,
+        remove_persisted_gjc_mcp_server,
+    )
     from ouroboros.config import get_gjc_cli_path
 
     agent_dir = gjc_agent_dir()
     skills = remove_gjc_skills(agent_dir=agent_dir, dry_run=True)
     gjc_path = get_gjc_cli_path() or shutil.which("gjc")
-    mcp_entry = _gjc_mcp_entry(gjc_path) if gjc_path else None
-    managed_mcp = _is_setup_managed_gjc_mcp_entry(mcp_entry)
+    listed_mcp = _gjc_mcp_entry(gjc_path) if gjc_path else None
+    durable_mcp = persisted_gjc_mcp_entry()
+    managed_listed_mcp = _is_setup_managed_gjc_mcp_entry(listed_mcp)
+    managed_durable_mcp = _is_setup_managed_gjc_mcp_entry(durable_mcp)
+    managed_mcp = managed_listed_mcp or managed_durable_mcp
     bridge_config = _gjc_mcp_bridge_config_path()
     managed_bridge_config = _is_setup_managed_gjc_mcp_bridge_config(bridge_config)
     guide = gjc_instruction_path()
@@ -324,28 +324,37 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
             print_info(f"[dry-run] Would remove GJC routing guide: {guide}")
         return True
 
+    if managed_mcp:
+        removed_mcp = False
+        if managed_listed_mcp and gjc_path:
+            try:
+                result = subprocess.run(
+                    [gjc_path, "mcp", "remove", "ouroboros", "--json"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                pass
+            else:
+                removed_mcp = result.returncode == 0
+        if not removed_mcp and managed_durable_mcp:
+            removed_mcp = remove_persisted_gjc_mcp_server()
+        if not removed_mcp:
+            print_warning(
+                "Could not remove the setup-owned GJC MCP registration; "
+                "preserved the remaining ownership artifacts for a later retry."
+            )
+            return False
+        print_success("Removed Ouroboros MCP registration from GJC")
+
     all_ok = True
     if skills:
         removed = remove_gjc_skills(agent_dir=agent_dir)
         all_ok = len(removed) == len(skills)
         if all_ok:
             print_success(f"Removed {len(removed)} GJC Ouroboros skills")
-    if managed_mcp and gjc_path:
-        try:
-            result = subprocess.run(
-                [gjc_path, "mcp", "remove", "ouroboros", "--json"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            all_ok = False
-        else:
-            if result.returncode == 0:
-                print_success("Removed Ouroboros MCP registration from GJC")
-            else:
-                all_ok = False
     if managed_bridge_config:
         try:
             bridge_config.unlink()
@@ -596,14 +605,16 @@ def uninstall(
         path.name.startswith("ouroboros-") for path in gjc_skill_root.iterdir()
     ):
         targets.append(f"GJC Ouroboros skills ({gjc_skill_root}/)")
+    from ouroboros.cli.commands.setup import _is_setup_managed_gjc_mcp_entry
+    from ouroboros.cli.gjc_setup import persisted_gjc_mcp_entry
     from ouroboros.config import get_gjc_cli_path
 
     gjc_path = get_gjc_cli_path() or shutil.which("gjc")
-    if gjc_path:
-        from ouroboros.cli.commands.setup import _is_setup_managed_gjc_mcp_entry
-
-        if _is_setup_managed_gjc_mcp_entry(_gjc_mcp_entry(gjc_path)):
-            targets.append("GJC Ouroboros MCP registration")
+    listed_gjc_mcp = _gjc_mcp_entry(gjc_path) if gjc_path else None
+    if _is_setup_managed_gjc_mcp_entry(
+        listed_gjc_mcp
+    ) or _is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry()):
+        targets.append("GJC Ouroboros MCP registration")
     guide = gjc_instruction_path()
     if is_setup_managed_gjc_instruction(guide):
         targets.append(f"GJC Ouroboros routing guide ({guide})")

@@ -188,6 +188,28 @@ def install_gjc_skills(
     return GjcSkillInstallResult(target_root=target_root, skill_paths=tuple(installed))
 
 
+def setup_owned_gjc_skill_paths(
+    *, agent_dir: str | Path, skills_dir: str | Path | None = None
+) -> tuple[Path, ...]:
+    """Return every exact skill path setup may create, replace, or prune."""
+    target_root = gjc_skills_root(agent_dir)
+    owned: set[Path] = set()
+    if target_root.is_dir() and not target_root.is_symlink():
+        owned.update(
+            candidate
+            for candidate in target_root.iterdir()
+            if candidate.name.startswith(GJC_SKILL_NAMESPACE)
+            and not candidate.is_symlink()
+            and _is_managed_skill(candidate)
+        )
+    with _packaged_skills(skills_dir) as source_root:
+        owned.update(
+            target_root / f"{GJC_SKILL_NAMESPACE}{source_dir.name}"
+            for source_dir in collect_skill_bundle_dirs(source_root)
+        )
+    return tuple(sorted(owned, key=lambda path: path.name))
+
+
 def remove_gjc_skills(*, agent_dir: str | Path, dry_run: bool = False) -> tuple[Path, ...]:
     """Remove only the namespaced skill projections managed by Ouroboros."""
     target_root = gjc_skills_root(agent_dir)
@@ -212,4 +234,5 @@ __all__ = [
     "gjc_skills_root",
     "install_gjc_skills",
     "remove_gjc_skills",
+    "setup_owned_gjc_skill_paths",
 ]

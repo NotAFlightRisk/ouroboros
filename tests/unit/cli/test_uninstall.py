@@ -536,6 +536,55 @@ class TestRemoveGjcArtifacts:
 
         assert not guide.exists()
 
+    def test_removes_managed_mcp_without_current_launcher(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        mcp_path = agent_dir / "mcp.json"
+        mcp_path.parent.mkdir(parents=True)
+        bridge_path = agent_dir / "ouroboros" / "mcp-bridge.yaml"
+        bridge_path.parent.mkdir(parents=True)
+        bridge_path.write_text(
+            "# Managed by ouroboros setup --runtime gjc\nmcp_servers: []\n",
+            encoding="utf-8",
+        )
+        managed = {
+            "type": "stdio",
+            "command": "uvx",
+            "args": [
+                "--isolated",
+                "--python",
+                ">=3.12",
+                "--from",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+                "--runtime",
+                "gjc",
+            ],
+            "env": {"OUROBOROS_MCP_CONFIG": str(bridge_path)},
+            "sharing": "per-session",
+            "timeout": 30000,
+        }
+        sibling = {"type": "stdio", "command": "other", "args": []}
+        mcp_path.write_text(
+            json.dumps({"mcpServers": {"ouroboros": managed, "other": sibling}}),
+            encoding="utf-8",
+        )
+
+        with (
+            patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+            patch("ouroboros.config.get_gjc_cli_path", return_value="/missing/gjc"),
+            patch(
+                "ouroboros.cli.commands.uninstall._gjc_mcp_entry",
+                return_value=None,
+            ),
+        ):
+            assert _remove_gjc_artifacts(dry_run=False)
+
+        payload = json.loads(mcp_path.read_text(encoding="utf-8"))
+        assert payload["mcpServers"] == {"other": sibling}
+        assert not bridge_path.exists()
+
     def test_preserves_custom_routing_guide(self, tmp_path: Path) -> None:
         agent_dir = tmp_path / "agent"
         guide = agent_dir / "rules" / "ouroboros-skill-capability-guide.md"

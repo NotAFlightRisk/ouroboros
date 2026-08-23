@@ -3745,25 +3745,32 @@ def _install_gjc_runtime_artifacts(
     registration_state: dict[str, bool] | None = None,
 ) -> bool:
     """Install GJC artifacts atomically before retiring the legacy bridge."""
-    from ouroboros.gjc import gjc_skills_root
+    from ouroboros.gjc import setup_owned_gjc_skill_paths
     from ouroboros.runtime_instruction_artifacts import gjc_agent_dir, gjc_instruction_path
 
     state = registration_state if registration_state is not None else {}
+    agent_dir = gjc_agent_dir()
     paths = (
-        gjc_skills_root(gjc_agent_dir()),
-        gjc_instruction_path().parent,
-        _gjc_mcp_bridge_config_path().parent,
-        gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge",
+        *setup_owned_gjc_skill_paths(agent_dir=agent_dir),
+        gjc_instruction_path(),
+        _gjc_mcp_bridge_config_path(),
+        agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts",
     )
     try:
         snapshots = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
-        succeeded = (
+        artifacts_installed = (
             _install_gjc_mcp_bridge_config()
             and _install_gjc_skills()
             and _install_runtime_instruction_artifact("gjc")
-            and _register_gjc_mcp_server(gjc_path, registration_state=state)
-            and _remove_legacy_gjc_bridge()
         )
+        expected = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
+        if not artifacts_installed:
+            succeeded = False
+        elif not _register_gjc_mcp_server(gjc_path, registration_state=state):
+            succeeded = False
+        else:
+            succeeded = _remove_legacy_gjc_bridge()
+            expected = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
     except OSError as exc:
         print_warning(f"Could not install GJC runtime artifacts: {exc}")
         succeeded = False
@@ -3774,10 +3781,22 @@ def _install_gjc_runtime_artifacts(
 
         rollback_gjc_activation(
             snapshots,
+            expected if "expected" in locals() else snapshots,
             restore_path_snapshot=_restore_path_snapshot,
+            snapshot_path=_snapshot_path,
             gjc_path=gjc_path,
             registration_state=state,
         )
+        for directory in (
+            agent_dir / "skills",
+            agent_dir / "rules",
+            agent_dir / "ouroboros",
+            agent_dir / "extensions" / "ouroboros-ooo-bridge",
+        ):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
     return False
 
 
