@@ -1788,12 +1788,7 @@ _NODE_PACKAGE_RUNNERS = frozenset({"npm", "npx", "yarn", "pnpm"})
 
 
 def _sole_node_manifest_directory(root: Path) -> Path | None:
-    """Return the one directory holding the workspace's only package.json.
-
-    Returns None when the root itself has a manifest, when none exists, or
-    when more than one candidate exists — resolution never guesses between
-    candidates.
-    """
+    """Return the sole non-ignored package.json directory, if unambiguous."""
     if (root / "package.json").is_file():
         return None
     candidates: list[Path] = []
@@ -1812,16 +1807,10 @@ def _sole_node_manifest_directory(root: Path) -> Path | None:
 def _resolve_verify_command_cwd(
     root_cwd: str, spec: AcceptanceCriterionSpec
 ) -> tuple[str, str | None]:
-    """Resolve the directory ``verify_command`` runs in.
+    """Resolve verify cwd, preferring explicit workspace-relative ``verify_cwd``.
 
-    Returns ``(cwd, error)``. Precedence: the spec's explicit ``verify_cwd``
-    (must resolve to an existing directory inside the workspace — anything
-    else is a loud contract failure), then, for node package-runner commands
-    issued from a workspace whose root has no ``package.json``, the directory
-    of the workspace's sole manifest (a greenfield run frequently scaffolds
-    the app in one subdirectory the seed could not know in advance), then the
-    workspace root itself. Only the command's working directory moves;
-    ``expected_artifacts`` and workspace digests stay rooted at ``root_cwd``.
+    Node package runners otherwise use the sole non-ignored package manifest.
+    Artifact checks and digests remain rooted at ``root_cwd``.
     """
     root = Path(root_cwd).expanduser().resolve(strict=False)
     if spec.verify_cwd:
