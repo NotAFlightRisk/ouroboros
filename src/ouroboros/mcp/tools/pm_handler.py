@@ -28,8 +28,10 @@ from typing import Any
 import structlog
 
 from ouroboros.backends import backend_supports_tool_envelope
+from ouroboros.bigbang.ambiguity import qualifies_for_seed_completion
 from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.interview import (
+    MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewRound,
     InterviewState,
 )
@@ -38,13 +40,19 @@ from ouroboros.bigbang.pm_completion import (
     maybe_complete_pm_interview,
 )
 from ouroboros.bigbang.pm_document import save_pm_document
-from ouroboros.bigbang.pm_interview import PM_UNCERTAINTY_GUIDANCE, PMInterviewEngine
+from ouroboros.bigbang.pm_interview import (
+    PM_UNCERTAINTY_GUIDANCE,
+    PMInterviewEngine,
+    PMInterviewTurnPlan,
+    decision_round_count,
+)
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.host_context import resolve_request_subagent_dispatch
 from ouroboros.mcp.tools.advisory_dispatch import append_question_advisory_dispatch
 from ouroboros.mcp.tools.fanout import FanoutRegistry
 from ouroboros.mcp.tools.question_advisory import attach_question_advisory
@@ -52,7 +60,6 @@ from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     build_pm_interview_subagent,
     dispatch_plugin_terminal,
-    resolve_subagent_dispatch,
     should_dispatch_via_plugin,
 )
 from ouroboros.mcp.types import (
@@ -398,7 +405,10 @@ class PMInterviewHandler:
             repository_roster=pm_repository_roster(
                 pm_meta.get("brownfield_repos") if pm_meta else None
             ),
-            dispatch_mode=resolve_subagent_dispatch(self.agent_runtime_backend, self.opencode_mode),
+            dispatch_mode=resolve_request_subagent_dispatch(
+                self.agent_runtime_backend,
+                self.opencode_mode,
+            ),
             runtime_backend=self.agent_runtime_backend,
             opencode_mode=self.opencode_mode,
             fanout_registry=self.fanout_registry,
@@ -1494,22 +1504,103 @@ class PMInterviewHandler:
                         )
                     )
                 state = record_result.value
-                state.clear_stored_ambiguity()
 
-        # ── Completion check (AC 12) ─────────────────────────────
-        # Completion is determined by engine ambiguity scoring.
-        # When complete, auto-generate the PM document immediately
-        # (no separate "generate" call needed from the skill).
-        completion_result = await maybe_complete_pm_interview(state, engine)
-        if completion_result.is_err:
-            return Result.err(
-                MCPToolError(
-                    f"Failed to complete interview: {completion_result.error}",
-                    tool_name="ouroboros_pm_interview",
+        if answer:
+            save_result = await engine.save_state(state)
+            if isinstance(save_result, Result) and save_result.is_err:
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to persist PM answer: {save_result.error}",
+                        tool_name="ouroboros_pm_interview",
+                    )
                 )
-            )
+            _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
 
-        state, completion = completion_result.value
+        completion: dict[str, Any] | None = None
+        supports_atomic_turn = (
+            isinstance(PMInterviewEngine, type)
+            and isinstance(engine, PMInterviewEngine)
+            and engine.supports_atomic_turn is True
+        )
+        if supports_atomic_turn:
+            turn_result = await engine.plan_next_turn(state)
+            if turn_result.is_err:
+                error_msg = str(turn_result.error)
+                return Result.ok(
+                    MCPToolResult(
+                        content=(
+                            MCPContentItem(
+                                type=ContentType.TEXT,
+                                text=(
+                                    f"Question generation failed. Session ID: {session_id}\n\n"
+                                    f'Resume with: session_id="{session_id}"\n\n'
+                                    f"Reason: {error_msg[:200]}"
+                                ),
+                            ),
+                        ),
+                        is_error=True,
+                        meta={"session_id": session_id, "recoverable": True},
+                    )
+                )
+            turn: PMInterviewTurnPlan = turn_result.value
+            question = turn.question
+            if turn.ambiguity is not None:
+                state.store_ambiguity(
+                    score=turn.ambiguity.overall_score,
+                    breakdown=turn.ambiguity.breakdown.model_dump(mode="json"),
+                )
+                answered_rounds = decision_round_count(state)
+                if (
+                    answered_rounds >= MIN_ROUNDS_BEFORE_EARLY_EXIT
+                    and qualifies_for_seed_completion(
+                        turn.ambiguity,
+                        is_brownfield=state.is_brownfield,
+                    )
+                ):
+                    completion = {
+                        "interview_complete": True,
+                        "completion_reason": "ambiguity_resolved",
+                        "rounds_completed": answered_rounds,
+                        "ambiguity_score": turn.ambiguity.overall_score,
+                    }
+                    complete_result = await engine.complete_interview(state)
+                    if complete_result.is_err:
+                        return Result.err(
+                            MCPToolError(
+                                f"Failed to complete interview: {complete_result.error}",
+                                tool_name="ouroboros_pm_interview",
+                            )
+                        )
+                    state = complete_result.value
+        else:
+            completion_result = await maybe_complete_pm_interview(state, engine)
+            if completion_result.is_err:
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to complete interview: {completion_result.error}",
+                        tool_name="ouroboros_pm_interview",
+                    )
+                )
+            state, completion = completion_result.value
+            if completion is None:
+                question_result = await engine.ask_next_question(state)
+                if question_result.is_err:
+                    return Result.ok(
+                        MCPToolResult(
+                            content=(
+                                MCPContentItem(
+                                    type=ContentType.TEXT,
+                                    text=(
+                                        f"Question generation failed. Session ID: {session_id}\n\n"
+                                        f'Resume with: session_id="{session_id}"'
+                                    ),
+                                ),
+                            ),
+                            is_error=True,
+                            meta={"session_id": session_id, "recoverable": True},
+                        )
+                    )
+                question = question_result.value
         if completion is not None:
             save_result = await engine.save_state(state)
             if isinstance(save_result, Result) and save_result.is_err:
@@ -1611,30 +1702,6 @@ class PMInterviewHandler:
                     meta=response_meta,
                 )
             )
-
-        question_result = await engine.ask_next_question(state)
-        if question_result.is_err:
-            error_msg = str(question_result.error)
-            if "empty response" in error_msg.lower():
-                return Result.ok(
-                    MCPToolResult(
-                        content=(
-                            MCPContentItem(
-                                type=ContentType.TEXT,
-                                text=(
-                                    f"Question generation failed. "
-                                    f"Session ID: {session_id}\n\n"
-                                    f'Resume with: session_id="{session_id}"'
-                                ),
-                            ),
-                        ),
-                        is_error=True,
-                        meta={"session_id": session_id, "recoverable": True},
-                    )
-                )
-            return Result.err(MCPToolError(error_msg, tool_name="ouroboros_pm_interview"))
-
-        question = question_result.value
 
         # Compute diff AFTER ask_next_question — new items are the
         # slice from the pre-snapshot length to current length
