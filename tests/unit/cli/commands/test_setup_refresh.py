@@ -182,9 +182,7 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         )
         register_mcp.assert_not_called()
 
-    def test_gjc_refresh_rolls_back_skills_when_guide_is_user_managed(
-        self, tmp_path: Path
-    ) -> None:
+    def test_gjc_refresh_rolls_back_skills_when_guide_is_user_managed(self, tmp_path: Path) -> None:
         skill = tmp_path / ".gjc" / "agent" / "skills" / "ouroboros-interview"
         skill.mkdir(parents=True)
         stale = (
@@ -192,13 +190,7 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
             "ouroboros_projection: gjc-v1\n---\n"
         )
         (skill / "SKILL.md").write_text(stale, encoding="utf-8")
-        guide = (
-            tmp_path
-            / ".gjc"
-            / "agent"
-            / "rules"
-            / "ouroboros-skill-capability-guide.md"
-        )
+        guide = tmp_path / ".gjc" / "agent" / "rules" / "ouroboros-skill-capability-guide.md"
         guide.parent.mkdir(parents=True)
         guide.write_text("# User-owned routing\n", encoding="utf-8")
 
