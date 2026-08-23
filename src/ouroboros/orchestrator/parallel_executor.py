@@ -89,6 +89,7 @@ from ouroboros.orchestrator import (
 )
 from ouroboros.orchestrator.ac_execution_capsule import (
     UnmaterializableSuccessContractError,
+    bind_capsule_to_resume_authority,
     bind_capsule_to_runtime_handle,
     build_ac_dispatch_authority_scope,
     build_ac_dispatch_request_digest,
@@ -1822,8 +1823,12 @@ def _resolve_verify_command_cwd(
         return str(target), None
 
     command = spec.verify_command or ""
-    first_token = Path(command.split()[0]).name if command.split() else ""
-    if first_token in _NODE_PACKAGE_RUNNERS:
+    try:
+        command_parts = _strip_env_prefix(shlex.split(command))
+    except ValueError:
+        command_parts = []
+    executable = Path(command_parts[0]).name if command_parts else ""
+    if executable in _NODE_PACKAGE_RUNNERS:
         try:
             manifest_dir = _sole_node_manifest_directory(root)
         except OSError:
@@ -8106,11 +8111,14 @@ Respond with either ATOMIC or the structured JSON object only.
                 depth=depth,
                 outcome=ACExecutionOutcome.INVALID,
             )
-        if (
-            expected_resume_capsule_fingerprint is not None
-            and capsule.fingerprint != expected_resume_capsule_fingerprint
-        ):
-            raise RuntimeError("paused AC capsule fingerprint drifted")
+        if expected_resume_capsule_fingerprint is not None:
+            try:
+                capsule = bind_capsule_to_resume_authority(
+                    capsule,
+                    expected_resume_capsule_fingerprint,
+                )
+            except ValueError as exc:
+                raise RuntimeError("paused AC capsule fingerprint drifted") from exc
 
         # Build prompt (label/indent, governed task section, success contract,
         # retry/parallel-awareness sections, cwd scan, completion contract).
