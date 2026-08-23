@@ -180,7 +180,19 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
                 or has_ambiguous_contract_governor(governor_prefix)
             ):
                 continue
-            matches.append((match.start(), match.end(), match.group("seed_id")))
+            candidate_id = match.group("seed_id")
+            # Reject articles, determiners, and descriptive references that
+            # cannot be valid opaque Seed IDs — they indicate unresolved
+            # natural-language descriptions rather than explicit identifiers.
+            if re.fullmatch(
+                r"(?:the|a|an|this|that|its|their|my|our|your|"
+                r"previous|prior|old|new|current|original|same|other|"
+                r"above|below|said|aforementioned)\b.*",
+                candidate_id,
+                re.IGNORECASE,
+            ):
+                continue
+            matches.append((match.start(), match.end(), candidate_id))
     if not matches:
         return None
     return _resolve_authoritative_matches(seed.goal, matches)

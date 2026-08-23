@@ -1811,3 +1811,82 @@ def test_resume_capability_is_none_when_recovery_guard_tripped(tmp_path) -> None
         state.last_qa_passed = False
         state.recovery_guard_tripped = tag
         assert state.resume_capability() is AutoResumeCapability.NONE, tag
+
+
+# ---------------------------------------------------------------------------
+# Regression: Natural-language authority blockers (PR #2102 review)
+# ---------------------------------------------------------------------------
+
+
+def test_seed_qa_repair_rejects_descriptive_lineage_references() -> None:
+    """Descriptive phrases like 'the previous Seed' must not fabricate ID 'the'.
+
+    When a goal uses articles or descriptive references instead of explicit
+    opaque IDs, the repair path must preserve the current seed's own ID
+    rather than writing a fabricated determiner into durable lineage.
+    """
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    for goal in (
+        "Inherit from the previous Seed.",
+        "Set parent_seed_id to the previous value.",
+        "Derive from the original Seed.",
+        "Inherit from a different Seed.",
+    ):
+        seed = _build_seed(seed_id="seed_current").model_copy(update={"goal": goal})
+        repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+        assert repaired.metadata.parent_seed_id == "seed_current", (
+            f"Expected 'seed_current' (unchanged) for goal: {goal!r}, "
+            f"got: {repaired.metadata.parent_seed_id!r}"
+        )
+
+
+def test_seed_qa_repair_rejects_selection_and_ruled_out_lineage() -> None:
+    """Rejected inheritance clauses must not persist as durable parent lineage."""
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    for goal in (
+        "Inherit seed_bad should not be selected.",
+        "Inherit seed_bad was ruled out.",
+        "Inherit seed_bad must not be chosen.",
+    ):
+        seed = _build_seed(seed_id="seed_current").model_copy(update={"goal": goal})
+        repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+        assert repaired.metadata.parent_seed_id == "seed_current", (
+            f"Expected 'seed_current' for goal: {goal!r}, got: {repaired.metadata.parent_seed_id!r}"
+        )
+
+
+def test_seed_qa_lateral_repair_rejects_descriptive_lineage_references() -> None:
+    """Lateral repair path must also reject descriptive lineage references."""
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="hacker",
+        approach_summary="Consider a different approach.",
+        text="Try an alternative path.",
+    )
+    for goal in (
+        "Inherit from the previous Seed.",
+        "Set parent_seed_id to the previous value.",
+    ):
+        seed = _build_seed(seed_id="seed_current").model_copy(update={"goal": goal})
+        repaired = _seed_with_seed_qa_lateral_feedback(
+            seed, lateral_result, qa_result=qa_result, attempt=1
+        )
+        assert repaired.metadata.parent_seed_id == "seed_current", (
+            f"Lateral: Expected 'seed_current' for goal: {goal!r}, "
+            f"got: {repaired.metadata.parent_seed_id!r}"
+        )

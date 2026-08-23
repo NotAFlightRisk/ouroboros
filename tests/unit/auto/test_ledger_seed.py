@@ -752,3 +752,38 @@ class TestAcceptanceCriteriaNotExplodedOnSemicolons:
         )
         seed = partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
         assert "API returns 200; payload is valid JSON" in ac_texts(seed.acceptance_criteria)
+
+
+# ---------------------------------------------------------------------------
+# Regression: Natural-language authority blockers (PR #2102 review)
+# ---------------------------------------------------------------------------
+
+
+class TestLedgerRejectsNonBindingTaskTypeAuthority:
+    """Rejected task/lineage clauses must not become authoritative in ledger synthesis."""
+
+    def test_complete_ledger_rejects_selection_and_ruled_out_language(self) -> None:
+        """'should not be selected', 'was ruled out', etc. must default to code."""
+        for goal in (
+            "task_type: document should not be selected.",
+            "task_type: document was ruled out.",
+            "task_type: document must not be selected.",
+            "task_type: document should not be chosen.",
+            "task_type: document must not be chosen.",
+            "task_type: document has been ruled out.",
+        ):
+            ledger = _populate_complete_ledger(goal)
+            seed = synthesize_seed_from_ledger(ledger)
+            assert seed.task_type == "code", f"Expected 'code' for goal: {goal!r}"
+
+    def test_partial_seed_rejects_selection_and_ruled_out_language(self) -> None:
+        """Partial synthesis must also reject these rejection forms."""
+        for goal in (
+            "task_type: document should not be selected.",
+            "task_type: document was ruled out.",
+            "task_type: document must not be selected.",
+            "task_type: document should not be chosen.",
+        ):
+            ledger = SeedDraftLedger.from_goal(goal)
+            seed = partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
+            assert seed.task_type == "code", f"Expected 'code' for goal: {goal!r}"

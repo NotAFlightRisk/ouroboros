@@ -494,3 +494,25 @@ def test_explicit_task_type_ignores_help_error_and_documentation_content() -> No
 
 def test_explicit_task_type_ignores_implementation_inheritance_prose() -> None:
     assert explicit_task_type_from_goal("Fix handling when users inherit seed_demo.") is None
+
+
+def test_explicit_task_type_rejects_selection_and_ruled_out_language() -> None:
+    """Regression: rejected task/lineage clauses must not become authoritative.
+
+    Phrases like 'should not be selected', 'was ruled out', 'must not be chosen'
+    explicitly reject a contract and must not propagate through extraction,
+    ledger synthesis, or Seed-QA repair.
+    """
+    for goal in (
+        "task_type: document should not be selected.",
+        "task_type: document was ruled out.",
+        "task_type: document must not be selected.",
+        "task_type: document should not be chosen.",
+        "task_type: document must not be chosen.",
+        "task_type: document has been ruled out.",
+        "task_type: document may not be selected.",
+    ):
+        assert explicit_task_type_from_goal(goal) is None, f"Expected None for: {goal!r}"
+    # Positive equivalents must still work
+    assert explicit_task_type_from_goal("task_type: document should be selected.") == "document"
+    assert explicit_task_type_from_goal("task_type: document must be used.") == "document"

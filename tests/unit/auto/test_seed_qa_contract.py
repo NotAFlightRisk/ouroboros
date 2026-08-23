@@ -461,3 +461,35 @@ def test_parent_seed_accepts_nonprefixed_schema_identifiers() -> None:
         ("Inherit 부모#42.", "부모#42"),
     ):
         assert inherited_parent_seed_id(_seed(goal)) == expected
+
+
+def test_parent_seed_rejects_articles_and_descriptive_references() -> None:
+    """Regression: descriptive lineage phrases must not fabricate durable IDs.
+
+    Phrases like 'Inherit from the previous Seed' and 'Set parent_seed_id to
+    the previous value' must not resolve to parent ID 'the'. Articles,
+    determiners, and descriptive references are not valid opaque identifiers.
+    """
+    for goal in (
+        "Inherit from the previous Seed.",
+        "Set parent_seed_id to the previous value.",
+        "Inherit from a different Seed.",
+        "Inherit from this new Seed.",
+        "Derive from the original Seed.",
+        "Set parent_seed_id to its predecessor.",
+        "Inherit from that other one.",
+        "Inherit from our current Seed.",
+        "Set parent_seed_id to the same value.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) is None, f"Expected None for: {goal!r}"
+
+
+def test_parent_seed_rejects_selection_and_ruled_out_language() -> None:
+    """Regression: rejected inheritance clauses must not become authoritative."""
+    for goal in (
+        "Inherit seed_bad should not be selected.",
+        "Inherit seed_bad was ruled out.",
+        "Inherit seed_bad must not be chosen.",
+        "Inherit seed_bad has been ruled out.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) is None, f"Expected None for: {goal!r}"
