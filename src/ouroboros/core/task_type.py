@@ -29,6 +29,11 @@ _SEED_ID_PATTERN = r"[^\s,;!?]+?(?<!\.)"
 _SEED_ID_CONTINUATION_PATTERN = r"[^\s,;!?.]|\.(?=[^\s,;!?])"
 _TASK_TYPE_CONTRACT_PATTERNS = (
     re.compile(
+        rf"\b(?:choose|select)\s+(?:the\s+)?task[_\s-]*type\b\s*(?:=|:|to\s+be)?\s*"
+        rf"{_TASK_TYPE_PATTERN}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
         rf"\btask[_\s-]*type\b\s*(?:=|:)\s*{_TASK_TYPE_PATTERN}\b",
         re.IGNORECASE,
     ),

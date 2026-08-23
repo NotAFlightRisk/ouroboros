@@ -423,7 +423,9 @@ async def test_reference_aware_generation_preserves_explicit_document_task_type(
         model="test-model",
         output_dir=tmp_path,
     )
-    state = _reference_state()
+    state = _reference_state(
+        confirmation="For the Linear-like reference, keyboard-first navigation is required."
+    )
     state.initial_context = (
         "Set the task type to document. For reference, task_type: code is an example. "
         "Build a Linear-like issue tool."

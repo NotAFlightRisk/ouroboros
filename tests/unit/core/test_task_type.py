@@ -190,6 +190,15 @@ def test_explicit_task_type_accepts_ordinary_positive_wording() -> None:
     )
 
 
+def test_explicit_task_type_accepts_authoritative_selection_verbs() -> None:
+    for goal in (
+        "Choose task_type: document.",
+        "Select task_type: document.",
+        "Choose the task type to be document.",
+    ):
+        assert explicit_task_type_from_goal(goal) == "document"
+
+
 def test_explicit_task_type_rejects_typographic_quoted_and_conditional_language() -> None:
     for goal in (
         "We won’t use task_type: document.",
