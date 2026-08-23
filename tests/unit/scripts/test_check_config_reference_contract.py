@@ -6555,3 +6555,337 @@ def test_documented_default_must_match_its_ssot_value(contract) -> None:
         "evaluation.semantic_model: documented default 'claude-opus-4-6' "
         "does not match 'claude-opus-4-8'",
     )
+
+
+# --- Blocker 1 regression: transitive callable relevance for unresolved decorators ---
+
+
+def test_unresolved_decorator_fails_closed_with_transitive_callable_relevance(
+    contract, tmp_path: Path
+) -> None:
+    """Blocker 1 repro: an unresolved decorator on a class whose __eq__ calls
+    a private helper that reads config must produce an unresolved-semantics
+    violation. The class body itself does not directly mention config names,
+    but the helper _read() does.
+    """
+    (tmp_path / "transitive_read.py").write_text(
+        """
+from external_package import total_ordering
+
+def _read(settings):
+    return settings.evaluation.stage1_enabled
+
+@total_ordering
+class Reader:
+    def __eq__(self, other):
+        return _read(self.settings)
+
+Reader() == Reader()
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    # The read should not be counted (decorator is unresolved and could
+    # replace the class), but the unresolved semantics must be recorded.
+    report = contract.audit_contract(
+        fields=frozenset({field}),
+        reads=reads,
+        rows={
+            field: contract.ReferenceRow(
+                "true", "Currently inert. Effective control: runtime.stage1_enabled."
+            )
+        },
+        markers={field: contract.InertMarker(field, "runtime.stage1_enabled")},
+        allowlist={},
+        documented_defaults={},
+    )
+    assert any("unresolved decorator" in v for v in report.violations), (
+        f"Expected unresolved decorator violation for transitive callable relevance, "
+        f"got: {report.violations}"
+    )
+
+
+def test_unresolved_decorator_fails_closed_with_indirect_method_call(
+    contract, tmp_path: Path
+) -> None:
+    """Blocker 1 variant: unresolved decorator on a function that calls
+    another function that reads config — the decorated function itself only
+    contains a call expression, not a direct config mention.
+    """
+    (tmp_path / "indirect_method.py").write_text(
+        """
+from unknown_package import maybe_replace
+
+def _load_settings(cfg):
+    return cfg.consensus.min_models
+
+@maybe_replace
+def process(config):
+    return _load_settings(config)
+
+process(config)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("consensus", "min_models")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    report = contract.audit_contract(
+        fields=frozenset({field}),
+        reads=reads,
+        rows={
+            field: contract.ReferenceRow(
+                "true", "Currently inert. Effective control: direct model count."
+            )
+        },
+        markers={field: contract.InertMarker(field, "direct model count")},
+        allowlist={},
+        documented_defaults={},
+    )
+    assert any("unresolved decorator" in v for v in report.violations), (
+        f"Expected unresolved decorator violation for indirect method call, "
+        f"got: {report.violations}"
+    )
+
+
+# --- Blocker 2 regression: no basename-only semantics-preserving trust ---
+
+
+def test_unresolved_external_dataclass_import_does_not_preserve_reads(
+    contract, tmp_path: Path
+) -> None:
+    """Blocker 2 repro: `from external import dataclass` must not be trusted
+    by basename alone. An external module could validly replace the class with
+    something that performs no read.
+    """
+    (tmp_path / "fake_dataclass.py").write_text(
+        """
+from external_package import dataclass
+
+@dataclass
+class Reader:
+    def read(self, config):
+        return config.evaluation.stage2_enabled
+
+Reader().read(config)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage2_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    # The read should NOT be counted — decorator is unresolved from unknown package
+    assert field not in reads
+    report = contract.audit_contract(
+        fields=frozenset({field}),
+        reads=reads,
+        rows={
+            field: contract.ReferenceRow(
+                "true", "Currently inert. Effective control: runtime.stage1_enabled."
+            )
+        },
+        markers={field: contract.InertMarker(field, "runtime.stage1_enabled")},
+        allowlist={},
+        documented_defaults={},
+    )
+    # Must flag unresolved decorator since the class has config-relevant methods
+    assert any("unresolved decorator 'dataclass'" in v for v in report.violations), (
+        f"Expected unresolved decorator violation for untrusted basename import, "
+        f"got: {report.violations}"
+    )
+
+
+def test_unresolved_external_command_import_does_not_preserve_reads(
+    contract, tmp_path: Path
+) -> None:
+    """Blocker 2 variant: `from unknown import command` must not be treated as
+    semantics-preserving without proven identity.
+    """
+    (tmp_path / "fake_command.py").write_text(
+        """
+from unknown_framework import command
+
+@command
+def cli_handler(config):
+    return config.evaluation.stage1_enabled
+
+cli_handler(settings)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert field not in reads
+    report = contract.audit_contract(
+        fields=frozenset({field}),
+        reads=reads,
+        rows={
+            field: contract.ReferenceRow(
+                "true", "Currently inert. Effective control: runtime.stage1_enabled."
+            )
+        },
+        markers={field: contract.InertMarker(field, "runtime.stage1_enabled")},
+        allowlist={},
+        documented_defaults={},
+    )
+    assert any("unresolved decorator 'command'" in v for v in report.violations), (
+        f"Expected unresolved decorator violation for untrusted 'command' import, "
+        f"got: {report.violations}"
+    )
+
+
+# --- Overreach-negative tests: proven decorators and attribute-style must NOT over-report ---
+
+
+def test_proven_dataclass_import_preserves_class_reads(contract, tmp_path: Path) -> None:
+    """Overreach-negative: `from dataclasses import dataclass` has proven
+    identity and must NOT trigger unresolved-semantics violations.
+    """
+    (tmp_path / "real_dataclass.py").write_text(
+        """
+from dataclasses import dataclass
+
+@dataclass
+class Config:
+    stage1_enabled: bool = True
+    def read(self, settings):
+        return settings.evaluation.stage1_enabled
+
+Config().read(settings)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    # Proven identity: reads should be detected and no unresolved violation
+    assert field in reads
+    report = contract.audit_contract(
+        fields=frozenset({field}),
+        reads=reads,
+        rows={field: contract.ReferenceRow("true", "Wired.")},
+        markers={},
+        allowlist={},
+        documented_defaults={},
+    )
+    assert not any("unresolved" in v for v in report.violations), (
+        f"Proven dataclass import should not produce unresolved violations: {report.violations}"
+    )
+
+
+def test_attribute_style_decorator_does_not_trigger_false_unresolved(
+    contract, tmp_path: Path
+) -> None:
+    """Overreach-negative: @app.command() style decorators (attribute access)
+    must NOT be flagged as unresolved, even when the receiver is external.
+    """
+    (tmp_path / "attribute_style.py").write_text(
+        """
+import external_framework
+
+app = external_framework.App()
+
+@app.command()
+def handler(config):
+    return config.evaluation.stage1_enabled
+
+handler(settings)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    report = contract.audit_contract(
+        fields=frozenset({field}),
+        reads=reads,
+        rows={field: contract.ReferenceRow("true", "Wired.")},
+        markers={},
+        allowlist={},
+        documented_defaults={},
+    )
+    assert not any("unresolved" in v for v in report.violations), (
+        f"Attribute-style decorators should not produce unresolved violations: {report.violations}"
+    )
+
+
+def test_proven_pydantic_field_validator_preserves_method_reads(contract, tmp_path: Path) -> None:
+    """Overreach-negative: `from pydantic import field_validator` has proven
+    identity and must preserve the decorated method's reads.
+    """
+    (tmp_path / "pydantic_model.py").write_text(
+        """
+from pydantic import field_validator
+
+class Model:
+    @field_validator("value")
+    @classmethod
+    def validate_value(cls, v, config):
+        return config.evaluation.stage1_enabled
+
+Model.validate_value(None, None, settings)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    report = contract.audit_contract(
+        fields=frozenset({field}),
+        reads=reads,
+        rows={field: contract.ReferenceRow("true", "Wired.")},
+        markers={},
+        allowlist={},
+        documented_defaults={},
+    )
+    assert not any("unresolved" in v for v in report.violations), (
+        f"Proven pydantic import should not produce unresolved violations: {report.violations}"
+    )
+
+
+def test_no_transitive_relevance_means_no_unresolved_violation(contract, tmp_path: Path) -> None:
+    """Overreach-negative: unresolved decorator on a function that has NO
+    transitive callable relevance to config fields must NOT produce a violation.
+    """
+    (tmp_path / "irrelevant_decorator.py").write_text(
+        """
+from unknown_package import some_decorator
+
+@some_decorator
+def totally_unrelated():
+    return 42
+
+totally_unrelated()
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    report = contract.audit_contract(
+        fields=frozenset({field}),
+        reads=reads,
+        rows={
+            field: contract.ReferenceRow(
+                "true", "Currently inert. Effective control: runtime.stage1_enabled."
+            )
+        },
+        markers={field: contract.InertMarker(field, "runtime.stage1_enabled")},
+        allowlist={},
+        documented_defaults={},
+    )
+    assert not any("unresolved" in v for v in report.violations), (
+        f"Irrelevant decorated function should not produce unresolved violations: "
+        f"{report.violations}"
+    )

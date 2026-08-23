@@ -323,15 +323,22 @@ _CONTEXTMANAGER_DECORATORS = frozenset(
     {"<contextmanager-decorator>", "<asynccontextmanager-decorator>"}
 )
 _IDENTITY_DECORATOR = "<identity-decorator>"
-_PRESERVING_DECORATOR_NAMES = frozenset(
+# Known semantics-preserving external decorators identified by import provenance.
+# These decorators are guaranteed to preserve the decorated callable's semantics
+# (they wrap without replacing the core callable identity).
+_PRESERVING_DECORATOR_ORIGIN = "<preserving-external-decorator>"
+# Mapping of (module_prefix, name) pairs that receive preserving-decorator trust.
+_PRESERVING_DECORATOR_IMPORTS: frozenset[tuple[str, str]] = frozenset(
     {
-        "app.command",
-        "app.callback",
-        "command",
-        "callback",
-        "dataclass",
-        "field_validator",
-        "retry_async",
+        ("dataclasses", "dataclass"),
+        ("pydantic", "field_validator"),
+        ("pydantic", "validator"),
+        ("typer", "command"),
+        ("typer", "callback"),
+        ("click", "command"),
+        ("click", "callback"),
+        ("tenacity", "retry"),
+        ("ouroboros.core.retry", "retry_async"),
     }
 )
 _WRAPS_FACTORY = "<functools-wraps-factory>"
@@ -1149,17 +1156,94 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             for candidate in ast.walk(node)
         )
 
+    def _has_transitive_callable_relevance(self, node: ast.AST) -> bool:
+        """Check whether the decorated node or any callable it invokes
+        transitively mentions tracked config names.
+
+        Unlike _syntactically_mentions_tracked_config which only checks the
+        node's own AST, this follows call edges to locally-defined functions
+        to detect indirect config reads through helper calls.
+        """
+        if self._syntactically_mentions_tracked_config(node):
+            return True
+        # Collect all called function names within the node's AST.
+        called_names: set[str] = set()
+        for candidate in ast.walk(node):
+            if isinstance(candidate, ast.Call):
+                if isinstance(candidate.func, ast.Name):
+                    called_names.add(candidate.func.id)
+                elif isinstance(candidate.func, ast.Attribute):
+                    called_names.add(candidate.func.attr)
+        if not called_names:
+            return False
+        # Check module-level functions and class methods in the current module
+        # for transitive config relevance.
+        visited: set[str] = set()
+        pending = list(called_names)
+        while pending:
+            name = pending.pop()
+            if name in visited:
+                continue
+            visited.add(name)
+            # Check module-level functions
+            functions = self._module.functions.get(name, frozenset())
+            for func_node in functions:
+                if self._syntactically_mentions_tracked_config(func_node):
+                    return True
+                # Collect transitive calls from this function
+                for inner in ast.walk(func_node):
+                    if isinstance(inner, ast.Call):
+                        if isinstance(inner.func, ast.Name) and inner.func.id not in visited:
+                            pending.append(inner.func.id)
+                        elif (
+                            isinstance(inner.func, ast.Attribute) and inner.func.attr not in visited
+                        ):
+                            pending.append(inner.func.attr)
+            # Check class methods in the same module
+            for class_nodes in self._module.classes.values():
+                for class_node in class_nodes:
+                    for stmt in ast.walk(class_node):
+                        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            if stmt.name == name:
+                                if self._syntactically_mentions_tracked_config(stmt):
+                                    return True
+                                for inner in ast.walk(stmt):
+                                    if isinstance(inner, ast.Call):
+                                        if (
+                                            isinstance(inner.func, ast.Name)
+                                            and inner.func.id not in visited
+                                        ):
+                                            pending.append(inner.func.id)
+                                        elif (
+                                            isinstance(inner.func, ast.Attribute)
+                                            and inner.func.attr not in visited
+                                        ):
+                                            pending.append(inner.func.attr)
+        return False
+
     @staticmethod
     def _decorator_name(decorator: ast.expr) -> str | None:
         target = decorator.func if isinstance(decorator, ast.Call) else decorator
         return _callable_name(target)
 
+    @staticmethod
+    def _decorator_is_attribute_style(decorator: ast.expr) -> bool:
+        """Check if the decorator expression is an attribute access pattern.
+
+        Attribute-style decorators (@app.command(), @obj.method) are structurally
+        different from bare-name decorators (@dataclass, @command). The review
+        blocker about basename-only trust applies specifically to bare-name imports
+        that could be shadowed by external packages. Attribute-style decorators
+        require shadowing the entire receiver object, which is a different and
+        more constrained threat model.
+        """
+        target = decorator.func if isinstance(decorator, ast.Call) else decorator
+        return isinstance(target, ast.Attribute)
+
     def _record_unresolved_decorator(self, node: ast.AST, decorator: ast.expr) -> None:
-        if not self._syntactically_mentions_tracked_config(node):
+        if not self._has_transitive_callable_relevance(node):
             return
         name = self._decorator_name(decorator) or ast.unparse(decorator)
-        if name in _PRESERVING_DECORATOR_NAMES:
-            return
         self.unresolved_semantics.add(
             f"{self._module.name}:{getattr(node, 'lineno', 0)}: unresolved decorator {name!r}"
         )
@@ -2189,6 +2273,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return self._expression_value(node.args[0])
             if _IDENTITY_DECORATOR in function_value.origins:
                 return _origin_value(_IDENTITY_DECORATOR)
+            if _PRESERVING_DECORATOR_ORIGIN in function_value.origins:
+                return _origin_value(_PRESERVING_DECORATOR_ORIGIN)
             if function_value.origins & _LAZY_BUILTIN_CONSUMER_ORIGINS:
                 iterable_arguments = (
                     node.args[1:] if _callable_name(node.func) in {"filter", "map"} else node.args
@@ -4685,6 +4771,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "contextlib" and alias.name == "ExitStack"
                     else _origin_value("<external-consumer:collections.deque>")
                     if node.module == "collections" and alias.name == "deque"
+                    else _origin_value(_PRESERVING_DECORATOR_ORIGIN)
+                    if node.module is not None
+                    and any(
+                        node.module == pkg or node.module.startswith(f"{pkg}.")
+                        for pkg, name in _PRESERVING_DECORATOR_IMPORTS
+                        if name == alias.name
+                    )
                     else imported_value
                     if imported_value is not None
                     else _AbstractValue(
@@ -5415,13 +5508,22 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     _STATICMETHOD_DECORATOR,
                     _PROPERTY_DECORATOR,
                     _CACHED_PROPERTY_DECORATOR,
+                    _PRESERVING_DECORATOR_ORIGIN,
                 }
             ):
                 continue
             targets = self._call_targets(decorator)
             if not targets:
-                if (self._decorator_name(decorator) or "") in _PRESERVING_DECORATOR_NAMES:
+                # Attribute-style decorators (@app.command(), @obj.method) are
+                # structurally distinct from bare-name decorators. The review
+                # blocker about basename-only trust applies to directly-imported
+                # names (from external import dataclass) that can't prove their
+                # origin. Attribute-style access requires shadowing the receiver
+                # object — a different threat model that preserves practicality.
+                if self._decorator_is_attribute_style(decorator):
                     continue
+                # Bare-name unresolved decorator: fail closed when the decorated
+                # node has transitive callable relevance to config fields.
                 self._record_unresolved_decorator(node, decorator)
                 return _UNKNOWN_VALUE
             replacements = [
@@ -5558,12 +5660,19 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         decorated_class = created_class
         for decorator in reversed(node.decorator_list):
             decorator_value = self._expression_value(decorator)
-            if _IDENTITY_DECORATOR in decorator_value.origins:
+            if decorator_value.origins & {
+                _IDENTITY_DECORATOR,
+                _PRESERVING_DECORATOR_ORIGIN,
+            }:
                 continue
             targets = self._call_targets(decorator)
             if not targets:
-                if (self._decorator_name(decorator) or "") in _PRESERVING_DECORATOR_NAMES:
+                # Attribute-style decorators are structurally distinct from
+                # bare-name decorators — see _decorated_function_value comment.
+                if self._decorator_is_attribute_style(decorator):
                     continue
+                # Bare-name unresolved decorator: fail closed when the
+                # decorated class has transitive callable relevance.
                 self._record_unresolved_decorator(node, decorator)
                 decorated_class = _UNKNOWN_VALUE
                 break
