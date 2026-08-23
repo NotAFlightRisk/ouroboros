@@ -41,6 +41,12 @@ from ouroboros.providers.codex_cli_stream import (
     iter_runtime_stream_lines,
     terminate_runtime_process,
 )
+from ouroboros.orchestrator.runtime_execution import (
+    RuntimeExecution,
+    RuntimeExecutionController,
+    force_reap_process,
+    reject_unowned_skill_dispatch,
+)
 from ouroboros.router import (
     InvalidInputReason,
     InvalidSkill,
@@ -392,6 +398,32 @@ class HermesCliRuntime(AgentRuntime):
             log_namespace=self._log_namespace,
         )
 
+    def acquire_execution(
+        self,
+        *,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+        **_unsupported: Any,
+    ) -> RuntimeExecution:
+        reject_unowned_skill_dispatch(self, prompt)
+        controller = RuntimeExecutionController(self._runtime_handle_backend)
+        stream = self.execute_task(
+            prompt,
+            tools,
+            system_prompt,
+            resume_handle,
+            resume_session_id,
+            _execution_controller=controller,
+        )
+        return RuntimeExecution(
+            backend=self._runtime_handle_backend,
+            stream=stream,
+            controller=controller,
+        )
+
     async def execute_task(
         self,
         prompt: str,
@@ -399,6 +431,8 @@ class HermesCliRuntime(AgentRuntime):
         system_prompt: str | None = None,
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
+        *,
+        _execution_controller: RuntimeExecutionController | None = None,
     ) -> AsyncIterator[AgentMessage]:
         """Execute a task via Hermes CLI.
 
@@ -469,13 +503,20 @@ class HermesCliRuntime(AgentRuntime):
 
         args.extend(["-q", full_prompt])
 
-        process = await asyncio.create_subprocess_exec(
+        spawn = asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self._cwd,
             env=self._build_child_env(),
         )
+        if _execution_controller is None:
+            process = await spawn
+        else:
+            process = await _execution_controller.acquire_process(
+                spawn,
+                lambda candidate: force_reap_process(candidate, self._terminate_process),
+            )
 
         stdout_task = asyncio.create_task(
             self._collect_stream_lines(
@@ -494,11 +535,21 @@ class HermesCliRuntime(AgentRuntime):
         try:
             stdout_lines, stderr_lines = await asyncio.gather(stdout_task, stderr_task)
             returncode = await process.wait()
+            if _execution_controller is not None:
+                _execution_controller.mark_reaped()
         except asyncio.CancelledError:
             await self._terminate_process(process)
+            if _execution_controller is not None and getattr(
+                process, "returncode", None
+            ) is not None:
+                _execution_controller.mark_reaped()
             raise
         except TimeoutError as e:
             await self._terminate_process(process)
+            if _execution_controller is not None and getattr(
+                process, "returncode", None
+            ) is not None:
+                _execution_controller.mark_reaped()
             for task in (stdout_task, stderr_task):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, TimeoutError):

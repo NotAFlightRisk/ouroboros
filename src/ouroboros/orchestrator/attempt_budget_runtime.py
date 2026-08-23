@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-import anyio
 
 from ouroboros.core.attempt_budget import (
     AttemptBudgetExhaustion,
@@ -44,70 +43,18 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
-_PROVIDER_STREAM_CLOSE_TIMEOUT_SECONDS = 1.0
-_PROVIDER_STREAM_CANCEL_TIMEOUT_SECONDS = 0.1
 
 
 class ProviderStreamCloseTimeout(TimeoutError):
     """Provider cleanup did not converge within the finite shutdown grace."""
 
 
-def _observe_detached_provider_task(task: asyncio.Future[Any]) -> None:
-    """Consume a late provider-task outcome after the bounded fallback returns."""
-
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        return
-    except Exception as exc:
-        log.warning(
-            "orchestrator.provider_stream.detached_operation_failed",
-            error=str(exc),
-        )
-
-
-async def _cancel_provider_task_bounded(
-    task: asyncio.Future[Any],
-    *,
-    timeout_seconds: float | None = None,
-) -> bool:
-    """Request cancellation without awaiting a resistant provider forever."""
-
-    cancel_timeout = (
-        _PROVIDER_STREAM_CANCEL_TIMEOUT_SECONDS
-        if timeout_seconds is None
-        else max(0.0, timeout_seconds)
-    )
-    task.cancel()
-    try:
-        with anyio.CancelScope(shield=True):
-            done, _ = await asyncio.wait((task,), timeout=cancel_timeout)
-    except asyncio.CancelledError:
-        done = set()
-    if not done:
-        task.add_done_callback(_observe_detached_provider_task)
-        return False
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    except Exception as exc:
-        log.warning(
-            "orchestrator.provider_stream.operation_failed_during_forced_shutdown",
-            error=str(exc),
-        )
-    return True
 
 
 async def await_provider_operation_bounded[T](operation: Awaitable[T]) -> T:
-    """Keep cancellation of one provider operation from owning the caller."""
+    """Await one read; the pre-effect RuntimeExecution owns forced cleanup."""
 
-    task = asyncio.ensure_future(operation)
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await _cancel_provider_task_bounded(task)
-        raise
+    return await operation
 
 
 async def close_provider_stream_bounded(
@@ -116,54 +63,24 @@ async def close_provider_stream_bounded(
     timeout_seconds: float | None = None,
     cancel_timeout_seconds: float | None = None,
 ) -> None:
-    """Close one provider stream without granting cleanup infinite authority.
+    """Close one owned provider without ever detaching its finalizer.
 
-    A cooperative finalizer gets a short shielded grace.  If it does not
-    finish, cancellation is requested and observed for another finite grace.
-    A cancellation-resistant task is detached with an outcome observer so the
-    caller can terminalize the attempt instead of hanging forever.
+    ``RuntimeExecution.aclose`` performs cooperative termination, force
+    termination, process reaping, and finalizer completion. Its verified receipt
+    is the finite boundary; a caller-side timeout would recreate the orphaning
+    bug by abandoning cleanup, so compatibility timeout arguments are ignored.
     """
 
+    del timeout_seconds, cancel_timeout_seconds
     close = getattr(stream, "aclose", None)
     if close is None:
         return
-    close_timeout = (
-        _PROVIDER_STREAM_CLOSE_TIMEOUT_SECONDS
-        if timeout_seconds is None
-        else max(0.0, timeout_seconds)
-    )
-    cancel_timeout = (
-        _PROVIDER_STREAM_CANCEL_TIMEOUT_SECONDS
-        if cancel_timeout_seconds is None
-        else max(0.0, cancel_timeout_seconds)
-    )
-    close_task = asyncio.ensure_future(close())
     try:
-        done, _ = await asyncio.wait((close_task,), timeout=close_timeout)
-    except asyncio.CancelledError:
-        await _cancel_provider_task_bounded(
-            close_task,
-            timeout_seconds=cancel_timeout,
-        )
-        raise
-    if done:
-        try:
-            await close_task
-        except Exception as exc:
-            raise ProviderStreamCloseTimeout(
-                f"provider stream closure failed before convergence: {exc}"
-            ) from exc
-        return
-
-    await _cancel_provider_task_bounded(
-        close_task,
-        timeout_seconds=cancel_timeout,
-    )
-
-    raise ProviderStreamCloseTimeout(
-        "provider stream did not close within the bounded shutdown grace "
-        f"({close_timeout:g}s + {cancel_timeout:g}s cancellation grace)"
-    )
+        await close()
+    except Exception as exc:
+        raise ProviderStreamCloseTimeout(
+            f"provider execution did not produce a verified termination receipt: {exc}"
+        ) from exc
 
 
 def terminalize_bounded_route_exhaustion[T](value: T) -> T:
@@ -406,10 +323,9 @@ class DirectAttemptBudget:
         event_store: Any,
         execution_id: str,
         session_id: str,
-        runtime_handle: RuntimeHandle | None,
         context: str,
     ) -> str:
-        """Persist and terminate one exhausted whole-Seed provider boundary."""
+        """Persist one exhausted whole-Seed boundary after owned closure."""
 
         exhaustion = stream.exhaustion
         if exhaustion is None:  # pragma: no cover - guarded by callers
@@ -417,15 +333,6 @@ class DirectAttemptBudget:
         if not stream.closure_confirmed:
             raise ProviderStreamCloseTimeout(
                 "refusing direct exhaustion publication before provider closure is confirmed"
-            )
-        terminated = await terminate_runtime_handle(
-            runtime_handle,
-            session_id=session_id,
-            context=f"{context}_attempt_budget_exhausted",
-        )
-        if not terminated:
-            raise ProviderStreamCloseTimeout(
-                "refusing direct exhaustion publication before runtime termination is confirmed"
             )
         event = create_ac_attempt_budget_exhausted_event(
             session_id=session_id,
@@ -662,17 +569,6 @@ class AtomicAttemptTerminalizer:
             raise ProviderStreamCloseTimeout(
                 "refusing atomic exhaustion publication before provider closure is confirmed"
             )
-        runtime_handle = self.dispatch_state.runtime_handle
-        if runtime_handle is not None and runtime_handle.can_terminate:
-            terminated = await self.executor._terminate_runtime_handle(
-                runtime_handle,
-                runtime_scope_id=self.runtime_identity.session_scope_id,
-            )
-            if not terminated:
-                raise ProviderStreamCloseTimeout(
-                    "refusing atomic exhaustion publication before runtime termination is confirmed"
-                )
-            self.dispatch_state.runtime_handle = None
         duration = (datetime.now(UTC) - self.start_time).total_seconds()
         log.warning(
             "parallel_executor.ac.attempt_budget_exhausted",

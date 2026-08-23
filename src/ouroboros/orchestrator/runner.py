@@ -215,6 +215,7 @@ from ouroboros.orchestrator.runtime_message_projection import (
     normalized_message_type,
     project_runtime_message,
 )
+from ouroboros.orchestrator.runtime_execution import require_runtime_execution
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
     runtime_capabilities_for,
@@ -9217,7 +9218,8 @@ class OrchestratorRunner:
                     )
                     if cancelled_result is not None:
                         return active_runtime_handle
-                message_stream = self._adapter.execute_task(  # type: ignore[type-var]
+                message_stream = require_runtime_execution(
+                    self._adapter,
                     prompt=direct_attempt_budget.decorate_prompt(prompt),
                     tools=merged_tools,
                     system_prompt=system_prompt,
@@ -9372,7 +9374,6 @@ class OrchestratorRunner:
                         event_store=self._event_store,
                         execution_id=exec_id,
                         session_id=tracker.session_id,
-                        runtime_handle=active_runtime_handle,
                         context="runner_direct",
                     )
                     active_runtime_handle = None
@@ -11238,7 +11239,8 @@ Note: This is a resumed session. Please continue from where execution was interr
                     )
                     if cancelled_result is not None:
                         return cancelled_result
-                message_stream = self._adapter.execute_task(  # type: ignore[type-var]
+                message_stream = require_runtime_execution(
+                    self._adapter,
                     prompt=direct_attempt_budget.decorate_prompt(resume_prompt),
                     tools=merged_tools,
                     system_prompt=system_prompt,
@@ -11371,7 +11373,6 @@ Note: This is a resumed session. Please continue from where execution was interr
                         event_store=self._event_store,
                         execution_id=tracker.execution_id,
                         session_id=session_id,
-                        runtime_handle=live_runtime_handle,
                         context="runner_resume",
                     )
                     live_runtime_handle = None
@@ -11509,7 +11510,8 @@ Note: This is a resumed session. Please continue from where execution was interr
                     last_resume_final_message = None
                     recoverable_resume_failure = None
                     resume_pause_budget_progress = None
-                    successor_stream = self._adapter.execute_task(  # type: ignore[type-var]
+                    successor_stream = require_runtime_execution(
+                        self._adapter,
                         prompt=direct_attempt_budget.decorate_prompt(
                             build_task_prompt(seed, strategy=strategy)
                             + "\n\nThe resumed route failed. Continue in a fresh "
@@ -11568,7 +11570,6 @@ Note: This is a resumed session. Please continue from where execution was interr
                             event_store=self._event_store,
                             execution_id=tracker.execution_id,
                             session_id=session_id,
-                            runtime_handle=live_runtime_handle,
                             context="runner_resume_successor",
                         )
                         live_runtime_handle = None

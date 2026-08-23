@@ -74,6 +74,12 @@ from ouroboros.providers.codex_cli_stream import (
     parse_json_event,
     terminate_runtime_process,
 )
+from ouroboros.orchestrator.runtime_execution import (
+    RuntimeExecution,
+    RuntimeExecutionController,
+    force_reap_process,
+    reject_unowned_skill_dispatch,
+)
 from ouroboros.providers.profiles import resolve_completion_profile
 from ouroboros.router import (
     InvalidInputReason,
@@ -3607,6 +3613,36 @@ class CodexCliRuntime:
             if key in details
         }
 
+    def acquire_execution(
+        self,
+        *,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+        reasoning_effort: str | None = None,
+        model: str | None = None,
+    ) -> RuntimeExecution:
+        """Create process ownership before the lazy provider stream is entered."""
+        reject_unowned_skill_dispatch(self, prompt)
+        controller = RuntimeExecutionController(self._runtime_handle_backend)
+        stream = self.execute_task(
+            prompt=prompt,
+            tools=tools,
+            system_prompt=system_prompt,
+            resume_handle=resume_handle,
+            resume_session_id=resume_session_id,
+            reasoning_effort=reasoning_effort,
+            model=model,
+            _execution_controller=controller,
+        )
+        return RuntimeExecution(
+            backend=self._runtime_handle_backend,
+            stream=stream,
+            controller=controller,
+        )
+
     async def execute_task(
         self,
         prompt: str,
@@ -3616,6 +3652,8 @@ class CodexCliRuntime:
         resume_session_id: str | None = None,
         reasoning_effort: str | None = None,
         model: str | None = None,
+        *,
+        _execution_controller: RuntimeExecutionController | None = None,
     ) -> AsyncIterator[AgentMessage]:
         """Execute a task via Codex CLI and stream normalized messages."""
         cwd_failure = worker_cwd_failure_message(
@@ -3636,6 +3674,7 @@ class CodexCliRuntime:
             reasoning_effort=reasoning_effort,
             model=model,
             _resume_depth=0,
+            _execution_controller=_execution_controller,
         ):
             yield msg
 
@@ -3649,6 +3688,7 @@ class CodexCliRuntime:
         reasoning_effort: str | None = None,
         model: str | None = None,
         _resume_depth: int = 0,
+        _execution_controller: RuntimeExecutionController | None = None,
     ) -> AsyncIterator[AgentMessage]:
         """Internal implementation with resume-depth tracking."""
         # Per-stream correlation scope: parallel or sequential ACs sharing
@@ -3750,7 +3790,7 @@ class CodexCliRuntime:
         stderr_task: asyncio.Task[list[str]] | None = None
 
         try:
-            process = await asyncio.create_subprocess_exec(
+            spawn = asyncio.create_subprocess_exec(
                 *command,
                 cwd=self._cwd,
                 stdin=(asyncio.subprocess.PIPE if self._requires_process_stdin() else None),
@@ -3759,6 +3799,22 @@ class CodexCliRuntime:
                 env=self._build_child_env(),
                 **self._subprocess_launch_kwargs(),
             )
+            if _execution_controller is None:
+                process = await spawn
+            else:
+                async def _force_owned_process(candidate: Any) -> bool:
+                    async def _terminate(owned: Any) -> None:
+                        await self._terminate_process(
+                            owned,
+                            process_group_id=self._process_group_id(owned),
+                        )
+
+                    return await force_reap_process(candidate, _terminate)
+
+                process = await _execution_controller.acquire_process(
+                    spawn,
+                    _force_owned_process,
+                )
         except FileNotFoundError as e:
             yield AgentMessage(
                 type="result",
@@ -3978,6 +4034,8 @@ class CodexCliRuntime:
                 control_state["runtime_status"] = "terminated"
             else:
                 control_state["runtime_status"] = "completed" if returncode == 0 else "failed"
+            if _execution_controller is not None:
+                _execution_controller.mark_reaped()
             current_handle = self._bind_runtime_handle_controls(
                 current_handle,
                 process=process,
@@ -4035,6 +4093,7 @@ class CodexCliRuntime:
                     reasoning_effort=reasoning_effort,
                     model=model,
                     _resume_depth=_resume_depth + 1,
+                    _execution_controller=_execution_controller,
                 ):
                     yield message
                 return
@@ -4084,6 +4143,10 @@ class CodexCliRuntime:
                 stderr_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await stderr_task
+            if _execution_controller is not None and (
+                process is None or getattr(process, "returncode", None) is not None
+            ):
+                _execution_controller.mark_reaped()
             output_path.unlink(missing_ok=True)
 
     async def execute_task_to_result(

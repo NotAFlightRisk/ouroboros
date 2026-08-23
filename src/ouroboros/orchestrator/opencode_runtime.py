@@ -58,6 +58,12 @@ from ouroboros.providers.codex_cli_stream import (
     parse_json_event,
     terminate_runtime_process,
 )
+from ouroboros.orchestrator.runtime_execution import (
+    RuntimeExecution,
+    RuntimeExecutionController,
+    force_reap_process,
+    reject_unowned_skill_dispatch,
+)
 from ouroboros.router import (
     InvalidInputReason,
     InvalidSkill,
@@ -1092,6 +1098,33 @@ class OpenCodeRuntime:
 
     # -- Main execute_task -------------------------------------------------
 
+    def acquire_execution(
+        self,
+        *,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+        **_unsupported: Any,
+    ) -> RuntimeExecution:
+        """Create process ownership before entering the lazy OpenCode stream."""
+        reject_unowned_skill_dispatch(self, prompt)
+        controller = RuntimeExecutionController(self._runtime_handle_backend)
+        stream = self.execute_task(
+            prompt=prompt,
+            tools=tools,
+            system_prompt=system_prompt,
+            resume_handle=resume_handle,
+            resume_session_id=resume_session_id,
+            _execution_controller=controller,
+        )
+        return RuntimeExecution(
+            backend=self._runtime_handle_backend,
+            stream=stream,
+            controller=controller,
+        )
+
     async def execute_task(
         self,
         prompt: str,
@@ -1099,6 +1132,8 @@ class OpenCodeRuntime:
         system_prompt: str | None = None,
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
+        *,
+        _execution_controller: RuntimeExecutionController | None = None,
     ) -> AsyncIterator[AgentMessage]:
         """Execute a task via the OpenCode CLI and stream messages.
 
@@ -1194,7 +1229,7 @@ class OpenCodeRuntime:
         stderr_task: asyncio.Task[list[str]] | None = None
 
         try:
-            process = await asyncio.create_subprocess_exec(
+            spawn = asyncio.create_subprocess_exec(
                 *command,
                 cwd=self._cwd,
                 stdin=asyncio.subprocess.PIPE,
@@ -1202,6 +1237,19 @@ class OpenCodeRuntime:
                 stderr=asyncio.subprocess.PIPE,
                 env=self._build_child_env(),
             )
+            if _execution_controller is None:
+                process = await spawn
+            else:
+                async def _force_owned_process(candidate: Any) -> bool:
+                    return await force_reap_process(
+                        candidate,
+                        self._terminate_process,
+                    )
+
+                process = await _execution_controller.acquire_process(
+                    spawn,
+                    _force_owned_process,
+                )
         except FileNotFoundError as e:
             yield AgentMessage(
                 type="result",
@@ -1409,6 +1457,10 @@ class OpenCodeRuntime:
                 stderr_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await stderr_task
+            if _execution_controller is not None and (
+                process is None or getattr(process, "returncode", None) is not None
+            ):
+                _execution_controller.mark_reaped()
 
     async def execute_task_to_result(
         self,

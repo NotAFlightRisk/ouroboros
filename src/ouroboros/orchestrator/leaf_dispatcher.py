@@ -18,7 +18,7 @@ partial message list must remain visible for teardown.
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 import errno
@@ -27,7 +27,7 @@ from pathlib import Path
 import stat
 import threading
 import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import anyio
 
@@ -66,6 +66,10 @@ from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_name,
     project_runtime_message,
 )
+from ouroboros.orchestrator.runtime_execution import (
+    RuntimeExecution,
+    require_runtime_execution,
+)
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.execution_runtime_scope import (
@@ -78,7 +82,7 @@ log = get_logger(__name__)
 
 
 async def _close_runtime_stream(
-    stream: AsyncGenerator[AgentMessage, None],
+    stream: RuntimeExecution,
     state: LeafDispatchState,
     timeout_exhausted: Callable[[], bool],
 ) -> None:
@@ -104,7 +108,7 @@ async def _close_runtime_stream(
 
 
 async def _iterate_runtime_stream(
-    stream: AsyncGenerator[AgentMessage, None],
+    stream: RuntimeExecution,
     *,
     attempt_timed_out: Callable[[], bool],
 ) -> AsyncIterator[AgentMessage]:
@@ -860,15 +864,13 @@ class LeafDispatcher:
             identity_tracker = stream_stack.enter_context(
                 _BashFilesystemLeaseTracker(task_cwd=task_cwd)
             )
-            message_stream = cast(
-                AsyncGenerator[AgentMessage, None],
-                executor._adapter.execute_task(
-                    prompt=prompt,
-                    tools=tools,
-                    system_prompt=system_prompt,
-                    resume_handle=state.runtime_handle,
-                    **execute_effort_kwargs,
-                ),
+            message_stream = require_runtime_execution(
+                executor._adapter,
+                prompt=prompt,
+                tools=tools,
+                system_prompt=system_prompt,
+                resume_handle=state.runtime_handle,
+                **execute_effort_kwargs,
             )
             state.provider_entered = True
             attempt_scope: anyio.CancelScope | None = None

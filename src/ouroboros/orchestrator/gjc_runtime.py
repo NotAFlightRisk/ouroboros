@@ -34,6 +34,12 @@ from ouroboros.providers.codex_cli_stream import (
     malformed_event_message,
     parse_json_event,
 )
+from ouroboros.orchestrator.runtime_execution import (
+    RuntimeExecution,
+    RuntimeExecutionController,
+    force_reap_process,
+    reject_unowned_skill_dispatch,
+)
 from ouroboros.providers.gjc_rpc_protocol import (
     SUPPORTED_EVENT_TYPES,
     GjcCommandError,
@@ -384,6 +390,32 @@ class GjcRuntime:
         stderr_text = "\n".join(stderr_lines or []).strip()
         return stderr_text or str(exc)
 
+    def acquire_execution(
+        self,
+        *,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+        **_unsupported: Any,
+    ) -> RuntimeExecution:
+        controller = RuntimeExecutionController(self._runtime_handle_backend)
+        reject_unowned_skill_dispatch(self, prompt)
+        stream = self.execute_task(
+            prompt,
+            tools,
+            system_prompt,
+            resume_handle,
+            resume_session_id,
+            _execution_controller=controller,
+        )
+        return RuntimeExecution(
+            backend=self._runtime_handle_backend,
+            stream=stream,
+            controller=controller,
+        )
+
     async def execute_task(
         self,
         prompt: str,
@@ -391,6 +423,8 @@ class GjcRuntime:
         system_prompt: str | None = None,
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
+        *,
+        _execution_controller: RuntimeExecutionController | None = None,
     ) -> AsyncIterator[AgentMessage]:
         cwd_failure = worker_cwd_failure_message(
             self._cwd,
@@ -436,7 +470,7 @@ class GjcRuntime:
         pending_final_content: str | None = None
         pending_error_content: str | None = None
         try:
-            process = await asyncio.create_subprocess_exec(
+            spawn = asyncio.create_subprocess_exec(
                 *command,
                 cwd=self._cwd,
                 stdin=asyncio.subprocess.PIPE,
@@ -444,6 +478,13 @@ class GjcRuntime:
                 stderr=asyncio.subprocess.PIPE,
                 env=self._build_child_env(),
             )
+            if _execution_controller is None:
+                process = await spawn
+            else:
+                process = await _execution_controller.acquire_process(
+                    spawn,
+                    lambda candidate: force_reap_process(candidate, self._terminate_process),
+                )
             stderr_task = asyncio.create_task(
                 self._collect_stream_lines(process.stderr, max_lines=self._max_stderr_lines)
             )
@@ -652,6 +693,10 @@ class GjcRuntime:
                 stderr_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await stderr_task
+            if _execution_controller is not None and (
+                process is None or getattr(process, "returncode", None) is not None
+            ):
+                _execution_controller.mark_reaped()
 
     async def execute_task_to_result(
         self,

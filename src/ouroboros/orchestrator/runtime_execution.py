@@ -1,0 +1,281 @@
+"""Pre-effect ownership contract for bounded agent-runtime executions."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any
+from ouroboros.orchestrator.adapter import AgentMessage
+
+
+async def force_reap_process(
+    process: Any,
+    graceful_terminate: Callable[[Any], Awaitable[None]],
+) -> bool:
+    """Terminate, force-kill if necessary, and wait for an owned subprocess."""
+    await graceful_terminate(process)
+    if getattr(process, "returncode", None) is None:
+        kill = getattr(process, "kill", None)
+        if not callable(kill):
+            return False
+        try:
+            kill()
+        except ProcessLookupError:
+            pass
+        await process.wait()
+    return getattr(process, "returncode", None) is not None
+
+
+
+class RuntimeExecutionUnavailable(RuntimeError):
+    """The selected runtime cannot provide verified termination authority."""
+
+
+@dataclass(frozen=True, slots=True)
+class TerminationReceipt:
+    """Evidence that one owned execution has no remaining live work."""
+
+    backend: str
+    provider_stopped: bool
+    process_reaped: bool
+    finalizer_complete: bool
+
+    @property
+    def verified(self) -> bool:
+        return self.provider_stopped and self.process_reaped and self.finalizer_complete
+
+
+class RuntimeExecutionController:
+    """Mutable process authority created before a provider can have effects."""
+
+    def __init__(self, backend: str) -> None:
+        self.backend = backend
+        self._force_terminate: Callable[[], Awaitable[bool]] | None = None
+        self._provider_started = False
+        self._process_reaped = True
+
+    def bind_process(self, force_terminate: Callable[[], Awaitable[bool]]) -> None:
+        """Publish force authority immediately after spawn, before provider input."""
+        if self._provider_started and not self._process_reaped:
+            raise RuntimeError("runtime execution already owns a live provider")
+        self._provider_started = True
+        self._process_reaped = False
+        self._force_terminate = force_terminate
+    async def acquire_process(
+        self,
+        spawn: Awaitable[Any],
+        terminate_process: Callable[[Any], Awaitable[bool]],
+    ) -> Any:
+        """Bind kill authority before starting an interruptible process spawn."""
+        spawn_task = asyncio.ensure_future(spawn)
+
+        async def _force_spawned_process() -> bool:
+            try:
+                process = await asyncio.shield(spawn_task)
+            except BaseException:
+                self.mark_reaped()
+                return True
+            return await terminate_process(process)
+
+        self.bind_process(_force_spawned_process)
+        try:
+            return await asyncio.shield(spawn_task)
+        except asyncio.CancelledError:
+            await _force_spawned_process()
+            raise
+        except BaseException:
+            self.mark_reaped()
+            raise
+
+    def mark_reaped(self) -> None:
+        self._process_reaped = True
+
+    async def force_terminate(self) -> bool:
+        if self._process_reaped:
+            return True
+        if not self._provider_started or self._force_terminate is None:
+            return False
+        stopped = await self._force_terminate()
+        if stopped:
+            self._process_reaped = True
+        return stopped
+
+    @property
+    def process_reaped(self) -> bool:
+        return self._process_reaped
+
+
+class RuntimeExecution(AsyncIterator[AgentMessage]):
+    """Own a provider stream, its active read, process, and finalizer."""
+    @property
+    def termination_receipt(self) -> TerminationReceipt | None:
+        return self._receipt
+
+    def __init__(
+        self,
+        *,
+        backend: str,
+        stream: AsyncIterator[AgentMessage],
+        controller: RuntimeExecutionController,
+        cooperative_shutdown_seconds: float = 0.1,
+    ) -> None:
+        self.backend = backend
+        self._stream = stream
+        self._controller = controller
+        self._cooperative_shutdown_seconds = cooperative_shutdown_seconds
+        self._active_read: asyncio.Task[AgentMessage] | None = None
+        self._closed = False
+        self._unwind_error: Exception | None = None
+        self._receipt: TerminationReceipt | None = None
+
+    def __aiter__(self) -> RuntimeExecution:
+        return self
+
+    async def __anext__(self) -> AgentMessage:
+        if self._closed:
+            raise StopAsyncIteration
+        if self._active_read is not None:
+            raise RuntimeError("runtime execution already has an active provider read")
+        task = asyncio.create_task(anext(self._stream))
+        self._active_read = task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done():
+                self._active_read = None
+
+    async def terminate(self) -> TerminationReceipt:
+        """Request cooperative cancellation without abandoning the read task."""
+        task = self._active_read
+        if task is not None and not task.done():
+            task.cancel()
+            done, _ = await asyncio.wait(
+                (task,), timeout=self._cooperative_shutdown_seconds
+            )
+            if done:
+                self._active_read = None
+                try:
+                    await task
+                except (asyncio.CancelledError, StopAsyncIteration):
+                    pass
+                except Exception as exc:
+                    self._unwind_error = exc
+        return self._build_receipt(finalizer_complete=False)
+
+    async def force_terminate(self) -> TerminationReceipt:
+        """Kill/reap provider-owned work, then wait for Python unwind."""
+        provider_stopped = await self._controller.force_terminate()
+        task = self._active_read
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, StopAsyncIteration):
+                pass
+            except Exception as exc:
+                self._unwind_error = exc
+            self._active_read = None
+        return self._build_receipt(
+            provider_stopped=provider_stopped,
+            finalizer_complete=False,
+        )
+
+    async def reap(self) -> TerminationReceipt:
+        """Close the generator and return only with verified no-live-work evidence."""
+        if self._closed and self._receipt is not None:
+            return self._receipt
+        task = self._active_read
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, StopAsyncIteration):
+                pass
+            except Exception as exc:
+                self._unwind_error = exc
+            self._active_read = None
+        close = getattr(self._stream, "aclose", None)
+        if close is not None:
+            await close()
+        if self._unwind_error is not None:
+            raise self._unwind_error
+        self._closed = True
+        self._receipt = self._build_receipt(finalizer_complete=True)
+        if not self._receipt.verified:
+            raise RuntimeExecutionUnavailable(
+                f"{self.backend} execution ended without a verified termination receipt"
+            )
+        return self._receipt
+
+    async def aclose(self) -> None:
+        cooperative = await self.terminate()
+        if not cooperative.verified:
+            forced = await self.force_terminate()
+            if not forced.provider_stopped or not forced.process_reaped:
+                raise RuntimeExecutionUnavailable(
+                    f"{self.backend} execution could not be force-terminated and reaped"
+                )
+        await self.reap()
+
+    def _build_receipt(
+        self,
+        *,
+        provider_stopped: bool | None = None,
+        finalizer_complete: bool,
+    ) -> TerminationReceipt:
+        if provider_stopped is None:
+            provider_stopped = self._controller.process_reaped
+        return TerminationReceipt(
+            backend=self.backend,
+            provider_stopped=provider_stopped,
+            process_reaped=self._controller.process_reaped,
+            finalizer_complete=finalizer_complete,
+        )
+
+
+def reject_unowned_skill_dispatch(runtime: Any, prompt: str) -> None:
+    """Fail before an in-process skill handler can escape process ownership."""
+    from ouroboros.router import InvalidSkill, NotHandled, ResolveRequest, resolve_skill_dispatch
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt=prompt,
+            cwd=getattr(runtime, "working_directory", None),
+            skills_dir=getattr(runtime, "_skills_dir", None),
+        )
+    )
+    if isinstance(result, (NotHandled, InvalidSkill)):
+        return
+    raise RuntimeExecutionUnavailable(
+        "bounded runtime execution cannot own in-process skill-dispatch effects"
+    )
+
+
+def require_runtime_execution(runtime: Any, **kwargs: Any) -> RuntimeExecution:
+    """Acquire termination authority synchronously, before provider entry."""
+    acquire = getattr(runtime, "acquire_execution", None)
+    if not callable(acquire):
+        backend = getattr(runtime, "runtime_backend", type(runtime).__name__)
+        raise RuntimeExecutionUnavailable(
+            f"runtime {backend!r} cannot provide pre-effect termination authority"
+        )
+    execution = acquire(**kwargs)
+    if not isinstance(execution, RuntimeExecution):
+        raise RuntimeExecutionUnavailable(
+            "runtime returned an invalid pre-effect execution authority"
+        )
+    return execution
+
+
+__all__ = [
+    "RuntimeExecution",
+    "RuntimeExecutionController",
+    "RuntimeExecutionUnavailable",
+    "force_reap_process",
+    "TerminationReceipt",
+    "require_runtime_execution",
+    "reject_unowned_skill_dispatch",
+]

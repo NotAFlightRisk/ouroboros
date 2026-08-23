@@ -38,6 +38,12 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.skill_intercept import SkillInterceptor
 from ouroboros.providers.codex_cli_stream import terminate_runtime_process
+from ouroboros.orchestrator.runtime_execution import (
+    RuntimeExecution,
+    RuntimeExecutionController,
+    force_reap_process,
+    reject_unowned_skill_dispatch,
+)
 
 # Kiro CLI headless mode (https://kiro.dev/docs/cli/headless/) supports skill
 # dispatch (via our interceptor). It does **not** surface a session id on
@@ -288,6 +294,32 @@ class KiroAgentAdapter:
 
     # -- AgentRuntime protocol methods --
 
+    def acquire_execution(
+        self,
+        *,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+        **_unsupported: object,
+    ) -> RuntimeExecution:
+        reject_unowned_skill_dispatch(self, prompt)
+        controller = RuntimeExecutionController(self._runtime_backend_name)
+        stream = self.execute_task(
+            prompt,
+            tools,
+            system_prompt,
+            resume_handle,
+            resume_session_id,
+            _execution_controller=controller,
+        )
+        return RuntimeExecution(
+            backend=self._runtime_backend_name,
+            stream=stream,
+            controller=controller,
+        )
+
     async def execute_task(
         self,
         prompt: str,
@@ -295,8 +327,11 @@ class KiroAgentAdapter:
         system_prompt: str | None = None,
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
+        *,
+        _execution_controller: RuntimeExecutionController | None = None,
     ) -> AsyncIterator[AgentMessage]:
-        """Execute a task and stream normalized messages.
+
+        """Execute a task through one owned Kiro CLI subprocess.
 
         Before spawning ``kiro-cli``, attempt deterministic skill dispatch so
         that ``ooo <skill>`` and ``/ouroboros:<skill>`` prompts route through
@@ -348,13 +383,20 @@ class KiroAgentAdapter:
         proc: asyncio.subprocess.Process | None = None
         stderr_task: asyncio.Task[list[str]] | None = None
         try:
-            proc = await asyncio.create_subprocess_exec(
+            spawn = asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self._cwd,
                 env=env,
             )
+            if _execution_controller is None:
+                proc = await spawn
+            else:
+                proc = await _execution_controller.acquire_process(
+                    spawn,
+                    lambda candidate: force_reap_process(candidate, _terminate_process),
+                )
             current_handle = self._build_runtime_handle(proc, effective_resume_session_id)
 
             # H2: drain stderr concurrently to prevent pipe buffer deadlock
@@ -446,6 +488,10 @@ class KiroAgentAdapter:
                 stderr_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await stderr_task
+            if _execution_controller is not None and (
+                proc is None or getattr(proc, "returncode", None) is not None
+            ):
+                _execution_controller.mark_reaped()
 
     async def execute_task_to_result(
         self,
