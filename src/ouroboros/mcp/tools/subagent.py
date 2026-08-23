@@ -1208,6 +1208,11 @@ def build_interview_subagent(
         initial_context,
         _INTERVIEW_SUBAGENT_MAX_CONTEXT_CHARS,
     )
+    research_subject_section = (
+        f"\n## Original Research Subject\n{bounded_initial_context}\n"
+        if action != "start" and bounded_initial_context
+        else ""
+    )
     bounded_answer = _truncate_tail(answer, _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS)
 
     seed_ready_guard = f"""
@@ -1253,6 +1258,7 @@ and ask the next clarifying question or declare ready only after the Seed-ready 
 ## Session ID
 {session_id}
 {transcript_section}
+{research_subject_section}
 ## User's Latest Answer
 {bounded_answer}
 {adapter_section}
@@ -1269,6 +1275,7 @@ Continue the interview."""
 Resume the Socratic interview for session {session_id}.
 Review the conversation history and continue from where we left off.
 {transcript_section}
+{research_subject_section}
 {seed_ready_guard}
 {plugin_question_advisory}
 {adapter_section}

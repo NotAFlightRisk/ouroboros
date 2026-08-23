@@ -248,6 +248,9 @@ class TestInterviewHandlerSubagentDispatch:
         payload = result.value.meta["_subagent"]
         assert payload["tool_name"] == "ouroboros_interview"
         assert "Use Python" in payload["prompt"]
+        assert payload["context"]["initial_context"] == "test context"
+        assert "## Original Research Subject" in payload["prompt"]
+        assert "test context" in payload["prompt"]
 
     async def test_resume_returns_subagent(self, handler) -> None:
         result = await handler.handle(
@@ -256,7 +259,11 @@ class TestInterviewHandlerSubagentDispatch:
             }
         )
         assert result.is_ok
-        assert result.value.meta["_subagent"]["tool_name"] == "ouroboros_interview"
+        payload = result.value.meta["_subagent"]
+        assert payload["tool_name"] == "ouroboros_interview"
+        assert payload["context"]["initial_context"] == "test context"
+        assert "## Original Research Subject" in payload["prompt"]
+        assert "test context" in payload["prompt"]
 
 
 # ---------------------------------------------------------------------------

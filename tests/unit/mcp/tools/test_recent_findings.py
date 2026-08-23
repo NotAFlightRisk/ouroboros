@@ -191,8 +191,11 @@ def test_follow_up_uses_same_session_start_baseline_without_new_subagents(
     assert "question_advisory_request" not in meta
 
 
-@pytest.mark.parametrize("session_id,phase", [("other", "start"), ("interview-1", "answer")])
-def test_baseline_authority_requires_same_session_start_phase(
+@pytest.mark.parametrize(
+    "session_id,phase",
+    [("other", "start"), ("interview-1", "completion_gate")],
+)
+def test_baseline_authority_requires_same_session_factual_phase(
     roster: list[dict[str, str]],
     store: ArtifactStore,
     session_id: str,

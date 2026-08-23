@@ -184,8 +184,20 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
    On the start turn, both lanes receive the bounded `research_subject` and
    build a reusable baseline. Process every emitted payload exactly as stamped,
-   using the declared parallel/sequential host action, then submit and fetch the
-   synthesis through `ouroboros_submit_fanout_results` and
+   using the declared parallel/sequential host action. For `web_context`, the
+   child output is only a candidate reference list: independently run its exact
+   `search_queries`, fetch every submitted reference URL, and submit a sibling
+   `source_evidence` object with:
+   - `attested_by: "parent_runtime"`
+   - the exact `search_queries`
+   - `search_results` entries containing each query and result URL
+   - `fetched_sources` entries containing each fetched URL, successful HTTP
+     status, confirmed source type, and UTC verification timestamp
+
+   Do not copy child claims into `source_evidence`. If the runtime cannot search
+   and fetch independently, submit `web_context` as `undispatched`; schema-valid
+   URLs without this evidence are rejected before publication. Submit and fetch
+   the synthesis through `ouroboros_submit_fanout_results` and
    `ouroboros_fetch_artifact`.
 
    On later turns, `meta.question_advisory_cached_lanes` carries scoped
@@ -194,7 +206,8 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    decision, and inspect only the missing or stale delta. A complete cache hit
    intentionally emits no `question_advisory_subagents`, no fan-out id, and no
    host dispatch banner. If one lane is absent, stale, malformed, or cannot be
-   fetched, only that factual lane is emitted again.
+   fetched, only that factual lane is emitted again. A successfully submitted
+   answer/resume repair becomes part of the same reusable baseline.
 
    Do not add data, contrarian, simplifier, or architecture subagents to an
    ordinary question. Take a measurement directly only when the current

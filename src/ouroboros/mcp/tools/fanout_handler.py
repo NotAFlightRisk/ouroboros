@@ -50,6 +50,7 @@ def _fanout_synthesis_contract_id(prepared: PreparedFanoutSynthesis) -> str:
             "record": prepared.record.to_dict(),
             "provided": prepared.provided,
             "completion_report": prepared.completion_report,
+            "source_evidence": prepared.source_evidence,
         },
         allow_nan=False,
         ensure_ascii=False,
@@ -100,11 +101,13 @@ class SubmitFanoutResultsHandler:
                 "subagents declared by a prior tool's `meta` (which stamped a "
                 "`fanout_id` and a `result_correlation_key`), call this tool with "
                 "one {key, content} per child output — `key` is the value of the "
-                "correlation field for that child. A child you could not spawn "
-                "at all is exactly {key, undispatched: true}; never invent output. "
-                "Missing required keys return `status=partial`; retry with EVERY lane. "
-                "A complete submission returns a bounded disposable artifact envelope; "
-                "fetch its body with the MCP tool `ouroboros_fetch_artifact`."
+                "correlation field for that child. A `web_context` result must also "
+                "carry parent-runtime `source_evidence` proving the submitted queries "
+                "were searched and every reference was fetched successfully. A child "
+                "you could not spawn at all is exactly {key, undispatched: true}; never "
+                "invent output. Missing required keys return `status=partial`; retry "
+                "with EVERY lane. A complete submission returns a bounded disposable "
+                "artifact envelope; fetch its body with `ouroboros_fetch_artifact`."
             ),
             parameters=(
                 MCPToolParameter(
@@ -133,8 +136,10 @@ class SubmitFanoutResultsHandler:
                     type=ToolInputType.ARRAY,
                     description=(
                         "Correlated child outputs: objects with a 'key' (the "
-                        "correlation value) and a 'content' (the child result), "
-                        "or 'undispatched': true when the child never ran."
+                        "correlation value) and a 'content' (the child result). "
+                        "web_context additionally requires parent-runtime "
+                        "'source_evidence' with searched queries/results and fetched "
+                        "source status. Use 'undispatched': true when the child never ran."
                     ),
                     required=True,
                 ),

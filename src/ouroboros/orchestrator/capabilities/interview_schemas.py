@@ -409,7 +409,11 @@ def _interview_web_reference_answer_contract() -> dict[str, Any]:
                 ],
             },
             "relevance": {"type": "string", "minLength": 1, "maxLength": 500},
-            "verified_at": {"type": "string", "minLength": 1, "maxLength": 64},
+            "verified_at": {
+                "type": "string",
+                "pattern": r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$",
+                "maxLength": 64,
+            },
         },
     }
     shared = {
@@ -481,18 +485,67 @@ def _interview_web_reference_answer_contract() -> dict[str, Any]:
             },
         },
     }
+    source_evidence = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "attested_by",
+            "search_queries",
+            "search_results",
+            "fetched_sources",
+        ],
+        "properties": {
+            "attested_by": {"const": "parent_runtime"},
+            "search_queries": shared["search_queries"],
+            "search_results": {
+                "type": "array",
+                "maxItems": 25,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["query", "url"],
+                    "properties": {
+                        "query": {"type": "string", "minLength": 1, "maxLength": 500},
+                        "url": {"type": "string", "pattern": r"^https?://", "maxLength": 2048},
+                    },
+                },
+            },
+            "fetched_sources": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "url",
+                        "http_status",
+                        "source_type",
+                        "verified_at",
+                    ],
+                    "properties": {
+                        "url": {"type": "string", "pattern": r"^https?://", "maxLength": 2048},
+                        "http_status": {"type": "integer", "minimum": 200, "maximum": 399},
+                        "source_type": reference["properties"]["source_type"],
+                        "verified_at": reference["properties"]["verified_at"],
+                    },
+                },
+            },
+        },
+    }
     return {
         "contract_id": "web_reference_reconnaissance.v1",
         "scope": "same_interview_start_reference_baseline",
         "response_model_schema": {"oneOf": [found, not_found]},
+        "source_evidence_schema": source_evidence,
         "runtime_instruction": (
             "Issue at least one real web search for the research_subject. Prefer primary "
             "and official sources, fetch promising results when available, and return two "
-            "to five URL-bearing references with relevance and verification time. The visible "
-            "interview question is not permission to skip research. If reliable references "
-            "remain absent after searching, return the exact queries and a closed failure "
-            "reason. If web tools are unavailable, do not fabricate queries or references; "
-            "the host must submit this lane as undispatched."
+            "to five URL-bearing references with relevance and verification time. The parent "
+            "runtime must independently search the submitted queries, fetch every submitted "
+            "reference, and attach source_evidence when submitting this lane; child-authored "
+            "claims are not provenance. If reliable references remain absent after searching, "
+            "return the exact queries and a closed failure reason. If web tools are unavailable, "
+            "do not fabricate queries or references; the host must submit this lane as undispatched."
         ),
     }
 

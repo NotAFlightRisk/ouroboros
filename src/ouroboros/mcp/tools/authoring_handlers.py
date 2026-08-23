@@ -2272,7 +2272,9 @@ class InterviewHandler:
         payload = build_interview_subagent(
             session_id=real_session_id or "new",
             action=action,
-            initial_context=initial_context,
+            initial_context=(
+                plugin_state.initial_context if plugin_state is not None else initial_context
+            ),
             answer=answer,
             cwd=arguments.get("cwd"),
             transcript=transcript,

@@ -4997,6 +4997,8 @@ def test_interview_metadata_includes_question_advisory_fanout_contract() -> None
     assert web_contract["contract_id"] == "web_reference_reconnaissance.v1"
     web_schema = web_contract["response_model_schema"]
     Draft202012Validator.check_schema(web_schema)
+    source_evidence_schema = web_contract["source_evidence_schema"]
+    Draft202012Validator.check_schema(source_evidence_schema)
 
     valid = {
         "question_identity": "interview-question:0123456789abcdef",
@@ -5035,6 +5037,26 @@ def test_interview_metadata_includes_question_advisory_fanout_contract() -> None
         ],
     }
     assert list(validator.iter_errors(missing_primary))
+    valid_source_evidence = {
+        "attested_by": "parent_runtime",
+        "search_queries": list(valid["search_queries"]),
+        "search_results": [
+            {"query": valid["search_queries"][0], "url": reference["url"]}
+            for reference in valid["references"]
+        ],
+        "fetched_sources": [
+            {
+                "url": reference["url"],
+                "http_status": 200,
+                "source_type": reference["source_type"],
+                "verified_at": reference["verified_at"],
+            }
+            for reference in valid["references"]
+        ],
+    }
+    assert list(
+        Draft202012Validator(source_evidence_schema).iter_errors(valid_source_evidence)
+    ) == []
 
 
 def test_question_advisory_request_model_validates_parent_runtime_payload() -> None:

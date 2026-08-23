@@ -50,6 +50,45 @@ async def test_start_fanout_publishes_server_provenance_and_is_reusable(tmp_path
         phase="start",
     )
     assert fanout_id is not None
+    web = {
+        "question_identity": question_identity,
+        "lane_id": "web_context",
+        "status": "references_found",
+        "search_queries": ["subscription billing official guidance"],
+        "references": [
+            {
+                "title": "Stripe Billing documentation",
+                "url": "https://docs.stripe.com/billing",
+                "source_type": "official",
+                "relevance": "Primary billing lifecycle reference.",
+                "verified_at": "2026-08-24T00:00:00Z",
+            },
+            {
+                "title": "W3C Web Payments",
+                "url": "https://www.w3.org/Payments/WG/",
+                "source_type": "standard",
+                "relevance": "Standards context for web payments.",
+                "verified_at": "2026-08-24T00:00:00Z",
+            },
+        ],
+    }
+    source_evidence = {
+        "attested_by": "parent_runtime",
+        "search_queries": list(web["search_queries"]),
+        "search_results": [
+            {"query": web["search_queries"][0], "url": reference["url"]}
+            for reference in web["references"]
+        ],
+        "fetched_sources": [
+            {
+                "url": reference["url"],
+                "http_status": 200,
+                "source_type": reference["source_type"],
+                "verified_at": reference["verified_at"],
+            }
+            for reference in web["references"]
+        ],
+    }
 
     result = await submit.handle(
         {
@@ -60,28 +99,8 @@ async def test_start_fanout_publishes_server_provenance_and_is_reusable(tmp_path
                 {"key": "code_context", "content": {"claim": "local fact"}},
                 {
                     "key": "web_context",
-                    "content": {
-                        "question_identity": question_identity,
-                        "lane_id": "web_context",
-                        "status": "references_found",
-                        "search_queries": ["subscription billing official guidance"],
-                        "references": [
-                            {
-                                "title": "Stripe Billing documentation",
-                                "url": "https://docs.stripe.com/billing",
-                                "source_type": "official",
-                                "relevance": "Primary billing lifecycle reference.",
-                                "verified_at": "2026-08-24T00:00:00Z",
-                            },
-                            {
-                                "title": "W3C Web Payments",
-                                "url": "https://www.w3.org/Payments/WG/",
-                                "source_type": "standard",
-                                "relevance": "Standards context for web payments.",
-                                "verified_at": "2026-08-24T00:00:00Z",
-                            },
-                        ],
-                    },
+                    "content": web,
+                    "source_evidence": source_evidence,
                 },
             ],
         }
@@ -95,6 +114,7 @@ async def test_start_fanout_publishes_server_provenance_and_is_reusable(tmp_path
         "phase": "start",
         "question_identity": question_identity,
     }
+    assert body["source_evidence"] == {"web_context": source_evidence}
     baseline = interview_baseline_by_lane(store, session_id=session_id)
     assert set(baseline) == {"code_context", "web_context"}
     assert {entry["contract_id"] for entry in baseline.values()} == {contract_id}
@@ -102,7 +122,94 @@ async def test_start_fanout_publishes_server_provenance_and_is_reusable(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_non_start_fanout_is_not_reusable_baseline(tmp_path: Any) -> None:
+async def test_answer_repair_joins_start_snapshot_and_is_reusable(tmp_path: Any) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = ArtifactStore.for_project(workspace)
+    store.initialize()
+    registry = FanoutRegistry(tmp_path / "fanout")
+    memory = DisposableMemory(artifact_store=store)
+    submit = SubmitFanoutResultsHandler(fanout_registry=registry, disposable_memory=memory)
+    session_id = "interview-foundation"
+    question_identity = "interview-question:fedcba9876543210"
+
+    async def publish(lane_id: str, phase: str) -> str:
+        fanout_id = register_question_advisory_fanout(
+            registry,
+            session_id=session_id,
+            payloads=[_payload(lane_id, question_identity=question_identity)],
+            phase=phase,
+        )
+        assert fanout_id is not None
+        result_entry: dict[str, Any] = {
+            "key": lane_id,
+            "content": {"claim": f"{phase} fact"},
+        }
+        if lane_id == "web_context":
+            url = "https://example.com/reference"
+            verified_at = "2026-08-24T00:00:00Z"
+            query = "official reference"
+            result_entry["content"] = {
+                "question_identity": question_identity,
+                "lane_id": "web_context",
+                "status": "references_found",
+                "search_queries": [query],
+                "references": [
+                    {
+                        "title": "Official reference",
+                        "url": url,
+                        "source_type": "official",
+                        "relevance": "Defines the relevant behavior.",
+                        "verified_at": verified_at,
+                    },
+                    {
+                        "title": "Supporting reference",
+                        "url": "https://example.org/reference",
+                        "source_type": "reputable_secondary",
+                        "relevance": "Corroborates the official reference.",
+                        "verified_at": verified_at,
+                    },
+                ],
+            }
+            result_entry["source_evidence"] = {
+                "attested_by": "parent_runtime",
+                "search_queries": [query],
+                "search_results": [
+                    {"query": query, "url": reference["url"]}
+                    for reference in result_entry["content"]["references"]
+                ],
+                "fetched_sources": [
+                    {
+                        "url": reference["url"],
+                        "http_status": 200,
+                        "source_type": reference["source_type"],
+                        "verified_at": reference["verified_at"],
+                    }
+                    for reference in result_entry["content"]["references"]
+                ],
+            }
+        result = await submit.handle(
+            {
+                "session_id": session_id,
+                "fanout_id": fanout_id,
+                "correlation_key": "context.lane_id",
+                "results": [result_entry],
+            }
+        )
+        assert result.is_ok, result
+        return str(result.unwrap().meta["contract_id"])
+
+    start_contract = await publish("code_context", "start")
+    repair_contract = await publish("web_context", "resume_pending")
+    baseline = interview_baseline_by_lane(store, session_id=session_id)
+
+    assert baseline["code_context"]["contract_id"] == start_contract
+    assert baseline["web_context"]["contract_id"] == repair_contract
+    assert set(baseline) == {"code_context", "web_context"}
+
+
+@pytest.mark.asyncio
+async def test_unrelated_phase_is_not_reusable_baseline(tmp_path: Any) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = ArtifactStore.for_project(workspace)
@@ -117,7 +224,7 @@ async def test_non_start_fanout_is_not_reusable_baseline(tmp_path: Any) -> None:
         registry,
         session_id=session_id,
         payloads=payloads,
-        phase="answer",
+        phase="completion_gate",
     )
     assert fanout_id is not None
 

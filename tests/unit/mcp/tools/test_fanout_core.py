@@ -537,6 +537,41 @@ def _advisory_lane_outputs(meta: Mapping[str, Any], lane_keys: list[str]) -> dic
         }
     return outputs
 
+def _web_source_evidence(output: Mapping[str, Any]) -> dict[str, Any]:
+    """Return parent-runtime search/fetch evidence matching a web lane output."""
+    queries = list(output["search_queries"])
+    references = list(output.get("references") or ())
+    return {
+        "attested_by": "parent_runtime",
+        "search_queries": queries,
+        "search_results": [
+            {"query": queries[0], "url": reference["url"]} for reference in references
+        ],
+        "fetched_sources": [
+            {
+                "url": reference["url"],
+                "http_status": 200,
+                "source_type": reference["source_type"],
+                "verified_at": reference["verified_at"],
+            }
+            for reference in references
+        ],
+    }
+
+
+def _advisory_result_entries(
+    outputs: Mapping[str, Any],
+    lane_keys: list[str],
+) -> list[dict[str, Any]]:
+    """Build submission entries, keeping host evidence outside child content."""
+    entries: list[dict[str, Any]] = []
+    for key in lane_keys:
+        entry = {"key": key, "content": outputs[key]}
+        if key == "web_context":
+            entry["source_evidence"] = _web_source_evidence(outputs[key])
+        entries.append(entry)
+    return entries
+
 
 def _required_advisory_lanes() -> list[str]:
     """Return the lane ids whose absence must block advisory completion."""
@@ -572,7 +607,7 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
             "session_id": session_id,
             "fanout_id": fanout_id,
             "correlation_key": correlation_key,
-            "results": [{"key": key, "content": outputs[key]} for key in lane_keys],
+            "results": _advisory_result_entries(outputs, lane_keys),
         }
     )
     assert submit_result.is_ok, submit_result
@@ -597,6 +632,9 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     aggregated = out["result"]["aggregated_outputs"]
     assert [item["lane_id"] for item in aggregated] == lane_keys
     assert [item["output"] for item in aggregated] == [outputs[key] for key in lane_keys]
+    assert out["source_evidence"] == {
+        "web_context": _web_source_evidence(outputs["web_context"])
+    }
 
 
 def test_generic_web_noop_is_rejected_by_reference_contract(tmp_path: Any) -> None:
@@ -619,6 +657,28 @@ def test_generic_web_noop_is_rejected_by_reference_contract(tmp_path: Any) -> No
     assert outcome["status"] == "partial"
     assert outcome["missing_required_keys"] == ["web_context"]
     assert "web_context" in outcome["contract_violations"]
+
+def test_schema_valid_web_references_without_host_evidence_are_rejected(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-web-unattested"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(
+        registry, session_id
+    )
+    outputs = _advisory_lane_outputs(meta, lane_keys)
+
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[{"key": key, "content": outputs[key]} for key in lane_keys],
+    )
+
+    assert outcome["status"] == "partial"
+    assert outcome["missing_required_keys"] == ["web_context"]
+    assert outcome["contract_violations"]["web_context"] == [
+        "source_evidence/output is not a JSON object"
+    ]
 
 
 @pytest.mark.asyncio
@@ -660,7 +720,7 @@ async def test_start_fanout_artifact_reduces_follow_up_to_delta_lanes(tmp_path: 
             "session_id": session_id,
             "fanout_id": start_meta["question_advisory_fanout_id"],
             "correlation_key": start_meta["question_advisory_result_correlation_key"],
-            "results": [{"key": key, "content": outputs[key]} for key in start_keys],
+            "results": _advisory_result_entries(outputs, start_keys),
         }
     )
     assert submitted.is_ok
@@ -776,7 +836,7 @@ async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
     first = lane_keys[0]
     partial = await reply([{"key": first, "content": f"{first}-facts"}])
     invalid = await reply([{"key": lane_keys[0]}])
-    complete = await reply([{"key": key, "content": outputs[key]} for key in lane_keys])
+    complete = await reply(_advisory_result_entries(outputs, lane_keys))
 
     # What the skills key on: present on the completed reply, absent everywhere
     # else. Both directions, so neither drifts without this failing.
@@ -854,9 +914,10 @@ async def test_a_completed_reply_does_not_mean_every_required_lane_ran(tmp_path:
             "session_id": session_id,
             "fanout_id": fanout_id,
             "correlation_key": correlation_key,
-            "results": [
-                {"key": key, "content": outputs[key]} for key in lane_keys if key != excused
-            ]
+            "results": _advisory_result_entries(
+                outputs,
+                [key for key in lane_keys if key != excused],
+            )
             + [{"key": excused, "undispatched": True}],
         }
     )
