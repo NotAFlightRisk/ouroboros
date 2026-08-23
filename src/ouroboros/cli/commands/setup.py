@@ -3770,100 +3770,28 @@ def _install_gjc_runtime_artifacts(
     if succeeded:
         return True
     if "snapshots" in locals():
-        _rollback_gjc_setup_paths(snapshots)
-    _rollback_new_gjc_mcp_registration(gjc_path, state)
+        from ouroboros.cli.gjc_setup import rollback_gjc_activation
+
+        rollback_gjc_activation(
+            snapshots,
+            restore_path_snapshot=_restore_path_snapshot,
+            gjc_path=gjc_path,
+            registration_state=state,
+        )
     return False
 
 
 def _setup_gjc(gjc_path: str) -> bool:
-    """Configure GJC as one recoverable local setup transaction."""
-    from ouroboros.config.loader import create_default_config, ensure_config_dir
-    from ouroboros.gjc import gjc_skills_root
-    from ouroboros.runtime_instruction_artifacts import gjc_agent_dir, gjc_instruction_path
+    """Configure GJC through the ownership-safe runtime transaction."""
+    from ouroboros.cli.gjc_setup import setup_gjc_runtime
 
-    config_dir = ensure_config_dir()
-    config_path = config_dir / "config.yaml"
-    transaction_paths = (
-        config_path,
-        config_dir / "credentials.yaml",
-        gjc_skills_root(gjc_agent_dir()),
-        gjc_instruction_path().parent,
-        _gjc_mcp_bridge_config_path().parent,
-        gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge",
+    return setup_gjc_runtime(
+        gjc_path,
+        install_runtime_artifacts=_install_gjc_runtime_artifacts,
+        atomic_write_text=_atomic_write_text,
+        snapshot_path=_snapshot_path,
+        restore_path_snapshot=_restore_path_snapshot,
     )
-    registration_state: dict[str, bool] = {}
-    try:
-        snapshots = tuple(
-            (path, _snapshot_path(path, follow_links=False)) for path in transaction_paths
-        )
-        if config_path.exists():
-            config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        else:
-            create_default_config(config_dir)
-            config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-
-        if not isinstance(config_dict, dict):
-            print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting GJC setup.")
-            _rollback_gjc_setup_paths(snapshots)
-            return False
-
-        orch = config_dict.get("orchestrator")
-        if not isinstance(orch, dict):
-            orch = {}
-            config_dict["orchestrator"] = orch
-        orch["runtime_backend"] = "gjc"
-        orch["gjc_cli_path"] = gjc_path
-
-        llm = config_dict.get("llm")
-        if not isinstance(llm, dict):
-            llm = {}
-            config_dict["llm"] = llm
-        llm["backend"] = "gjc"
-
-        if not _install_gjc_runtime_artifacts(gjc_path, registration_state=registration_state):
-            _rollback_gjc_setup_paths(snapshots)
-            _rollback_new_gjc_mcp_registration(gjc_path, registration_state)
-            print_error("GJC setup failed; restored the previous configuration and artifacts.")
-            return False
-
-        _atomic_write_text(
-            config_path,
-            yaml.dump(config_dict, default_flow_style=False, sort_keys=False),
-        )
-    except (OSError, yaml.YAMLError) as exc:
-        if "snapshots" in locals():
-            _rollback_gjc_setup_paths(snapshots)
-        _rollback_new_gjc_mcp_registration(gjc_path, registration_state)
-        print_error(f"GJC setup failed; restored the previous state: {exc}")
-        return False
-
-    print_success(f"Configured GJC runtime (CLI: {gjc_path})")
-    print_info(f"Config saved to: {config_path}")
-    return True
-
-
-def _rollback_new_gjc_mcp_registration(gjc_path: str, registration_state: dict[str, bool]) -> None:
-    """Remove only an MCP entry newly created by the failed setup attempt."""
-    if not registration_state.get("created"):
-        return
-    from ouroboros.cli.gjc_setup import remove_gjc_mcp_server
-
-    if remove_gjc_mcp_server(gjc_path, run_command=subprocess.run):
-        registration_state.update(created=False, changed=False)
-    else:
-        print_warning("GJC setup rollback could not remove the newly registered MCP server.")
-
-
-def _rollback_gjc_setup_paths(snapshots: tuple[tuple[Path, _PathSnapshot], ...]) -> None:
-    """Best-effort restore of paths touched by the GJC setup transaction."""
-    failures: list[str] = []
-    for path, snapshot in reversed(snapshots):
-        try:
-            _restore_path_snapshot(path, snapshot, restore_link_targets=False)
-        except OSError as exc:
-            failures.append(f"{path}: {exc}")
-    if failures:
-        print_warning("GJC setup rollback was incomplete: " + "; ".join(failures))
 
 
 def _setup_gemini(gemini_path: str) -> None:
