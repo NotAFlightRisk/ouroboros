@@ -37,7 +37,11 @@ from ouroboros.cli.opencode_config import (
 )
 from ouroboros.codex import CODEX_RULE_FILENAME, resolve_codex_home, resolve_packaged_codex_assets
 from ouroboros.gjc import gjc_skills_root, remove_gjc_skills
-from ouroboros.runtime_instruction_artifacts import gjc_agent_dir
+from ouroboros.runtime_instruction_artifacts import (
+    gjc_agent_dir,
+    gjc_instruction_path,
+    is_setup_managed_gjc_instruction,
+)
 
 app = typer.Typer(
     name="uninstall",
@@ -290,7 +294,7 @@ def _gjc_mcp_entry(gjc_path: str) -> dict[str, object] | None:
 
 
 def _remove_gjc_artifacts(dry_run: bool) -> bool:
-    """Remove setup-owned GJC skills and MCP registration."""
+    """Remove setup-owned GJC skills, MCP registration, bridge config, and guide."""
     from ouroboros.cli.commands.setup import (
         _gjc_mcp_bridge_config_path,
         _is_setup_managed_gjc_mcp_bridge_config,
@@ -305,7 +309,9 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
     managed_mcp = _is_setup_managed_gjc_mcp_entry(mcp_entry)
     bridge_config = _gjc_mcp_bridge_config_path()
     managed_bridge_config = _is_setup_managed_gjc_mcp_bridge_config(bridge_config)
-    if not skills and not managed_mcp and not managed_bridge_config:
+    guide = gjc_instruction_path()
+    managed_guide = is_setup_managed_gjc_instruction(guide)
+    if not skills and not managed_mcp and not managed_bridge_config and not managed_guide:
         return False
     if dry_run:
         if skills:
@@ -314,6 +320,8 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
             print_info("[dry-run] Would remove Ouroboros MCP registration from GJC")
         if managed_bridge_config:
             print_info(f"[dry-run] Would remove GJC MCP bridge config: {bridge_config}")
+        if managed_guide:
+            print_info(f"[dry-run] Would remove GJC routing guide: {guide}")
         return True
 
     all_ok = True
@@ -341,9 +349,23 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
     if managed_bridge_config:
         try:
             bridge_config.unlink()
-            bridge_config.parent.rmdir()
         except OSError:
             all_ok = False
+        else:
+            try:
+                bridge_config.parent.rmdir()
+            except OSError:
+                pass
+    if managed_guide:
+        try:
+            guide.unlink()
+        except OSError:
+            all_ok = False
+        else:
+            try:
+                guide.parent.rmdir()
+            except OSError:
+                pass
     return all_ok
 
 
@@ -582,6 +604,9 @@ def uninstall(
 
         if _is_setup_managed_gjc_mcp_entry(_gjc_mcp_entry(gjc_path)):
             targets.append("GJC Ouroboros MCP registration")
+    guide = gjc_instruction_path()
+    if is_setup_managed_gjc_instruction(guide):
+        targets.append(f"GJC Ouroboros routing guide ({guide})")
 
     cwd = Path.cwd()
     claude_md = cwd / "CLAUDE.md"

@@ -182,6 +182,56 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         )
         register_mcp.assert_not_called()
 
+    def test_legacy_gjc_bridge_registers_mcp_before_removal(self, tmp_path: Path) -> None:
+        bridge = tmp_path / ".gjc" / "agent" / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text("legacy bridge", encoding="utf-8")
+        calls: list[str] = []
+
+        with (
+            patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/bin/gjc"),
+            patch(
+                "ouroboros.cli.commands.setup._install_gjc_mcp_bridge_config",
+                side_effect=lambda: calls.append("bridge-config") or True,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._install_gjc_skills",
+                side_effect=lambda: calls.append("skills") or True,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._install_runtime_instruction_artifact",
+                side_effect=lambda runtime: calls.append(f"guide:{runtime}") or True,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_gjc_mcp_server",
+                side_effect=lambda *_args, **_kwargs: calls.append("mcp") or True,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._remove_legacy_gjc_bridge",
+                side_effect=lambda: calls.append("remove-legacy") or True,
+            ),
+        ):
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 0
+        assert calls.index("mcp") < calls.index("remove-legacy")
+
+    def test_legacy_gjc_bridge_survives_failed_mcp_registration(self, tmp_path: Path) -> None:
+        bridge = tmp_path / ".gjc" / "agent" / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text("legacy bridge", encoding="utf-8")
+
+        with (
+            patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/bin/gjc"),
+            patch("ouroboros.cli.commands.setup._register_gjc_mcp_server", return_value=False),
+            patch("ouroboros.cli.commands.setup._remove_legacy_gjc_bridge") as remove_legacy,
+        ):
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 1
+        assert bridge.read_text(encoding="utf-8") == "legacy bridge"
+        remove_legacy.assert_not_called()
+
     def test_codex_refreshes_when_codex_dir_exists(self, tmp_path: Path) -> None:
         codex_dir = tmp_path / ".codex"
         codex_dir.mkdir()

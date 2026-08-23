@@ -3720,6 +3720,7 @@ def _register_gjc_mcp_server(
     gjc_path: str,
     *,
     detected: dict[str, object] | None = None,
+    registration_state: dict[str, bool] | None = None,
 ) -> bool:
     from ouroboros.cli.gjc_setup import register_gjc_mcp_server
 
@@ -3728,6 +3729,7 @@ def _register_gjc_mcp_server(
         detect_mcp_entry=_detect_mcp_entry,
         run_command=subprocess.run,
         detected=detected,
+        registration_state=registration_state,
     )
 
 
@@ -3737,52 +3739,131 @@ def _remove_legacy_gjc_bridge() -> bool:
     return remove_legacy_gjc_bridge()
 
 
-def _install_gjc_runtime_artifacts(gjc_path: str) -> bool:
-    """Install the OMP-style GJC skill projection and MCP registration."""
-    skills_ok = _install_gjc_skills()
-    bridge_config_ok = _install_gjc_mcp_bridge_config()
-    mcp_ok = bridge_config_ok and _register_gjc_mcp_server(gjc_path)
-    bridge_ok = _remove_legacy_gjc_bridge()
-    return skills_ok and bridge_config_ok and mcp_ok and bridge_ok
+def _install_gjc_runtime_artifacts(
+    gjc_path: str,
+    *,
+    registration_state: dict[str, bool] | None = None,
+) -> bool:
+    """Install GJC artifacts atomically before retiring the legacy bridge."""
+    from ouroboros.gjc import gjc_skills_root
+    from ouroboros.runtime_instruction_artifacts import gjc_agent_dir, gjc_instruction_path
+
+    state = registration_state if registration_state is not None else {}
+    paths = (
+        gjc_skills_root(gjc_agent_dir()),
+        gjc_instruction_path().parent,
+        _gjc_mcp_bridge_config_path().parent,
+        gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge",
+    )
+    try:
+        snapshots = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
+        succeeded = (
+            _install_gjc_mcp_bridge_config()
+            and _install_gjc_skills()
+            and _install_runtime_instruction_artifact("gjc")
+            and _register_gjc_mcp_server(gjc_path, registration_state=state)
+            and _remove_legacy_gjc_bridge()
+        )
+    except OSError as exc:
+        print_warning(f"Could not install GJC runtime artifacts: {exc}")
+        succeeded = False
+    if succeeded:
+        return True
+    if "snapshots" in locals():
+        _rollback_gjc_setup_paths(snapshots)
+    _rollback_new_gjc_mcp_registration(gjc_path, state)
+    return False
 
 
-def _setup_gjc(gjc_path: str) -> None:
-    """Configure Ouroboros for the GJC CLI runtime."""
+def _setup_gjc(gjc_path: str) -> bool:
+    """Configure GJC as one recoverable local setup transaction."""
     from ouroboros.config.loader import create_default_config, ensure_config_dir
+    from ouroboros.gjc import gjc_skills_root
+    from ouroboros.runtime_instruction_artifacts import gjc_agent_dir, gjc_instruction_path
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
+    transaction_paths = (
+        config_path,
+        config_dir / "credentials.yaml",
+        gjc_skills_root(gjc_agent_dir()),
+        gjc_instruction_path().parent,
+        _gjc_mcp_bridge_config_path().parent,
+        gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge",
+    )
+    registration_state: dict[str, bool] = {}
+    try:
+        snapshots = tuple(
+            (path, _snapshot_path(path, follow_links=False)) for path in transaction_paths
+        )
+        if config_path.exists():
+            config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        else:
+            create_default_config(config_dir)
+            config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
 
-    if config_path.exists():
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(config_dict, dict):
+            print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting GJC setup.")
+            _rollback_gjc_setup_paths(snapshots)
+            return False
 
-    if not isinstance(config_dict, dict):
-        print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting GJC setup.")
-        return
+        orch = config_dict.get("orchestrator")
+        if not isinstance(orch, dict):
+            orch = {}
+            config_dict["orchestrator"] = orch
+        orch["runtime_backend"] = "gjc"
+        orch["gjc_cli_path"] = gjc_path
 
-    orch = config_dict.get("orchestrator")
-    if not isinstance(orch, dict):
-        orch = {}
-        config_dict["orchestrator"] = orch
-    orch["runtime_backend"] = "gjc"
-    orch["gjc_cli_path"] = gjc_path
+        llm = config_dict.get("llm")
+        if not isinstance(llm, dict):
+            llm = {}
+            config_dict["llm"] = llm
+        llm["backend"] = "gjc"
 
-    llm = config_dict.get("llm")
-    if not isinstance(llm, dict):
-        llm = {}
-        config_dict["llm"] = llm
-    llm["backend"] = "gjc"
+        if not _install_gjc_runtime_artifacts(gjc_path, registration_state=registration_state):
+            _rollback_gjc_setup_paths(snapshots)
+            _rollback_new_gjc_mcp_registration(gjc_path, registration_state)
+            print_error("GJC setup failed; restored the previous configuration and artifacts.")
+            return False
 
-    with config_path.open("w", encoding="utf-8") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+        _atomic_write_text(
+            config_path,
+            yaml.dump(config_dict, default_flow_style=False, sort_keys=False),
+        )
+    except (OSError, yaml.YAMLError) as exc:
+        if "snapshots" in locals():
+            _rollback_gjc_setup_paths(snapshots)
+        _rollback_new_gjc_mcp_registration(gjc_path, registration_state)
+        print_error(f"GJC setup failed; restored the previous state: {exc}")
+        return False
 
     print_success(f"Configured GJC runtime (CLI: {gjc_path})")
     print_info(f"Config saved to: {config_path}")
-    _install_runtime_instruction_artifact("gjc")
-    _install_gjc_runtime_artifacts(gjc_path)
+    return True
+
+
+def _rollback_new_gjc_mcp_registration(gjc_path: str, registration_state: dict[str, bool]) -> None:
+    """Remove only an MCP entry newly created by the failed setup attempt."""
+    if not registration_state.get("created"):
+        return
+    from ouroboros.cli.gjc_setup import remove_gjc_mcp_server
+
+    if remove_gjc_mcp_server(gjc_path, run_command=subprocess.run):
+        registration_state.update(created=False, changed=False)
+    else:
+        print_warning("GJC setup rollback could not remove the newly registered MCP server.")
+
+
+def _rollback_gjc_setup_paths(snapshots: tuple[tuple[Path, _PathSnapshot], ...]) -> None:
+    """Best-effort restore of paths touched by the GJC setup transaction."""
+    failures: list[str] = []
+    for path, snapshot in reversed(snapshots):
+        try:
+            _restore_path_snapshot(path, snapshot, restore_link_targets=False)
+        except OSError as exc:
+            failures.append(f"{path}: {exc}")
+    if failures:
+        print_warning("GJC setup rollback was incomplete: " + "; ".join(failures))
 
 
 def _setup_gemini(gemini_path: str) -> None:
@@ -4995,7 +5076,8 @@ def setup(
                 "Install it, set OUROBOROS_GJC_CLI_PATH, or configure orchestrator.gjc_cli_path."
             )
             raise typer.Exit(1)
-        _setup_gjc(gjc_path)
+        if not _setup_gjc(gjc_path):
+            raise typer.Exit(1)
     elif selected in ("goose", "goose_cli"):
         goose_path = available.get("goose")
         if not goose_path:
