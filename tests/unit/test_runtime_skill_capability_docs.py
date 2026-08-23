@@ -7,7 +7,10 @@ code identifiers) so that rewording the surrounding prose never breaks them.
 from pathlib import Path
 import re
 
-from ouroboros.backends.capabilities import runtime_backend_choices
+from ouroboros.backends.capabilities import (
+    get_backend_capability,
+    runtime_backend_choices,
+)
 
 
 def test_runtime_skill_capability_guide_docs_cover_all_runtime_backends() -> None:
@@ -50,3 +53,39 @@ def test_cli_reference_setup_runtime_list_includes_supported_runtime_backends() 
 
     assert "ouroboros setup --runtime" in docs
     assert Path("docs/runtime-guides/zcode.md").is_file()
+
+
+def test_architecture_runtime_inventory_matches_backend_registry() -> None:
+    docs = Path("docs/architecture.md").read_text(encoding="utf-8")
+    section = docs.split("### Shipped adapters", 1)[1].split("### Runtime factory", 1)[0]
+    rows = [line for line in section.splitlines() if line.startswith("| `")]
+
+    documented: dict[str, set[str]] = {}
+    for row in rows:
+        columns = [column.strip() for column in row.strip("|").split("|")]
+        backend = columns[0].strip("`")
+        documented[backend] = set(re.findall(r"`([^`]+)`", columns[2]))
+
+    assert set(documented) == set(runtime_backend_choices())
+    for backend, aliases in documented.items():
+        capability = get_backend_capability(backend)
+        assert capability is not None
+        assert aliases == set(capability.aliases)
+
+
+def test_cli_reference_documents_recovery_and_inspection_commands() -> None:
+    docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
+    overview = docs.split("## Commands Overview", 1)[1].split("\n---\n", 1)[0]
+
+    assert "| `init` / `interview` |" in overview
+    assert "| `resume` |" in overview
+    assert "write validated Stage 1 commands" in overview
+    assert "Inspect and compare exported auto-interview traces" in overview
+    assert "## `ouroboros detect`" in docs
+    assert "## `ouroboros harness`" in docs
+    assert "## `ouroboros resume`" in docs
+
+    compact_docs = " ".join(docs.split())
+    assert "does not detect installed runtime backends" in compact_docs
+    assert "does not manage runtime harness configuration" in compact_docs
+    assert "does not resume a session by itself" in compact_docs
