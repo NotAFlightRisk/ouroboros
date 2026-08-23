@@ -537,6 +537,7 @@ def _advisory_lane_outputs(meta: Mapping[str, Any], lane_keys: list[str]) -> dic
         }
     return outputs
 
+
 def _web_source_evidence(output: Mapping[str, Any]) -> dict[str, Any]:
     """Return parent-runtime search/fetch evidence matching a web lane output."""
     queries = list(output["search_queries"])
@@ -632,9 +633,7 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     aggregated = out["result"]["aggregated_outputs"]
     assert [item["lane_id"] for item in aggregated] == lane_keys
     assert [item["output"] for item in aggregated] == [outputs[key] for key in lane_keys]
-    assert out["source_evidence"] == {
-        "web_context": _web_source_evidence(outputs["web_context"])
-    }
+    assert out["source_evidence"] == {"web_context": _web_source_evidence(outputs["web_context"])}
 
 
 def test_generic_web_noop_is_rejected_by_reference_contract(tmp_path: Any) -> None:
@@ -658,12 +657,11 @@ def test_generic_web_noop_is_rejected_by_reference_contract(tmp_path: Any) -> No
     assert outcome["missing_required_keys"] == ["web_context"]
     assert "web_context" in outcome["contract_violations"]
 
+
 def test_schema_valid_web_references_without_host_evidence_are_rejected(tmp_path: Any) -> None:
     registry = FanoutRegistry(tmp_path)
     session_id = "sess-web-unattested"
-    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(
-        registry, session_id
-    )
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
     outputs = _advisory_lane_outputs(meta, lane_keys)
 
     outcome = submit_fanout_results(

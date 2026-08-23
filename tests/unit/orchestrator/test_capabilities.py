@@ -5054,9 +5054,9 @@ def test_interview_metadata_includes_question_advisory_fanout_contract() -> None
             for reference in valid["references"]
         ],
     }
-    assert list(
-        Draft202012Validator(source_evidence_schema).iter_errors(valid_source_evidence)
-    ) == []
+    assert (
+        list(Draft202012Validator(source_evidence_schema).iter_errors(valid_source_evidence)) == []
+    )
 
 
 def test_question_advisory_request_model_validates_parent_runtime_payload() -> None:

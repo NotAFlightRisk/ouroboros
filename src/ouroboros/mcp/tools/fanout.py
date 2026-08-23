@@ -165,6 +165,7 @@ class PreparedFanoutSynthesis:
 
     source_evidence: dict[str, Any]
 
+
 class FanoutRegistry:
     """File-backed store for pending fan-out expected-key state.
 

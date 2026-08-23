@@ -391,6 +391,21 @@ def _interview_code_investigation_answer_contract() -> dict[str, Any]:
 
 def _interview_web_reference_answer_contract() -> dict[str, Any]:
     """Return the closed contract for start-turn web reconnaissance."""
+    source_type_schema = {
+        "type": "string",
+        "enum": [
+            "primary",
+            "official",
+            "standard",
+            "research",
+            "reputable_secondary",
+        ],
+    }
+    verified_at_schema = {
+        "type": "string",
+        "pattern": r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$",
+        "maxLength": 64,
+    }
     reference = {
         "type": "object",
         "additionalProperties": False,
@@ -398,22 +413,9 @@ def _interview_web_reference_answer_contract() -> dict[str, Any]:
         "properties": {
             "title": {"type": "string", "minLength": 1, "maxLength": 300},
             "url": {"type": "string", "pattern": r"^https?://", "maxLength": 2048},
-            "source_type": {
-                "type": "string",
-                "enum": [
-                    "primary",
-                    "official",
-                    "standard",
-                    "research",
-                    "reputable_secondary",
-                ],
-            },
+            "source_type": source_type_schema,
             "relevance": {"type": "string", "minLength": 1, "maxLength": 500},
-            "verified_at": {
-                "type": "string",
-                "pattern": r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$",
-                "maxLength": 64,
-            },
+            "verified_at": verified_at_schema,
         },
     }
     shared = {
@@ -525,8 +527,8 @@ def _interview_web_reference_answer_contract() -> dict[str, Any]:
                     "properties": {
                         "url": {"type": "string", "pattern": r"^https?://", "maxLength": 2048},
                         "http_status": {"type": "integer", "minimum": 200, "maximum": 399},
-                        "source_type": reference["properties"]["source_type"],
-                        "verified_at": reference["properties"]["verified_at"],
+                        "source_type": source_type_schema,
+                        "verified_at": verified_at_schema,
                     },
                 },
             },
