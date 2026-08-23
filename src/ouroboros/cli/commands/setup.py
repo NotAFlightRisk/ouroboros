@@ -3819,6 +3819,7 @@ def _install_gjc_runtime_artifacts(
         )
     return False
 
+
 def _refresh_gjc_runtime_artifacts() -> bool:
     """Refresh an existing GJC projection atomically without touching MCP state."""
     from ouroboros.gjc import gjc_skills_root

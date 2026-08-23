@@ -9879,9 +9879,7 @@ class TestGjcSetup:
             assert added.returncode == 0, added.stderr
             assert listed.returncode == 0, listed.stderr
             entry = next(
-                item
-                for item in json.loads(listed.stdout)["servers"]
-                if item["name"] == "ouroboros"
+                item for item in json.loads(listed.stdout)["servers"] if item["name"] == "ouroboros"
             )
             assert entry["runtimeStatus"] == "autoload"
         finally:
