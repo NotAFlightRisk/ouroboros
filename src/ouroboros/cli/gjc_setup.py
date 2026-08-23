@@ -98,9 +98,7 @@ def _gjc_mcp_config(entry: object) -> dict[str, object] | None:
     return entry
 
 
-def is_setup_managed_gjc_mcp_entry(
-    entry: object, *, allow_redacted_env: bool = False
-) -> bool:
+def is_setup_managed_gjc_mcp_entry(entry: object, *, allow_redacted_env: bool = False) -> bool:
     """Return whether *entry* exactly matches setup's execution contract."""
     config = _gjc_mcp_config(entry)
     if config is None:
@@ -360,6 +358,7 @@ def remove_legacy_gjc_bridge() -> bool:
     print_info("Removed obsolete GJC input bridge; native skills now own ooo routing.")
     return True
 
+
 def setup_gjc_runtime(
     gjc_path: str,
     *,
@@ -414,9 +413,7 @@ def setup_gjc_runtime(
 
         if not install_runtime_artifacts(gjc_path, registration_state=registration_state):
             raise OSError("runtime artifact activation failed")
-        current_after_activation = {
-            path: snapshot_path(path, follow_links=False) for path in paths
-        }
+        current_after_activation = {path: snapshot_path(path, follow_links=False) for path in paths}
         current_after_activation[config_path] = config_generation
         expected = tuple(current_after_activation.items())
         atomic_write_text(
@@ -446,7 +443,10 @@ def _restore_gjc_paths(
     for path, snapshot in reversed(snapshots):
         try:
             expected_current = expected_by_path.get(path)
-            if expected_current is not None and snapshot_path(path, follow_links=False) != expected_current:
+            if (
+                expected_current is not None
+                and snapshot_path(path, follow_links=False) != expected_current
+            ):
                 print_warning(f"Preserved concurrently changed GJC setup path: {path}")
                 continue
             restore_path_snapshot(path, snapshot, restore_link_targets=False)
@@ -454,7 +454,6 @@ def _restore_gjc_paths(
             failures.append(f"{path}: {exc}")
     if failures:
         print_warning("GJC setup rollback was incomplete: " + "; ".join(failures))
-
 
 
 def _rollback_new_gjc_mcp_registration(gjc_path: str, registration_state: dict[str, bool]) -> None:

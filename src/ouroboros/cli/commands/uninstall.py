@@ -611,9 +611,9 @@ def uninstall(
 
     gjc_path = get_gjc_cli_path() or shutil.which("gjc")
     listed_gjc_mcp = _gjc_mcp_entry(gjc_path) if gjc_path else None
-    if _is_setup_managed_gjc_mcp_entry(
-        listed_gjc_mcp
-    ) or _is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry()):
+    if _is_setup_managed_gjc_mcp_entry(listed_gjc_mcp) or _is_setup_managed_gjc_mcp_entry(
+        persisted_gjc_mcp_entry()
+    ):
         targets.append("GJC Ouroboros MCP registration")
     guide = gjc_instruction_path()
     if is_setup_managed_gjc_instruction(guide):
