@@ -522,6 +522,34 @@ class TestRemoveGjcArtifacts:
             assert not _remove_gjc_artifacts(dry_run=False)
         run.assert_not_called()
 
+    def test_removes_managed_routing_guide(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        with (
+            patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+            patch("ouroboros.config.get_gjc_cli_path", return_value=None),
+            patch("ouroboros.cli.commands.uninstall.shutil.which", return_value=None),
+        ):
+            from ouroboros.runtime_instruction_artifacts import install_gjc_instruction_artifact
+
+            guide = install_gjc_instruction_artifact().path
+            assert _remove_gjc_artifacts(dry_run=False)
+
+        assert not guide.exists()
+
+    def test_preserves_custom_routing_guide(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        guide = agent_dir / "rules" / "ouroboros-skill-capability-guide.md"
+        guide.parent.mkdir(parents=True)
+        guide.write_text("my routing rules\n", encoding="utf-8")
+        with (
+            patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+            patch("ouroboros.config.get_gjc_cli_path", return_value=None),
+            patch("ouroboros.cli.commands.uninstall.shutil.which", return_value=None),
+        ):
+            assert not _remove_gjc_artifacts(dry_run=False)
+
+        assert guide.read_text(encoding="utf-8") == "my routing rules\n"
+
 
 # ── _remove_claude_md_block ──────────────────────────────────────
 

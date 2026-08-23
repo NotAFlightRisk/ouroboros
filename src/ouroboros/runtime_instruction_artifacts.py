@@ -118,6 +118,18 @@ def has_managed_section(path: str | Path) -> bool:
         return False
 
 
+def is_setup_managed_gjc_instruction(path: str | Path) -> bool:
+    """Return whether *path* is exactly the routing guide emitted by setup."""
+    candidate = Path(path)
+    try:
+        return (
+            not candidate.is_symlink()
+            and candidate.read_text(encoding="utf-8") == _render_gjc_guide()
+        )
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
 def _write_managed_section(path: Path, backend: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -260,6 +272,7 @@ __all__ = [
     "gjc_agent_dir",
     "gjc_instruction_path",
     "has_managed_section",
+    "is_setup_managed_gjc_instruction",
     "install_copilot_instruction_artifact",
     "install_gemini_instruction_artifact",
     "install_gjc_instruction_artifact",
