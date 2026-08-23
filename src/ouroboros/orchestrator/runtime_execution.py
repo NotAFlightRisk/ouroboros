@@ -253,7 +253,7 @@ class RuntimeExecution(AsyncIterator[AgentMessage]):
                 operation=f"{self.backend} provider read",
                 cancel_first=True,
             )
-            if read_error is not None:
+            if read_error is not None and not isinstance(read_error, StopAsyncIteration):
                 self._unwind_error = read_error
             self._active_read = None
         return self._build_receipt(
@@ -273,7 +273,7 @@ class RuntimeExecution(AsyncIterator[AgentMessage]):
                 operation=f"{self.backend} provider read",
                 cancel_first=True,
             )
-            if read_error is not None:
+            if read_error is not None and not isinstance(read_error, StopAsyncIteration):
                 self._unwind_error = read_error
             self._active_read = None
         close = getattr(self._stream, "aclose", None)
