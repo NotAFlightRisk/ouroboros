@@ -15,6 +15,7 @@ from ouroboros.cli.commands.uninstall import (
     _remove_codex_artifacts,
     _remove_codex_mcp,
     _remove_data_dir,
+    _remove_gjc_artifacts,
     _remove_opencode_bridge_plugin,
     app,
 )
@@ -478,6 +479,48 @@ class TestRemoveCodexArtifacts:
         assert not (skills_dir / "ouroboros-interview").exists()
         assert not (skills_dir / "ouroboros-run").exists()
         assert (skills_dir / "other").exists()
+
+
+# ── _remove_gjc_artifacts ────────────────────────────────────────
+
+
+class TestRemoveGjcArtifacts:
+    def test_removes_managed_skills_and_preserves_other_skills(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        managed = agent_dir / "skills" / "ouroboros-interview"
+        managed.mkdir(parents=True)
+        (managed / "SKILL.md").write_text(
+            "---\nname: ouroboros-interview\ndescription: managed\nouroboros_projection: gjc-v1\n---\n",
+            encoding="utf-8",
+        )
+        other = agent_dir / "skills" / "my-skill"
+        other.mkdir()
+        with (
+            patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+            patch("ouroboros.config.get_gjc_cli_path", return_value=None),
+            patch("ouroboros.cli.commands.uninstall.shutil.which", return_value=None),
+        ):
+            assert _remove_gjc_artifacts(dry_run=False)
+
+        assert not managed.exists()
+        assert other.exists()
+
+    def test_preserves_user_managed_mcp(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        with (
+            patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+            patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/bin/gjc"),
+            patch(
+                "ouroboros.cli.commands.uninstall._gjc_mcp_entry",
+                return_value={
+                    "name": "ouroboros",
+                    "config": {"type": "stdio", "command": "docker", "args": ["run"]},
+                },
+            ),
+            patch("ouroboros.cli.commands.uninstall.subprocess.run") as run,
+        ):
+            assert not _remove_gjc_artifacts(dry_run=False)
+        run.assert_not_called()
 
 
 # ── _remove_claude_md_block ──────────────────────────────────────

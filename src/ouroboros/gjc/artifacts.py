@@ -1,0 +1,215 @@
+"""Install packaged Ouroboros skills into GJC's native skill registry."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+import os
+from pathlib import Path
+import re
+import shutil
+import tempfile
+
+import yaml
+
+from ouroboros.skills.artifacts import collect_skill_bundle_dirs, resolve_packaged_skills_dir
+
+GJC_SKILL_NAMESPACE = "ouroboros-"
+_SKILL_REFERENCE_PATTERN = re.compile(r"\.\./([a-z0-9_-]+)/SKILL\.md")
+_SLASH_SKILL_PATTERN = re.compile(r"/ouroboros:([a-z0-9_-]+)")
+_MANAGED_FIELD = "ouroboros_projection"
+_MANAGED_VALUE = "gjc-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class GjcSkillInstallResult:
+    """Installed GJC skill projection paths."""
+
+    target_root: Path
+    skill_paths: tuple[Path, ...]
+
+
+def gjc_skills_root(agent_dir: str | Path) -> Path:
+    """Return the native GJC user-skill directory beneath an agent profile."""
+    return Path(agent_dir).expanduser() / "skills"
+
+
+def _split_skill_document(source: str, source_path: Path) -> tuple[dict[str, object], str]:
+    if not source.startswith("---\n"):
+        raise ValueError(f"Skill lacks YAML frontmatter: {source_path}")
+    closing = source.find("\n---\n", 4)
+    if closing == -1:
+        raise ValueError(f"Skill frontmatter is not closed: {source_path}")
+    parsed = yaml.safe_load(source[4:closing]) or {}
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Skill frontmatter is not a mapping: {source_path}")
+    return parsed, source[closing + 5 :]
+
+
+def _gjc_mcp_wire_name(mcp_tool: object) -> str | None:
+    """Map an Ouroboros MCP tool id to GJC's deterministic MCP wire name."""
+    if not isinstance(mcp_tool, str):
+        return None
+    normalized = mcp_tool.strip()
+    if not normalized.startswith("ouroboros_"):
+        return None
+    return f"mcp__ouroboros_{normalized.removeprefix('ouroboros_')}"
+
+
+def _render_gjc_skill(source_dir: Path) -> str:
+    source_path = source_dir / "SKILL.md"
+    frontmatter, body = _split_skill_document(source_path.read_text(encoding="utf-8"), source_path)
+    command = source_dir.name
+    projected_name = f"{GJC_SKILL_NAMESPACE}{command}"
+    raw_description = frontmatter.get("description")
+    description = str(raw_description).strip() if raw_description is not None else ""
+    trigger = (
+        "Use when the user sends bare `ooo`."
+        if command == "ooo"
+        else f"Use when the user explicitly invokes `ooo {command}`."
+    )
+    frontmatter["name"] = projected_name
+    frontmatter[_MANAGED_FIELD] = _MANAGED_VALUE
+    frontmatter["description"] = (
+        f"{description.rstrip('.')} — {trigger}" if description else trigger
+    )
+    wire_name = _gjc_mcp_wire_name(frontmatter.get("mcp_tool"))
+    if wire_name is not None:
+        body = (
+            "## GJC runtime dispatch\n\n"
+            f"The Ouroboros MCP tool for this skill is `{wire_name}`. In GJC it is "
+            "autoloaded and may already be active even when a tool-discovery search returns "
+            "zero matches. Skip deferred tool discovery, `gjc tools` shell probes, and "
+            "repository searches. At the skill body's first MCP step, call this exact tool "
+            "directly with the documented arguments. Use the non-MCP fallback only if that "
+            "direct call itself reports that the tool is unavailable.\n\n" + body
+        )
+    projected_body = _SKILL_REFERENCE_PATTERN.sub(
+        lambda match: f"../{GJC_SKILL_NAMESPACE}{match.group(1)}/SKILL.md",
+        body,
+    )
+    projected_body = _SLASH_SKILL_PATTERN.sub(
+        lambda match: (
+            f"/skill:{match.group(1)}"
+            if match.group(1).startswith(GJC_SKILL_NAMESPACE)
+            else f"/skill:{GJC_SKILL_NAMESPACE}{match.group(1)}"
+        ),
+        projected_body,
+    )
+    rendered_frontmatter = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True).rstrip()
+    return f"---\n{rendered_frontmatter}\n---\n{projected_body}"
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def _is_managed_skill(path: Path) -> bool:
+    try:
+        frontmatter, _ = _split_skill_document(
+            (path / "SKILL.md").read_text(encoding="utf-8"),
+            path / "SKILL.md",
+        )
+    except (OSError, ValueError, UnicodeDecodeError, yaml.YAMLError):
+        return False
+    return frontmatter.get(_MANAGED_FIELD) == _MANAGED_VALUE
+
+
+def _publish_skill(source_dir: Path, target_path: Path) -> None:
+    if target_path.is_symlink():
+        raise OSError(f"Refusing to replace symlinked GJC skill: {target_path}")
+    if target_path.exists() and not _is_managed_skill(target_path):
+        raise OSError(f"Refusing to replace non-Ouroboros GJC skill: {target_path}")
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=f".{target_path.name}.",
+            suffix=".tmp",
+            dir=str(target_path.parent),
+        )
+    )
+    backup: Path | None = None
+    try:
+        shutil.copytree(source_dir, staging, dirs_exist_ok=True, symlinks=False)
+        (staging / "SKILL.md").write_text(_render_gjc_skill(source_dir), encoding="utf-8")
+        if target_path.exists():
+            backup = target_path.with_name(f".{target_path.name}.{os.urandom(8).hex()}.old")
+            os.replace(target_path, backup)
+        os.replace(staging, target_path)
+    except BaseException:
+        _remove_path(staging)
+        if backup is not None and backup.exists() and not target_path.exists():
+            os.replace(backup, target_path)
+        raise
+    if backup is not None:
+        _remove_path(backup)
+
+
+@contextmanager
+def _packaged_skills(skills_dir: str | Path | None = None) -> Iterator[Path]:
+    with resolve_packaged_skills_dir(skills_dir=skills_dir, anchor_file=__file__) as source_root:
+        yield source_root
+
+
+def install_gjc_skills(
+    *,
+    agent_dir: str | Path,
+    skills_dir: str | Path | None = None,
+    prune: bool = True,
+) -> GjcSkillInstallResult:
+    """Install or refresh namespaced Ouroboros skills for one GJC profile."""
+    target_root = gjc_skills_root(agent_dir)
+    target_root.mkdir(parents=True, exist_ok=True)
+    if target_root.is_symlink():
+        raise OSError(f"Refusing to install GJC skills through a symlink: {target_root}")
+
+    installed: list[Path] = []
+    with _packaged_skills(skills_dir) as source_root:
+        source_dirs = collect_skill_bundle_dirs(source_root)
+        if not source_dirs:
+            raise FileNotFoundError("Packaged Ouroboros skills directory is empty")
+        expected_names = {f"{GJC_SKILL_NAMESPACE}{source_dir.name}" for source_dir in source_dirs}
+        for source_dir in source_dirs:
+            target_path = target_root / f"{GJC_SKILL_NAMESPACE}{source_dir.name}"
+            _publish_skill(source_dir, target_path)
+            installed.append(target_path)
+
+    if prune:
+        for candidate in target_root.iterdir():
+            if (
+                candidate.name.startswith(GJC_SKILL_NAMESPACE)
+                and candidate.name not in expected_names
+                and _is_managed_skill(candidate)
+            ):
+                _remove_path(candidate)
+    return GjcSkillInstallResult(target_root=target_root, skill_paths=tuple(installed))
+
+
+def remove_gjc_skills(*, agent_dir: str | Path, dry_run: bool = False) -> tuple[Path, ...]:
+    """Remove only the namespaced skill projections managed by Ouroboros."""
+    target_root = gjc_skills_root(agent_dir)
+    if not target_root.is_dir() or target_root.is_symlink():
+        return ()
+    targets = tuple(
+        candidate
+        for candidate in sorted(target_root.iterdir(), key=lambda path: path.name)
+        if candidate.name.startswith(GJC_SKILL_NAMESPACE)
+        and not candidate.is_symlink()
+        and _is_managed_skill(candidate)
+    )
+    if not dry_run:
+        for target in targets:
+            _remove_path(target)
+    return targets
+
+
+__all__ = [
+    "GJC_SKILL_NAMESPACE",
+    "GjcSkillInstallResult",
+    "gjc_skills_root",
+    "install_gjc_skills",
+    "remove_gjc_skills",
+]
