@@ -6,6 +6,9 @@ from collections.abc import Callable, Sequence
 import json
 from pathlib import Path
 import subprocess
+from typing import Any
+
+import yaml
 
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.runtime_instruction_artifacts import gjc_agent_dir
@@ -267,3 +270,103 @@ def remove_legacy_gjc_bridge() -> bool:
         pass
     print_info("Removed obsolete GJC input bridge; native skills now own ooo routing.")
     return True
+
+
+def setup_gjc_runtime(
+    gjc_path: str,
+    *,
+    install_runtime_artifacts: Callable[..., bool],
+    atomic_write_text: Callable[..., object],
+    snapshot_path: Callable[..., object],
+    restore_path_snapshot: Callable[..., None],
+) -> bool:
+    """Configure GJC and roll back every owned path when activation fails."""
+    from ouroboros.config.loader import create_default_config, ensure_config_dir
+    from ouroboros.gjc import gjc_skills_root
+    from ouroboros.runtime_instruction_artifacts import gjc_instruction_path
+
+    config_dir = ensure_config_dir()
+    config_path = config_dir / "config.yaml"
+    paths = (
+        config_path,
+        config_dir / "credentials.yaml",
+        gjc_skills_root(gjc_agent_dir()),
+        gjc_instruction_path().parent,
+        gjc_mcp_bridge_config_path().parent,
+        gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge",
+    )
+    registration_state: dict[str, bool] = {}
+    snapshots: tuple[tuple[Path, Any], ...] = ()
+    try:
+        snapshots = tuple((path, snapshot_path(path, follow_links=False)) for path in paths)
+        if config_path.exists():
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        else:
+            create_default_config(config_dir)
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(config, dict):
+            print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting GJC setup.")
+            _restore_gjc_paths(snapshots, restore_path_snapshot)
+            return False
+
+        orchestrator = config.get("orchestrator")
+        if not isinstance(orchestrator, dict):
+            orchestrator = {}
+            config["orchestrator"] = orchestrator
+        orchestrator.update(runtime_backend="gjc", gjc_cli_path=gjc_path)
+        llm = config.get("llm")
+        if not isinstance(llm, dict):
+            llm = {}
+            config["llm"] = llm
+        llm["backend"] = "gjc"
+
+        if not install_runtime_artifacts(gjc_path, registration_state=registration_state):
+            raise OSError("runtime artifact activation failed")
+        atomic_write_text(
+            config_path,
+            yaml.dump(config, default_flow_style=False, sort_keys=False),
+        )
+    except (OSError, yaml.YAMLError) as exc:
+        _restore_gjc_paths(snapshots, restore_path_snapshot)
+        _rollback_new_gjc_mcp_registration(gjc_path, registration_state)
+        print_error(f"GJC setup failed; restored the previous state: {exc}")
+        return False
+
+    print_success(f"Configured GJC runtime (CLI: {gjc_path})")
+    print_info(f"Config saved to: {config_path}")
+    return True
+
+
+def _restore_gjc_paths(
+    snapshots: tuple[tuple[Path, Any], ...],
+    restore_path_snapshot: Callable[..., None],
+) -> None:
+    failures: list[str] = []
+    for path, snapshot in reversed(snapshots):
+        try:
+            restore_path_snapshot(path, snapshot, restore_link_targets=False)
+        except OSError as exc:
+            failures.append(f"{path}: {exc}")
+    if failures:
+        print_warning("GJC setup rollback was incomplete: " + "; ".join(failures))
+
+
+def _rollback_new_gjc_mcp_registration(gjc_path: str, registration_state: dict[str, bool]) -> None:
+    if not registration_state.get("created"):
+        return
+    if remove_gjc_mcp_server(gjc_path, run_command=subprocess.run):
+        registration_state.update(created=False, changed=False)
+    else:
+        print_warning("GJC setup rollback could not remove the newly registered MCP server.")
+
+
+def rollback_gjc_activation(
+    snapshots: tuple[tuple[Path, Any], ...],
+    *,
+    restore_path_snapshot: Callable[..., None],
+    gjc_path: str,
+    registration_state: dict[str, bool],
+) -> None:
+    """Restore owned paths and remove only a registration created by this activation."""
+    _restore_gjc_paths(snapshots, restore_path_snapshot)
+    _rollback_new_gjc_mcp_registration(gjc_path, registration_state)
