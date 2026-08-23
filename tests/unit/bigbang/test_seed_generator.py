@@ -361,6 +361,10 @@ class TestSeedGeneratorAmbiguityGating:
         (
             "Rather than change source code, write the requested plan; set the task type to document. For reference, task_type: code is an example.",
             "Implement this as task_type: document.",
+            "Make this a document task.",
+            "Create a document Seed.",
+            "Please make the task type document.",
+            "Choose document for this Seed.",
         ),
     )
     async def test_generate_preserves_explicit_document_task_type(

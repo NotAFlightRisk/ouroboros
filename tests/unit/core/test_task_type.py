@@ -199,6 +199,26 @@ def test_explicit_task_type_accepts_authoritative_selection_verbs() -> None:
         assert explicit_task_type_from_goal(goal) == "document"
 
 
+def test_explicit_task_type_accepts_direct_document_selections() -> None:
+    for goal in (
+        "Make this a document task.",
+        "Create a document Seed.",
+        "Please make the task type document.",
+        "Choose document for this Seed.",
+    ):
+        assert explicit_task_type_from_goal(goal) == "document"
+
+
+def test_direct_document_selection_forms_retain_non_binding_guards() -> None:
+    for goal in (
+        "Do not make this a document task.",
+        "For example, create a document Seed.",
+        'The guide says "Please make the task type document."',
+        "Choose document for this Seed?",
+    ):
+        assert explicit_task_type_from_goal(goal) is None
+
+
 def test_explicit_task_type_rejects_typographic_quoted_and_conditional_language() -> None:
     for goal in (
         "We won’t use task_type: document.",

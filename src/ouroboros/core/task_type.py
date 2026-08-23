@@ -60,6 +60,23 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
         rf"{_TASK_TYPE_PATTERN}\s*(?:이어야|여야|로\s*(?:설정|지정))",
         re.IGNORECASE,
     ),
+    re.compile(
+        rf"\b(?:please\s+)?make\s+this\s+(?:an?\s+)?{_TASK_TYPE_PATTERN}\s+task\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bcreate\s+(?:an?\s+)?{_TASK_TYPE_PATTERN}\s+seed\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:please\s+)?make\s+(?:the\s+)?task[_\s-]*type\s+(?:an?\s+)?"
+        rf"{_TASK_TYPE_PATTERN}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:choose|select)\s+{_TASK_TYPE_PATTERN}\s+for\s+(?:this|the)\s+seed\b",
+        re.IGNORECASE,
+    ),
 )
 
 _NON_BINDING_CONTRACT_PATTERN = re.compile(

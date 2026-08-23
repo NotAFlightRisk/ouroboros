@@ -427,7 +427,7 @@ async def test_reference_aware_generation_preserves_explicit_document_task_type(
         confirmation="For the Linear-like reference, keyboard-first navigation is required."
     )
     state.initial_context = (
-        "Set the task type to document. For reference, task_type: code is an example. "
+        "Create a document Seed. For reference, task_type: code is an example. "
         "Build a Linear-like issue tool."
     )
 
@@ -435,6 +435,9 @@ async def test_reference_aware_generation_preserves_explicit_document_task_type(
 
     assert result.is_ok
     assert result.value.task_type == "document"
+    assert tuple(str(item) for item in result.value.acceptance_criteria) == (
+        "For the Linear-like reference, keyboard-first navigation is required.",
+    )
     adapter.complete.assert_not_awaited()
 
 

@@ -99,6 +99,10 @@ class TestSynthesizeSeedFromLedgerUnchanged:
             "Use task_type: document. Compare it with task_type: code.",
             "Use task_type: document. This document mentions task_type: code in prose.",
             "task_type: document should be used.",
+            "Make this a document task.",
+            "Create a document Seed.",
+            "Please make the task type document.",
+            "Choose document for this Seed.",
         ):
             ledger = _populate_complete_ledger(goal)
 
@@ -151,6 +155,10 @@ class TestPartialSeedFromEvidence:
             "Use task_type: document. Compare it with task_type: code.",
             "Use task_type: document. This document mentions task_type: code in prose.",
             "task_type: document should be used.",
+            "Make this a document task.",
+            "Create a document Seed.",
+            "Please make the task type document.",
+            "Choose document for this Seed.",
         ):
             ledger = SeedDraftLedger.from_goal(goal)
 

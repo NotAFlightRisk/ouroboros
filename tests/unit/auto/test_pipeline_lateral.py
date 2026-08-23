@@ -181,6 +181,41 @@ def test_seed_qa_repairs_preserve_same_clause_task_and_parent_contracts() -> Non
         assert candidate.metadata.parent_seed_id == "seed_good"
 
 
+@pytest.mark.parametrize(
+    "goal",
+    (
+        "Make this a document task.",
+        "Create a document Seed.",
+        "Please make the task type document.",
+        "Choose document for this Seed.",
+    ),
+)
+def test_seed_qa_repairs_preserve_direct_document_selections(goal: str) -> None:
+    seed = _build_seed(seed_id="seed_wrong_task_type").model_copy(
+        update={"goal": goal, "task_type": "code"}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.61,
+        verdict="revise",
+        differences=("The explicit task contract is not reflected.",),
+        suggestions=("Preserve the explicit document task.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Keep the explicit task contract authoritative.",
+        text="Apply the requested document task.",
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    lateral = _seed_with_seed_qa_lateral_feedback(
+        seed, lateral_result, qa_result=qa_result, attempt=1
+    )
+
+    assert repaired.task_type == "document"
+    assert lateral.task_type == "document"
+
+
 def test_seed_qa_repairs_ignore_comma_prefixed_reference_contracts() -> None:
     seed = _build_seed(seed_id="seed_comma_governors").model_copy(
         update={
