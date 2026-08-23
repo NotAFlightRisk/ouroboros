@@ -9956,9 +9956,7 @@ class TestGjcSetup:
                     "--runtime",
                     "gjc",
                 ],
-                "env": {
-                    "OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())
-                },
+                "env": {"OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())},
                 "sharing": "per-session",
                 "timeout": 30000,
             },
@@ -10070,9 +10068,7 @@ class TestGjcSetup:
             ("timeout", 1000),
         ],
     )
-    def test_mcp_ownership_rejects_custom_execution_fields(
-        self, field: str, value: object
-    ) -> None:
+    def test_mcp_ownership_rejects_custom_execution_fields(self, field: str, value: object) -> None:
         entry = {
             "type": "stdio",
             "command": "uvx",
@@ -10088,9 +10084,7 @@ class TestGjcSetup:
                 "--runtime",
                 "gjc",
             ],
-            "env": {
-                "OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())
-            },
+            "env": {"OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())},
             "sharing": "per-session",
             "timeout": 30000,
         }
@@ -10117,9 +10111,7 @@ class TestGjcSetup:
                     "--runtime",
                     "gjc",
                 ],
-                "env": {
-                    "OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())
-                },
+                "env": {"OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())},
                 "sharing": "per-session",
                 "timeout": 30000,
             },

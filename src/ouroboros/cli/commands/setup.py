@@ -3764,9 +3764,9 @@ def _install_gjc_runtime_artifacts(
             and _install_runtime_instruction_artifact("gjc")
         )
         expected = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
-        if not artifacts_installed:
-            succeeded = False
-        elif not _register_gjc_mcp_server(gjc_path, registration_state=state):
+        if not artifacts_installed or not _register_gjc_mcp_server(
+            gjc_path, registration_state=state
+        ):
             succeeded = False
         else:
             succeeded = _remove_legacy_gjc_bridge()
