@@ -5853,10 +5853,10 @@ def _literal_default(value: str) -> str:
 def opus_default_violations(direct_model: str, consensus_model: str) -> tuple[str, ...]:
     """Validate the intentionally different direct and OpenRouter Opus ids."""
 
-    direct_pattern = re.compile(r"claude-opus-(?P<major>[1-9][0-9]*)-(?P<minor>0|[1-9][0-9]*)")
+    direct_pattern = re.compile(r"claude-opus-(?P<major>[1-9][0-9]*)(?:-(?P<minor>0|[1-9][0-9]*))?")
     consensus_pattern = re.compile(
         r"openrouter/anthropic/claude-opus-"
-        r"(?P<major>[1-9][0-9]*)\.(?P<minor>0|[1-9][0-9]*)"
+        r"(?P<major>[1-9][0-9]*)(?:\.(?P<minor>0|[1-9][0-9]*))?"
     )
     direct_match = direct_pattern.fullmatch(direct_model)
     consensus_match = consensus_pattern.fullmatch(consensus_model)
@@ -5867,21 +5867,23 @@ def opus_default_violations(direct_model: str, consensus_model: str) -> tuple[st
     if direct_match is None:
         violations.append(
             "evaluation.semantic_model: invalid direct Opus default "
-            f"{direct_model!r}; expected 'claude-opus-<major>-<minor>'"
+            f"{direct_model!r}; expected 'claude-opus-<major>' or "
+            "'claude-opus-<major>-<minor>'"
         )
     if consensus_match is None:
         violations.append(
             "consensus.advocate_model: invalid OpenRouter Opus default "
             f"{consensus_model!r}; expected "
+            "'openrouter/anthropic/claude-opus-<major>' or "
             "'openrouter/anthropic/claude-opus-<major>.<minor>'"
         )
     if direct_match is not None and consensus_match is not None:
         direct_version = direct_match.group("major", "minor")
         consensus_version = consensus_match.group("major", "minor")
         if direct_version != consensus_version:
-            expected_consensus = (
-                f"openrouter/anthropic/claude-opus-{direct_version[0]}.{direct_version[1]}"
-            )
+            expected_consensus = f"openrouter/anthropic/claude-opus-{direct_version[0]}"
+            if direct_version[1] is not None:
+                expected_consensus += f".{direct_version[1]}"
             violations.append(
                 "consensus.advocate_model: OpenRouter Opus default "
                 f"{consensus_model!r} does not correspond to direct default {direct_model!r}; "

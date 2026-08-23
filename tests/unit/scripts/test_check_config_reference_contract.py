@@ -6475,12 +6475,18 @@ def test_opus_defaults_preserve_direct_and_openrouter_formats(contract) -> None:
         == ()
     )
 
+    assert (
+        contract.opus_default_violations("claude-opus-5", "openrouter/anthropic/claude-opus-5")
+        == ()
+    )
+
     violations = contract.opus_default_violations("claude-opus-4-8", "claude-opus-4-8")
 
     assert violations == (
         "Opus defaults must use distinct direct and OpenRouter identifiers",
         "consensus.advocate_model: invalid OpenRouter Opus default 'claude-opus-4-8'; "
-        "expected 'openrouter/anthropic/claude-opus-<major>.<minor>'",
+        "expected 'openrouter/anthropic/claude-opus-<major>' or "
+        "'openrouter/anthropic/claude-opus-<major>.<minor>'",
     )
 
 
