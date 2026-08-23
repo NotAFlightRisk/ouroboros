@@ -5462,16 +5462,23 @@ class ParallelACExecutor:
                                 "verify_command": spec.verify_command,
                                 "passed": bool(replay_outcome.passed),
                                 "reason": replay_outcome.reason,
+                                "environment_unverifiable": bool(
+                                    replay_outcome.environment_unverifiable
+                                ),
                                 "final_workspace_revalidation": True,
                             },
                         )
                     )
                     if replay_outcome.workspace_mutated:
                         replay_mutated_workspace = True
-                    if not replay_outcome.passed and not replay_outcome.environment_unverifiable:
+                    if not replay_outcome.passed:
+                        replay_failure = (
+                            "Final workspace verify gate was unverifiable on settlement replay"
+                            if replay_outcome.environment_unverifiable
+                            else "Final workspace verify gate failed on settlement replay"
+                        )
                         individual_failures[result.ac_index] = (
-                            "Final workspace verify gate failed on settlement "
-                            f"replay: {replay_outcome.reason}",
+                            f"{replay_failure}: {replay_outcome.reason}",
                             replay_outcome,
                         )
                         settled.append(result)
@@ -5535,6 +5542,7 @@ class ParallelACExecutor:
                     error=reason,
                     final_message=reason,
                     outcome=ACExecutionOutcome.FAILED,
+                    verify_gate_outcome=outcome,
                     atomic_verifier_verdict=VerifierVerdict(
                         passed=False,
                         reasons=(reason,),

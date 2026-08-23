@@ -49,6 +49,7 @@ from ouroboros.orchestrator.parallel_executor import (
 )
 from ouroboros.orchestrator.retry_hints import is_retryable_failure
 from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.orchestrator.verify_command_runner import VerifyRun
 from ouroboros.orchestrator.verify_shell import verify_shell_path_from_identity
 
 
@@ -2276,6 +2277,112 @@ async def test_final_settlement_replay_failure_rejects_stale_command(
     assert settled[0].success is False
     assert settled[0].outcome is ACExecutionOutcome.FAILED
     assert "failed on settlement replay" in (settled[0].error or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("replay_run", "expected_reason"),
+    (
+        (
+            VerifyRun(returncode=-1, output="", timed_out=True),
+            "verify_command timed out after 30s",
+        ),
+        (
+            VerifyRun(returncode=-1, output="", start_error="spawn unavailable"),
+            "verify_command could not start: spawn unavailable",
+        ),
+    ),
+)
+async def test_final_settlement_replay_fails_closed_when_command_is_unverifiable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    replay_run: VerifyRun,
+    expected_reason: str,
+) -> None:
+    target = tmp_path / "condition.txt"
+    target.write_text("before", encoding="utf-8")
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(
+            description="ac",
+            verify_command="exit 0",
+            verify_replay_safe=True,
+        )
+    )
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    target.write_text("after", encoding="utf-8")
+
+    async def unverifiable_run(*_args: Any, **_kwargs: Any) -> VerifyRun:
+        return replay_run
+
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.parallel_executor.run_with_shell",
+        unverifiable_run,
+    )
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ac",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=cached,
+            )
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert settled[0].success is False
+    assert settled[0].outcome is ACExecutionOutcome.FAILED
+    assert settled[0].verify_gate_outcome is not None
+    assert settled[0].verify_gate_outcome.environment_unverifiable is True
+    assert expected_reason in (settled[0].error or "")
+    emitted = [call.args[0] for call in executor._event_store.append.await_args_list]
+    replayed = next(event for event in emitted if event.type == "execution.verify.replayed")
+    assert replayed.data["passed"] is False
+    assert replayed.data["environment_unverifiable"] is True
+    failed = next(event for event in emitted if event.type == "execution.verify.failed")
+    assert expected_reason in failed.data["reason"]
+
+
+@pytest.mark.asyncio
+async def test_final_settlement_replay_fails_closed_when_shell_is_missing(tmp_path: Any) -> None:
+    target = tmp_path / "condition.txt"
+    target.write_text("before", encoding="utf-8")
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(
+            description="ac",
+            verify_command="exit 0",
+            verify_replay_safe=True,
+        )
+    )
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    target.write_text("after", encoding="utf-8")
+    executor._verify_shell_identity = None
+
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ac",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=cached,
+            )
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert settled[0].success is False
+    assert settled[0].outcome is ACExecutionOutcome.FAILED
+    assert settled[0].verify_gate_outcome is not None
+    assert settled[0].verify_gate_outcome.environment_unverifiable is True
+    assert "unverifiable on settlement replay" in (settled[0].error or "")
 
 
 @pytest.mark.asyncio
