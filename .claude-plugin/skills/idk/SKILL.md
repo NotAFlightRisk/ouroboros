@@ -36,7 +36,14 @@ Examples:
 2. Forward the evidence to the `ouroboros_interview` tool using the `calibration_input` argument.
 3. This does NOT answer a pending interview question — it adjusts the wording of future questions.
 4. Display the calibration result (level, confidence, rephrased question if available).
-5. Continue the interview with the next question from the tool response.
+5. **Relay calibration into subsequent interview calls**: The MCP response includes
+   `meta.interview_calibration`. On every subsequent `ouroboros_interview` call in
+   this session (when sending an answer or resuming), pass this object as the
+   `interview_calibration` argument so the question generator can apply the
+   calibrated wording. This is the full idk→answer→next sequence: calibrate,
+   then answer the (possibly rephrased) question, then receive the next question
+   at the calibrated level.
+6. Continue the interview with the next question from the tool response.
 
 ## Guardrails
 

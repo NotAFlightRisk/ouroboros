@@ -50,6 +50,8 @@ def infer_interview_calibration(evidence: str) -> InterviewCalibration:
         "do not know",
         "not familiar",
         "unfamiliar",
+        "cannot explain",
+        "can't explain",
         "잘 모르",
         "모르겠",
         "처음",
@@ -90,6 +92,22 @@ def infer_interview_calibration(evidence: str) -> InterviewCalibration:
     )
     if english_match:
         unknown_segments.append(english_match.group(1))
+    # Match "cannot explain X" / "can't explain X" pattern
+    explain_match = re.search(
+        r"(?:cannot explain|can't explain|can not explain)\s+([^.;]+)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if explain_match:
+        unknown_segments.append(explain_match.group(1))
+    # Match "X are/is unfamiliar" pattern (subject before the adjective)
+    subj_unfamiliar_match = re.search(
+        r"([^.;,]{1,160}?)\s+(?:are|is)\s+unfamiliar",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if subj_unfamiliar_match:
+        unknown_segments.append(subj_unfamiliar_match.group(1))
     korean_match = re.search(
         r"(?:^|[,.;]\s*)([^,.;]{1,160}?)(?:은|는|이|가|을|를)?\s*(?:잘\s*)?(?:모르|낯설)",
         normalized,

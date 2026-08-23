@@ -61,12 +61,14 @@ async def handle_interview_calibration_turn(
             state = load_result.value
             if state.rounds and state.rounds[-1].user_response is None:
                 pending_question = state.rounds[-1].question
-                rephrase_result = await engine.rephrase_pending_question(
-                    pending_question,
-                    calibration,
-                )
-                if rephrase_result.is_ok and rephrase_result.value:
-                    rephrased_question = rephrase_result.value
+                rephrase_method = getattr(engine, "rephrase_pending_question", None)
+                if callable(rephrase_method):
+                    rephrase_result = await rephrase_method(
+                        pending_question,
+                        calibration,
+                    )
+                    if rephrase_result.is_ok and rephrase_result.value:
+                        rephrased_question = rephrase_result.value
         finally:
             if handler._owns_event_store:
                 await handler.close()

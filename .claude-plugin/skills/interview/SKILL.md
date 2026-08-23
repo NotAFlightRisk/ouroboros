@@ -403,6 +403,12 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    that call. Do not put product decisions into glossary/reference fields; keep
    those decisions in the user answer.
 
+   **Interview calibration relay**: If an earlier `/ouroboros:idk` call produced
+   `meta.interview_calibration`, pass that object as the `interview_calibration`
+   argument on every subsequent `ouroboros_interview` call in this session. This
+   ensures the question generator applies calibrated wording to all future
+   questions without re-calibrating each turn.
+
    **Payload format — preserve the user's reasoning, do NOT compress to one line.**
    MCP cannot read code, browse the web, or call tools. The text you send is
    the only context MCP has when generating the next question. A one-line
