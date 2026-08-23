@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import tomllib
 from typing import Annotated
 
@@ -35,6 +36,8 @@ from ouroboros.cli.opencode_config import (
     opencode_config_dir,
 )
 from ouroboros.codex import CODEX_RULE_FILENAME, resolve_codex_home, resolve_packaged_codex_assets
+from ouroboros.gjc import gjc_skills_root, remove_gjc_skills
+from ouroboros.runtime_instruction_artifacts import gjc_agent_dir
 
 app = typer.Typer(
     name="uninstall",
@@ -253,6 +256,95 @@ def _remove_opencode_mcp(dry_run: bool) -> bool:
         return False
     print_success(f"Removed ouroboros from {config_path}")
     return True
+
+
+def _gjc_mcp_entry(gjc_path: str) -> dict[str, object] | None:
+    """Return GJC's redacted Ouroboros MCP row, or ``None`` when unavailable."""
+    try:
+        result = subprocess.run(
+            [gjc_path, "mcp", "list", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    servers = payload.get("servers") if isinstance(payload, dict) else None
+    if not isinstance(servers, list):
+        return None
+    return next(
+        (
+            entry
+            for entry in servers
+            if isinstance(entry, dict) and entry.get("name") == "ouroboros"
+        ),
+        None,
+    )
+
+
+def _remove_gjc_artifacts(dry_run: bool) -> bool:
+    """Remove setup-owned GJC skills and MCP registration."""
+    from ouroboros.cli.commands.setup import (
+        _gjc_mcp_bridge_config_path,
+        _is_setup_managed_gjc_mcp_bridge_config,
+        _is_setup_managed_gjc_mcp_entry,
+    )
+    from ouroboros.config import get_gjc_cli_path
+
+    agent_dir = gjc_agent_dir()
+    skills = remove_gjc_skills(agent_dir=agent_dir, dry_run=True)
+    gjc_path = get_gjc_cli_path() or shutil.which("gjc")
+    mcp_entry = _gjc_mcp_entry(gjc_path) if gjc_path else None
+    managed_mcp = _is_setup_managed_gjc_mcp_entry(mcp_entry)
+    bridge_config = _gjc_mcp_bridge_config_path()
+    managed_bridge_config = _is_setup_managed_gjc_mcp_bridge_config(bridge_config)
+    if not skills and not managed_mcp and not managed_bridge_config:
+        return False
+    if dry_run:
+        if skills:
+            print_info(f"[dry-run] Would remove {len(skills)} GJC Ouroboros skills")
+        if managed_mcp:
+            print_info("[dry-run] Would remove Ouroboros MCP registration from GJC")
+        if managed_bridge_config:
+            print_info(f"[dry-run] Would remove GJC MCP bridge config: {bridge_config}")
+        return True
+
+    all_ok = True
+    if skills:
+        removed = remove_gjc_skills(agent_dir=agent_dir)
+        all_ok = len(removed) == len(skills)
+        if all_ok:
+            print_success(f"Removed {len(removed)} GJC Ouroboros skills")
+    if managed_mcp and gjc_path:
+        try:
+            result = subprocess.run(
+                [gjc_path, "mcp", "remove", "ouroboros", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            all_ok = False
+        else:
+            if result.returncode == 0:
+                print_success("Removed Ouroboros MCP registration from GJC")
+            else:
+                all_ok = False
+    if managed_bridge_config:
+        try:
+            bridge_config.unlink()
+            bridge_config.parent.rmdir()
+        except OSError:
+            all_ok = False
+    return all_ok
 
 
 def _remove_claude_md_block(project_dir: Path, dry_run: bool) -> bool:
@@ -477,6 +569,20 @@ def uninstall(
     if any((codex_dir / relative_path).exists() for relative_path in managed_relative_paths):
         targets.append("Codex rules and skills (~/.codex/)")
 
+    gjc_skill_root = gjc_skills_root(gjc_agent_dir())
+    if gjc_skill_root.is_dir() and any(
+        path.name.startswith("ouroboros-") for path in gjc_skill_root.iterdir()
+    ):
+        targets.append(f"GJC Ouroboros skills ({gjc_skill_root}/)")
+    from ouroboros.config import get_gjc_cli_path
+
+    gjc_path = get_gjc_cli_path() or shutil.which("gjc")
+    if gjc_path:
+        from ouroboros.cli.commands.setup import _is_setup_managed_gjc_mcp_entry
+
+        if _is_setup_managed_gjc_mcp_entry(_gjc_mcp_entry(gjc_path)):
+            targets.append("GJC Ouroboros MCP registration")
+
     cwd = Path.cwd()
     claude_md = cwd / "CLAUDE.md"
     try:
@@ -558,6 +664,10 @@ def uninstall(
     if not _remove_codex_artifacts(dry_run=False):
         if any("Codex rules" in t for t in targets):
             failed.append("~/.codex/ rules/skills")
+
+    if not _remove_gjc_artifacts(dry_run=False):
+        if any(target.startswith("GJC Ouroboros") for target in targets):
+            failed.append("GJC Ouroboros skills/MCP")
 
     if not _remove_claude_md_block(cwd, dry_run=False):
         if any("CLAUDE.md" in t for t in targets):

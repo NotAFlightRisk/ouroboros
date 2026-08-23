@@ -163,6 +163,25 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         assert result.exit_code == 0
         assert bridge.read_text(encoding="utf-8") != "// stale bridge\n"
 
+    def test_refreshes_existing_gjc_skill_projection_without_touching_mcp(
+        self, tmp_path: Path
+    ) -> None:
+        skill = tmp_path / ".gjc" / "agent" / "skills" / "ouroboros-interview"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: ouroboros-interview\ndescription: stale\nouroboros_projection: gjc-v1\n---\n",
+            encoding="utf-8",
+        )
+        with patch("ouroboros.cli.commands.setup._register_gjc_mcp_server") as register_mcp:
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 0
+        assert "gjc" in result.output
+        assert "explicitly invokes `ooo interview`" in (skill / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        register_mcp.assert_not_called()
+
     def test_codex_refreshes_when_codex_dir_exists(self, tmp_path: Path) -> None:
         codex_dir = tmp_path / ".codex"
         codex_dir.mkdir()

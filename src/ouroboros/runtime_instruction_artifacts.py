@@ -28,6 +28,50 @@ def _render_section(backend: str) -> str:
     return f"{_SECTION_START}\n{guide}\n{_SECTION_END}\n"
 
 
+def _render_gjc_guide() -> str:
+    """Render GJC's always-applied exact-command routing and capability guide."""
+    from ouroboros.gjc import GJC_SKILL_NAMESPACE
+    from ouroboros.router import packaged_skill_dispatch_registry
+
+    with packaged_skill_dispatch_registry() as registry:
+        routes = sorted(
+            (
+                identifier,
+                f"{GJC_SKILL_NAMESPACE}{target.skill_name}",
+            )
+            for identifier, target in registry.mapping.items()
+            if identifier != "ooo"
+        )
+    lines = [
+        "---",
+        "alwaysApply: true",
+        "description: Deterministic Ouroboros command routing for GJC",
+        "---",
+        "",
+        "## Ouroboros command routing",
+        "",
+        "Exact `ooo` commands are explicit skill invocations, not ordinary natural-language requests.",
+        "They MUST be routed before generic planning, interview, search, or implementation skills:",
+        "",
+        "- Bare `ooo` → invoke `/skill:ouroboros-ooo`.",
+    ]
+    lines.extend(
+        f"- `ooo {identifier} [arguments]` → invoke `/skill:{skill_name} [arguments]`."
+        for identifier, skill_name in routes
+    )
+    lines.extend(
+        (
+            "",
+            "Preserve every argument after the command prefix verbatim. Do not inspect the repository,",
+            "infer another workflow, or route to GJC's bundled `deep-interview` when an exact route above matches.",
+            "",
+            render_backend_skill_capability_guide("gjc").rstrip(),
+            "",
+        )
+    )
+    return "\n".join(lines)
+
+
 def _upsert_marked_section(existing: str, section: str) -> str:
     """Insert or replace managed guide sections without dropping user text."""
     chunks: list[str] = []
@@ -84,9 +128,9 @@ def _write_managed_section(path: Path, backend: str) -> Path:
     return path
 
 
-def _write_exact_guide(path: Path, backend: str) -> Path:
+def _write_exact_guide(path: Path, backend: str, *, content: str | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_backend_skill_capability_guide(backend), encoding="utf-8")
+    path.write_text(content or render_backend_skill_capability_guide(backend), encoding="utf-8")
     return path
 
 
@@ -197,7 +241,11 @@ def install_gjc_instruction_artifact(
     """Install GJC's setup-owned global rules guidance file."""
     return RuntimeInstructionArtifact(
         backend="gjc",
-        path=_write_exact_guide(gjc_instruction_path(home=home, environ=environ), "gjc"),
+        path=_write_exact_guide(
+            gjc_instruction_path(home=home, environ=environ),
+            "gjc",
+            content=_render_gjc_guide(),
+        ),
     )
 
 

@@ -3584,8 +3584,6 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
 
 
 _PI_OOO_BRIDGE_FILENAME = "ouroboros-ooo-bridge.ts"
-_GJC_OOO_BRIDGE_SUBDIR = "ouroboros-ooo-bridge"
-_GJC_OOO_BRIDGE_FILENAME = "index.ts"
 
 
 def _detect_pi_bridge_dispatch_entry() -> tuple[str, list[str]]:
@@ -3719,82 +3717,207 @@ def _install_pi_ooo_bridge() -> bool:
     return True
 
 
-def _detect_gjc_bridge_dispatch_entry() -> tuple[str, list[str]]:
-    """Return the launcher a managed GJC bridge should use for this install."""
-    if _is_source_tree_ouroboros_build():
-        return sys.executable, ["-m", "ouroboros"]
-    try:
-        version = importlib_metadata.version("ouroboros-ai")
-    except importlib_metadata.PackageNotFoundError:
-        return sys.executable, ["-m", "ouroboros"]
-    if ".dev" in version:
-        return sys.executable, ["-m", "ouroboros"]
-    return shutil.which("ouroboros") or "ouroboros", []
-
-
-def _gjc_bridge_source_text() -> str | None:
-    """Return the packaged managed GJC bridge extension source."""
-    from importlib import resources
-
-    try:
-        source = (
-            resources.files("ouroboros.gjc_bridge")
-            .joinpath(_GJC_OOO_BRIDGE_FILENAME)
-            .read_text(encoding="utf-8")
-        )
-    except (FileNotFoundError, ModuleNotFoundError, OSError):
-        dev = Path(__file__).resolve().parents[2] / "gjc_bridge" / _GJC_OOO_BRIDGE_FILENAME
-        try:
-            source = dev.read_text(encoding="utf-8") if dev.exists() else None
-        except OSError:
-            return None
-    if source is None:
-        return None
-    command, args = _detect_gjc_bridge_dispatch_entry()
-    return source.replace(
-        'const DEFAULT_COMMAND = "ouroboros";',
-        f"const DEFAULT_COMMAND = {json.dumps(command)};",
-    ).replace(
-        "const DEFAULT_ARGS: string[] = [];",
-        f"const DEFAULT_ARGS: string[] = {json.dumps(args)};",
-    )
-
-
-def _install_gjc_ooo_bridge() -> bool:
-    """Install the managed GJC extension that routes interactive ``ooo`` input."""
-    import hashlib
-
+def _install_gjc_skills() -> bool:
+    """Project packaged Ouroboros skills into GJC's native user registry."""
+    from ouroboros.gjc import install_gjc_skills
     from ouroboros.runtime_instruction_artifacts import gjc_agent_dir
 
-    dest = gjc_agent_dir() / "extensions" / _GJC_OOO_BRIDGE_SUBDIR / _GJC_OOO_BRIDGE_FILENAME
-    content = _gjc_bridge_source_text()
-    if content is None:
-        print_warning("Could not locate packaged GJC ooo bridge source.")
+    try:
+        result = install_gjc_skills(agent_dir=gjc_agent_dir(), prune=True)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        print_warning(f"Could not install GJC Ouroboros skills: {exc}")
+        return False
+    print_success(f"Installed {len(result.skill_paths)} Ouroboros skills → {result.target_root}")
+    return True
+
+
+_GJC_MCP_BRIDGE_CONFIG_CONTENT = "# Managed by ouroboros setup --runtime gjc\nmcp_servers: []\n"
+
+
+def _gjc_mcp_bridge_config_path() -> Path:
+    """Return the setup-owned empty upstream bridge config for GJC sessions."""
+    from ouroboros.runtime_instruction_artifacts import gjc_agent_dir
+
+    return gjc_agent_dir() / "ouroboros" / "mcp-bridge.yaml"
+
+
+def _install_gjc_mcp_bridge_config() -> bool:
+    """Disable redundant upstream MCP fan-in inside GJC-hosted Ouroboros MCP."""
+    path = _gjc_mcp_bridge_config_path()
+    if path.is_symlink():
+        print_warning(f"Refusing to replace symlinked GJC MCP bridge config: {path}")
+        return False
+    try:
+        _atomic_write_text(path, _GJC_MCP_BRIDGE_CONFIG_CONTENT, mode=0o600)
+    except OSError as exc:
+        print_warning(f"Could not install GJC MCP bridge config: {exc}")
+        return False
+    return True
+
+
+def _is_setup_managed_gjc_mcp_bridge_config(path: Path) -> bool:
+    """Return whether *path* is the exact setup-owned empty bridge config."""
+    try:
+        return (
+            not path.is_symlink()
+            and path.read_text(encoding="utf-8") == _GJC_MCP_BRIDGE_CONFIG_CONTENT
+        )
+    except (OSError, UnicodeDecodeError):
         return False
 
-    new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    existing_hash: str | None = None
-    if dest.exists():
-        try:
-            existing_hash = hashlib.sha256(dest.read_bytes()).hexdigest()
-        except OSError:
-            existing_hash = None
 
-    if existing_hash == new_hash:
-        print_info(f"GJC ooo bridge already up to date: {dest}")
-        return True
+def _is_setup_managed_gjc_mcp_entry(entry: object) -> bool:
+    """Return whether setup may replace one redacted GJC MCP list entry."""
+    if not isinstance(entry, dict):
+        return False
+    config = entry.get("config")
+    if not isinstance(config, dict) or config.get("type") != "stdio":
+        return False
+    command = config.get("command")
+    if not isinstance(command, str) or os.path.basename(command) not in {"uvx", "pipx"}:
+        return False
+    args = config.get("args")
+    return isinstance(args, list) and any(
+        isinstance(arg, str) and "ouroboros-ai" in arg for arg in args
+    )
+
+
+def _register_gjc_mcp_server(
+    gjc_path: str,
+    *,
+    detected: dict[str, object] | None = None,
+) -> bool:
+    """Register the isolated Ouroboros MCP server through GJC's public CLI."""
+    detected = detected or _detect_mcp_entry(package_spec="ouroboros-ai[mcp]")
+    if detected is None:
+        print_error(
+            "GJC setup requires an isolated MCP 2 launcher. "
+            "Install uv/uvx or pipx, then re-run setup."
+        )
+        return False
 
     try:
-        _atomic_write_text(dest, content)
-    except OSError as exc:
-        print_warning(f"Could not install GJC ooo bridge at {dest}: {exc}")
+        listed = subprocess.run(
+            [gjc_path, "mcp", "list", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        print_warning(f"Could not inspect GJC MCP registrations: {exc}")
         return False
-
-    print_success(
-        f"{'Updated' if existing_hash is not None else 'Installed'} GJC ooo bridge: {dest}"
+    if listed.returncode != 0:
+        print_warning(f"Could not inspect GJC MCP registrations: {listed.stderr.strip()}")
+        return False
+    try:
+        payload = json.loads(listed.stdout)
+    except json.JSONDecodeError:
+        print_warning("GJC MCP list returned malformed JSON; leaving registrations untouched.")
+        return False
+    servers = payload.get("servers") if isinstance(payload, dict) else None
+    existing = (
+        next(
+            (
+                entry
+                for entry in servers
+                if isinstance(entry, dict) and entry.get("name") == "ouroboros"
+            ),
+            None,
+        )
+        if isinstance(servers, list)
+        else None
     )
-    print_info("Restart GJC or run /reload in an existing GJC session to load the bridge.")
+    if existing is not None and not _is_setup_managed_gjc_mcp_entry(existing):
+        print_info("Preserved existing user-managed Ouroboros MCP config in GJC.")
+        return True
+
+    command = detected.get("command")
+    raw_args = detected.get("args")
+    if (
+        not isinstance(command, str)
+        or not isinstance(raw_args, list)
+        or not all(isinstance(arg, str) for arg in raw_args)
+    ):
+        print_warning("Detected Ouroboros MCP launcher is invalid; GJC registration skipped.")
+        return False
+    server_args = [*raw_args, "--runtime", "gjc"]
+    add_command = [
+        gjc_path,
+        "mcp",
+        "add",
+        "ouroboros",
+        "--command",
+        command,
+        *(f"--arg={arg}" for arg in server_args),
+        f"--env=OUROBOROS_MCP_CONFIG={_gjc_mcp_bridge_config_path()}",
+        "--sharing",
+        "per-session",
+        "--timeout",
+        "30000",
+        "--json",
+    ]
+    if existing is not None:
+        add_command.append("--force")
+    try:
+        added = subprocess.run(
+            add_command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        print_warning(f"Could not register Ouroboros MCP server in GJC: {exc}")
+        return False
+    if added.returncode != 0:
+        print_warning(f"Could not register Ouroboros MCP server in GJC: {added.stderr.strip()}")
+        return False
+    print_success("Registered Ouroboros MCP server in GJC.")
     return True
+
+
+def _remove_legacy_gjc_bridge() -> bool:
+    """Remove the obsolete setup-owned input bridge without touching custom files."""
+    from ouroboros.runtime_instruction_artifacts import gjc_agent_dir
+
+    bridge = gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+    try:
+        source = bridge.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        print_warning(f"Could not inspect legacy GJC bridge: {exc}")
+        return False
+    signatures = (
+        "const COMMAND_RE = /^\\s*ooo(?:\\s+|$)/i;",
+        '"dispatch", "--runtime", "gjc"',
+        "_OUROBOROS_GJC_BRIDGE_DEPTH",
+        "export default function ouroborosBridge",
+    )
+    if not all(signature in source for signature in signatures):
+        print_info(f"Preserved custom GJC extension at {bridge}")
+        return True
+    try:
+        bridge.unlink()
+    except OSError as exc:
+        print_warning(f"Could not remove legacy GJC bridge: {exc}")
+        return False
+    try:
+        bridge.parent.rmdir()
+    except OSError:
+        pass
+    print_info("Removed obsolete GJC input bridge; native skills now own ooo routing.")
+    return True
+
+
+def _install_gjc_runtime_artifacts(gjc_path: str) -> bool:
+    """Install the OMP-style GJC skill projection and MCP registration."""
+    skills_ok = _install_gjc_skills()
+    bridge_config_ok = _install_gjc_mcp_bridge_config()
+    mcp_ok = bridge_config_ok and _register_gjc_mcp_server(gjc_path)
+    bridge_ok = _remove_legacy_gjc_bridge()
+    return skills_ok and bridge_config_ok and mcp_ok and bridge_ok
 
 
 def _setup_gjc(gjc_path: str) -> None:
@@ -3833,7 +3956,7 @@ def _setup_gjc(gjc_path: str) -> None:
     print_success(f"Configured GJC runtime (CLI: {gjc_path})")
     print_info(f"Config saved to: {config_path}")
     _install_runtime_instruction_artifact("gjc")
-    _install_gjc_ooo_bridge()
+    _install_gjc_runtime_artifacts(gjc_path)
 
 
 def _setup_gemini(gemini_path: str) -> None:

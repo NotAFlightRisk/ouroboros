@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-from ouroboros.backends.capabilities import render_backend_skill_capability_guide
 from ouroboros.runtime_instruction_artifacts import (
     COPILOT_AGENTS_FILENAME,
     COPILOT_INSTRUCTIONS_DIRNAME,
@@ -86,7 +85,7 @@ def test_gjc_agent_dir_respects_explicit_agent_dir(tmp_path: Path) -> None:
     )
 
 
-def test_gjc_installs_rules_guide_exact_renderer_output_and_idempotent(tmp_path: Path) -> None:
+def test_gjc_installs_always_apply_command_routes_and_capability_guide(tmp_path: Path) -> None:
     env = {"GJC_CODING_AGENT_DIR": str(tmp_path / "agent")}
 
     first = install_gjc_instruction_artifact(environ=env)
@@ -95,7 +94,15 @@ def test_gjc_installs_rules_guide_exact_renderer_output_and_idempotent(tmp_path:
     assert first.backend == "gjc"
     assert first.path == second.path == gjc_instruction_path(environ=env)
     assert first.path == tmp_path / "agent" / "rules" / GUIDE_FILENAME
-    assert first.path.read_text(encoding="utf-8") == render_backend_skill_capability_guide("gjc")
+    content = first.path.read_text(encoding="utf-8")
+    assert content.startswith("---\nalwaysApply: true\n")
+    assert (
+        "`ooo interview [arguments]` → invoke `/skill:ouroboros-interview [arguments]`" in content
+    )
+    assert "Bare `ooo` → invoke `/skill:ouroboros-ooo`" in content
+    assert "route to GJC's bundled `deep-interview`" in content
+    assert "## Ouroboros Skill Capability Guide: Gjc" in content
+    assert first.path.read_text(encoding="utf-8") == second.path.read_text(encoding="utf-8")
 
 
 def test_marked_section_refresh_is_idempotent(tmp_path: Path) -> None:
