@@ -20,6 +20,8 @@ from ouroboros.mcp.server.evolve_evaluation import (
 
 
 class _Pipeline:
+    """Pipeline that supplies both questions_used and evidence (valid authority)."""
+
     def __init__(self, verdicts: tuple[bool, ...]) -> None:
         self.verdicts = verdicts
         self.contexts: list[Any] = []
@@ -37,6 +39,7 @@ class _Pipeline:
             uncertainty=0.1,
             reasoning=f"criterion {index + 1} {'passed' if passed else 'failed'}",
             reward_hacking_risk=0.0,
+            questions_used=(f"Does AC {index + 1} hold?",),
             evidence=(f"evidence-{index + 1}",),
         )
         return Result.ok(
@@ -44,6 +47,42 @@ class _Pipeline:
                 execution_id=context.execution_id,
                 stage2_result=semantic,
                 final_approved=passed,
+            )
+        )
+
+
+class _EvidenceFreePipeline:
+    """Pipeline that returns a semantic PASS with no questions or evidence."""
+
+    def __init__(
+        self,
+        *,
+        questions_used: tuple[str, ...] = (),
+        evidence: tuple[str, ...] = (),
+    ) -> None:
+        self.questions_used = questions_used
+        self.evidence = evidence
+        self.contexts: list[Any] = []
+
+    async def evaluate(self, context: Any, *, stage1_result: Any = None) -> Any:
+        del stage1_result
+        self.contexts.append(context)
+        semantic = SemanticResult(
+            score=0.95,
+            ac_compliance=True,
+            goal_alignment=0.95,
+            drift_score=0.05,
+            uncertainty=0.05,
+            reasoning="looks good",
+            reward_hacking_risk=0.0,
+            questions_used=self.questions_used,
+            evidence=self.evidence,
+        )
+        return Result.ok(
+            EvaluationResult(
+                execution_id=context.execution_id,
+                stage2_result=semantic,
+                final_approved=True,
             )
         )
 
@@ -69,6 +108,40 @@ class _NoSemanticPipeline:
                 execution_id=context.execution_id,
                 stage1_result=effective_stage1,
                 final_approved=self.final_approved,
+            )
+        )
+
+
+class _ExceptionPipeline:
+    """Pipeline that raises on the Nth criterion (0-indexed)."""
+
+    def __init__(self, *, fail_at: int, error: Exception) -> None:
+        self._fail_at = fail_at
+        self._error = error
+        self.contexts: list[Any] = []
+
+    async def evaluate(self, context: Any, *, stage1_result: Any = None) -> Any:
+        del stage1_result
+        self.contexts.append(context)
+        index = int(context.execution_id.rsplit("_", 1)[-1]) - 1
+        if index == self._fail_at:
+            raise self._error
+        semantic = SemanticResult(
+            score=0.9,
+            ac_compliance=True,
+            goal_alignment=0.9,
+            drift_score=0.1,
+            uncertainty=0.1,
+            reasoning=f"criterion {index + 1} passed",
+            reward_hacking_risk=0.0,
+            questions_used=(f"Does AC {index + 1} hold?",),
+            evidence=(f"evidence-{index + 1}",),
+        )
+        return Result.ok(
+            EvaluationResult(
+                execution_id=context.execution_id,
+                stage2_result=semantic,
+                final_approved=True,
             )
         )
 
@@ -169,6 +242,23 @@ def test_any_structured_contract_suppresses_structural_warning() -> None:
     with capture_logs() as logs:
         warn_if_seed_has_no_success_contract(seed)
 
+    # With the mixed-contract diagnostic, an unanchored criterion is reported.
+    assert len(logs) == 1
+    assert logs[0]["event"] == "evolution.acceptance_contract.mixed"
+    assert logs[0]["structured_count"] == 1
+    assert logs[0]["unanchored_count"] == 1
+    assert logs[0]["unanchored_indices"] == [0]
+
+
+def test_fully_structured_contract_suppresses_all_warnings() -> None:
+    seed = _seed(
+        AcceptanceCriterionSpec(description="first behavior", verify_command="pytest -q"),
+        AcceptanceCriterionSpec(description="second behavior", verify_command="make test"),
+    )
+
+    with capture_logs() as logs:
+        warn_if_seed_has_no_success_contract(seed)
+
     assert logs == []
 
 
@@ -249,3 +339,204 @@ async def test_zero_ac_seed_fails_closed_without_synthetic_coverage() -> None:
     assert logs[0]["consequence"] == (
         "the Seed declares no acceptance criteria; evolve cannot establish coverage"
     )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Regressions: evidence-free semantic PASS must never become authoritative
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_evidence_free_semantic_pass_cannot_become_authoritative() -> None:
+    """A semantic PASS with empty questions and evidence must not mint authority."""
+    seed = _seed(AcceptanceCriterionSpec(description="first behavior"))
+    pipeline = _EvidenceFreePipeline(questions_used=(), evidence=())
+
+    summary = await evaluate_seed_criteria(
+        seed=seed,
+        artifact="worker report",
+        artifact_bundle=None,
+        pipeline=pipeline,
+    )
+
+    assert summary.final_approved is False
+    assert summary.approval_status == "rejected"
+    ac = summary.ac_results[0]
+    assert ac.passed is False
+    assert ac.verdict_is_authoritative is False
+    assert ac.authoritative_pass is False
+    assert ac.ac_verdict_state == "not_evaluated"
+    assert ac.rendered_verdict == "INSUFFICIENT_EVIDENCE"
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_evidence_cannot_mint_authoritative_pass() -> None:
+    """Whitespace-only strings in questions_used and evidence are not meaningful."""
+    seed = _seed(AcceptanceCriterionSpec(description="first behavior"))
+    pipeline = _EvidenceFreePipeline(
+        questions_used=("   ", "\t", "\n"),
+        evidence=("  ", ""),
+    )
+
+    summary = await evaluate_seed_criteria(
+        seed=seed,
+        artifact="worker report",
+        artifact_bundle=None,
+        pipeline=pipeline,
+    )
+
+    assert summary.final_approved is False
+    ac = summary.ac_results[0]
+    assert ac.passed is False
+    assert ac.verdict_is_authoritative is False
+    assert ac.authoritative_pass is False
+    assert ac.rendered_verdict == "INSUFFICIENT_EVIDENCE"
+
+
+@pytest.mark.asyncio
+async def test_questions_only_without_evidence_is_non_authoritative() -> None:
+    """Having questions but no evidence is one-sided and non-authoritative."""
+    seed = _seed(AcceptanceCriterionSpec(description="first behavior"))
+    pipeline = _EvidenceFreePipeline(
+        questions_used=("Does the function handle edge cases?",),
+        evidence=(),
+    )
+
+    summary = await evaluate_seed_criteria(
+        seed=seed,
+        artifact="worker report",
+        artifact_bundle=None,
+        pipeline=pipeline,
+    )
+
+    assert summary.final_approved is False
+    ac = summary.ac_results[0]
+    assert ac.passed is False
+    assert ac.verdict_is_authoritative is False
+    assert ac.authoritative_pass is False
+    assert ac.rendered_verdict == "INSUFFICIENT_EVIDENCE"
+
+
+@pytest.mark.asyncio
+async def test_evidence_only_without_questions_is_non_authoritative() -> None:
+    """Having evidence but no verification questions is one-sided and non-authoritative."""
+    seed = _seed(AcceptanceCriterionSpec(description="first behavior"))
+    pipeline = _EvidenceFreePipeline(
+        questions_used=(),
+        evidence=("file src/main.py contains handler",),
+    )
+
+    summary = await evaluate_seed_criteria(
+        seed=seed,
+        artifact="worker report",
+        artifact_bundle=None,
+        pipeline=pipeline,
+    )
+
+    assert summary.final_approved is False
+    ac = summary.ac_results[0]
+    assert ac.passed is False
+    assert ac.verdict_is_authoritative is False
+    assert ac.authoritative_pass is False
+    assert ac.rendered_verdict == "INSUFFICIENT_EVIDENCE"
+
+
+@pytest.mark.asyncio
+async def test_full_evidence_and_questions_grants_authority() -> None:
+    """When both questions and evidence are present, authority is granted."""
+    seed = _seed(AcceptanceCriterionSpec(description="first behavior"))
+    pipeline = _EvidenceFreePipeline(
+        questions_used=("Does the handler validate input?",),
+        evidence=("src/handler.py:42 performs input validation",),
+    )
+
+    summary = await evaluate_seed_criteria(
+        seed=seed,
+        artifact="worker report",
+        artifact_bundle=None,
+        pipeline=pipeline,
+    )
+
+    assert summary.final_approved is True
+    assert summary.approval_status == "approved"
+    ac = summary.ac_results[0]
+    assert ac.passed is True
+    assert ac.verdict_is_authoritative is True
+    assert ac.authoritative_pass is True
+    assert ac.ac_verdict_state == "evaluated"
+    assert ac.rendered_verdict == "PASS"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Regressions: exception aggregation / first-error fail-closed policy
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_first_criterion_exception_returns_rejected_summary() -> None:
+    """An exception on the first criterion fails closed immediately."""
+    seed = _seed(
+        AcceptanceCriterionSpec(description="first behavior"),
+        AcceptanceCriterionSpec(description="second behavior"),
+    )
+    pipeline = _ExceptionPipeline(fail_at=0, error=RuntimeError("LLM timeout"))
+
+    summary = await evaluate_seed_criteria(
+        seed=seed,
+        artifact="worker report",
+        artifact_bundle=None,
+        pipeline=pipeline,
+    )
+
+    assert summary.final_approved is False
+    assert summary.approval_status == "rejected"
+    assert "AC 1 evaluation raised RuntimeError" in (summary.failure_reason or "")
+    assert "LLM timeout" in (summary.failure_reason or "")
+    assert summary.ac_results == ()
+
+
+@pytest.mark.asyncio
+async def test_later_criterion_exception_returns_rejected_summary() -> None:
+    """An exception on a gathered criterion fails closed with diagnostics."""
+    seed = _seed(
+        AcceptanceCriterionSpec(description="first behavior"),
+        AcceptanceCriterionSpec(description="second behavior"),
+        AcceptanceCriterionSpec(description="third behavior"),
+    )
+    pipeline = _ExceptionPipeline(fail_at=2, error=ValueError("parse failed"))
+
+    summary = await evaluate_seed_criteria(
+        seed=seed,
+        artifact="worker report",
+        artifact_bundle=None,
+        pipeline=pipeline,
+    )
+
+    assert summary.final_approved is False
+    assert summary.approval_status == "rejected"
+    assert "AC 3 evaluation raised ValueError" in (summary.failure_reason or "")
+    assert "parse failed" in (summary.failure_reason or "")
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Regressions: mixed structured/prose warning diagnostic
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def test_mixed_structured_prose_seed_emits_mixed_warning() -> None:
+    """A Seed with some structured and some prose-only criteria emits mixed warning."""
+    seed = _seed(
+        AcceptanceCriterionSpec(description="prose criterion A"),
+        AcceptanceCriterionSpec(description="structured criterion", verify_command="pytest -q"),
+        AcceptanceCriterionSpec(description="prose criterion B"),
+    )
+
+    with capture_logs() as logs:
+        warn_if_seed_has_no_success_contract(seed)
+
+    assert len(logs) == 1
+    assert logs[0]["event"] == "evolution.acceptance_contract.mixed"
+    assert logs[0]["structured_count"] == 1
+    assert logs[0]["unanchored_count"] == 2
+    assert logs[0]["unanchored_indices"] == [0, 2]
+    assert "2/3 AC(s)" in logs[0]["consequence"]

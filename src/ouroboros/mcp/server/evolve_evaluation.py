@@ -9,7 +9,7 @@ import structlog
 
 from ouroboros.core.lineage import ACResult, EvaluationSummary
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text
-from ouroboros.evaluation.models import EvaluationContext, EvaluationResult
+from ouroboros.evaluation.models import EvaluationContext, EvaluationResult, SemanticResult
 
 log = structlog.get_logger(__name__)
 
@@ -17,26 +17,69 @@ log = structlog.get_logger(__name__)
 def warn_if_seed_has_no_success_contract(seed: Any) -> None:
     """Expose when evolve has no fixed, structured verification anchor."""
     criteria = tuple(getattr(seed, "acceptance_criteria", ()) or ())
-    if any(
-        isinstance(criterion, AcceptanceCriterionSpec) and criterion.has_success_contract
-        for criterion in criteria
-    ):
-        return
+
+    structured_indices: list[int] = []
+    unanchored_indices: list[int] = []
+    for i, criterion in enumerate(criteria):
+        if isinstance(criterion, AcceptanceCriterionSpec) and criterion.has_success_contract:
+            structured_indices.append(i)
+        else:
+            unanchored_indices.append(i)
 
     metadata = getattr(seed, "metadata", None)
-    log.warning(
-        "evolution.acceptance_contract.unstructured",
-        seed_id=getattr(metadata, "seed_id", None),
-        acceptance_criteria=len(criteria),
-        consequence=(
-            (
+    seed_id = getattr(metadata, "seed_id", None)
+
+    if not criteria:
+        log.warning(
+            "evolution.acceptance_contract.unstructured",
+            seed_id=seed_id,
+            acceptance_criteria=0,
+            consequence=(
+                "the Seed declares no acceptance criteria; evolve cannot establish coverage"
+            ),
+        )
+        return
+
+    if not structured_indices:
+        # Wholly prose-only: no criterion has a structured contract.
+        log.warning(
+            "evolution.acceptance_contract.unstructured",
+            seed_id=seed_id,
+            acceptance_criteria=len(criteria),
+            consequence=(
                 "no AC declares verify_command, expected_artifacts, or output_assertion; "
                 "evolve has no fixed structured verification anchor"
-            )
-            if criteria
-            else "the Seed declares no acceptance criteria; evolve cannot establish coverage"
-        ),
-    )
+            ),
+        )
+        return
+
+    if unanchored_indices:
+        # Mixed: some structured, some prose-only.
+        log.warning(
+            "evolution.acceptance_contract.mixed",
+            seed_id=seed_id,
+            acceptance_criteria=len(criteria),
+            structured_count=len(structured_indices),
+            unanchored_count=len(unanchored_indices),
+            unanchored_indices=unanchored_indices,
+            consequence=(
+                f"{len(unanchored_indices)}/{len(criteria)} AC(s) at indices "
+                f"{unanchored_indices} have no structured verification anchor; "
+                "evolve cannot mechanically verify those criteria"
+            ),
+        )
+
+
+def _has_meaningful_evidence(stage2: SemanticResult) -> bool:
+    """Require non-trivial verification questions AND evidence for authority.
+
+    The semantic prompt contract requires the evaluator to show its work:
+    criterion-specific questions it asked and concrete evidence it observed.
+    Without both, the verdict is advisory, not authoritative.
+    """
+    has_questions = any(q.strip() for q in stage2.questions_used)
+    has_evidence = any(e.strip() for e in stage2.evidence)
+    return has_questions and has_evidence
 
 
 def _rejected_summary(reason: str) -> EvaluationSummary:
@@ -64,29 +107,86 @@ def _render_evidence(result: EvaluationResult) -> str:
 
 
 def _failure_reason(
-    criteria: tuple[Any, ...],
+    ac_results: tuple[ACResult, ...],
     results: tuple[EvaluationResult, ...],
 ) -> str | None:
+    """Build human-readable failure reason from per-AC verdicts."""
     failed = [
         (
-            index,
-            ac_text(criterion),
+            ac.ac_index + 1,
+            ac.ac_content,
             (
                 result.failure_reason
                 if result.stage2_result is not None
                 else "semantic evaluation did not run"
-            ),
+            )
+            if not ac.passed
+            else None,
         )
-        for index, (criterion, result) in enumerate(zip(criteria, results, strict=True), start=1)
-        if result.stage2_result is None or not result.final_approved
+        for ac, result in zip(ac_results, results, strict=True)
+        if not ac.authoritative_pass
     ]
     if not failed:
         return None
+    total = len(ac_results)
     details = "; ".join(
-        f"AC {index} ({content}): {reason or 'semantic evaluation rejected this criterion'}"
+        f"AC {index} ({content}): {reason or 'insufficient evidence for authoritative pass'}"
         for index, content, reason in failed
     )
-    return f"{len(failed)}/{len(criteria)} acceptance criteria failed: {details}"
+    return f"{len(failed)}/{total} acceptance criteria failed: {details}"
+
+
+def _build_ac_result(index: int, criterion: Any, result: EvaluationResult) -> ACResult:
+    """Construct an ACResult enforcing evidence requirements for authority.
+
+    A semantic verdict becomes authoritative only when the evaluator supplied
+    meaningful criterion-specific verification questions AND concrete evidence.
+    Without both, the verdict is recorded but remains non-authoritative so that
+    downstream focus selection, convergence, and lineage consumers do not
+    consume an unproven PASS.
+    """
+    stage2 = result.stage2_result
+    has_stage2 = stage2 is not None
+    evidence_sufficient = has_stage2 and _has_meaningful_evidence(stage2)
+
+    # Authority requires both Stage 2 presence and meaningful evidence.
+    # Without evidence, the verdict is advisory — the AC remains unresolved.
+    if has_stage2 and result.final_approved and evidence_sufficient:
+        passed = True
+        ac_verdict_state = "evaluated"
+        final_verdict = "pass"
+        rendered_verdict = "PASS"
+    elif has_stage2 and not result.final_approved:
+        # Explicit rejection is always authoritative (fail-closed is safe).
+        passed = False
+        ac_verdict_state = "evaluated"
+        final_verdict = "fail"
+        rendered_verdict = "FAIL"
+    elif has_stage2 and result.final_approved and not evidence_sufficient:
+        # Model said pass but provided no proof — non-authoritative.
+        passed = False
+        ac_verdict_state = "not_evaluated"
+        final_verdict = "fail"
+        rendered_verdict = "INSUFFICIENT_EVIDENCE"
+    else:
+        # No Stage 2 at all.
+        passed = False
+        ac_verdict_state = "not_evaluated"
+        final_verdict = "fail"
+        rendered_verdict = "NOT_EVALUATED"
+
+    return ACResult(
+        ac_index=index,
+        ac_content=ac_text(criterion),
+        semantic_ac_key=getattr(criterion, "semantic_ac_key", None),
+        passed=passed,
+        score=stage2.score if stage2 else 0.0,
+        evidence=_render_evidence(result),
+        verification_method=("semantic_evaluation" if has_stage2 else "unknown"),
+        ac_verdict_state=ac_verdict_state,
+        final_verdict=final_verdict,
+        rendered_verdict=rendered_verdict,
+    )
 
 
 async def evaluate_seed_criteria(
@@ -153,35 +253,17 @@ async def evaluate_seed_criteria(
     stage2_results = tuple(
         result.stage2_result for result in results if result.stage2_result is not None
     )
-    approved = all(result.stage2_result is not None and result.final_approved for result in results)
     scores = tuple(result.score for result in stage2_results)
     drift_scores = tuple(result.drift_score for result in stage2_results)
     reward_hacking_risks = tuple(result.reward_hacking_risk for result in stage2_results)
     ac_results = tuple(
-        ACResult(
-            ac_index=index,
-            ac_content=ac_text(criterion),
-            semantic_ac_key=getattr(criterion, "semantic_ac_key", None),
-            passed=result.stage2_result is not None and result.final_approved,
-            score=result.stage2_result.score if result.stage2_result else 0.0,
-            evidence=_render_evidence(result),
-            verification_method=(
-                "semantic_evaluation" if result.stage2_result is not None else "unknown"
-            ),
-            ac_verdict_state=("evaluated" if result.stage2_result is not None else "not_evaluated"),
-            final_verdict=(
-                "pass" if result.stage2_result is not None and result.final_approved else "fail"
-            ),
-            rendered_verdict=(
-                "PASS"
-                if result.stage2_result is not None and result.final_approved
-                else "FAIL"
-                if result.stage2_result is not None
-                else "NOT_EVALUATED"
-            ),
-        )
+        _build_ac_result(index, criterion, result)
         for index, (criterion, result) in enumerate(zip(criteria, results, strict=True))
     )
+
+    # Aggregate approval derives from per-AC authority: every criterion must
+    # have passed with sufficient evidence for the aggregate to approve.
+    approved = all(ac.authoritative_pass for ac in ac_results)
 
     return EvaluationSummary(
         final_approved=approved,
@@ -189,7 +271,7 @@ async def evaluate_seed_criteria(
         score=sum(scores) / len(scores) if scores else 0.0,
         drift_score=max(drift_scores) if drift_scores else None,
         reward_hacking_risk=max(reward_hacking_risks) if reward_hacking_risks else None,
-        failure_reason=_failure_reason(criteria, results),
+        failure_reason=_failure_reason(ac_results, results) if not approved else None,
         ac_results=ac_results,
         approval_status="approved" if approved else "rejected",
         execution_completion_status="completed",
