@@ -1226,20 +1226,6 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         target = decorator.func if isinstance(decorator, ast.Call) else decorator
         return _callable_name(target)
 
-    @staticmethod
-    def _decorator_is_attribute_style(decorator: ast.expr) -> bool:
-        """Check if the decorator expression is an attribute access pattern.
-
-        Attribute-style decorators (@app.command(), @obj.method) are structurally
-        different from bare-name decorators (@dataclass, @command). The review
-        blocker about basename-only trust applies specifically to bare-name imports
-        that could be shadowed by external packages. Attribute-style decorators
-        require shadowing the entire receiver object, which is a different and
-        more constrained threat model.
-        """
-        target = decorator.func if isinstance(decorator, ast.Call) else decorator
-        return isinstance(target, ast.Attribute)
-
     def _record_unresolved_decorator(self, node: ast.AST, decorator: ast.expr) -> None:
         if not self._has_transitive_callable_relevance(node):
             return
@@ -5514,16 +5500,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 continue
             targets = self._call_targets(decorator)
             if not targets:
-                # Attribute-style decorators (@app.command(), @obj.method) are
-                # structurally distinct from bare-name decorators. The review
-                # blocker about basename-only trust applies to directly-imported
-                # names (from external import dataclass) that can't prove their
-                # origin. Attribute-style access requires shadowing the receiver
-                # object — a different threat model that preserves practicality.
-                if self._decorator_is_attribute_style(decorator):
-                    continue
-                # Bare-name unresolved decorator: fail closed when the decorated
-                # node has transitive callable relevance to config fields.
+                # No syntax shape proves that an unresolved decorator preserves
+                # the original callable. Attribute-style factories can replace
+                # functions just as bare-name decorators can, so fail closed for
+                # every decorated node with transitive config relevance.
                 self._record_unresolved_decorator(node, decorator)
                 return _UNKNOWN_VALUE
             replacements = [
@@ -5667,12 +5647,9 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 continue
             targets = self._call_targets(decorator)
             if not targets:
-                # Attribute-style decorators are structurally distinct from
-                # bare-name decorators — see _decorated_function_value comment.
-                if self._decorator_is_attribute_style(decorator):
-                    continue
-                # Bare-name unresolved decorator: fail closed when the
-                # decorated class has transitive callable relevance.
+                # Attribute access is not decorator provenance: an unresolved
+                # factory may replace the class, so use the same fail-closed
+                # boundary as every other unresolved decorator.
                 self._record_unresolved_decorator(node, decorator)
                 decorated_class = _UNKNOWN_VALUE
                 break

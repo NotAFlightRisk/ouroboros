@@ -6747,7 +6747,7 @@ cli_handler(settings)
     )
 
 
-# --- Overreach-negative tests: proven decorators and attribute-style must NOT over-report ---
+# --- Decorator provenance regressions ---
 
 
 def test_proven_dataclass_import_preserves_class_reads(contract, tmp_path: Path) -> None:
@@ -6787,13 +6787,11 @@ Config().read(settings)
     )
 
 
-def test_attribute_style_decorator_does_not_trigger_false_unresolved(
+def test_unresolved_attribute_style_replacement_decorator_fails_closed(
     contract, tmp_path: Path
 ) -> None:
-    """Overreach-negative: @app.command() style decorators (attribute access)
-    must NOT be flagged as unresolved, even when the receiver is external.
-    """
-    (tmp_path / "attribute_style.py").write_text(
+    """An unresolved attribute factory may replace the decorated function."""
+    (tmp_path / "attribute_replacement.py").write_text(
         """
 import external_framework
 
@@ -6811,6 +6809,7 @@ handler(settings)
 
     reads = contract.runtime_reads(tmp_path, frozenset({field}))
 
+    assert field not in reads
     report = contract.audit_contract(
         fields=frozenset({field}),
         reads=reads,
@@ -6819,9 +6818,107 @@ handler(settings)
         allowlist={},
         documented_defaults={},
     )
-    assert not any("unresolved" in v for v in report.violations), (
-        f"Attribute-style decorators should not produce unresolved violations: {report.violations}"
+    assert any("unresolved decorator 'command'" in v for v in report.violations)
+
+
+def test_unresolved_attribute_style_class_replacement_decorator_fails_closed(
+    contract, tmp_path: Path
+) -> None:
+    """An unresolved attribute factory may replace a config-reading class."""
+    (tmp_path / "attribute_class_replacement.py").write_text(
+        """
+import external_framework
+
+registry = external_framework.Registry()
+
+@registry.register()
+class Reader:
+    def read(self, config):
+        return config.evaluation.stage2_enabled
+
+Reader().read(settings)
+""",
+        encoding="utf-8",
     )
+    field = contract.ConfigField("evaluation", "stage2_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert field not in reads
+    report = contract.audit_contract(
+        fields=frozenset({field}),
+        reads=reads,
+        rows={field: contract.ReferenceRow("true", "Wired.")},
+        markers={},
+        allowlist={},
+        documented_defaults={},
+    )
+    assert any("unresolved decorator 'register'" in v for v in report.violations)
+
+
+def test_proven_local_attribute_identity_decorator_preserves_reads(
+    contract, tmp_path: Path
+) -> None:
+    """Exactly resolved attribute factories may preserve the original function."""
+    (tmp_path / "attribute_identity.py").write_text(
+        """
+class Framework:
+    def command(self):
+        def preserve(function):
+            return function
+        return preserve
+
+app = Framework()
+
+@app.command()
+def handler(config):
+    return config.evaluation.stage1_enabled
+
+handler(settings)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset({field})
+    report = contract.audit_contract(
+        fields=frozenset({field}),
+        reads=reads,
+        rows={field: contract.ReferenceRow("true", "Wired.")},
+        markers={},
+        allowlist={},
+        documented_defaults={},
+    )
+    assert not any("unresolved decorator" in v for v in report.violations)
+
+
+def test_proven_local_attribute_replacement_decorator_erases_read(
+    contract, tmp_path: Path
+) -> None:
+    """Resolved attribute factories must honor a replacement callable."""
+    (tmp_path / "attribute_replacement_resolved.py").write_text(
+        """
+class Framework:
+    def command(self):
+        def replace(function):
+            return lambda *args, **kwargs: None
+        return replace
+
+app = Framework()
+
+@app.command()
+def handler(config):
+    return config.evaluation.stage1_enabled
+
+handler(settings)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset()
 
 
 def test_proven_pydantic_field_validator_preserves_method_reads(contract, tmp_path: Path) -> None:
