@@ -2195,7 +2195,13 @@ async def test_final_settlement_replays_stale_command_and_accepts_final_pass(
         'raise SystemExit(0)"'
     )
     executor = _make_executor(working_directory=str(tmp_path))
-    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(
+            description="ac",
+            verify_command=command,
+            verify_replay_safe=True,
+        )
+    )
     cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
     # A downstream sibling changes the workspace after the cached pass.
     target.write_text("after", encoding="utf-8")
@@ -2241,7 +2247,13 @@ async def test_final_settlement_replay_failure_rejects_stale_command(
         "raise SystemExit(0 if Path('condition.txt').read_text() == 'before' else 7)\""
     )
     executor = _make_executor(working_directory=str(tmp_path))
-    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(
+            description="ac",
+            verify_command=command,
+            verify_replay_safe=True,
+        )
+    )
     cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
     target.write_text("after", encoding="utf-8")
 
@@ -2280,7 +2292,13 @@ async def test_final_settlement_replay_mutation_invalidates_success_set(
         "marker.write_text('x') if Path('condition.txt').read_text() != 'before' else None\""
     )
     executor = _make_executor(working_directory=str(tmp_path))
-    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(
+            description="ac",
+            verify_command=command,
+            verify_replay_safe=True,
+        )
+    )
     cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
     assert cached.workspace_mutated is False
     target.write_text("after", encoding="utf-8")
@@ -2303,6 +2321,44 @@ async def test_final_settlement_replay_mutation_invalidates_success_set(
     assert settled[0].success is False
     assert settled[0].outcome is ACExecutionOutcome.FAILED
     assert "mutated the workspace" in (settled[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_final_settlement_never_replays_without_explicit_safety(
+    tmp_path: Any,
+) -> None:
+    counter = tmp_path.parent / f"unsafe-settlement-count-{tmp_path.name}.txt"
+    target = tmp_path / "condition.txt"
+    target.write_text("before", encoding="utf-8")
+    command = (
+        'python3 -c "from pathlib import Path; '
+        f"counter=Path({str(counter)!r}); "
+        "n=int(counter.read_text()) if counter.exists() else 0; "
+        "counter.write_text(str(n+1))\""
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    target.write_text("after", encoding="utf-8")
+
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ac",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=cached,
+            )
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert counter.read_text(encoding="utf-8") == "1"
+    assert settled[0].success is False
+    assert "does not declare verify_replay_safe" in (settled[0].error or "")
 
 
 @pytest.mark.asyncio

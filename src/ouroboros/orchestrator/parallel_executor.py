@@ -5311,16 +5311,14 @@ class ParallelACExecutor:
         """Bind terminal acceptance to the settled shared workspace.
 
         Verify gates run as each AC completes, while later ACs can still touch
-        the same workspace.  Before terminal acceptance, re-check every
-        successful contract's artifact leg and cached workspace identity.  A
-        command result whose cached workspace digest no longer matches the
-        settled workspace is replayed once against that workspace — downstream
-        siblings legitimately build on an AC's work, so a stale digest is the
-        expected shape of every dependency-chained run, not evidence of
-        tampering.  The replayed gate result (pass or fail) becomes the
-        acceptance evidence.  Invalidate the complete success set when any
-        verify command — cached or replayed — was observed mutating the
-        workspace.
+        the same workspace. Before terminal acceptance, re-check every
+        successful contract's artifact leg and cached workspace identity. A
+        stale command result is replayed only when its Seed contract explicitly
+        declares that repeated execution is side-effect-safe or idempotent. The
+        replayed gate result (pass or fail) becomes the acceptance evidence.
+        Commands without that authority fail closed rather than duplicating an
+        external effect. Invalidate the complete success set when any verify
+        command — cached or replayed — was observed mutating the workspace.
         """
         from ouroboros.events.base import BaseEvent
         from ouroboros.orchestrator.failure_taxonomy import FailureClass
@@ -5429,16 +5427,18 @@ class ParallelACExecutor:
                     continue
 
                 if cached_digest != final_digest:
-                    # A later worker changed the workspace after this command
-                    # passed.  Rejecting the stale pass outright fails every
-                    # dependency-chained run — each downstream AC legitimately
-                    # builds on its predecessors' work — so re-run the gate once
-                    # against the settled workspace instead.  The per-attempt
-                    # retry path already re-executes the same command, so a
-                    # settlement replay introduces no effect the run could not
-                    # already have.  Acceptance then binds to the workspace as
-                    # it actually is, which also catches downstream regressions
-                    # the cached pass could never observe.
+                    if not spec.verify_replay_safe:
+                        individual_failures[result.ac_index] = (
+                            "Final acceptance rejected because verify_command evidence "
+                            "is stale and the contract does not declare verify_replay_safe.",
+                            outcome,
+                        )
+                        settled.append(result)
+                        continue
+                    # A replay-safe command may be re-run once against the
+                    # settled workspace. Its pass or fail becomes authoritative
+                    # final evidence; workspace mutation still invalidates the
+                    # complete success set below.
                     replay_outcome = await _invoke_execution_authority_entry(
                         self,
                         _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,

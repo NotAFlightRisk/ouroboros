@@ -20,6 +20,7 @@ from ouroboros.core.seed import (
     MAX_AC_SUCCESS_CONTRACT_ARTIFACTS,
     MAX_AC_SUCCESS_CONTRACT_CHARS,
     AcceptanceCriterionSpec,
+    expected_artifact_path_error,
     expected_artifact_workspace_path_error,
     validate_ac_success_contract_values,
 )
@@ -27,7 +28,7 @@ from ouroboros.orchestrator.adapter import RuntimeHandle
 from ouroboros.orchestrator.execution_runtime_scope import ACRuntimeIdentity
 from ouroboros.orchestrator.level_context import LevelContext
 
-AC_EXECUTION_CAPSULE_VERSION = 2
+AC_EXECUTION_CAPSULE_VERSION = 3
 DEFAULT_AC_CONTEXT_BUDGET_CHARS = 12_000
 MAX_AC_CONTEXT_REFERENCES = 256
 _MAX_REFERENCE_LOCATOR_CHARS = 2_048
@@ -245,19 +246,33 @@ class ACSuccessContract:
     """Seed-authored acceptance gate projected into a capsule."""
 
     verify_command: str | None = None
+    verify_cwd: str | None = None
+    verify_replay_safe: bool = False
     expected_artifacts: tuple[str, ...] = ()
     output_assertion: str | None = None
 
     def __post_init__(self) -> None:
         validate_ac_success_contract_values(
             verify_command=self.verify_command,
+            verify_cwd=self.verify_cwd,
+            verify_replay_safe=self.verify_replay_safe,
             expected_artifacts=self.expected_artifacts,
             output_assertion=self.output_assertion,
         )
+        if self.verify_cwd:
+            cwd_error = expected_artifact_path_error(self.verify_cwd)
+            if cwd_error is not None:
+                raise ValueError(f"success contract verify cwd is invalid: {cwd_error}")
+            if not self.verify_command:
+                raise ValueError("success contract verify cwd requires a command")
+        if self.verify_replay_safe and not self.verify_command:
+            raise ValueError("success contract replay safety requires a command")
 
     def to_contract_data(self) -> dict[str, object]:
         return {
             "verify_command": self.verify_command,
+            "verify_cwd": self.verify_cwd,
+            "verify_replay_safe": self.verify_replay_safe,
             "expected_artifacts": list(self.expected_artifacts),
             "output_assertion": self.output_assertion,
         }
@@ -272,20 +287,34 @@ class ACSuccessContract:
             return cls()
         return cls(
             verify_command=spec.verify_command,
+            verify_cwd=spec.verify_cwd,
+            verify_replay_safe=spec.verify_replay_safe,
             expected_artifacts=tuple(spec.expected_artifacts),
             output_assertion=spec.output_assertion,
         )
 
     @classmethod
     def from_contract_data(cls, raw: object) -> ACSuccessContract:
-        expected = {"verify_command", "expected_artifacts", "output_assertion"}
+        expected = {
+            "verify_command",
+            "verify_cwd",
+            "verify_replay_safe",
+            "expected_artifacts",
+            "output_assertion",
+        }
         if not isinstance(raw, Mapping) or set(raw) != expected:
             raise ValueError("success contract has an invalid shape")
         verify_command = raw.get("verify_command")
+        verify_cwd = raw.get("verify_cwd")
+        verify_replay_safe = raw.get("verify_replay_safe")
         expected_artifacts = raw.get("expected_artifacts")
         output_assertion = raw.get("output_assertion")
         if verify_command is not None and not isinstance(verify_command, str):
             raise ValueError("success contract verify command is invalid")
+        if verify_cwd is not None and not isinstance(verify_cwd, str):
+            raise ValueError("success contract verify cwd is invalid")
+        if not isinstance(verify_replay_safe, bool):
+            raise ValueError("success contract replay safety is invalid")
         if not isinstance(expected_artifacts, list) or any(
             not isinstance(path, str) or not path for path in expected_artifacts
         ):
@@ -294,6 +323,8 @@ class ACSuccessContract:
             raise ValueError("success contract output assertion is invalid")
         return cls(
             verify_command=verify_command,
+            verify_cwd=verify_cwd,
+            verify_replay_safe=verify_replay_safe,
             expected_artifacts=tuple(expected_artifacts),
             output_assertion=output_assertion,
         )

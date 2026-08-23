@@ -24,6 +24,7 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
     ac_texts,
+    derive_semantic_ac_key,
     expected_artifact_path_error,
     expected_artifact_workspace_path_error,
     parse_expected_artifact_list,
@@ -1218,3 +1219,27 @@ class TestAcceptanceCriterionVerifyCwd:
         )
         rebuilt = AcceptanceCriterionSpec.model_validate(spec.to_seed_value())
         assert rebuilt == spec
+
+    def test_verify_cwd_changes_semantic_identity(self) -> None:
+        app = AcceptanceCriterionSpec(
+            description="tests pass",
+            verify_command="npm test",
+            verify_cwd="app",
+        )
+        site = app.model_copy(update={"verify_cwd": "site", "semantic_ac_key": None})
+
+        assert derive_semantic_ac_key(app) != derive_semantic_ac_key(site)
+
+    def test_verify_replay_safe_round_trips_and_changes_identity(self) -> None:
+        unsafe = AcceptanceCriterionSpec(description="tests pass", verify_command="npm test")
+        safe = unsafe.model_copy(update={"verify_replay_safe": True, "semantic_ac_key": None})
+
+        assert derive_semantic_ac_key(unsafe) != derive_semantic_ac_key(safe)
+        assert AcceptanceCriterionSpec.model_validate(safe.to_seed_value()) == safe
+
+    def test_verify_replay_safe_requires_verify_command(self) -> None:
+        with pytest.raises(
+            PydanticValidationError,
+            match="verify_replay_safe requires verify_command",
+        ):
+            AcceptanceCriterionSpec(description="tests pass", verify_replay_safe=True)

@@ -425,6 +425,8 @@ def test_success_contract_preserves_output_assertion_without_command() -> None:
     assert contract.has_success_contract is True
     assert contract.to_contract_data() == {
         "verify_command": None,
+        "verify_cwd": None,
+        "verify_replay_safe": False,
         "expected_artifacts": [],
         "output_assertion": "OK",
     }
@@ -457,6 +459,23 @@ def test_capsule_fingerprint_changes_with_acceptance_authority(tmp_path) -> None
     )
 
     assert changed.fingerprint != capsule.fingerprint
+
+
+def test_capsule_fingerprint_changes_with_verify_execution_semantics(tmp_path) -> None:
+    capsule = _capsule(tmp_path)
+    changed_cwd = replace(
+        capsule,
+        success_contract=replace(capsule.success_contract, verify_cwd="app"),
+    )
+    changed_replay_safety = replace(
+        capsule,
+        success_contract=replace(capsule.success_contract, verify_replay_safe=True),
+    )
+
+    assert changed_cwd.fingerprint != capsule.fingerprint
+    assert changed_replay_safety.fingerprint != capsule.fingerprint
+    restored = ACSuccessContract.from_contract_data(changed_cwd.success_contract.to_contract_data())
+    assert restored.verify_cwd == "app"
 
 
 def test_capsule_success_contract_override_is_child_local(tmp_path) -> None:
