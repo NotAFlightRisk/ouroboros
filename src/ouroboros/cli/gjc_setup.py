@@ -94,6 +94,36 @@ def is_setup_managed_gjc_mcp_entry(entry: object) -> bool:
         and _is_exact_launcher_args(command, args)
     )
 
+def is_runtime_loaded_gjc_mcp_entry(entry: object) -> bool:
+    """Return whether GJC will autoload the exact setup-owned endpoint."""
+    return (
+        is_setup_managed_gjc_mcp_entry(entry)
+        and isinstance(entry, dict)
+        and entry.get("runtimeStatus") == "autoload"
+    )
+
+
+def build_gjc_mcp_add_command(
+    gjc_path: str,
+    *,
+    command: str,
+    server_args: Sequence[str],
+) -> list[str]:
+    """Build an argv accepted by GJC versions before and after MCP autoload."""
+    return [
+        gjc_path,
+        "mcp",
+        "add",
+        "ouroboros",
+        "--command",
+        command,
+        *(f"--arg={arg}" for arg in server_args),
+        f"--env=OUROBOROS_MCP_CONFIG={gjc_mcp_bridge_config_path()}",
+        "--timeout",
+        "30000",
+        "--json",
+    ]
+
 
 def _listed_gjc_mcp_entry(
     gjc_path: str,
@@ -182,9 +212,18 @@ def register_gjc_mcp_server(
         return False
     if existing is not None:
         if not is_setup_managed_gjc_mcp_entry(existing):
-            print_info("Preserved existing user-managed Ouroboros MCP config in GJC.")
-        else:
-            print_info("Ouroboros MCP server in GJC is already up to date.")
+            print_error(
+                "GJC already has a user-managed MCP server named 'ouroboros'. "
+                "Preserved it and aborted activation because its tool contract cannot be verified."
+            )
+            return False
+        if not is_runtime_loaded_gjc_mcp_entry(existing):
+            print_error(
+                "The stored Ouroboros MCP server is not autoloaded by ordinary GJC sessions. "
+                "Upgrade GJC or enable conventional MCP autoload, then re-run setup."
+            )
+            return False
+        print_info("Ouroboros MCP server in GJC is already active and up to date.")
         return True
     command = detected.get("command")
     raw_args = detected.get("args")
@@ -196,21 +235,11 @@ def register_gjc_mcp_server(
         print_warning("Detected Ouroboros MCP launcher is invalid; GJC registration skipped.")
         return False
     server_args = [*raw_args, "--runtime", "gjc"]
-    add_command = [
+    add_command = build_gjc_mcp_add_command(
         gjc_path,
-        "mcp",
-        "add",
-        "ouroboros",
-        "--command",
-        command,
-        *(f"--arg={arg}" for arg in server_args),
-        f"--env=OUROBOROS_MCP_CONFIG={gjc_mcp_bridge_config_path()}",
-        "--sharing",
-        "per-session",
-        "--timeout",
-        "30000",
-        "--json",
-    ]
+        command=command,
+        server_args=server_args,
+    )
     try:
         added = run_command(
             add_command,
@@ -229,14 +258,15 @@ def register_gjc_mcp_server(
     if registration_state is not None:
         registration_state.update(created=existing is None, changed=True)
     validated_ok, validated = _listed_gjc_mcp_entry(gjc_path, run_command)
-    if not validated_ok or not is_setup_managed_gjc_mcp_entry(validated):
-        print_warning("GJC did not retain the expected Ouroboros MCP registration.")
-        if existing is None:
-            remove_gjc_mcp_server(gjc_path, run_command=run_command)
+    if not validated_ok or not is_runtime_loaded_gjc_mcp_entry(validated):
+        print_warning(
+            "GJC did not expose the expected Ouroboros MCP server as an autoloaded runtime endpoint."
+        )
+        if existing is None and remove_gjc_mcp_server(gjc_path, run_command=run_command):
             if registration_state is not None:
                 registration_state.update(created=False, changed=False)
         return False
-    print_success("Registered Ouroboros MCP server in GJC.")
+    print_success("Registered autoloaded Ouroboros MCP server in GJC.")
     return True
 
 
@@ -360,6 +390,15 @@ def _rollback_new_gjc_mcp_registration(gjc_path: str, registration_state: dict[s
         print_warning("GJC setup rollback could not remove the newly registered MCP server.")
 
 
+def rollback_gjc_files(
+    snapshots: tuple[tuple[Path, Any], ...],
+    *,
+    restore_path_snapshot: Callable[..., None],
+) -> None:
+    """Restore GJC filesystem artifacts without changing MCP registration state."""
+    _restore_gjc_paths(snapshots, restore_path_snapshot)
+
+
 def rollback_gjc_activation(
     snapshots: tuple[tuple[Path, Any], ...],
     *,
@@ -368,5 +407,5 @@ def rollback_gjc_activation(
     registration_state: dict[str, bool],
 ) -> None:
     """Restore owned paths and remove only a registration created by this activation."""
-    _restore_gjc_paths(snapshots, restore_path_snapshot)
+    rollback_gjc_files(snapshots, restore_path_snapshot=restore_path_snapshot)
     _rollback_new_gjc_mcp_registration(gjc_path, registration_state)

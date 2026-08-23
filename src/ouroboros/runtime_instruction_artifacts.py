@@ -13,6 +13,7 @@ COPILOT_INSTRUCTIONS_DIRNAME = "ouroboros-instructions"
 COPILOT_AGENTS_FILENAME = "AGENTS.md"
 _SECTION_START = "<!-- ouroboros:skill-capability-guide:start -->"
 _SECTION_END = "<!-- ouroboros:skill-capability-guide:end -->"
+_GJC_PROJECTION_MARKER = "<!-- ouroboros:gjc-command-projection:v1 -->"
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +29,7 @@ def _render_section(backend: str) -> str:
     return f"{_SECTION_START}\n{guide}\n{_SECTION_END}\n"
 
 
-def _render_gjc_guide() -> str:
+def _render_gjc_guide(*, managed_marker: bool = True) -> str:
     """Render GJC's always-applied exact-command routing and capability guide."""
     from ouroboros.gjc import GJC_SKILL_NAMESPACE
     from ouroboros.router import packaged_skill_dispatch_registry
@@ -48,13 +49,19 @@ def _render_gjc_guide() -> str:
         "description: Deterministic Ouroboros command routing for GJC",
         "---",
         "",
-        "## Ouroboros command routing",
-        "",
-        "Exact `ooo` commands are explicit skill invocations, not ordinary natural-language requests.",
-        "They MUST be routed before generic planning, interview, search, or implementation skills:",
-        "",
-        "- Bare `ooo` → invoke `/skill:ouroboros-ooo`.",
     ]
+    if managed_marker:
+        lines.extend((_GJC_PROJECTION_MARKER, ""))
+    lines.extend(
+        (
+            "## Ouroboros command routing",
+            "",
+            "Exact `ooo` commands are explicit skill invocations, not ordinary natural-language requests.",
+            "They MUST be routed before generic planning, interview, search, or implementation skills:",
+            "",
+            "- Bare `ooo` → invoke `/skill:ouroboros-ooo`.",
+        )
+    )
     lines.extend(
         f"- `ooo {identifier} [arguments]` → invoke `/skill:{skill_name} [arguments]`."
         for identifier, skill_name in routes
@@ -119,12 +126,13 @@ def has_managed_section(path: str | Path) -> bool:
 
 
 def is_setup_managed_gjc_instruction(path: str | Path) -> bool:
-    """Return whether *path* is exactly the routing guide emitted by setup."""
+    """Return whether *path* is a marked current or exact legacy setup guide."""
     candidate = Path(path)
     try:
-        return (
-            not candidate.is_symlink()
-            and candidate.read_text(encoding="utf-8") == _render_gjc_guide()
+        content = candidate.read_text(encoding="utf-8")
+        return not candidate.is_symlink() and (
+            _GJC_PROJECTION_MARKER in content
+            or content == _render_gjc_guide(managed_marker=False)
         )
     except (OSError, UnicodeDecodeError):
         return False
@@ -141,8 +149,13 @@ def _write_managed_section(path: Path, backend: str) -> Path:
 
 
 def _write_exact_guide(path: Path, backend: str, *, content: str | None = None) -> Path:
+    rendered = content or render_backend_skill_capability_guide(backend)
+    if path.is_symlink():
+        raise OSError(f"Refusing to replace symlinked {backend} instruction guide: {path}")
+    if path.exists() and backend == "gjc" and not is_setup_managed_gjc_instruction(path):
+        raise OSError(f"Refusing to replace user-managed GJC routing guide: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content or render_backend_skill_capability_guide(backend), encoding="utf-8")
+    path.write_text(rendered, encoding="utf-8")
     return path
 
 

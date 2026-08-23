@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from ouroboros.runtime_instruction_artifacts import (
     COPILOT_AGENTS_FILENAME,
     COPILOT_INSTRUCTIONS_DIRNAME,
@@ -103,6 +105,33 @@ def test_gjc_installs_always_apply_command_routes_and_capability_guide(tmp_path:
     assert "route to GJC's bundled `deep-interview`" in content
     assert "## Ouroboros Skill Capability Guide: Gjc" in content
     assert first.path.read_text(encoding="utf-8") == second.path.read_text(encoding="utf-8")
+
+def test_gjc_preserves_user_managed_routing_guide(tmp_path: Path) -> None:
+    env = {"GJC_CODING_AGENT_DIR": str(tmp_path / "agent")}
+    guide = gjc_instruction_path(environ=env)
+    guide.parent.mkdir(parents=True)
+    guide.write_text("# My routing rules\n", encoding="utf-8")
+
+    with pytest.raises(OSError, match="user-managed GJC routing guide"):
+        install_gjc_instruction_artifact(environ=env)
+
+    assert guide.read_text(encoding="utf-8") == "# My routing rules\n"
+
+
+def test_gjc_refreshes_legacy_exact_setup_guide(tmp_path: Path) -> None:
+    env = {"GJC_CODING_AGENT_DIR": str(tmp_path / "agent")}
+    guide = install_gjc_instruction_artifact(environ=env).path
+    current = guide.read_text(encoding="utf-8")
+    guide.write_text(
+        current.replace("<!-- ouroboros:gjc-command-projection:v1 -->\n\n", ""),
+        encoding="utf-8",
+    )
+
+    install_gjc_instruction_artifact(environ=env)
+
+    assert "<!-- ouroboros:gjc-command-projection:v1 -->" in guide.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_marked_section_refresh_is_idempotent(tmp_path: Path) -> None:

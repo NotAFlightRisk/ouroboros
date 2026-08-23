@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import tomllib
 from unittest.mock import patch
 
@@ -521,6 +522,57 @@ class TestRemoveGjcArtifacts:
         ):
             assert not _remove_gjc_artifacts(dry_run=False)
         run.assert_not_called()
+
+    def test_mcp_removal_failure_restores_all_managed_files(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        managed = agent_dir / "skills" / "ouroboros-interview"
+        managed.mkdir(parents=True)
+        skill_content = (
+            "---\nname: ouroboros-interview\ndescription: managed\n"
+            "ouroboros_projection: gjc-v1\n---\n"
+        )
+        (managed / "SKILL.md").write_text(skill_content, encoding="utf-8")
+        with (
+            patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+            patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/bin/gjc"),
+            patch(
+                "ouroboros.cli.commands.uninstall._gjc_mcp_entry",
+                return_value={
+                    "name": "ouroboros",
+                    "config": {
+                        "type": "stdio",
+                        "command": "uvx",
+                        "args": [
+                            "--isolated",
+                            "--python",
+                            ">=3.12",
+                            "--from",
+                            "ouroboros-ai[mcp]",
+                            "ouroboros",
+                            "mcp",
+                            "serve",
+                            "--runtime",
+                            "gjc",
+                        ],
+                    },
+                },
+            ),
+            patch(
+                "ouroboros.cli.commands.uninstall.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="failed"),
+            ),
+        ):
+            from ouroboros.cli.commands.setup import _install_gjc_mcp_bridge_config
+            from ouroboros.runtime_instruction_artifacts import install_gjc_instruction_artifact
+
+            guide = install_gjc_instruction_artifact().path
+            assert _install_gjc_mcp_bridge_config()
+            bridge_config = agent_dir / "ouroboros" / "mcp-bridge.yaml"
+            assert not _remove_gjc_artifacts(dry_run=False)
+
+        assert (managed / "SKILL.md").read_text(encoding="utf-8") == skill_content
+        assert guide.exists()
+        assert bridge_config.exists()
 
     def test_removes_managed_routing_guide(self, tmp_path: Path) -> None:
         agent_dir = tmp_path / "agent"

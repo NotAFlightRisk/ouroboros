@@ -108,12 +108,10 @@ def refresh_runtime_artifacts() -> None:
             path.name.startswith("ouroboros-") for path in gjc_skills.iterdir()
         ):
             gjc_expected = True
-            gjc_succeeded = setup._install_gjc_skills() and gjc_succeeded
         if gjc_instruction_path().exists():
             gjc_expected = True
-            gjc_succeeded = setup._install_runtime_instruction_artifact("gjc") and gjc_succeeded
         if gjc_expected:
-            gjc_succeeded = setup._install_gjc_mcp_bridge_config() and gjc_succeeded
+            gjc_succeeded = setup._refresh_gjc_runtime_artifacts()
     if gjc_expected:
         (refreshed if gjc_succeeded else failed).append("gjc")
 

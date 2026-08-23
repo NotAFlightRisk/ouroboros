@@ -294,11 +294,13 @@ def _gjc_mcp_entry(gjc_path: str) -> dict[str, object] | None:
 
 
 def _remove_gjc_artifacts(dry_run: bool) -> bool:
-    """Remove setup-owned GJC skills, MCP registration, bridge config, and guide."""
+    """Transactionally remove only setup-owned GJC projection artifacts."""
     from ouroboros.cli.commands.setup import (
         _gjc_mcp_bridge_config_path,
         _is_setup_managed_gjc_mcp_bridge_config,
         _is_setup_managed_gjc_mcp_entry,
+        _restore_path_snapshot_if_current_matches,
+        _snapshot_path,
     )
     from ouroboros.config import get_gjc_cli_path
 
@@ -311,7 +313,12 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
     managed_bridge_config = _is_setup_managed_gjc_mcp_bridge_config(bridge_config)
     guide = gjc_instruction_path()
     managed_guide = is_setup_managed_gjc_instruction(guide)
-    if not skills and not managed_mcp and not managed_bridge_config and not managed_guide:
+    owned_paths = (
+        *skills,
+        *((bridge_config,) if managed_bridge_config else ()),
+        *((guide,) if managed_guide else ()),
+    )
+    if not owned_paths and not managed_mcp:
         return False
     if dry_run:
         if skills:
@@ -324,12 +331,46 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
             print_info(f"[dry-run] Would remove GJC routing guide: {guide}")
         return True
 
-    all_ok = True
-    if skills:
+    snapshots = tuple((path, _snapshot_path(path, follow_links=False)) for path in owned_paths)
+
+    def restore_files(expected_current: tuple[tuple[Path, object], ...]) -> bool:
+        restored_all = True
+        for (path, snapshot), (_, expected) in zip(
+            reversed(snapshots), reversed(expected_current), strict=True
+        ):
+            try:
+                restored = _restore_path_snapshot_if_current_matches(
+                    path,
+                    snapshot,
+                    expected,
+                    restore_link_targets=False,
+                    follow_links=False,
+                )
+            except OSError:
+                restored = False
+            restored_all = restored and restored_all
+        return restored_all
+
+    try:
         removed = remove_gjc_skills(agent_dir=agent_dir)
-        all_ok = len(removed) == len(skills)
-        if all_ok:
-            print_success(f"Removed {len(removed)} GJC Ouroboros skills")
+        if len(removed) != len(skills):
+            raise OSError("not every managed GJC skill was removed")
+        for path in owned_paths[len(skills) :]:
+            path.unlink()
+        removed_snapshots = tuple(
+            (path, _snapshot_path(path, follow_links=False)) for path in owned_paths
+        )
+    except OSError as exc:
+        current_snapshots = tuple(
+            (path, _snapshot_path(path, follow_links=False)) for path in owned_paths
+        )
+        restored = restore_files(current_snapshots)
+        suffix = " (rollback incomplete)" if not restored else ""
+        print_warning(
+            f"Could not remove GJC projection artifacts; restored prior files{suffix}: {exc}"
+        )
+        return False
+
     if managed_mcp and gjc_path:
         try:
             result = subprocess.run(
@@ -340,33 +381,21 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
                 check=False,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            all_ok = False
-        else:
-            if result.returncode == 0:
-                print_success("Removed Ouroboros MCP registration from GJC")
-            else:
-                all_ok = False
-    if managed_bridge_config:
+            result = None
+        if result is None or result.returncode != 0:
+            restored = restore_files(removed_snapshots)
+            suffix = " (file rollback incomplete)" if not restored else ""
+            print_warning(f"Could not remove Ouroboros MCP registration; restored GJC files{suffix}.")
+            return False
+        print_success("Removed Ouroboros MCP registration from GJC")
+    if skills:
+        print_success(f"Removed {len(skills)} GJC Ouroboros skills")
+    for parent in {path.parent for path in owned_paths}:
         try:
-            bridge_config.unlink()
+            parent.rmdir()
         except OSError:
-            all_ok = False
-        else:
-            try:
-                bridge_config.parent.rmdir()
-            except OSError:
-                pass
-    if managed_guide:
-        try:
-            guide.unlink()
-        except OSError:
-            all_ok = False
-        else:
-            try:
-                guide.parent.rmdir()
-            except OSError:
-                pass
-    return all_ok
+            pass
+    return True
 
 
 def _remove_claude_md_block(project_dir: Path, dry_run: bool) -> bool:

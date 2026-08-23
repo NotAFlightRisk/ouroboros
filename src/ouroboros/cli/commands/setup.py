@@ -3819,6 +3819,37 @@ def _install_gjc_runtime_artifacts(
         )
     return False
 
+def _refresh_gjc_runtime_artifacts() -> bool:
+    """Refresh an existing GJC projection atomically without touching MCP state."""
+    from ouroboros.gjc import gjc_skills_root
+    from ouroboros.runtime_instruction_artifacts import gjc_agent_dir, gjc_instruction_path
+
+    paths = (
+        gjc_skills_root(gjc_agent_dir()),
+        gjc_instruction_path().parent,
+        _gjc_mcp_bridge_config_path().parent,
+    )
+    try:
+        snapshots = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
+        succeeded = (
+            _install_gjc_mcp_bridge_config()
+            and _install_gjc_skills()
+            and _install_runtime_instruction_artifact("gjc")
+        )
+    except OSError as exc:
+        print_warning(f"Could not refresh GJC runtime artifacts: {exc}")
+        succeeded = False
+    if succeeded:
+        return True
+    if "snapshots" in locals():
+        from ouroboros.cli.gjc_setup import rollback_gjc_files
+
+        rollback_gjc_files(
+            snapshots,
+            restore_path_snapshot=_restore_path_snapshot,
+        )
+    return False
+
 
 def _setup_gjc(gjc_path: str) -> bool:
     """Configure GJC through the ownership-safe runtime transaction."""

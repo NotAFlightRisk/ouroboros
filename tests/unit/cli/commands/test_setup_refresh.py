@@ -182,6 +182,33 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         )
         register_mcp.assert_not_called()
 
+    def test_gjc_refresh_rolls_back_skills_when_guide_is_user_managed(
+        self, tmp_path: Path
+    ) -> None:
+        skill = tmp_path / ".gjc" / "agent" / "skills" / "ouroboros-interview"
+        skill.mkdir(parents=True)
+        stale = (
+            "---\nname: ouroboros-interview\ndescription: stale\n"
+            "ouroboros_projection: gjc-v1\n---\n"
+        )
+        (skill / "SKILL.md").write_text(stale, encoding="utf-8")
+        guide = (
+            tmp_path
+            / ".gjc"
+            / "agent"
+            / "rules"
+            / "ouroboros-skill-capability-guide.md"
+        )
+        guide.parent.mkdir(parents=True)
+        guide.write_text("# User-owned routing\n", encoding="utf-8")
+
+        result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 1
+        assert (skill / "SKILL.md").read_text(encoding="utf-8") == stale
+        assert guide.read_text(encoding="utf-8") == "# User-owned routing\n"
+        assert not (tmp_path / ".gjc" / "agent" / "ouroboros").exists()
+
     def test_legacy_gjc_bridge_registers_mcp_before_removal(self, tmp_path: Path) -> None:
         bridge = tmp_path / ".gjc" / "agent" / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
         bridge.parent.mkdir(parents=True)
