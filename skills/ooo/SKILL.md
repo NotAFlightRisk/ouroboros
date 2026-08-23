@@ -5,9 +5,9 @@ description: "Start Ouroboros onboarding. Use when the user sends bare `ooo`, as
 
 # Start Ouroboros
 
-Invoke `/ouroboros:welcome` with the user's arguments and follow that skill exactly.
-This is the explicit Marketplace-plugin entry point for a bare `ooo` message
-before any runtime-specific setup has run.
+Read `../welcome/SKILL.md` and follow its instructions exactly. GJC projects this
+entry point to `/ouroboros:welcome`, preserving the same bare `ooo` onboarding
+contract before any runtime-specific setup has run.
 
 ## RFC #1392 State Breadcrumb Footer
 
