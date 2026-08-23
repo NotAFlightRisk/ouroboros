@@ -45,7 +45,6 @@ from ouroboros.orchestrator.adapter import (
 from ouroboros.orchestrator.attempt_budget_runtime import (
     AttemptBudgetedMessageStream,
     DirectAttemptBudget,
-    ProviderStreamCloseTimeout,
     direct_bounded_route_runtime_active,
     shielded_aclosing,
 )
@@ -78,6 +77,10 @@ from ouroboros.orchestrator.runner import (
     request_cancellation,
 )
 from ouroboros.orchestrator.runtime_error import classify_subprocess_failure
+from ouroboros.orchestrator.runtime_execution import (
+    RuntimeExecution,
+    RuntimeExecutionController,
+)
 from ouroboros.orchestrator.session import (
     SESSION_START_IDENTITY_PROGRESS_KEY,
     SessionStatus,
@@ -211,6 +214,20 @@ def _bare_linked_task_workspace(adapter: Any, root: Path) -> TaskWorkspace:
     return workspace
 
 
+def _attach_test_execution_authority(adapter: Any) -> None:
+    """Give one in-memory adapter the same pre-effect contract as production."""
+
+    def acquire_execution(**kwargs: Any) -> RuntimeExecution:
+        controller = RuntimeExecutionController(str(adapter.runtime_backend))
+        return RuntimeExecution(
+            backend=str(adapter.runtime_backend),
+            stream=adapter.execute_task(**kwargs),
+            controller=controller,
+        )
+
+    adapter.acquire_execution = acquire_execution
+
+
 def _allow_mocked_precreated_durable_state(runner: OrchestratorRunner) -> None:
     """Treat a unit-test tracker as the durable snapshot for mocked stores."""
 
@@ -321,134 +338,101 @@ async def test_direct_attempt_resume_preserves_exact_near_max_remaining_time(
 
 
 @pytest.mark.asyncio
-async def test_direct_exhaustion_bounds_nonreturning_provider_finalizer() -> None:
-    """A wedged direct finalizer prevents false exhaustion publication."""
+async def test_direct_exhaustion_reaps_hostile_finalizer_before_return() -> None:
+    """A bounded direct attempt returns only after force-stop and finalizer exit."""
 
     close_started = asyncio.Event()
-    close_cancelled = asyncio.Event()
-    allow_close = asyncio.Event()
     close_finished = asyncio.Event()
+    force_called = asyncio.Event()
 
-    async def nonreturning_provider() -> AsyncIterator[AgentMessage]:
+    async def hostile_provider() -> AsyncIterator[AgentMessage]:
         try:
             yield AgentMessage(type="assistant", content="tool", tool_name="Read")
             yield AgentMessage(type="assistant", content="tool", tool_name="Read")
         finally:
             close_started.set()
-            while not allow_close.is_set():
+            while not force_called.is_set():
                 try:
-                    await allow_close.wait()
+                    await force_called.wait()
                 except asyncio.CancelledError:
-                    close_cancelled.set()
+                    pass
             close_finished.set()
 
-    source = nonreturning_provider()
+    controller = RuntimeExecutionController("opencode")
+
+    async def force_provider() -> bool:
+        force_called.set()
+        return True
+
+    controller.bind_process(force_provider)
+    execution = RuntimeExecution(
+        backend="opencode",
+        stream=hostile_provider(),
+        controller=controller,
+        cooperative_shutdown_seconds=0.01,
+    )
     budget = DirectAttemptBudget(
         max_agentic_steps=1,
         timeout_seconds=10,
         root_ac_count=1,
     )
-    stream = budget.wrap(source)
+    stream = budget.wrap(execution)
     event_store = AsyncMock()
 
-    with (
-        patch(
-            "ouroboros.orchestrator.attempt_budget_runtime._PROVIDER_STREAM_CLOSE_TIMEOUT_SECONDS",
-            0.01,
-        ),
-        patch(
-            "ouroboros.orchestrator.attempt_budget_runtime._PROVIDER_STREAM_CANCEL_TIMEOUT_SECONDS",
-            0.01,
-        ),
-    ):
-        started = asyncio.get_running_loop().time()
-        with pytest.raises(ProviderStreamCloseTimeout):
-            async with (
-                stream.lifetime(),
-                shielded_aclosing(
-                    stream,
-                    close_error_is_observe_only=lambda: stream.exhaustion is not None,
-                ),
-            ):
-                async for _message in stream:
-                    pass
-        elapsed = asyncio.get_running_loop().time() - started
-
-        with pytest.raises(ProviderStreamCloseTimeout, match="closure is confirmed"):
-            await budget.terminalize(
-                stream=stream,
-                event_store=event_store,
-                execution_id="exec_unconfirmed_close",
-                session_id="sess_unconfirmed_close",
-                runtime_handle=None,
-                context="test_direct",
-            )
-
-    try:
-        assert stream.exhaustion is not None
-        assert close_started.is_set()
-        assert close_cancelled.is_set()
-        assert stream.closure_confirmed is False
-        event_store.append.assert_not_awaited()
-        assert elapsed < 0.5
-    finally:
-        allow_close.set()
-        await asyncio.wait_for(close_finished.wait(), timeout=0.5)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("termination_confirmed", (False, True))
-async def test_direct_exhaustion_requires_confirmed_runtime_termination(
-    termination_confirmed: bool,
-) -> None:
-    """Direct exhaustion is publishable only after its live handle confirms termination."""
-
-    async def over_budget_provider() -> AsyncIterator[AgentMessage]:
-        yield AgentMessage(type="assistant", content="tool 1", tool_name="Read")
-        yield AgentMessage(type="assistant", content="tool 2", tool_name="Read")
-
-    termination_calls: list[RuntimeHandle] = []
-
-    async def terminate(handle: RuntimeHandle) -> bool:
-        termination_calls.append(handle)
-        return termination_confirmed
-
-    budget = DirectAttemptBudget(max_agentic_steps=1, timeout_seconds=10, root_ac_count=1)
-    stream = budget.wrap(over_budget_provider())
     async with stream.lifetime(), shielded_aclosing(stream):
         async for _message in stream:
             pass
+    result = await budget.terminalize(
+        stream=stream,
+        event_store=event_store,
+        execution_id="exec_owned_close",
+        session_id="sess_owned_close",
+        context="test_direct",
+    )
+
+    assert "attempt budget exhausted" in result
+    assert stream.exhaustion is not None
     assert stream.closure_confirmed is True
-    event_store = AsyncMock()
-    runtime_handle = RuntimeHandle(
+    assert close_started.is_set()
+    assert force_called.is_set()
+    assert close_finished.is_set()
+    assert execution.termination_receipt is not None
+    assert execution.termination_receipt.verified is True
+    event_store.append.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_direct_exhaustion_does_not_reterminate_closed_runtime_handle() -> None:
+    """The execution receipt, not a late streamed handle, owns termination."""
+
+    async def provider() -> AsyncIterator[AgentMessage]:
+        yield AgentMessage(type="assistant", content="tool 1", tool_name="Read")
+        yield AgentMessage(type="assistant", content="tool 2", tool_name="Read")
+
+    controller = RuntimeExecutionController("opencode")
+    execution = RuntimeExecution(
         backend="opencode",
-        native_session_id="direct-controlled",
-    ).bind_controls(terminate_callback=terminate)
+        stream=provider(),
+        controller=controller,
+    )
+    budget = DirectAttemptBudget(max_agentic_steps=1, timeout_seconds=10, root_ac_count=1)
+    stream = budget.wrap(execution)
+    async with stream.lifetime(), shielded_aclosing(stream):
+        async for _message in stream:
+            pass
 
-    if termination_confirmed:
-        result = await budget.terminalize(
-            stream=stream,
-            event_store=event_store,
-            execution_id="exec_direct_controlled",
-            session_id="sess_direct_controlled",
-            runtime_handle=runtime_handle,
-            context="test_direct",
-        )
-        assert "attempt budget exhausted" in result
-        event_store.append.assert_awaited_once()
-    else:
-        with pytest.raises(ProviderStreamCloseTimeout, match="termination is confirmed"):
-            await budget.terminalize(
-                stream=stream,
-                event_store=event_store,
-                execution_id="exec_direct_uncontrolled",
-                session_id="sess_direct_uncontrolled",
-                runtime_handle=runtime_handle,
-                context="test_direct",
-            )
-        event_store.append.assert_not_awaited()
+    event_store = AsyncMock()
+    result = await budget.terminalize(
+        stream=stream,
+        event_store=event_store,
+        execution_id="exec_closed_runtime",
+        session_id="sess_closed_runtime",
+        context="test_direct",
+    )
 
-    assert termination_calls == [runtime_handle]
+    assert "attempt budget exhausted" in result
+    assert execution.termination_receipt is not None
+    assert execution.termination_receipt.verified is True
 
 
 def _attach_live_process_local_contract(
@@ -959,8 +943,8 @@ class TestOrchestratorRunner:
         adapter._model = "test-model"
         adapter.working_directory = "/tmp/project"
         adapter.permission_mode = "acceptEdits"
+        _attach_test_execution_authority(adapter)
         return adapter
-
     @pytest.fixture
     def mock_event_store(self) -> AsyncMock:
         """Create a mock event store."""
@@ -1413,12 +1397,12 @@ class TestOrchestratorRunner:
 
         if provider_close_fails:
             assert result.is_err
-            assert "provider stream closure failed" in str(result.error)
+            assert "verified termination receipt" in str(result.error)
             assert terminate_calls == 0
             return
         assert result.is_ok and result.value.success is False
         assert produced == 4  # 3 root ACs x 1 admitted step, then the boundary turn
-        assert terminate_calls == 1
+        assert terminate_calls == 0
         assert "agentic_steps limit=3" in result.value.final_message
         budget_event = next(
             call.args[0]
@@ -1493,33 +1477,20 @@ class TestOrchestratorRunner:
         )
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("provider_close_outcome", ("ok", "raises", "hangs"))
-    async def test_execute_seed_direct_stops_at_scaled_wall_clock_budget(
+    async def test_execute_seed_direct_reaps_hostile_provider_before_return(
         self,
         runner: OrchestratorRunner,
         mock_adapter: MagicMock,
         mock_event_store: AsyncMock,
         sample_seed: Seed,
-        provider_close_outcome: str,
     ) -> None:
-        """Slow post-read processing cannot outlive the direct provider deadline."""
+        """The direct wall-clock boundary owns forced shutdown through return."""
 
         runner._max_iterations_per_ac = 100
         runner._ac_attempt_timeout_seconds = 1
-        terminate_calls = 0
         provider_close_started = asyncio.Event()
+        provider_force_called = asyncio.Event()
         provider_finalized = asyncio.Event()
-
-        async def terminate(_handle: RuntimeHandle) -> bool:
-            nonlocal terminate_calls
-            assert provider_finalized.is_set()
-            terminate_calls += 1
-            return True
-
-        live_handle = RuntimeHandle(
-            backend="opencode",
-            native_session_id="direct-time-budget",
-        ).bind_controls(terminate_callback=terminate)
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             del args, kwargs
@@ -1527,20 +1498,31 @@ class TestOrchestratorRunner:
                 yield AgentMessage(
                     type="assistant",
                     content="entered slow consumer processing",
-                    resume_handle=live_handle,
                 )
                 await asyncio.Event().wait()
             finally:
                 provider_close_started.set()
-                if provider_close_outcome == "hangs":
+                while not provider_force_called.is_set():
                     try:
-                        await asyncio.Event().wait()
+                        await provider_force_called.wait()
                     except asyncio.CancelledError:
-                        provider_finalized.set()
-                        raise
+                        pass
                 provider_finalized.set()
-                if provider_close_outcome == "raises":
-                    raise RuntimeError("provider close failed after deadline")
+
+        def acquire_execution(**kwargs: Any) -> RuntimeExecution:
+            controller = RuntimeExecutionController("opencode")
+
+            async def force_provider() -> bool:
+                provider_force_called.set()
+                return True
+
+            controller.bind_process(force_provider)
+            return RuntimeExecution(
+                backend="opencode",
+                stream=mock_execute(**kwargs),
+                controller=controller,
+                cooperative_shutdown_seconds=0.01,
+            )
 
         async def slow_progress(*args: Any, **kwargs: Any) -> Any:
             del args, kwargs
@@ -1548,6 +1530,7 @@ class TestOrchestratorRunner:
             raise AssertionError("post-read processing exceeded the fixed deadline")
 
         mock_adapter.execute_task = mock_execute
+        mock_adapter.acquire_execution = acquire_execution
 
         async def create_session(*args: Any, **kwargs: Any):
             return Result.ok(
@@ -1575,46 +1558,22 @@ class TestOrchestratorRunner:
                 AsyncMock(return_value=Result.ok(None)),
             ),
             patch.object(runner, "_update_and_persist_progress", slow_progress),
-            patch(
-                "ouroboros.orchestrator.attempt_budget_runtime."
-                "_PROVIDER_STREAM_CLOSE_TIMEOUT_SECONDS",
-                0.01,
-            ),
-            patch(
-                "ouroboros.orchestrator.attempt_budget_runtime."
-                "_PROVIDER_STREAM_CANCEL_TIMEOUT_SECONDS",
-                0.01,
-            ),
         ):
-            started = asyncio.get_running_loop().time()
             result = await runner.execute_seed(sample_seed, parallel=False)
-            elapsed = asyncio.get_running_loop().time() - started
 
-        if provider_close_outcome != "ok":
-            assert result.is_err
-            assert "closure" in str(result.error)
-            assert terminate_calls == 0
-            assert not any(
-                call.args
-                and getattr(call.args[0], "type", None) == "execution.ac.attempt_budget_exhausted"
-                for call in mock_event_store.append.await_args_list
-            )
-            return
         assert result.is_ok and result.value.success is False
-        assert elapsed < 0.9
         assert provider_close_started.is_set()
+        assert provider_force_called.is_set()
         assert provider_finalized.is_set()
-        assert terminate_calls == 1
         budget_events = [
             call.args[0]
             for call in mock_event_store.append.await_args_list
-            if getattr(call.args[0], "type", None) == "execution.ac.attempt_budget_exhausted"
+            if getattr(call.args[0], "type", None)
+            == "execution.ac.attempt_budget_exhausted"
         ]
         assert len(budget_events) == 1
-        budget_event = budget_events[0]
-        assert budget_event.data["budget_kind"] == "wall_clock"
-        assert budget_event.data["limit"] == pytest.approx(0.03)
-        assert budget_event.data["observed"] >= 0.03
+        assert budget_events[0].data["budget_kind"] == "wall_clock"
+        assert budget_events[0].data["limit"] == pytest.approx(0.03)
 
     @pytest.mark.asyncio
     async def test_execute_seed_direct_does_not_misclassify_provider_timeout(
@@ -9817,6 +9776,7 @@ class TestOrchestratorRunnerWithMCP:
         adapter._model = "test-model"
         adapter.working_directory = "/tmp/project"
         adapter.permission_mode = "acceptEdits"
+        _attach_test_execution_authority(adapter)
         return adapter
 
     @pytest.fixture
@@ -10270,6 +10230,7 @@ class TestCancellationPolling:
         adapter._model = "test-model"
         adapter.working_directory = "/tmp/project"
         adapter.permission_mode = "acceptEdits"
+        _attach_test_execution_authority(adapter)
         return adapter
 
     @pytest.fixture

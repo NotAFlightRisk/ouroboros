@@ -117,6 +117,12 @@ from ouroboros.orchestrator.parallel_executor import (
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
 from ouroboros.orchestrator.recoverable_failure import UsageLimitPauseConsequence
 from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.orchestrator.runtime_execution import (
+    RuntimeExecution,
+    RuntimeExecutionController,
+    RuntimeExecutionUnavailable,
+    require_runtime_execution,
+)
 from ouroboros.persistence.checkpoint import CheckpointStore
 from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalTestExecutor
 
@@ -4699,7 +4705,43 @@ def test_build_governed_parent_summary_preserves_embedded_wrapper_headings() -> 
     ]
 
 
-class _FinalMessageRuntime:
+def test_bounded_dispatch_rejects_unowned_runtime_before_provider_entry() -> None:
+    """A backend without pre-effect authority cannot start provider work."""
+
+    class _UnsupportedRuntime:
+        runtime_backend = "unsupported"
+
+        def __init__(self) -> None:
+            self.entered = False
+
+        async def execute_task(self, **_kwargs: Any):
+            self.entered = True
+            if False:
+                yield AgentMessage(type="result", content="unreachable")
+
+    runtime = _UnsupportedRuntime()
+    with pytest.raises(
+        RuntimeExecutionUnavailable,
+        match="cannot provide pre-effect termination authority",
+    ):
+        require_runtime_execution(runtime, prompt="must not run")
+
+    assert runtime.entered is False
+
+
+class _OwnedTestRuntime:
+    """Test-only no-process authority for deterministic in-memory streams."""
+
+    def acquire_execution(self, **kwargs: Any) -> RuntimeExecution:
+        controller = RuntimeExecutionController(self.runtime_backend)
+        return RuntimeExecution(
+            backend=self.runtime_backend,
+            stream=self.execute_task(**kwargs),
+            controller=controller,
+        )
+
+
+class _FinalMessageRuntime(_OwnedTestRuntime):
     """Minimal runtime that returns one successful final message with a handle."""
 
     _runtime_handle_backend = "opencode"
@@ -5007,38 +5049,16 @@ async def test_attempt_budget_exhaustion_skips_provider_recovery_paths() -> None
 
     assert result.success is False
     assert result.attempt_budget_exhaustion is None
-    assert result.outcome is ACExecutionOutcome.BLOCKED
-    assert "provider stream closure failed" in (result.error or "")
-    assert retry_hints.is_retryable_failure(result) is False
-    assert runtime.call_count == 1
-    assert runtime.finalized is True
-    executor._maybe_recover_with_bounce_decomposition.assert_not_awaited()
-    executor._maybe_redispatch_alt_harness.assert_not_awaited()
-    budget_events = [
-        call.args[0]
-        for call in event_store.append.await_args_list
-        if call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
-    ]
-    assert budget_events == []
-
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("termination_confirmed", (False, True))
-async def test_atomic_exhaustion_requires_confirmed_runtime_termination(
-    termination_confirmed: bool,
-) -> None:
-    """Atomic exhaustion is publishable only after its live handle confirms termination."""
+async def test_atomic_exhaustion_does_not_reterminate_closed_runtime_handle() -> None:
+    """A verified execution receipt supersedes late streamed handle controls."""
 
-    termination_calls: list[RuntimeHandle] = []
-
-    async def terminate(handle: RuntimeHandle) -> bool:
-        termination_calls.append(handle)
-        return termination_confirmed
-
+    late_terminate = AsyncMock(side_effect=AssertionError("runtime already reaped"))
     controlled_handle = RuntimeHandle(
         backend="opencode",
-        native_session_id="atomic-controlled",
-    ).bind_controls(terminate_callback=terminate)
+        native_session_id="atomic-closed",
+    ).bind_controls(terminate_callback=late_terminate)
 
     class _ControlledStepRuntime(_FinalMessageRuntime):
         def __init__(self) -> None:
@@ -5081,20 +5101,12 @@ async def test_atomic_exhaustion_requires_confirmed_runtime_termination(
 
     assert result.success is False
     assert runtime.closed is True
-    assert len(termination_calls) == (1 if termination_confirmed else 2)
-    budget_events = [
-        call.args[0]
+    assert result.attempt_budget_exhaustion is not None
+    assert any(
+        call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
         for call in event_store.append.await_args_list
-        if call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
-    ]
-    if termination_confirmed:
-        assert result.attempt_budget_exhaustion is not None
-        assert len(budget_events) == 1
-    else:
-        assert result.attempt_budget_exhaustion is None
-        assert result.outcome is ACExecutionOutcome.BLOCKED
-        assert "runtime termination is confirmed" in (result.error or "")
-        assert budget_events == []
+    )
+    late_terminate.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -5158,7 +5170,7 @@ async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity(
 ) -> None:
     """Progress messages may reset the idle watchdog but never the total deadline."""
 
-    class _ActiveForeverRuntime:
+    class _ActiveForeverRuntime(_OwnedTestRuntime):
         _runtime_handle_backend = "opencode"
         _cwd = "/tmp/project"
         _permission_mode = "acceptEdits"
@@ -5231,20 +5243,17 @@ async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity(
 
 
 @pytest.mark.asyncio
-async def test_atomic_wall_clock_exhaustion_bounds_nonreturning_finalizer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A wedged parallel finalizer prevents false exhaustion publication."""
+async def test_atomic_wall_clock_exhaustion_reaps_hostile_finalizer_before_return() -> None:
+    """A parallel attempt cannot return while provider cleanup remains live."""
 
-    class _NonreturningFinalizerRuntime:
+    class _HostileFinalizerRuntime(_OwnedTestRuntime):
         _runtime_handle_backend = "opencode"
         _cwd = "/tmp/project"
         _permission_mode = "acceptEdits"
 
         def __init__(self) -> None:
             self.close_started = asyncio.Event()
-            self.close_cancelled = asyncio.Event()
-            self.allow_close = asyncio.Event()
+            self.force_called = asyncio.Event()
             self.close_finished = asyncio.Event()
 
         @property
@@ -5259,6 +5268,21 @@ async def test_atomic_wall_clock_exhaustion_bounds_nonreturning_finalizer(
         def permission_mode(self) -> str:
             return self._permission_mode
 
+        def acquire_execution(self, **kwargs: Any) -> RuntimeExecution:
+            controller = RuntimeExecutionController(self.runtime_backend)
+
+            async def force_provider() -> bool:
+                self.force_called.set()
+                return True
+
+            controller.bind_process(force_provider)
+            return RuntimeExecution(
+                backend=self.runtime_backend,
+                stream=self.execute_task(**kwargs),
+                controller=controller,
+                cooperative_shutdown_seconds=0.01,
+            )
+
         async def execute_task(self, **_kwargs: Any):
             try:
                 while True:
@@ -5270,22 +5294,14 @@ async def test_atomic_wall_clock_exhaustion_bounds_nonreturning_finalizer(
                     await asyncio.sleep(0.001)
             finally:
                 self.close_started.set()
-                while not self.allow_close.is_set():
+                while not self.force_called.is_set():
                     try:
-                        await self.allow_close.wait()
+                        await self.force_called.wait()
                     except asyncio.CancelledError:
-                        self.close_cancelled.set()
+                        pass
                 self.close_finished.set()
 
-    monkeypatch.setattr(
-        "ouroboros.orchestrator.attempt_budget_runtime._PROVIDER_STREAM_CLOSE_TIMEOUT_SECONDS",
-        0.01,
-    )
-    monkeypatch.setattr(
-        "ouroboros.orchestrator.attempt_budget_runtime._PROVIDER_STREAM_CANCEL_TIMEOUT_SECONDS",
-        0.01,
-    )
-    runtime = _NonreturningFinalizerRuntime()
+    runtime = _HostileFinalizerRuntime()
     event_store = AsyncMock()
     executor = ParallelACExecutor(
         adapter=runtime,
@@ -5296,34 +5312,28 @@ async def test_atomic_wall_clock_exhaustion_bounds_nonreturning_finalizer(
         ac_attempt_timeout_seconds=0.01,
     )
 
-    started = asyncio.get_running_loop().time()
     result = await executor._execute_atomic_ac(
         ac_index=0,
         ac_content="Never-ending provider finalizer",
-        session_id="sess_budget_nonreturning_close",
-        execution_id="exec_budget_nonreturning_close",
+        session_id="sess_budget_owned_close",
+        execution_id="exec_budget_owned_close",
         tools=["Read"],
         system_prompt="system",
         seed_goal="Bound provider ownership",
         depth=0,
         start_time=datetime.now(UTC),
     )
-    elapsed = asyncio.get_running_loop().time() - started
 
-    try:
-        assert result.success is False
-        assert result.attempt_budget_exhaustion is None
-        assert "provider stream closure" in (result.error or "")
-        assert runtime.close_started.is_set()
-        assert not runtime.close_finished.is_set()
-        assert not any(
-            call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
-            for call in event_store.append.await_args_list
-        )
-        assert elapsed < 0.5
-    finally:
-        runtime.allow_close.set()
-        await asyncio.wait_for(runtime.close_finished.wait(), timeout=0.5)
+    assert result.success is False
+    assert result.attempt_budget_exhaustion is not None
+    assert result.attempt_budget_exhaustion.kind is AttemptBudgetKind.WALL_CLOCK
+    assert runtime.close_started.is_set()
+    assert runtime.force_called.is_set()
+    assert runtime.close_finished.is_set()
+    assert any(
+        call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
+        for call in event_store.append.await_args_list
+    )
 
 
 @pytest.mark.asyncio
