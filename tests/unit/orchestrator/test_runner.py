@@ -338,8 +338,8 @@ async def test_direct_attempt_resume_preserves_exact_near_max_remaining_time(
 
 
 @pytest.mark.asyncio
-async def test_direct_exhaustion_reaps_hostile_finalizer_before_return() -> None:
-    """A bounded direct attempt returns only after force-stop and finalizer exit."""
+async def test_direct_exhaustion_force_closes_nonreturning_finalizer() -> None:
+    """A bounded direct attempt force-closes cancellation-resistant unwind."""
 
     close_started = asyncio.Event()
     close_finished = asyncio.Event()
@@ -351,12 +351,14 @@ async def test_direct_exhaustion_reaps_hostile_finalizer_before_return() -> None
             yield AgentMessage(type="assistant", content="tool", tool_name="Read")
         finally:
             close_started.set()
-            while not force_called.is_set():
-                try:
-                    await force_called.wait()
-                except asyncio.CancelledError:
-                    pass
-            close_finished.set()
+            try:
+                while True:
+                    try:
+                        await asyncio.sleep(3600)
+                    except asyncio.CancelledError:
+                        pass
+            finally:
+                close_finished.set()
 
     controller = RuntimeExecutionController("opencode")
 
@@ -379,9 +381,12 @@ async def test_direct_exhaustion_reaps_hostile_finalizer_before_return() -> None
     stream = budget.wrap(execution)
     event_store = AsyncMock()
 
-    async with stream.lifetime(), shielded_aclosing(stream):
-        async for _message in stream:
-            pass
+    async def consume_exhausted_stream() -> None:
+        async with stream.lifetime(), shielded_aclosing(stream):
+            async for _message in stream:
+                pass
+
+    await asyncio.wait_for(consume_exhausted_stream(), timeout=0.25)
     result = await budget.terminalize(
         stream=stream,
         event_store=event_store,

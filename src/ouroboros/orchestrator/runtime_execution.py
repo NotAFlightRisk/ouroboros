@@ -46,6 +46,78 @@ class TerminationReceipt:
         return self.provider_stopped and self.process_reaped and self.finalizer_complete
 
 
+async def _settle_task_boundary(
+    task: asyncio.Task[Any],
+    *,
+    timeout_seconds: float,
+    operation: str,
+    cancel_first: bool,
+) -> tuple[bool, Exception | None]:
+    """Settle one task and forcibly close its awaitable if it resists cancellation."""
+
+    forced = False
+    if not task.done() and cancel_first:
+        task.cancel()
+    if not task.done():
+        done, _ = await asyncio.wait((task,), timeout=timeout_seconds)
+        if not done:
+            task.cancel()
+            done, _ = await asyncio.wait((task,), timeout=timeout_seconds)
+        if not done:
+            close = getattr(task.get_coro(), "close", None)
+            if not callable(close):
+                raise RuntimeExecutionUnavailable(
+                    f"{operation} has no forceable Python task boundary"
+                )
+            forced = True
+            try:
+                close()
+            except BaseException as exc:
+                raise RuntimeExecutionUnavailable(
+                    f"{operation} resisted forced Python task closure"
+                ) from exc
+            task.cancel()
+            done, _ = await asyncio.wait((task,), timeout=timeout_seconds)
+            if not done:
+                raise RuntimeExecutionUnavailable(
+                    f"{operation} remained live after forced Python task closure"
+                )
+    if task.cancelled():
+        return forced, None
+    error = task.exception()
+    if forced:
+        return True, None
+    if error is None or isinstance(error, Exception):
+        return False, error
+    raise RuntimeExecutionUnavailable(f"{operation} failed during Python task closure") from error
+
+
+async def _await_operation[T](operation: Awaitable[T]) -> T:
+    """Give every provider awaitable a task-owned coroutine boundary."""
+
+    return await operation
+
+
+async def _run_operation_bounded[T](
+    operation: Awaitable[T],
+    *,
+    timeout_seconds: float,
+    label: str,
+) -> tuple[T | None, BaseException | None]:
+    """Run one provider operation behind a finite, forceable task boundary."""
+
+    task = asyncio.create_task(_await_operation(operation))
+    forced, error = await _settle_task_boundary(
+        task,
+        timeout_seconds=timeout_seconds,
+        operation=label,
+        cancel_first=False,
+    )
+    if forced or error is not None or task.cancelled():
+        return None, error
+    return task.result(), None
+
+
 class RuntimeExecutionController:
     """Mutable process authority created before a provider can have effects."""
 
@@ -164,18 +236,25 @@ class RuntimeExecution(AsyncIterator[AgentMessage]):
         return self._build_receipt(finalizer_complete=False)
 
     async def force_terminate(self) -> TerminationReceipt:
-        """Kill/reap provider-owned work, then wait for Python unwind."""
-        provider_stopped = await self._controller.force_terminate()
+        """Kill/reap provider work behind finite process and read boundaries."""
+        provider_stopped_value, force_error = await _run_operation_bounded(
+            self._controller.force_terminate(),
+            timeout_seconds=self._cooperative_shutdown_seconds,
+            label=f"{self.backend} provider force termination",
+        )
+        if force_error is not None:
+            self._unwind_error = force_error
+        provider_stopped = bool(provider_stopped_value) and force_error is None
         task = self._active_read
         if task is not None:
-            if not task.done():
-                task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, StopAsyncIteration):
-                pass
-            except Exception as exc:
-                self._unwind_error = exc
+            _, read_error = await _settle_task_boundary(
+                task,
+                timeout_seconds=self._cooperative_shutdown_seconds,
+                operation=f"{self.backend} provider read",
+                cancel_first=True,
+            )
+            if read_error is not None:
+                self._unwind_error = read_error
             self._active_read = None
         return self._build_receipt(
             provider_stopped=provider_stopped,
@@ -183,23 +262,29 @@ class RuntimeExecution(AsyncIterator[AgentMessage]):
         )
 
     async def reap(self) -> TerminationReceipt:
-        """Close the generator and return only with verified no-live-work evidence."""
+        """Bound provider finalization and return verified no-live-work evidence."""
         if self._closed and self._receipt is not None:
             return self._receipt
         task = self._active_read
         if task is not None:
-            if not task.done():
-                task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, StopAsyncIteration):
-                pass
-            except Exception as exc:
-                self._unwind_error = exc
+            _, read_error = await _settle_task_boundary(
+                task,
+                timeout_seconds=self._cooperative_shutdown_seconds,
+                operation=f"{self.backend} provider read",
+                cancel_first=True,
+            )
+            if read_error is not None:
+                self._unwind_error = read_error
             self._active_read = None
         close = getattr(self._stream, "aclose", None)
         if close is not None:
-            await close()
+            _, close_error = await _run_operation_bounded(
+                close(),
+                timeout_seconds=self._cooperative_shutdown_seconds,
+                label=f"{self.backend} provider finalizer",
+            )
+            if close_error is not None:
+                self._unwind_error = close_error
         if self._unwind_error is not None:
             raise self._unwind_error
         self._closed = True

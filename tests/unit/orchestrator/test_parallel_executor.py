@@ -5243,8 +5243,8 @@ async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity(
 
 
 @pytest.mark.asyncio
-async def test_atomic_wall_clock_exhaustion_reaps_hostile_finalizer_before_return() -> None:
-    """A parallel attempt cannot return while provider cleanup remains live."""
+async def test_atomic_wall_clock_exhaustion_force_closes_nonreturning_finalizer() -> None:
+    """A parallel attempt force-closes cancellation-resistant provider unwind."""
 
     class _HostileFinalizerRuntime(_OwnedTestRuntime):
         _runtime_handle_backend = "opencode"
@@ -5294,12 +5294,14 @@ async def test_atomic_wall_clock_exhaustion_reaps_hostile_finalizer_before_retur
                     await asyncio.sleep(0.001)
             finally:
                 self.close_started.set()
-                while not self.force_called.is_set():
-                    try:
-                        await self.force_called.wait()
-                    except asyncio.CancelledError:
-                        pass
-                self.close_finished.set()
+                try:
+                    while True:
+                        try:
+                            await asyncio.sleep(3600)
+                        except asyncio.CancelledError:
+                            pass
+                finally:
+                    self.close_finished.set()
 
     runtime = _HostileFinalizerRuntime()
     event_store = AsyncMock()
@@ -5312,16 +5314,19 @@ async def test_atomic_wall_clock_exhaustion_reaps_hostile_finalizer_before_retur
         ac_attempt_timeout_seconds=0.01,
     )
 
-    result = await executor._execute_atomic_ac(
-        ac_index=0,
-        ac_content="Never-ending provider finalizer",
-        session_id="sess_budget_owned_close",
-        execution_id="exec_budget_owned_close",
-        tools=["Read"],
-        system_prompt="system",
-        seed_goal="Bound provider ownership",
-        depth=0,
-        start_time=datetime.now(UTC),
+    result = await asyncio.wait_for(
+        executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Never-ending provider finalizer",
+            session_id="sess_budget_owned_close",
+            execution_id="exec_budget_owned_close",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Bound provider ownership",
+            depth=0,
+            start_time=datetime.now(UTC),
+        ),
+        timeout=0.25,
     )
 
     assert result.success is False
