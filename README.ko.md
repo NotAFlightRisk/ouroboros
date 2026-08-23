@@ -472,12 +472,12 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 ## 내부 구조
 
 <details>
-<summary><strong>18개 패키지 · 166개 모듈 · 95개 테스트 파일 · Python 3.12+</strong></summary>
+<summary><strong>596개 tracked Python 모듈 · 684개 테스트 파일 · Python 3.12+</strong></summary>
 
 ```text
 src/ouroboros/
 ├── bigbang/        Interview, 모호성 점수 산정, brownfield 탐색
-├── routing/        PAL Router — 3단계 비용 최적화 (1x / 10x / 30x)
+├── router/         PAL Router — 3단계 비용 최적화 (1x / 10x / 30x)
 ├── execution/      (deprecated — 로직이 orchestrator/ 및 mcp/tools/로 이동됨)
 ├── evaluation/     Mechanical → Semantic → Multi-Model Consensus
 ├── evolution/      Wonder / Reflect 순환, 수렴 감지

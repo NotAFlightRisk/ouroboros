@@ -451,7 +451,7 @@ Nine highlighted agents below, with 12 more specialized agents available (21 tot
 ```
 src/ouroboros/
 +-- bigbang/        Interview, ambiguity scoring, brownfield explorer
-+-- routing/        PAL Router -- 3-tier cost optimization (1x / 10x / 30x)
++-- router/         PAL Router -- 3-tier cost optimization (1x / 10x / 30x)
 +-- execution/      (deprecated — logic moved to orchestrator/ and mcp/tools/)
 +-- evaluation/     Mechanical -> Semantic -> Multi-Model Consensus
 +-- evolution/      Wonder / Reflect cycle, convergence detection
