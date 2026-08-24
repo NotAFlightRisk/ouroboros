@@ -119,6 +119,20 @@ def _is_managed_skill(path: Path) -> bool:
     return frontmatter.get(_MANAGED_FIELD) == _MANAGED_VALUE
 
 
+def has_managed_gjc_skill_projection(*, agent_dir: str | Path) -> bool:
+    """Return whether the profile contains an exact setup-owned GJC skill."""
+    target_root = gjc_skills_root(agent_dir)
+    if not target_root.is_dir() or target_root.is_symlink():
+        return False
+    return any(
+        candidate.name.startswith(GJC_SKILL_NAMESPACE)
+        and not candidate.is_symlink()
+        and _is_managed_skill(candidate)
+        for candidate in target_root.iterdir()
+    )
+
+
+
 def _publish_skill(source_dir: Path, target_path: Path) -> None:
     if target_path.is_symlink():
         raise OSError(f"Refusing to replace symlinked GJC skill: {target_path}")
@@ -210,6 +224,7 @@ __all__ = [
     "GJC_SKILL_NAMESPACE",
     "GjcSkillInstallResult",
     "gjc_skills_root",
+    "has_managed_gjc_skill_projection",
     "install_gjc_skills",
     "remove_gjc_skills",
 ]

@@ -478,34 +478,28 @@ def setup_gjc_runtime(
     install_runtime_artifacts: Callable[..., bool],
     atomic_write_text: Callable[..., object],
     snapshot_path: Callable[..., object],
-    restore_path_snapshot: Callable[..., None],
+    restore_path_snapshot: Callable[..., object],
 ) -> bool:
     """Configure GJC and roll back every owned path when activation fails."""
     from ouroboros.config.loader import create_default_config, ensure_config_dir
-    from ouroboros.gjc import gjc_skills_root
-    from ouroboros.runtime_instruction_artifacts import gjc_instruction_path
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
-    paths = (
-        config_path,
-        config_dir / "credentials.yaml",
-        gjc_skills_root(gjc_agent_dir()),
-        gjc_instruction_path().parent,
-        gjc_mcp_bridge_config_path().parent,
-        gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge",
-    )
+    paths = (config_path, config_dir / "credentials.yaml")
     registration_state: dict[str, bool] = {}
-    snapshots: tuple[tuple[Path, Any], ...] = ()
+    snapshots: tuple[tuple[Path, Any, Any], ...] = ()
     if not gjc_supports_standalone_mcp_autoload(gjc_path, run_command=subprocess.run):
         return False
     try:
-        snapshots = tuple((path, snapshot_path(path, follow_links=False)) for path in paths)
+        before = tuple((path, snapshot_path(path, follow_links=False)) for path in paths)
+        expected = {path: snapshot for path, snapshot in before}
         if config_path.exists():
             config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         else:
             create_default_config(config_dir)
+            expected = {path: snapshot_path(path, follow_links=False) for path in paths}
             config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        snapshots = tuple((path, snapshot, expected[path]) for path, snapshot in before)
         if not isinstance(config, dict):
             print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting GJC setup.")
             _restore_gjc_paths(snapshots, restore_path_snapshot)
@@ -540,13 +534,19 @@ def setup_gjc_runtime(
 
 
 def _restore_gjc_paths(
-    snapshots: tuple[tuple[Path, Any], ...],
-    restore_path_snapshot: Callable[..., None],
+    snapshots: tuple[tuple[Path, Any, Any], ...],
+    restore_path_snapshot: Callable[..., object],
 ) -> None:
     failures: list[str] = []
-    for path, snapshot in reversed(snapshots):
+    for path, snapshot, expected_current in reversed(snapshots):
         try:
-            restore_path_snapshot(path, snapshot, restore_link_targets=False)
+            restore_path_snapshot(
+                path,
+                snapshot,
+                expected_current,
+                restore_link_targets=False,
+                follow_links=False,
+            )
         except OSError as exc:
             failures.append(f"{path}: {exc}")
     if failures:
@@ -563,18 +563,18 @@ def _rollback_new_gjc_mcp_registration(gjc_path: str, registration_state: dict[s
 
 
 def rollback_gjc_files(
-    snapshots: tuple[tuple[Path, Any], ...],
+    snapshots: tuple[tuple[Path, Any, Any], ...],
     *,
-    restore_path_snapshot: Callable[..., None],
+    restore_path_snapshot: Callable[..., object],
 ) -> None:
     """Restore GJC filesystem artifacts without changing MCP registration state."""
     _restore_gjc_paths(snapshots, restore_path_snapshot)
 
 
 def rollback_gjc_activation(
-    snapshots: tuple[tuple[Path, Any], ...],
+    snapshots: tuple[tuple[Path, Any, Any], ...],
     *,
-    restore_path_snapshot: Callable[..., None],
+    restore_path_snapshot: Callable[..., object],
     gjc_path: str,
     registration_state: dict[str, bool],
 ) -> None:

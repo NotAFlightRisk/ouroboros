@@ -10374,6 +10374,48 @@ class TestGjcSetup:
         assert not (agent_dir / "rules").exists()
         assert not (agent_dir / "ouroboros" / "mcp-bridge.yaml").exists()
 
+    def test_setup_gjc_failed_activation_preserves_concurrent_user_skill(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n"
+        config_path.write_text(original, encoding="utf-8")
+        agent_dir = tmp_path / "gjc-agent"
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+        concurrent_skill = agent_dir / "skills" / "concurrent-user" / "SKILL.md"
+
+        def fail_after_concurrent_write(*_args: object, **_kwargs: object) -> bool:
+            concurrent_skill.parent.mkdir(parents=True)
+            concurrent_skill.write_text("user generation\n", encoding="utf-8")
+            return False
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.gjc_setup.gjc_supports_standalone_mcp_autoload",
+                return_value=True,
+            ),
+            patch.object(
+                setup_cmd,
+                "_register_gjc_mcp_server",
+                side_effect=fail_after_concurrent_write,
+            ),
+        ):
+            assert not setup_cmd._setup_gjc("/opt/bin/gjc")
+
+        assert config_path.read_text(encoding="utf-8") == original
+        assert concurrent_skill.read_text(encoding="utf-8") == "user generation\n"
+        assert tuple(
+            path
+            for path in (agent_dir / "skills").iterdir()
+            if path.name.startswith("ouroboros-")
+        ) == ()
+        assert not (agent_dir / "rules").exists()
+        assert not (agent_dir / "ouroboros" / "mcp-bridge.yaml").exists()
+
     def test_setup_gjc_preserves_custom_mcp_bridge_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

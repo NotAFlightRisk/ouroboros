@@ -8,6 +8,7 @@ import shutil
 
 import typer
 
+from ouroboros.cli import gjc_setup as _gjc_setup
 from ouroboros.hermes.artifacts import HERMES_SKILL_CATEGORY, HERMES_SKILL_NAME
 from ouroboros.runtime_instruction_artifacts import (
     copilot_instruction_path,
@@ -89,17 +90,16 @@ def refresh_runtime_artifacts() -> None:
             failed.append("pi")
 
     gjc_root = gjc_agent_dir()
-    gjc_skills = gjc_root / "skills"
     gjc_bridge = gjc_root / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
     gjc_bridge_config = gjc_root / "ouroboros" / "mcp-bridge.yaml"
+    from ouroboros.gjc import has_managed_gjc_skill_projection
+    from ouroboros.runtime_instruction_artifacts import is_setup_managed_gjc_instruction
+
     gjc_expected = (
-        (
-            gjc_skills.is_dir()
-            and any(path.name.startswith("ouroboros-") for path in gjc_skills.iterdir())
-        )
-        or gjc_instruction_path().exists()
-        or gjc_bridge_config.exists()
-        or gjc_bridge.exists()
+        has_managed_gjc_skill_projection(agent_dir=gjc_root)
+        or is_setup_managed_gjc_instruction(gjc_instruction_path())
+        or _gjc_setup.is_setup_managed_gjc_mcp_bridge_config(gjc_bridge_config)
+        or _gjc_setup.is_setup_managed_legacy_gjc_bridge(gjc_bridge)
     )
     from ouroboros.config import get_gjc_cli_path
 

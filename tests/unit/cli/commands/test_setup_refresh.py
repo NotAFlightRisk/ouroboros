@@ -76,6 +76,26 @@ class TestSetupRefreshPresenceGating:
         assert gemini_md.read_text(encoding="utf-8") == "my own notes\n"
 
 
+    def test_user_owned_namespaced_gjc_skill_does_not_activate_projection(
+        self, tmp_path: Path
+    ) -> None:
+        skill = tmp_path / ".gjc" / "agent" / "skills" / "ouroboros-custom"
+        skill.mkdir(parents=True)
+        skill.joinpath("SKILL.md").write_text(
+            "---\nname: ouroboros-custom\ndescription: user owned\n---\n",
+            encoding="utf-8",
+        )
+
+        with patch("ouroboros.cli.commands.setup._install_gjc_runtime_artifacts") as install:
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 0
+        assert "No installed runtime artifacts found to refresh." in result.output
+        install.assert_not_called()
+        assert skill.joinpath("SKILL.md").read_text(encoding="utf-8").endswith(
+            "description: user owned\n---\n"
+        )
+
 class TestSetupRefreshUpdatesInstalledArtifacts:
     def test_refreshes_managed_gemini_section(self, tmp_path: Path) -> None:
         gemini_md = tmp_path / ".gemini" / "GEMINI.md"

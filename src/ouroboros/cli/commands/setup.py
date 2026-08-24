@@ -2511,6 +2511,72 @@ def _restore_path_snapshot_if_current_matches(
     return True
 
 
+def _snapshot_children(snapshot: _PathSnapshot) -> dict[str, _PathSnapshot]:
+    return dict(snapshot.children) if snapshot.kind == "directory" else {}
+
+
+def _collect_concurrent_snapshot_changes(
+    before: _PathSnapshot,
+    expected: _PathSnapshot,
+    current: _PathSnapshot,
+    *,
+    relative_path: Path = Path(),
+) -> tuple[list[tuple[Path, _PathSnapshot]], bool]:
+    """Separate operator changes from setup changes in a snapshot generation."""
+    if current == expected:
+        return [], False
+    if before == expected:
+        return [(relative_path, current)], False
+    if before.kind in {"missing", "directory"} and expected.kind == current.kind == "directory":
+        before_children = _snapshot_children(before)
+        expected_children = _snapshot_children(expected)
+        current_children = _snapshot_children(current)
+        changes: list[tuple[Path, _PathSnapshot]] = []
+        conflict = False
+        missing = _PathSnapshot(kind="missing")
+        for name in sorted(before_children.keys() | expected_children.keys() | current_children.keys()):
+            child_changes, child_conflict = _collect_concurrent_snapshot_changes(
+                before_children.get(name, missing),
+                expected_children.get(name, missing),
+                current_children.get(name, missing),
+                relative_path=relative_path / name,
+            )
+            changes.extend(child_changes)
+            conflict = conflict or child_conflict
+        return changes, conflict
+    return [], True
+
+
+def _restore_path_snapshot_preserving_concurrent_changes(
+    path: Path,
+    snapshot: _PathSnapshot,
+    expected_current: _PathSnapshot | None,
+    *,
+    restore_link_targets: bool = True,
+    follow_links: bool = True,
+) -> bool:
+    """Roll back setup-owned deltas while preserving disjoint operator changes."""
+    if expected_current is None:
+        _restore_path_snapshot(path, snapshot, restore_link_targets=restore_link_targets)
+        return True
+    current = _snapshot_path(path, follow_links=follow_links)
+    changes, conflict = _collect_concurrent_snapshot_changes(snapshot, expected_current, current)
+    if conflict:
+        print_warning(f"Preserved concurrently changed setup path during rollback: {path}")
+        return False
+    _restore_path_snapshot(path, snapshot, restore_link_targets=restore_link_targets)
+    for relative_path, concurrent_snapshot in changes:
+        target = path if relative_path == Path() else path / relative_path
+        _restore_path_snapshot(
+            target,
+            concurrent_snapshot,
+            restore_link_targets=restore_link_targets,
+        )
+    if changes:
+        print_warning(f"Preserved concurrent changes while rolling back setup path: {path}")
+    return True
+
+
 def _require_path_snapshot(path: Path, expected: _PathSnapshot) -> _PathSnapshot:
     """Fail closed when a managed path changed since the caller last read it."""
     current = _snapshot_path(path)
@@ -3715,35 +3781,46 @@ def _install_gjc_runtime_artifacts(
     from ouroboros.runtime_instruction_artifacts import gjc_agent_dir, gjc_instruction_path
 
     state = registration_state if registration_state is not None else {}
-    paths = (
-        gjc_skills_root(gjc_agent_dir()),
-        gjc_instruction_path().parent,
-        _gjc_setup.gjc_mcp_bridge_config_path().parent,
-        gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge",
-    )
+    skills_path = gjc_skills_root(gjc_agent_dir())
+    rules_path = gjc_instruction_path().parent
+    bridge_config_path = _gjc_setup.gjc_mcp_bridge_config_path().parent
+    legacy_bridge_path = gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge"
+    paths = (skills_path, rules_path, bridge_config_path, legacy_bridge_path)
+    before = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
+    expected = {path: snapshot for path, snapshot in before}
+
+    def capture_expected_generation(path: Path) -> None:
+        expected[path] = _snapshot_path(path, follow_links=False)
+
     try:
-        snapshots = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
-        succeeded = (
-            _install_gjc_mcp_bridge_config()
-            and _install_gjc_skills()
-            and _install_runtime_instruction_artifact("gjc")
-            and _register_gjc_mcp_server(gjc_path, registration_state=state)
-            and _remove_legacy_gjc_bridge()
-        )
+        succeeded = _install_gjc_mcp_bridge_config()
+        if succeeded:
+            capture_expected_generation(bridge_config_path)
+            succeeded = _install_gjc_skills()
+        if succeeded:
+            capture_expected_generation(skills_path)
+            succeeded = _install_runtime_instruction_artifact("gjc")
+        if succeeded:
+            capture_expected_generation(rules_path)
+            succeeded = _register_gjc_mcp_server(gjc_path, registration_state=state)
+        if succeeded:
+            succeeded = _remove_legacy_gjc_bridge()
+            if succeeded:
+                capture_expected_generation(legacy_bridge_path)
     except OSError as exc:
         print_warning(f"Could not install GJC runtime artifacts: {exc}")
         succeeded = False
     if succeeded:
         return True
-    if "snapshots" in locals():
-        from ouroboros.cli.gjc_setup import rollback_gjc_activation
+    from ouroboros.cli.gjc_setup import rollback_gjc_activation
 
-        rollback_gjc_activation(
-            snapshots,
-            restore_path_snapshot=_restore_path_snapshot,
-            gjc_path=gjc_path,
-            registration_state=state,
-        )
+    snapshots = tuple((path, snapshot, expected[path]) for path, snapshot in before)
+    rollback_gjc_activation(
+        snapshots,
+        restore_path_snapshot=_restore_path_snapshot_preserving_concurrent_changes,
+        gjc_path=gjc_path,
+        registration_state=state,
+    )
     return False
 
 
@@ -3756,7 +3833,7 @@ def _setup_gjc(gjc_path: str) -> bool:
         install_runtime_artifacts=_install_gjc_runtime_artifacts,
         atomic_write_text=_atomic_write_text,
         snapshot_path=_snapshot_path,
-        restore_path_snapshot=_restore_path_snapshot,
+        restore_path_snapshot=_restore_path_snapshot_preserving_concurrent_changes,
     )
 
 
