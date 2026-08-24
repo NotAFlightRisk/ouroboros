@@ -131,8 +131,7 @@ def is_setup_managed_gjc_instruction(path: str | Path) -> bool:
     try:
         content = candidate.read_text(encoding="utf-8")
         return not candidate.is_symlink() and (
-            _GJC_PROJECTION_MARKER in content
-            or content == _render_gjc_guide(managed_marker=False)
+            _GJC_PROJECTION_MARKER in content or content == _render_gjc_guide(managed_marker=False)
         )
     except (OSError, UnicodeDecodeError):
         return False

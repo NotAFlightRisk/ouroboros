@@ -9757,6 +9757,10 @@ class TestGjcSetup:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup._register_gjc_mcp_server", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._verify_gjc_standalone_mcp_autoload",
+                return_value=True,
+            ),
         ):
             setup_cmd._setup_gjc("/opt/bin/gjc")
             setup_cmd._setup_gjc("/opt/bin/gjc")
@@ -10122,6 +10126,10 @@ class TestGjcSetup:
             patch.object(setup_cmd, "_detect_runtimes", return_value={"gjc": "/opt/bin/gjc"}),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch.object(setup_cmd, "_register_gjc_mcp_server", return_value=False),
+            patch(
+                "ouroboros.cli.commands.setup._verify_gjc_standalone_mcp_autoload",
+                return_value=True,
+            ),
         ):
             result = CliRunner().invoke(setup_cmd.app, ["--runtime", "gjc", "--non-interactive"])
 
@@ -10148,6 +10156,10 @@ class TestGjcSetup:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch.object(setup_cmd, "_register_gjc_mcp_server", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._verify_gjc_standalone_mcp_autoload",
+                return_value=True,
+            ),
         ):
             assert setup_cmd._setup_gjc("/opt/bin/gjc")
 
@@ -10171,6 +10183,10 @@ class TestGjcSetup:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch.object(setup_cmd, "_register_gjc_mcp_server") as register_mcp,
+            patch(
+                "ouroboros.cli.commands.setup._verify_gjc_standalone_mcp_autoload",
+                return_value=True,
+            ),
         ):
             assert not setup_cmd._setup_gjc("/opt/bin/gjc")
 

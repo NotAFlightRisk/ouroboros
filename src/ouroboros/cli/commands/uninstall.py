@@ -385,7 +385,9 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
         if result is None or result.returncode != 0:
             restored = restore_files(removed_snapshots)
             suffix = " (file rollback incomplete)" if not restored else ""
-            print_warning(f"Could not remove Ouroboros MCP registration; restored GJC files{suffix}.")
+            print_warning(
+                f"Could not remove Ouroboros MCP registration; restored GJC files{suffix}."
+            )
             return False
         print_success("Removed Ouroboros MCP registration from GJC")
     if skills:

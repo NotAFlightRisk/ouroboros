@@ -250,11 +250,14 @@ def register_gjc_mcp_server(
     run_command: Callable[..., subprocess.CompletedProcess[str]],
     detected: dict[str, object] | None = None,
     registration_state: dict[str, bool] | None = None,
+    autoload_verified: bool = False,
 ) -> bool:
     """Register the isolated server only when standalone GJC can load it."""
     if registration_state is not None:
         registration_state.update(created=False, changed=False)
-    if not gjc_supports_standalone_mcp_autoload(gjc_path, run_command=run_command):
+    if not autoload_verified and not gjc_supports_standalone_mcp_autoload(
+        gjc_path, run_command=run_command
+    ):
         return False
     detected = detected or detect_mcp_entry(package_spec="ouroboros-ai[mcp]")
     if detected is None:

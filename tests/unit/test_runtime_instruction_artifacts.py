@@ -106,6 +106,7 @@ def test_gjc_installs_always_apply_command_routes_and_capability_guide(tmp_path:
     assert "## Ouroboros Skill Capability Guide: Gjc" in content
     assert first.path.read_text(encoding="utf-8") == second.path.read_text(encoding="utf-8")
 
+
 def test_gjc_preserves_user_managed_routing_guide(tmp_path: Path) -> None:
     env = {"GJC_CODING_AGENT_DIR": str(tmp_path / "agent")}
     guide = gjc_instruction_path(environ=env)
@@ -129,9 +130,7 @@ def test_gjc_refreshes_legacy_exact_setup_guide(tmp_path: Path) -> None:
 
     install_gjc_instruction_artifact(environ=env)
 
-    assert "<!-- ouroboros:gjc-command-projection:v1 -->" in guide.read_text(
-        encoding="utf-8"
-    )
+    assert "<!-- ouroboros:gjc-command-projection:v1 -->" in guide.read_text(encoding="utf-8")
 
 
 def test_marked_section_refresh_is_idempotent(tmp_path: Path) -> None:

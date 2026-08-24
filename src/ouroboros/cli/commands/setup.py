@@ -3755,11 +3755,18 @@ def _is_setup_managed_gjc_mcp_entry(entry: object) -> bool:
     return is_setup_managed_gjc_mcp_entry(entry)
 
 
+def _verify_gjc_standalone_mcp_autoload(gjc_path: str) -> bool:
+    from ouroboros.cli.gjc_setup import gjc_supports_standalone_mcp_autoload
+
+    return gjc_supports_standalone_mcp_autoload(gjc_path, run_command=subprocess.run)
+
+
 def _register_gjc_mcp_server(
     gjc_path: str,
     *,
     detected: dict[str, object] | None = None,
     registration_state: dict[str, bool] | None = None,
+    autoload_verified: bool = False,
 ) -> bool:
     from ouroboros.cli.gjc_setup import register_gjc_mcp_server
 
@@ -3769,6 +3776,7 @@ def _register_gjc_mcp_server(
         run_command=subprocess.run,
         detected=detected,
         registration_state=registration_state,
+        autoload_verified=autoload_verified,
     )
 
 
@@ -3795,12 +3803,18 @@ def _install_gjc_runtime_artifacts(
         gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge",
     )
     try:
+        if not _verify_gjc_standalone_mcp_autoload(gjc_path):
+            return False
         snapshots = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
         succeeded = (
             _install_gjc_mcp_bridge_config()
             and _install_gjc_skills()
             and _install_runtime_instruction_artifact("gjc")
-            and _register_gjc_mcp_server(gjc_path, registration_state=state)
+            and _register_gjc_mcp_server(
+                gjc_path,
+                registration_state=state,
+                autoload_verified=True,
+            )
             and _remove_legacy_gjc_bridge()
         )
     except OSError as exc:
