@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import ModuleType
@@ -1683,6 +1684,70 @@ class TestBuildRuntimeHandleFreshPath:
         assert final.data["subtype"] == "rate_limit_timeout_force_reserve"
         assert final.data["max_wait_seconds"] == 30.0
         assert final.data["source"] == "shared_rate_limit_bucket"
+
+
+class TestClaudeOwnedRuntime:
+    @pytest.mark.asyncio
+    async def test_cancellation_resistant_connect_is_settled_before_close_returns(self) -> None:
+        from ouroboros.orchestrator.claude_owned_runtime import (
+            ClaudeRuntimeState,
+            stream_owned_claude_client,
+        )
+        from ouroboros.orchestrator.runtime_execution import (
+            RuntimeExecution,
+            RuntimeExecutionController,
+        )
+
+        connect_started = asyncio.Event()
+
+        class _Client:
+            _transport = None
+            _query = None
+
+            async def connect(self) -> None:
+                connect_started.set()
+                while True:
+                    try:
+                        await asyncio.sleep(60)
+                    except asyncio.CancelledError:
+                        continue
+
+            async def disconnect(self) -> None:
+                return None
+
+            async def query(self, _prompt: str) -> None:
+                raise AssertionError("prompt must not reach a stuck connection")
+
+            async def receive_response(self):
+                if False:
+                    yield None
+
+        controller = RuntimeExecutionController("claude", shutdown_timeout_seconds=0.01)
+        stream = stream_owned_claude_client(
+            client=_Client(),
+            prompt="never dispatched",
+            controller=controller,
+            convert_message=lambda message: message,
+            build_handle=lambda *_args, **_kwargs: None,
+            state=ClaudeRuntimeState(session_id=None, runtime_handle=None),
+            approval_mode="acceptEdits",
+            log=AsyncMock(),
+        )
+        execution = RuntimeExecution(
+            backend="claude",
+            stream=stream,
+            controller=controller,
+            cooperative_shutdown_seconds=0.01,
+        )
+
+        read_task = asyncio.create_task(anext(execution))
+        await connect_started.wait()
+        await execution.aclose()
+
+        assert read_task.done()
+        assert controller.process_reaped is True
+        assert execution.termination_receipt is not None
+        assert execution.termination_receipt.verified is True
 
 
 class TestNonStringSelectorErrorMessage:

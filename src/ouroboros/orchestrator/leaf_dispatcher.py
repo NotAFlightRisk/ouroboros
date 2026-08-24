@@ -104,7 +104,7 @@ async def _close_runtime_stream(
             ),
             error=str(exc),
         )
-        return
+        raise
 
 
 async def _iterate_runtime_stream(

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from contextlib import suppress
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -45,49 +44,93 @@ async def stream_owned_claude_client(
     log: Any,
 ) -> AsyncIterator[Any]:
     """Connect, bind process authority, stream messages, and reap the SDK client."""
-    owned_process: Any | None = None
     connect_task = asyncio.create_task(client.connect())
+    shutdown_lock = asyncio.Lock()
+    shutdown_verified = False
 
-    async def settle_connect_task() -> bool:
-        if not connect_task.done():
-            connect_task.cancel()
-            done, _ = await asyncio.wait((connect_task,), timeout=0.1)
-            if not done:
-                close = getattr(connect_task.get_coro(), "close", None)
-                if not callable(close):
-                    return False
-                with suppress(BaseException):
-                    close()
-                connect_task.cancel()
-                done, _ = await asyncio.wait((connect_task,), timeout=0.1)
-                if not done:
-                    return False
-        if not connect_task.cancelled():
-            with suppress(BaseException):
-                connect_task.exception()
-        return True
+    async def settle_client_task(task: asyncio.Task[Any], *, operation: str) -> bool:
+        from ouroboros.orchestrator.runtime_execution import settle_owned_task
+
+        return await settle_owned_task(task, operation=operation)
+
+    async def settle_task_handle(handle: Any, *, operation: str) -> bool:
+        task = getattr(handle, "_task", None)
+        if isinstance(task, asyncio.Task):
+            return await settle_client_task(task, operation=operation)
+        cancel = getattr(handle, "cancel", None)
+        wait = getattr(handle, "wait", None)
+        done = getattr(handle, "done", None)
+        if callable(done) and done():
+            return True
+        if not callable(cancel) or not callable(wait):
+            return False
+        cancel()
+        wait_task = asyncio.create_task(wait())
+        return await settle_client_task(wait_task, operation=operation)
+
+    async def settle_client_children(query: Any | None, transport: Any | None) -> bool:
+        handles: list[tuple[Any, str]] = []
+        if query is not None:
+            read_task = getattr(query, "_read_task", None)
+            if read_task is not None:
+                handles.append((read_task, "Claude SDK response reader"))
+            handles.extend(
+                (task, "Claude SDK child task")
+                for task in tuple(getattr(query, "_child_tasks", ()))
+            )
+        stderr_task = getattr(transport, "_stderr_task", None)
+        if stderr_task is not None:
+            handles.append((stderr_task, "Claude SDK stderr reader"))
+        settled = True
+        for handle, operation in handles:
+            settled = await settle_task_handle(handle, operation=operation) and settled
+        return settled
+
+
+    async def reap_client_process(process: Any | None) -> bool:
+        from ouroboros.orchestrator.runtime_execution import force_reap_process
+
+        if process is None or getattr(process, "returncode", None) is not None:
+            return True
+
+        async def graceful_terminate(owned_process: Any) -> None:
+            try:
+                owned_process.terminate()
+            except ProcessLookupError:
+                return
+            wait = getattr(owned_process, "wait", None)
+            if callable(wait):
+                await wait()
+
+        return await force_reap_process(process, graceful_terminate)
 
     async def force_owned_client() -> bool:
-        if not await settle_connect_task():
-            return False
-        transport = getattr(client, "_transport", None)
-        process = getattr(transport, "_process", None)
-        if process is None:
-            return True
-        if getattr(process, "returncode", None) is None:
-            try:
-                process.terminate()
-            except ProcessLookupError:
-                pass
-            try:
-                await asyncio.wait_for(process.wait(), timeout=1.0)
-            except TimeoutError:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                await process.wait()
-        return getattr(process, "returncode", None) is not None
+        nonlocal shutdown_verified
+        async with shutdown_lock:
+            if shutdown_verified:
+                return True
+
+            connect_settled = await settle_client_task(
+                connect_task,
+                operation="Claude SDK connection setup",
+            )
+            query = getattr(client, "_query", None)
+            transport = getattr(client, "_transport", None)
+            process = getattr(transport, "_process", None)
+            if not connect_settled:
+                await settle_client_children(query, transport)
+                await reap_client_process(process)
+                return False
+
+            disconnect_task = asyncio.create_task(client.disconnect())
+            disconnect_settled = await settle_client_task(
+                disconnect_task,
+                operation="Claude SDK disconnect",
+            )
+            children_settled = await settle_client_children(query, transport)
+            process_reaped = await reap_client_process(process)
+            shutdown_verified = disconnect_settled and children_settled and process_reaped
+            return shutdown_verified
 
     if controller is not None:
         controller.bind_process(force_owned_client)
@@ -131,12 +174,12 @@ async def stream_owned_claude_client(
                 )
             yield agent_message
     finally:
-        connect_settled = await settle_connect_task()
-        await client.disconnect()
-        process_reaped = True
-        if owned_process is not None and getattr(owned_process, "returncode", None) is None:
-            owned_process.kill()
-            await owned_process.wait()
-            process_reaped = getattr(owned_process, "returncode", None) is not None
-        if controller is not None and connect_settled and process_reaped:
+        client_stopped = await force_owned_client()
+        if not client_stopped:
+            from ouroboros.orchestrator.runtime_execution import RuntimeExecutionUnavailable
+
+            raise RuntimeExecutionUnavailable(
+                "Claude SDK connection work did not reach a verified termination boundary"
+            )
+        if controller is not None:
             controller.mark_reaped()

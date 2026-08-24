@@ -98,6 +98,25 @@ class _CountingRuntime:
         self.resume_selector_calls += 1
         raise AssertionError("process-local resume must not ask a resume selector provider")
 
+    def acquire_execution(self, **kwargs: object):
+        """Provide the mandatory owned execution contract for this double."""
+        from ouroboros.orchestrator.runtime_execution import (
+            RuntimeExecution,
+            RuntimeExecutionController,
+        )
+
+        controller = RuntimeExecutionController(self.runtime_backend)
+
+        async def force_provider() -> bool:
+            return True
+
+        controller.bind_process(force_provider)
+        return RuntimeExecution(
+            backend=self.runtime_backend,
+            stream=self.execute_task(**kwargs),
+            controller=controller,
+        )
+
     async def execute_task(self, **_: object):
         self.execute_calls += 1
         if False:  # pragma: no cover - process-local guard must stop first

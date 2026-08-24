@@ -86,15 +86,34 @@ async def _settle_task_boundary(
                     f"{operation} has no forceable Python task boundary"
                 )
             forced = True
-            try:
-                close()
-            except BaseException as exc:
-                raise RuntimeExecutionUnavailable(
-                    f"{operation} resisted forced Python task closure"
-                ) from exc
-            task.cancel()
-            done, _ = await asyncio.wait((task,), timeout=timeout_seconds)
-            if not done:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + timeout_seconds
+            while not task.done():
+                try:
+                    close()
+                except RuntimeError:
+                    # The task may be between cancellation checkpoints. Yield
+                    # until its coroutine is suspended, then close that exact
+                    # owned boundary rather than abandoning it.
+                    if loop.time() >= deadline:
+                        raise RuntimeExecutionUnavailable(
+                            f"{operation} resisted forced Python task closure"
+                        )
+                    await asyncio.sleep(0)
+                    continue
+                except BaseException as exc:
+                    raise RuntimeExecutionUnavailable(
+                        f"{operation} resisted forced Python task closure"
+                    ) from exc
+                task.cancel()
+                done, _ = await asyncio.wait((task,), timeout=timeout_seconds)
+                if done:
+                    break
+                if loop.time() >= deadline:
+                    raise RuntimeExecutionUnavailable(
+                        f"{operation} remained live after forced Python task closure"
+                    )
+            if not task.done():
                 raise RuntimeExecutionUnavailable(
                     f"{operation} remained live after forced Python task closure"
                 )
@@ -106,6 +125,24 @@ async def _settle_task_boundary(
     if error is None or isinstance(error, Exception):
         return False, error
     raise RuntimeExecutionUnavailable(f"{operation} failed during Python task closure") from error
+
+async def settle_owned_task(
+    task: asyncio.Task[Any],
+    *,
+    timeout_seconds: float = 0.1,
+    operation: str,
+) -> bool:
+    """Finitely settle one provider task, including cancellation-resistant awaits."""
+    try:
+        await _settle_task_boundary(
+            task,
+            timeout_seconds=timeout_seconds,
+            operation=operation,
+            cancel_first=True,
+        )
+    except RuntimeExecutionUnavailable:
+        return False
+    return task.done()
 
 
 async def _await_operation[T](operation: Awaitable[T]) -> T:
@@ -400,6 +437,7 @@ __all__ = [
     "RuntimeExecutionController",
     "RuntimeExecutionUnavailable",
     "force_reap_process",
+    "settle_owned_task",
     "TerminationReceipt",
     "require_runtime_execution",
     "reject_unowned_skill_dispatch",
