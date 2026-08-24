@@ -9,7 +9,6 @@ the MCP registration before retiring a compatibility bridge.
 from __future__ import annotations
 
 import json
-
 from pathlib import Path
 from unittest.mock import patch
 

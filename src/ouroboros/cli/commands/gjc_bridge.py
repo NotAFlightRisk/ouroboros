@@ -6,7 +6,6 @@ import hashlib
 import json
 import re
 
-
 _OWNERSHIP_PREFIX = "// ouroboros-setup-sha256:"
 
 

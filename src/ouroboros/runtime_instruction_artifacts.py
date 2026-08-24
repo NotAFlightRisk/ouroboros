@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
+
 from ouroboros.backends.capabilities import render_backend_skill_capability_guide
 
 GUIDE_FILENAME = "ouroboros-skill-capability-guide.md"
