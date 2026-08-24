@@ -362,7 +362,11 @@ def _governor_scope_start(text: str, start: int) -> int:
 def has_affirmative_contract_prefix(prefix: str, *, allow_task_linker: bool = False) -> bool:
     """Require field-shaped values to be current-Seed authority, not operands."""
     normalized = prefix.strip().casefold()
-    if re.fullmatch(r"(?:(?:a|answer|correction)\s*:|actually\s*,?|the|please)?", normalized):
+    if re.fullmatch(
+        r"(?:(?:a|answer|correction)\s*:|actually\s*,?|the|please|"
+        r"(?:please\s+)?set(?:\s+the)?)?",
+        normalized,
+    ):
         return True
     return allow_task_linker and re.search(r"\b(?:use|with)\s*$", normalized) is not None
 

@@ -213,6 +213,15 @@ def test_explicit_task_type_accepts_authoritative_selection_verbs() -> None:
         assert explicit_task_type_from_goal(goal) == "document"
 
 
+def test_explicit_task_type_accepts_direct_field_assignments() -> None:
+    for goal in (
+        "Set task_type: document.",
+        "Set task_type = document.",
+        "Please set task_type: document.",
+    ):
+        assert explicit_task_type_from_goal(goal) == "document"
+
+
 def test_explicit_task_type_accepts_direct_document_selections() -> None:
     for goal in (
         "Make this a document task.",
