@@ -3763,75 +3763,28 @@ def _install_gjc_runtime_artifacts(
     *,
     registration_state: dict[str, bool] | None = None,
 ) -> bool:
-    """Activate one complete GJC frontdoor before retiring any prior route."""
-    from ouroboros.cli.gjc_setup import (
-        gjc_bridge_path,
-        gjc_native_mcp_autoload_support,
-        install_gjc_compatibility_bridge,
-    )
-    from ouroboros.gjc import setup_owned_gjc_skill_paths
+    from ouroboros.cli.commands.setup_gjc_activation import install_gjc_runtime_artifacts
+    from ouroboros.cli.gjc_setup import gjc_mcp_bridge_config_path
     from ouroboros.runtime_instruction_artifacts import gjc_agent_dir, gjc_instruction_path
 
-    state = registration_state if registration_state is not None else {}
-    agent_dir = gjc_agent_dir()
-    paths = (
-        *setup_owned_gjc_skill_paths(agent_dir=agent_dir),
-        gjc_instruction_path(),
-        _gjc_mcp_bridge_config_path(),
-        gjc_bridge_path(),
+    command, args = _detect_pi_bridge_dispatch_entry()
+    return install_gjc_runtime_artifacts(
+        gjc_path,
+        registration_state=registration_state,
+        bridge_source=gjc_ooo_bridge_source_text(command, args),
+        agent_dir=gjc_agent_dir(),
+        instruction_path=gjc_instruction_path(),
+        bridge_config_path=gjc_mcp_bridge_config_path(),
+        atomic_write_text=_atomic_write_text,
+        snapshot_path=_snapshot_path,
+        restore_path_snapshot=_restore_path_snapshot,
+        install_bridge_config=_install_gjc_mcp_bridge_config,
+        install_skills=_install_gjc_skills,
+        install_instruction=lambda: _install_runtime_instruction_artifact("gjc"),
+        register_server=_register_gjc_mcp_server,
+        remove_legacy_bridge=_remove_legacy_gjc_bridge,
+        warn=print_warning,
     )
-    try:
-        snapshots = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
-        native_mcp_support = gjc_native_mcp_autoload_support(gjc_path, run_command=subprocess.run)
-        if native_mcp_support is None:
-            succeeded = False
-            expected = snapshots
-        elif not native_mcp_support:
-            succeeded = install_gjc_compatibility_bridge(
-                gjc_ooo_bridge_source_text(*_detect_pi_bridge_dispatch_entry()),
-                _atomic_write_text,
-            )
-            expected = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
-        else:
-            artifacts_installed = (
-                _install_gjc_mcp_bridge_config()
-                and _install_gjc_skills()
-                and _install_runtime_instruction_artifact("gjc")
-            )
-            expected = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
-            if not artifacts_installed or not _register_gjc_mcp_server(
-                gjc_path, registration_state=state
-            ):
-                succeeded = False
-            else:
-                succeeded = _remove_legacy_gjc_bridge()
-                expected = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
-    except OSError as exc:
-        print_warning(f"Could not install GJC runtime artifacts: {exc}")
-        succeeded = False
-    if succeeded:
-        return True
-    if "snapshots" in locals():
-        from ouroboros.cli.gjc_setup import rollback_gjc_activation
-
-        rollback_gjc_activation(
-            snapshots,
-            expected if "expected" in locals() else snapshots,
-            restore_path_snapshot=_restore_path_snapshot,
-            snapshot_path=_snapshot_path,
-            registration_state=state,
-        )
-        for directory in (
-            agent_dir / "skills",
-            agent_dir / "rules",
-            agent_dir / "ouroboros",
-            agent_dir / "extensions" / "ouroboros-ooo-bridge",
-        ):
-            try:
-                directory.rmdir()
-            except OSError:
-                pass
-    return False
 
 
 def _setup_gjc(gjc_path: str) -> bool:
