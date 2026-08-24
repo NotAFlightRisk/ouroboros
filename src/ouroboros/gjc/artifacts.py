@@ -119,17 +119,15 @@ def _normalized_skill_bytes(source: str, expected_digest: str) -> bytes | None:
     matches = tuple(pattern.finditer(source))
     if len(matches) != 1 or matches[0].group(1) != expected_digest:
         return None
-    return pattern.sub(
-        f"{_MANAGED_DIGEST_FIELD}: {_DIGEST_PLACEHOLDER}", source, count=1
-    ).encode("utf-8")
+    return pattern.sub(f"{_MANAGED_DIGEST_FIELD}: {_DIGEST_PLACEHOLDER}", source, count=1).encode(
+        "utf-8"
+    )
 
 
 def _skill_tree_digest(path: Path, *, expected_digest: str) -> str | None:
     digest = hashlib.sha256()
     try:
-        candidates = sorted(
-            path.rglob("*"), key=lambda item: item.relative_to(path).as_posix()
-        )
+        candidates = sorted(path.rglob("*"), key=lambda item: item.relative_to(path).as_posix())
         for candidate in candidates:
             relative = candidate.relative_to(path).as_posix().encode("utf-8")
             if candidate.is_symlink():
@@ -141,9 +139,7 @@ def _skill_tree_digest(path: Path, *, expected_digest: str) -> str | None:
                 return None
             content = candidate.read_bytes()
             if relative == b"SKILL.md":
-                normalized = _normalized_skill_bytes(
-                    content.decode("utf-8"), expected_digest
-                )
+                normalized = _normalized_skill_bytes(content.decode("utf-8"), expected_digest)
                 if normalized is None:
                     return None
                 content = normalized
@@ -186,9 +182,7 @@ def _publish_skill(source_dir: Path, target_path: Path) -> None:
         shutil.copytree(source_dir, staging, dirs_exist_ok=True, symlinks=False)
         rendered = _render_gjc_skill(source_dir)
         (staging / "SKILL.md").write_text(rendered, encoding="utf-8")
-        generation_digest = _skill_tree_digest(
-            staging, expected_digest=_DIGEST_PLACEHOLDER
-        )
+        generation_digest = _skill_tree_digest(staging, expected_digest=_DIGEST_PLACEHOLDER)
         if generation_digest is None:
             raise OSError(f"Could not fingerprint projected GJC skill: {target_path}")
         rendered = rendered.replace(
@@ -198,9 +192,7 @@ def _publish_skill(source_dir: Path, target_path: Path) -> None:
         )
         (staging / "SKILL.md").write_text(rendered, encoding="utf-8")
         if target_path.exists():
-            backup = target_path.with_name(
-                f".{target_path.name}.{os.urandom(8).hex()}.old"
-            )
+            backup = target_path.with_name(f".{target_path.name}.{os.urandom(8).hex()}.old")
             os.replace(target_path, backup)
         os.replace(staging, target_path)
     except BaseException:

@@ -17,8 +17,8 @@ from typer.testing import CliRunner
 
 from ouroboros.cli.commands.setup import app
 from ouroboros.codex import CodexArtifactInstallResult
-from ouroboros.hermes.artifacts import HERMES_SKILL_CATEGORY, HERMES_SKILL_NAME
 from ouroboros.gjc import install_gjc_skills
+from ouroboros.hermes.artifacts import HERMES_SKILL_CATEGORY, HERMES_SKILL_NAME
 from ouroboros.runtime_instruction_artifacts import (
     _SECTION_END,
     _SECTION_START,
@@ -165,9 +165,7 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         assert result.exit_code == 0
         assert bridge.read_text(encoding="utf-8") != "// stale bridge\n"
 
-    def test_refreshes_existing_gjc_projection_and_repairs_mcp(
-        self, tmp_path: Path
-    ) -> None:
+    def test_refreshes_existing_gjc_projection_and_repairs_mcp(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         source_skill = source / "interview"
         source_skill.mkdir(parents=True)
@@ -196,9 +194,7 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         )
         register_mcp.assert_called_once()
 
-    def test_user_owned_namespaced_skill_does_not_trigger_gjc_refresh(
-        self, tmp_path: Path
-    ) -> None:
+    def test_user_owned_namespaced_skill_does_not_trigger_gjc_refresh(self, tmp_path: Path) -> None:
         skill = tmp_path / ".gjc" / "agent" / "skills" / "ouroboros-custom"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text(
@@ -206,9 +202,7 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
             encoding="utf-8",
         )
 
-        with patch(
-            "ouroboros.cli.commands.setup._install_gjc_runtime_artifacts"
-        ) as install:
+        with patch("ouroboros.cli.commands.setup._install_gjc_runtime_artifacts") as install:
             result = _invoke_refresh(tmp_path)
 
         assert result.exit_code == 0

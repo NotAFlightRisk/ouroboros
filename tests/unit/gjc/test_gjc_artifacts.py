@@ -87,9 +87,7 @@ def test_remove_deletes_only_intact_generated_skills(tmp_path: Path) -> None:
     source = tmp_path / "source"
     agent_dir = tmp_path / "agent"
     _skill(source, "interview")
-    managed = install_gjc_skills(
-        agent_dir=agent_dir, skills_dir=source
-    ).skill_paths[0]
+    managed = install_gjc_skills(agent_dir=agent_dir, skills_dir=source).skill_paths[0]
     custom_namespaced = agent_dir / "skills" / "ouroboros-custom"
     custom_namespaced.mkdir()
     (custom_namespaced / "SKILL.md").write_text(
@@ -111,9 +109,7 @@ def test_refresh_and_remove_preserve_modified_generated_skill(tmp_path: Path) ->
     source = tmp_path / "source"
     agent_dir = tmp_path / "agent"
     _skill(source, "interview")
-    projected = install_gjc_skills(
-        agent_dir=agent_dir, skills_dir=source
-    ).skill_paths[0]
+    projected = install_gjc_skills(agent_dir=agent_dir, skills_dir=source).skill_paths[0]
     skill_md = projected / "SKILL.md"
     modified = skill_md.read_text(encoding="utf-8") + "\nOperator notes.\n"
     skill_md.write_text(modified, encoding="utf-8")
