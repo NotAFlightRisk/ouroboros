@@ -20,7 +20,7 @@ The bot posts a fixed structure:
    checked. If you pushed after it started, the verdict describes the older commit.
 2. **What Improved** — what the PR does well.
 3. **Issue Requirements** — a table grading your PR against **the linked
-   issue's** requirements, each marked *Met*, *Partially met*, or unmet.
+   issue's** requirements, each marked *Met*, *Partially met*, or *Not met*.
 4. **Prior Findings Status** — every finding from earlier rounds, and whether
    you resolved it. Unaddressed findings carry forward.
 5. **Blockers** — a table of `File:Line`, severity, and the finding.

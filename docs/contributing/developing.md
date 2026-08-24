@@ -28,7 +28,8 @@ which one you need depends on what you changed.
 
 ### Surface 1 — the CLI
 
-The package installs three console scripts (`pyproject.toml:88`):
+The package installs three console scripts (see `[project.scripts]` in
+[`pyproject.toml`](../../pyproject.toml)):
 
 | Script | Entry point |
 |---|---|
@@ -45,11 +46,17 @@ uv run ooo status
 ```
 
 To make your working tree the `ooo` on your `PATH` everywhere (useful when a
-client spawns the binary for you):
+client spawns the binary for you), install the local package with its isolated
+MCP 2 dependency profile:
 
 ```bash
-uv tool install --force --editable . --python '>=3.12'
+uv tool install --force --with mcp --from . ouroboros-ai --python '>=3.12'
 ```
+
+The `--with mcp` supplies the separate MCP 2 SDK. Do not add the MCP 1.x
+`[claude]`, `[claude-sdk]`, or `[all]` profiles to this environment. Re-run
+the command after edits because a tool install is a snapshot; use `uv run`
+below when you want every invocation to reflect the current working tree.
 
 The `--python '>=3.12'` matters. `uvx`/`uv tool` otherwise resolve against the
 machine's default interpreter, and on a 3.11 box the MCP server dies before it
@@ -58,13 +65,20 @@ can answer `initialize`. Any launcher you generate must carry the same floor.
 ### Surface 2 — the MCP server
 
 Most of this project's behavior reaches a user through MCP, so this is the
-surface you will usually need. Run the server straight from your working tree:
+surface you will usually need. MCP 2 is intentionally a separate dependency
+profile: the default `dev` group does not install it. Select the repository's
+`mcp-test` group when running the server straight from your working tree:
 
 ```bash
-uv run --directory /path/to/your/clone ouroboros mcp serve
+uv run --directory /path/to/your/clone --group mcp-test \
+  ouroboros mcp serve --runtime claude-cli --llm-backend claude_code
 ```
 
-(`serve` is defined at `src/ouroboros/cli/commands/mcp.py:1115`.)
+This executes the local package and supplies `mcp==2.0.0`. Do not combine this
+profile with the MCP 1.x `[claude]`, `[claude-sdk]`, or `[all]` profiles. The
+command is implemented by `serve()` in
+[`src/ouroboros/cli/commands/mcp.py`](../../src/ouroboros/cli/commands/mcp.py).
+
 
 To make a client use it, replace the `ouroboros` entry in your client's MCP
 config — `~/.claude/mcp.json` for Claude Code, or the project `.mcp.json` —
@@ -73,24 +87,30 @@ with the local form, and **preserve every other server entry in the file**:
 ```json
 "ouroboros": {
   "command": "uv",
-  "args": ["run", "--directory", "/path/to/your/clone", "ouroboros", "mcp", "serve"],
+  "args": ["run", "--directory", "/path/to/your/clone", "--group", "mcp-test", "ouroboros", "mcp", "serve", "--runtime", "claude-cli", "--llm-backend", "claude_code"],
   "timeout": 600
 }
 ```
 
-Keep connection settings and runtime selection separate: the MCP config
-carries `command` / `args` / `timeout` only. Which model or runtime is used is
-config, not connection — see below. Back up the file before you edit it, and
-restore it when you are done testing so you do not silently keep running a
-stale branch weeks later.
+Connection and runtime selection are separate concepts. The example above
+deliberately pins `--runtime` and `--llm-backend` so its smoke-test behavior is
+deterministic. Remove those two option/value pairs if the server should inherit
+the environment/config precedence documented below. Back up the client file
+before editing it, preserve every unrelated server, and restore it when testing
+ends so you do not silently keep running a stale branch weeks later.
 
 **Restart the client after changing MCP config.** Nothing hot-reloads.
+
+Before restarting it, run the exact serve command by hand. A successful startup
+prints `MCP Server starting on stdio...` and `Registered ... tools` to stderr;
+press Ctrl+C after those lines appear. An immediate `MCP dependencies not
+installed` error means the launcher still omitted the MCP profile.
 
 > If the server fails to start, suspect a *different* server first. One broken
 > entry in the client's MCP config can take the whole startup down. Run the
 > serve command by hand and read the first ~40 lines of output.
 
-## Runtime selection lives in config, not in the connection
+## Runtime selection is separate from the connection
 
 Config file: `~/.ouroboros/config.yaml`.
 
@@ -101,24 +121,47 @@ orchestrator:
   runtime_backend: claude   # which agent runtime executes work
 ```
 
-Resolution order (`src/ouroboros/config/loader.py:1742`):
+The agent runtime and the LLM backend are separate selectors with separate
+precedence rules. The resolvers are `get_agent_runtime_backend()` and
+`get_llm_backend()` in
+[`src/ouroboros/config/loader.py`](../../src/ouroboros/config/loader.py).
 
-1. environment variable `OUROBOROS_LLM_BACKEND` — a per-shell override
-2. `~/.ouroboros/config.yaml`
-3. the built-in default (`claude_code`)
+Agent runtime precedence:
 
-A CLI flag on `mcp serve` can be overridden by config in some paths, so if a
-runtime selection appears to be ignored, check `config.yaml` before assuming
-the flag is broken.
+1. `OUROBOROS_AGENT_RUNTIME`
+2. `OUROBOROS_RUNTIME`
+3. `orchestrator.runtime_backend` in `config.yaml`
+4. the built-in default, `claude`
+
+LLM backend precedence:
+
+1. `OUROBOROS_LLM_BACKEND`
+2. `OUROBOROS_RUNTIME`, only when its value names a backend that implements the
+   LLM adapter contract
+3. `llm.backend` in `config.yaml`
+4. the built-in default, `claude_code`
+
+An explicit `mcp serve --runtime` or `--llm-backend` option selects that server
+process directly. Otherwise, if a selection appears to ignore YAML, inspect the
+client launcher's environment and your shell's `OUROBOROS_*` variables before
+assuming the config loader is broken.
 
 ## Where state and output go
 
-| What | Where |
-|---|---|
-| Config | `~/.ouroboros/config.yaml` |
-| Event database | `~/.ouroboros/ouroboros.db` (`persistence/event_store.py:552`) |
-| Logs | `~/.ouroboros/logs/ouroboros.log` (`observability/logging.py:163`) |
-| Worktrees created by runs | `~/.ouroboros/worktrees/` |
+| What | Default or fallback | Override |
+|---|---|---|
+| Config | `~/.ouroboros/config.yaml` | Ouroboros config directory |
+| Event database | Generated config: `~/.ouroboros/data/ouroboros.db`; legacy fallback: `~/.ouroboros/ouroboros.db` | `persistence.database_path`, relative to the config directory unless absolute |
+| Logs | `~/.ouroboros/logs/ouroboros.log` | `logging.log_path`, relative to the config directory unless absolute |
+| Worktrees created by runs | `~/.ouroboros/worktrees/` | `orchestrator.worktree_root` |
+
+Event-store resolution is implemented by `resolve_event_store_path()` and
+`event_store_path_from_config()` in
+[`src/ouroboros/config/models.py`](../../src/ouroboros/config/models.py).
+Managed worktrees resolve through `managed_worktree_root()` in
+[`src/ouroboros/core/worktree.py`](../../src/ouroboros/core/worktree.py).
+Treat the table as defaults and compatibility fallbacks, not invariant paths;
+check `config.yaml` before inspecting or cleaning state.
 
 This state accumulates and it is not small — the event DB and its WAL grow
 across runs, and abandoned run worktrees are the usual cause of a full disk.
@@ -129,7 +172,8 @@ uv run ouroboros cleanup --dry-run   # report only
 uv run ouroboros cleanup --force
 ```
 
-Never `rm -rf ~/.ouroboros/worktrees` by hand — a live run may hold one.
+Never delete the configured worktree root by hand — a live run may hold one.
+
 
 ## Fastest verification per change type
 
