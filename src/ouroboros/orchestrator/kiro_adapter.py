@@ -36,14 +36,14 @@ from ouroboros.orchestrator.adapter import (
     resolve_worker_cwd,
     worker_cwd_failure_message,
 )
-from ouroboros.orchestrator.skill_intercept import SkillInterceptor
-from ouroboros.providers.codex_cli_stream import terminate_runtime_process
 from ouroboros.orchestrator.runtime_execution import (
     RuntimeExecution,
     RuntimeExecutionController,
     force_reap_process,
     reject_unowned_skill_dispatch,
 )
+from ouroboros.orchestrator.skill_intercept import SkillInterceptor
+from ouroboros.providers.codex_cli_stream import terminate_runtime_process
 
 # Kiro CLI headless mode (https://kiro.dev/docs/cli/headless/) supports skill
 # dispatch (via our interceptor). It does **not** surface a session id on
@@ -330,7 +330,6 @@ class KiroAgentAdapter:
         *,
         _execution_controller: RuntimeExecutionController | None = None,
     ) -> AsyncIterator[AgentMessage]:
-
         """Execute a task through one owned Kiro CLI subprocess.
 
         Before spawning ``kiro-cli``, attempt deterministic skill dispatch so

@@ -62,13 +62,13 @@ from ouroboros.orchestrator.evidence.runtime_metadata import (
     HEARTBEAT_INTERVAL_SECONDS,
     STALL_TIMEOUT_SECONDS,
 )
-from ouroboros.orchestrator.runtime_message_projection import (
-    message_tool_name,
-    project_runtime_message,
-)
 from ouroboros.orchestrator.runtime_execution import (
     RuntimeExecution,
     require_runtime_execution,
+)
+from ouroboros.orchestrator.runtime_message_projection import (
+    message_tool_name,
+    project_runtime_message,
 )
 
 if TYPE_CHECKING:

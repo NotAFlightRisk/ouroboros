@@ -37,15 +37,15 @@ from ouroboros.orchestrator.adapter import (
     worker_cwd_failure_message,
 )
 from ouroboros.orchestrator.runtime_error import classify_subprocess_failure
-from ouroboros.providers.codex_cli_stream import (
-    iter_runtime_stream_lines,
-    terminate_runtime_process,
-)
 from ouroboros.orchestrator.runtime_execution import (
     RuntimeExecution,
     RuntimeExecutionController,
     force_reap_process,
     reject_unowned_skill_dispatch,
+)
+from ouroboros.providers.codex_cli_stream import (
+    iter_runtime_stream_lines,
+    terminate_runtime_process,
 )
 from ouroboros.router import (
     InvalidInputReason,
@@ -539,16 +539,18 @@ class HermesCliRuntime(AgentRuntime):
                 _execution_controller.mark_reaped()
         except asyncio.CancelledError:
             await self._terminate_process(process)
-            if _execution_controller is not None and getattr(
-                process, "returncode", None
-            ) is not None:
+            if (
+                _execution_controller is not None
+                and getattr(process, "returncode", None) is not None
+            ):
                 _execution_controller.mark_reaped()
             raise
         except TimeoutError as e:
             await self._terminate_process(process)
-            if _execution_controller is not None and getattr(
-                process, "returncode", None
-            ) is not None:
+            if (
+                _execution_controller is not None
+                and getattr(process, "returncode", None) is not None
+            ):
                 _execution_controller.mark_reaped()
             for task in (stdout_task, stderr_task):
                 task.cancel()

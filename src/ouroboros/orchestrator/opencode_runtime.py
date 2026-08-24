@@ -53,16 +53,16 @@ from ouroboros.orchestrator.opencode_event_normalizer import (
     OpenCodeEventContext,
     OpenCodeEventNormalizer,
 )
-from ouroboros.providers.codex_cli_stream import (
-    iter_runtime_stream_lines,
-    parse_json_event,
-    terminate_runtime_process,
-)
 from ouroboros.orchestrator.runtime_execution import (
     RuntimeExecution,
     RuntimeExecutionController,
     force_reap_process,
     reject_unowned_skill_dispatch,
+)
+from ouroboros.providers.codex_cli_stream import (
+    iter_runtime_stream_lines,
+    parse_json_event,
+    terminate_runtime_process,
 )
 from ouroboros.router import (
     InvalidInputReason,
@@ -1240,6 +1240,7 @@ class OpenCodeRuntime:
             if _execution_controller is None:
                 process = await spawn
             else:
+
                 async def _force_owned_process(candidate: Any) -> bool:
                     return await force_reap_process(
                         candidate,

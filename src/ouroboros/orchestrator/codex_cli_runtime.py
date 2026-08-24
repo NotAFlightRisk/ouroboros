@@ -69,18 +69,18 @@ from ouroboros.orchestrator.frugality_runtime_attestation import (
     clear_attested_codex_child_environment,
     codex_cli_runtime_attestation,
 )
+from ouroboros.orchestrator.runtime_execution import (
+    RuntimeExecution,
+    RuntimeExecutionController,
+    force_reap_process,
+    reject_unowned_skill_dispatch,
+)
 from ouroboros.orchestrator.skill_tool_mapping import discover_skill_tool_mappings
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.codex_cli_stream import (
     iter_runtime_stream_lines,
     parse_json_event,
     terminate_runtime_process,
-)
-from ouroboros.orchestrator.runtime_execution import (
-    RuntimeExecution,
-    RuntimeExecutionController,
-    force_reap_process,
-    reject_unowned_skill_dispatch,
 )
 from ouroboros.providers.profiles import resolve_completion_profile
 from ouroboros.router import (
@@ -3735,6 +3735,7 @@ class CodexCliRuntime:
             if _execution_controller is None:
                 process = await spawn
             else:
+
                 async def _force_owned_process(candidate: Any) -> bool:
                     async def _terminate(owned: Any) -> None:
                         await self._terminate_process(

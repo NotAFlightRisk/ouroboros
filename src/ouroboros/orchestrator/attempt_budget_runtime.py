@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-
 from ouroboros.core.attempt_budget import (
     AttemptBudgetExhaustion,
     AttemptBudgetKind,
@@ -44,11 +43,8 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 
-
 class ProviderStreamCloseTimeout(TimeoutError):
     """Provider cleanup did not converge within the finite shutdown grace."""
-
-
 
 
 async def await_provider_operation_bounded[T](operation: Awaitable[T]) -> T:

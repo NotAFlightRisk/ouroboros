@@ -208,13 +208,13 @@ from ouroboros.orchestrator.recoverable_failure import (
     retry_duration_seconds_from_message,
     retry_duration_seconds_from_metadata,
 )
+from ouroboros.orchestrator.runtime_execution import require_runtime_execution
 from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_input,
     message_tool_name,
     normalized_message_type,
     project_runtime_message,
 )
-from ouroboros.orchestrator.runtime_execution import require_runtime_execution
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
     runtime_capabilities_for,
