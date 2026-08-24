@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
+
 from ouroboros.orchestrator.adapter import AgentMessage
 
 
@@ -41,7 +42,6 @@ async def force_reap_process(
         if wait_error is not None:
             return False
     return getattr(process, "returncode", None) is not None
-
 
 
 class RuntimeExecutionUnavailable(RuntimeError):
@@ -221,6 +221,7 @@ class RuntimeExecutionController:
 
 class RuntimeExecution(AsyncIterator[AgentMessage]):
     """Own a provider stream, its active read, process, and finalizer."""
+
     @property
     def termination_receipt(self) -> TerminationReceipt | None:
         return self._receipt
@@ -263,9 +264,7 @@ class RuntimeExecution(AsyncIterator[AgentMessage]):
         task = self._active_read
         if task is not None and not task.done():
             task.cancel()
-            done, _ = await asyncio.wait(
-                (task,), timeout=self._cooperative_shutdown_seconds
-            )
+            done, _ = await asyncio.wait((task,), timeout=self._cooperative_shutdown_seconds)
             if done:
                 self._active_read = None
                 try:

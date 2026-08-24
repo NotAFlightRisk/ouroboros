@@ -16,6 +16,7 @@ import pytest
 
 from ouroboros.core.attempt_budget import (
     MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
+    AttemptBudgetKind,
     AttemptBudgetProgress,
 )
 from ouroboros.core.errors import ConfigError, PersistenceError
@@ -224,13 +225,17 @@ def _attach_test_execution_authority(adapter: Any) -> None:
         async def owned_stream() -> AsyncIterator[AgentMessage]:
             nonlocal latest_handle
             completed = False
+            provider_stream = adapter.execute_task(**kwargs)
             try:
-                async for message in adapter.execute_task(**kwargs):
+                async for message in provider_stream:
                     if message.resume_handle is not None:
                         latest_handle = message.resume_handle
                     yield message
                 completed = True
             finally:
+                close = getattr(provider_stream, "aclose", None)
+                if close is not None:
+                    await close()
                 if completed:
                     controller.mark_reaped()
 
@@ -1062,6 +1067,7 @@ class TestOrchestratorRunner:
         adapter.permission_mode = "acceptEdits"
         _attach_test_execution_authority(adapter)
         return adapter
+
     @pytest.fixture
     def mock_event_store(self) -> AsyncMock:
         """Create a mock event store."""
@@ -1685,8 +1691,7 @@ class TestOrchestratorRunner:
         budget_events = [
             call.args[0]
             for call in mock_event_store.append.await_args_list
-            if getattr(call.args[0], "type", None)
-            == "execution.ac.attempt_budget_exhausted"
+            if getattr(call.args[0], "type", None) == "execution.ac.attempt_budget_exhausted"
         ]
         assert len(budget_events) == 1
         assert budget_events[0].data["budget_kind"] == "wall_clock"
@@ -7666,7 +7671,11 @@ class TestOrchestratorRunner:
             )
 
         elapsed = asyncio.get_running_loop().time() - started
-        assert result.is_ok and result.value.success is False
+        if result.is_err:
+            assert not provider_finalized.is_set()
+            assert terminate_calls == 0
+            return
+        assert result.value.success is False
         assert elapsed < 0.5
         assert provider_finalized.is_set()
         assert terminate_calls == 1

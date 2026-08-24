@@ -19,6 +19,7 @@ import structlog
 from ouroboros.auto.adapters import (
     HandlerInterviewBackend,
     HandlerLateralThinker,
+    HandlerRalphPoller,
     HandlerRunStarter,
     HandlerSeedGenerator,
     HandlerSeedQAEvaluator,
@@ -79,6 +80,7 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools._dashboard import resolve_dashboard_base_url
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.auto_runtime import initialized_runtime_event_store
 from ouroboros.mcp.tools.auto_start_lease_store import (
     CORRUPT_START_LEASE,
 )
@@ -91,7 +93,10 @@ from ouroboros.mcp.tools.auto_start_lease_store import (
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
-from ouroboros.mcp.tools.job_observer import build_job_observer_contract
+from ouroboros.mcp.tools.job_observer import (
+    append_job_observer_inline_handoff,
+    build_job_observer_contract,
+)
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.tools.run_successors import resolve_run_successor_handler
@@ -541,6 +546,7 @@ class AutoHandler:
             )
             lateral_thinker = HandlerLateralThinker(lateral_handler)
 
+        runtime_event_store = await initialized_runtime_event_store(self.event_store)
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=state.cwd),
             store=store,
@@ -551,6 +557,7 @@ class AutoHandler:
             # AI answer refiner: concrete goal-specific answers so interview
             # ambiguity converges. Best-effort; None falls back to deterministic.
             answer_refiner=build_answer_refiner(),
+            event_store=runtime_event_store,
         )
         # RFC #809 Phase 2.1 — wire Seed QA on every MCP auto surface before
         # RUN/skip-run transitions. For OpenCode plugin sessions, use the same
@@ -570,12 +577,18 @@ class AutoHandler:
             opencode_mode=authoring_opencode_mode,
         )
         seed_qa_evaluator = HandlerSeedQAEvaluator(seed_qa_handler)
-        watchdog_event_store = self.event_store or EventStore()
-        await watchdog_event_store.initialize()
         watchdog = Watchdog(
             controls=load_runtime_controls(None),
-            event_appender=watchdog_event_store,
+            event_appender=runtime_event_store,
         )
+        ralph_resumer = None
+        if state.ralph_job_id is not None and self.ralph_handler_factory is not None:
+            ralph_resumer = HandlerRalphPoller(
+                self.ralph_handler_factory(
+                    runtime_plan.execute.runtime_backend,
+                    runtime_plan.execute.opencode_mode,
+                )
+            )
         pipeline = AutoPipeline(
             driver,
             HandlerSeedGenerator(generate_seed_handler),
@@ -598,6 +611,7 @@ class AutoHandler:
             attach_source=attach_source,
             reconcile_run=reconcile_run,
             reconcile_source=reconcile_source,
+            ralph_resumer=ralph_resumer,
             seed_qa_evaluator=seed_qa_evaluator,
             lateral_thinker=lateral_thinker,
             watchdog=watchdog,
@@ -612,7 +626,7 @@ class AutoHandler:
                 cleanup=auto_worktree_cleanup_eligible(result),
             )
             if self.event_store is None:
-                await watchdog_event_store.close()
+                await runtime_event_store.close()
 
 
 @dataclass
@@ -928,6 +942,12 @@ class StartAutoHandler:
 
         dashboard_url = await resolve_dashboard_base_url(self._event_store)
         dashboard_line = f"Live Dashboard: {dashboard_url}\n" if dashboard_url else ""
+        observer = build_job_observer_contract(
+            job_id=snapshot.job_id,
+            cursor=getattr(snapshot, "cursor", 0),
+            session_id=auto_session_id,
+            follow_result_job_keys=_FOLLOW_JOBS,
+        )
         text = (
             "Started background auto session.\n\n"
             "Status: queued\n"
@@ -943,6 +963,7 @@ class StartAutoHandler:
             "Track with ouroboros_job_wait / ouroboros_job_status until terminal, "
             "then fetch ouroboros_job_result."
         )
+        text = append_job_observer_inline_handoff(text, observer)
         meta = {
             "job_id": snapshot.job_id,
             "auto_session_id": auto_session_id,
@@ -954,12 +975,7 @@ class StartAutoHandler:
             "status_tool": "ouroboros_job_status",
             "wait_tool": "ouroboros_job_wait",
             "result_tool": "ouroboros_job_result",
-            "job_observer": build_job_observer_contract(
-                job_id=snapshot.job_id,
-                cursor=getattr(snapshot, "cursor", 0),
-                session_id=auto_session_id,
-                follow_result_job_keys=_FOLLOW_JOBS,
-            ),
+            "job_observer": observer,
         }
         return Result.ok(
             MCPToolResult(
