@@ -1806,11 +1806,9 @@ def _sole_node_manifest_directory(root: Path) -> Path | None:
 
 
 def _verify_command_executable(command: str) -> str:
-    """Return the effective executable after supported shell wrappers."""
-    inner_command = _single_command_after_safe_shell_preamble(command)
-    candidate = inner_command or command
+    """Return the effective executable after supported prefixes and wrappers."""
     try:
-        parts = _strip_env_prefix(shlex.split(candidate))
+        parts = _strip_env_prefix(shlex.split(command))
     except ValueError:
         return ""
     if parts and Path(parts[0]).name in {"command", "exec"}:
@@ -1818,6 +1816,18 @@ def _verify_command_executable(command: str) -> str:
         if parts and parts[0] == "--":
             parts = parts[1:]
         parts = _strip_env_prefix(parts)
+
+    inner_command = _single_command_after_safe_shell_preamble(shlex.join(parts))
+    if inner_command is not None:
+        try:
+            parts = _strip_env_prefix(shlex.split(inner_command))
+        except ValueError:
+            return ""
+        if parts and Path(parts[0]).name in {"command", "exec"}:
+            parts = parts[1:]
+            if parts and parts[0] == "--":
+                parts = parts[1:]
+            parts = _strip_env_prefix(parts)
     return Path(parts[0]).name if parts else ""
 
 
