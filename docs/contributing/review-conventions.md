@@ -7,10 +7,16 @@ The bot is strict, and it is strict in a predictable, repeatable way. Most
 review rounds are lost to objections that could have been preempted before the
 first push. This page exists so you can preempt them.
 
-The rules below were extracted from the bot's actual review bodies on merged
-PRs, not from a style guide. Some PRs take a single round; some take seven.
-The difference is almost entirely whether the change is a root-cause fix with
-proof, or a plausible-looking patch.
+It is tempting to read a page like this as a checklist to satisfy. Do not. The
+recurring blockers catalogued below are all the same question wearing different
+clothes — *is this change structurally in the right direction?* — and a
+contributor who memorizes ten rules will lose a month to the eleventh case
+nobody catalogued. Start with the question. The rules are what it looks like
+when the answer was no.
+
+Everything here was extracted from the bot's actual review bodies on this
+repository's PRs, not from a style guide. Some PRs take a single round; one
+took thirty and was closed unmerged.
 
 ## What the review actually contains
 
@@ -38,16 +44,116 @@ Two consequences worth internalizing:
   guard"* (#2224, #2239). You are not arguing with a linter. If you claim a
   path is unreachable, expect it to be tested.
 
+## Is this change structurally in the right direction?
+
+Ask this before your first push, and again every time a round lands. It is the
+only question on this page that matters, and the rest of the page exists
+because it is the one people skip.
+
+This project's whole premise is that most failure is upstream of the code —
+you solve the root problem or you spend forever on symptoms. Review applies
+that premise to your diff. A round is not an obstacle between you and merge.
+It is evidence about your direction.
+
+So when a round arrives, there are two possible readings:
+
+- **This specific thing is wrong.** Fix it, push, done. Most rounds.
+- **The reviewer found this because the shape makes it findable.** Fix the
+  specific thing and another one appears, because you are defending a position
+  that cannot be defended. No number of rounds closes this.
+
+Telling those apart early is the whole skill. What it costs to get wrong:
+
+| PR | Direction taken | Rounds | Outcome |
+|---|---|---|---|
+| #1926 | "**bind** regex evidence to acceptance input" — make the check correct enough to be trusted | 30 | **closed, never merged** |
+| #2065 | "**refuse** unbound regex evidence as grounds to overturn an agent FAIL" — stop trusting it | 3 | merged |
+
+The same defect. Thirty rounds versus three. #2065 did not out-argue the
+reviewer and did not write a better check — it asked whether that component
+should have been allowed to overturn a verdict at all, and the answer was no.
+
+Nobody in #1926 was careless. Every round was answered. The question that
+would have ended it in week one was never asked.
+
+### The signal that you should be asking it
+
+You are not obliged to introspect after every comment. These are the specific
+signs that the next round will not be the last one:
+
+- The same finding **reappears at a different line number**. You are moving the
+  failure, not removing it.
+- Each fix **adds surface** — another branch, another special case, another
+  entry in a table.
+- The blocker count is **not trending down** after three rounds.
+- You are arguing about **which inputs are legitimate** rather than about what
+  the code does.
+- You find yourself thinking *"the reviewer keeps finding edge cases"*. Edge
+  cases that keep existing are not edge cases. They are the shape.
+
+### What asking it actually looks like
+
+Not "which of the known traps is this?" — that is pattern-matching, and
+pattern-matching is how you end up with a fourth trap nobody catalogued.
+Re-derive from the problem instead:
+
+1. State, in one sentence, the property the reviewer keeps attacking.
+2. Ask what would have to be true for that property to be **unnecessary**.
+   Usually one of: the component should not hold this authority; the default
+   should be refusal rather than acceptance; the truth belongs to something
+   else that should be asked directly; the two things that must agree should be
+   one thing.
+3. Ask whether the original problem is still solved by that shape. If it is,
+   you have the change you should have opened.
+4. Say it in the PR: the current shape cannot close, here is the one that can.
+   A stated structural argument gets engaged with — the reviewer's own
+   non-blocking notes are frequently pointing at it already. In #2212 the exit
+   was sitting in a round-5 suggestion to share one authoritative parser
+   instead of maintaining parallel option tables that drift.
+5. Be willing to close the PR and open a differently-shaped one. #2065 is not a
+   failure story. It is the correct ending to #1926.
+
+### Three ways this has actually gone wrong here
+
+Read these as worked examples of the question being skipped, not as a taxonomy
+to match your situation against.
+
+**Enumerating a surface you do not own** (#2212, 10 rounds). A hand-maintained
+`uv run` option grammar inside a verification path. Round after round named
+another gap — *"The hand-maintained option grammar is still incomplete for
+valid current `uv run` commands."* A table mirroring someone else's CLI can
+never be complete, so the rounds could not end. It closed when the code stopped
+enumerating what was allowed and started refusing anything it had not
+positively parsed.
+
+**Two paths kept alive that must agree** (#2193, 7 rounds). A new fused path
+beside the legacy one: the legacy branch skipping completion logic, the atomic
+branch losing an answer on failure, `[decide_later]` meaning different things
+depending on which path ran. Two implementations that must stay identical will
+diverge along a new axis every round. One of them has to stop existing.
+
+**Trusting a component that should not be trusted** (#1926 → #2065, above).
+
+In all three, the reviewer was not being pedantic. It was repeatedly reporting
+the same underlying fact — this shape cannot hold — in the only vocabulary it
+has: specific findings at specific lines.
+
+### Not an escape hatch
+
+This is not permission to dismiss a finding you do not want to fix. "The
+structure is wrong" is a claim that has to survive step 3 above — a different
+shape that still solves the original problem. Without that, it is just a
+disagreement, and the reviewer is probably right.
+
 ## The recurring blockers
 
 Ordered by how often they appear in review bodies.
 
 ### 1. Fix the root cause, not the symptom
 
-The most expensive rounds are the ones where a patch changes *which* failure
-occurs rather than removing it. Before pushing, ask what the reviewer will ask:
-*if this input arrives again through a different path, does the bug come back?*
-If the answer is yes, you have moved the symptom.
+The per-diff form of the question above: *if this input arrives again through a
+different path, does the bug come back?* If yes, you moved the symptom rather
+than removing it, and the next round will say so somewhere else.
 
 ### 2. Validate untrusted input — never coerce it
 
@@ -139,6 +245,8 @@ the test set up real state instead.
 
 Before your first push, walk your own diff and answer:
 
+- **Is the shape right?** If this is defending a position rather than removing
+  a failure, stop here — see [the question](#is-this-change-structurally-in-the-right-direction).
 - Does this remove the cause, or relocate the symptom?
 - Every new input: validated, or coerced?
 - Every new branch: can it succeed while doing nothing?
@@ -151,104 +259,6 @@ Before your first push, walk your own diff and answer:
 Writing that reasoning into the PR description is not ceremony. The bot reads
 it, and a stated, justified scope boundary is treated differently from a
 requirement that is simply unmet.
-
-## When the review will not converge
-
-Most PRs settle in one to three rounds. Some do not, and the failure looks the
-same every time: you fix what the round asked for, push, and the next round
-returns a finding of the same *kind* somewhere else. Nothing is wrong with your
-diligence. The shape of the change is wrong, and no amount of patching will
-close it.
-
-Learn to recognize this early. The cost of not recognizing it is real:
-
-| PR | Approach | Rounds | Outcome |
-|---|---|---|---|
-| #1926 | "**bind** regex evidence to acceptance input" — make the classifier correct | 30 | **closed, never merged** |
-| #2065 | "**refuse** unbound regex evidence as grounds to overturn an agent FAIL" — remove the classifier's authority | 3 | merged |
-
-Same underlying defect, opposite shape, ten times the cost. The second PR did
-not out-argue the reviewer. It removed the thing the reviewer kept finding
-holes in.
-
-### Signature 1 — you are enumerating an unbounded surface
-
-You are hand-maintaining an allowlist, option grammar, or keyword table that
-mirrors something you do not own — another tool's CLI, a model's output format,
-a third-party schema. Each round the reviewer names a case your table misses,
-because the table can never be complete.
-
-PR #2212 ("recognize option-bearing uv test runs") spent 10 rounds here:
-
-> R2: "The new allowlist does not cover the complete supported `uv run` option grammar"
-> R3: "The hand-maintained option grammar is still incomplete for valid current `uv run` commands."
-> R5: "The enumerated option schema omits valid current `uv run` flags"
-
-**The escape:** stop enumerating what is allowed; parse, and reject anything you
-did not positively understand. #2212 converged when it became operand-aware and
-started rejecting malformed operands, non-executing modes, and compound
-commands outright — an unbounded allowlist became a bounded, fail-closed parser.
-Delegating to the authoritative source beats both; the reviewer had already
-suggested exactly that, as a non-blocking note in round 5:
-
-> "Consider sharing one authoritative `uv run` option schema/parser with
-> `src/ouroboros/evaluation/detector.py` rather than maintaining parallel
-> option tables that can drift independently."
-
-Read the non-blocking suggestions. They are often where the structural fix is.
-
-### Signature 2 — you kept two paths alive
-
-You added a new path and left the old one in place, and now both must behave
-identically. Every round finds another place they diverge. This is
-combinatorial: the reviewer will keep finding pairs.
-
-PR #2193 ("fuse scoring question and routing") spent 7 rounds here — the
-legacy branch not running completion logic, the atomic branch losing an answer
-on failure, `completion` assigned only in one branch, `[decide_later]` meaning
-different things per path, then the legacy branch still calling the old helper.
-
-**The escape:** delete one path, or funnel both through one implementation. Two
-paths that must agree are two paths that will not.
-
-### Signature 3 — the component's authority is the problem, not its accuracy
-
-The reviewer keeps defeating your check with a new input class. You narrow it;
-next round it is defeated again. The question to ask is not "how do I classify
-correctly?" but "**why is this component allowed to make this decision at
-all?**"
-
-That is #1926 versus #2065 above. Thirty rounds went into making a regex-based
-evidence classifier correct enough to overturn an agent's FAIL verdict. It was
-never going to be correct enough. The merged fix let it stop overturning
-verdicts.
-
-### How to tell you are in one
-
-- The same finding reappears at a **different line number** each round. You are
-  moving the failure, not removing it.
-- Each fix **adds surface** — another branch, another special case, another
-  entry in a table.
-- The blocker count is **not trending down** after three rounds.
-- You are arguing about which inputs are legitimate rather than about what the
-  code does.
-
-### What to do
-
-Stop pushing. Another round costs you and proves nothing.
-
-1. Write down the property the reviewer keeps attacking, in one sentence.
-2. Ask whether that property can be made unnecessary — by deleting the
-   component, by inverting the default to fail closed, or by delegating to
-   whatever actually owns the truth.
-3. Say this in the PR, explicitly: the current shape cannot close, here is the
-   shape that can. A stated structural argument gets engaged with.
-4. Be willing to close the PR and open a differently-shaped one. #2065 is not a
-   failure story — it is the correct ending to #1926.
-
-None of this is a reason to dismiss a finding you simply do not want to fix. The
-signature is a repeating *kind* of finding across rounds, not a single finding
-you disagree with.
 
 ## Mechanics
 
