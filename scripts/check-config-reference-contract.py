@@ -149,6 +149,7 @@ def _callable_name(node: ast.AST) -> str | None:
 
 _FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
 
+
 @dataclass(frozen=True)
 class _UnresolvedCallable:
     """A decorated callable whose replacement semantics are not statically known."""
@@ -1079,8 +1080,10 @@ class _SourceIndex:
                         if isinstance(expression, ast.Name)
                         else None
                     )
-                    targets = statement.targets if isinstance(statement, ast.Assign) else (
-                        statement.target,
+                    targets = (
+                        statement.targets
+                        if isinstance(statement, ast.Assign)
+                        else (statement.target,)
                     )
                     for target in targets:
                         for assigned in self._assigned_names(target):
@@ -1110,9 +1113,7 @@ class _SourceIndex:
                     return resolved
             return frozenset()
 
-        return frozenset().union(
-            *(inherited(class_node, frozenset()) for class_node in classes)
-        )
+        return frozenset().union(*(inherited(class_node, frozenset()) for class_node in classes))
 
     def is_strict_subclass(self, child: ast.ClassDef, parent: ast.ClassDef) -> bool:
         """Return whether an indexed class is a strict descendant of another."""
@@ -1312,9 +1313,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         unresolved: tuple[_UnresolvedCallable, ...],
     ) -> None:
         field_names = {
-            section: frozenset(
-                field.name for field in self._fields if field.section == section
-            )
+            section: frozenset(field.name for field in self._fields if field.section == section)
             for section in TRACKED_SECTIONS
         }
         for target in unresolved:
@@ -1334,7 +1333,6 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         f"{target.decorator_name!r}"
                     )
                     break
-
 
     def _name_value(self, name: str) -> _AbstractValue:
         for scope in reversed(self._states):
@@ -5612,6 +5610,14 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             ):
                 continue
             targets = self._call_targets(decorator)
+            if not targets and isinstance(decorator, ast.Call):
+                factory = _join_values(
+                    *(
+                        self._local_call_value(decorator, function, receiver)
+                        for function, receiver in self._call_targets(decorator.func)
+                    )
+                )
+                targets = tuple((target.function, target.receiver) for target in factory.callables)
             if not targets:
                 # Preserve the unresolved callable as a provenance carrier so a
                 # later call can make decorator relevance depend on its actual

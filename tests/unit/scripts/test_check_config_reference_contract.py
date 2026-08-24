@@ -31,7 +31,7 @@ def contract():
 def _audit_as_documented_inert(contract, field, reads):
     return contract.audit_contract(
         fields=frozenset({field}),
-        reads=reads & {field},
+        reads=reads,
         rows={
             field: contract.ReferenceRow(
                 "true", "Currently inert. Effective control: runtime.stage1_enabled."
@@ -3246,9 +3246,7 @@ Reader().read(config.evaluation)
     assert _audit_as_documented_inert(contract, field, reads).violations == ()
 
 
-def test_runtime_scan_keeps_final_duplicate_method_definition(
-    contract, tmp_path: Path
-) -> None:
+def test_runtime_scan_keeps_final_duplicate_method_definition(contract, tmp_path: Path) -> None:
     (tmp_path / "duplicate_method.py").write_text(
         """
 class Reader:
@@ -3266,9 +3264,8 @@ Reader().read(config.evaluation)
 
     assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
 
-def test_runtime_scan_falls_back_to_base_after_deleted_method(
-    contract, tmp_path: Path
-) -> None:
+
+def test_runtime_scan_falls_back_to_base_after_deleted_method(contract, tmp_path: Path) -> None:
     (tmp_path / "deleted_method.py").write_text(
         """
 class BaseReader:
@@ -4289,7 +4286,10 @@ reader(settings)
     reads = contract.runtime_reads(tmp_path, frozenset({field}))
 
     assert reads == frozenset()
-    assert _audit_as_documented_inert(contract, field, reads).violations == ()
+    assert any(
+        "unresolved decorator 'wraps'" in violation
+        for violation in _audit_as_documented_inert(contract, field, reads).violations
+    )
 
 
 def test_runtime_scan_tracks_list_sort_callback(contract, tmp_path: Path) -> None:
@@ -6722,9 +6722,7 @@ process(config)
     )
 
 
-def test_unresolved_decorator_uses_callsite_section_provenance(
-    contract, tmp_path: Path
-) -> None:
+def test_unresolved_decorator_uses_callsite_section_provenance(contract, tmp_path: Path) -> None:
     (tmp_path / "decorated_section_reader.py").write_text(
         """
 from external_package import preserve_or_replace
@@ -6744,8 +6742,7 @@ read_stage(config.evaluation)
 
     assert reads == frozenset()
     assert any(
-        "unresolved decorator 'preserve_or_replace'" in violation
-        for violation in report.violations
+        "unresolved decorator 'preserve_or_replace'" in violation for violation in report.violations
     )
 
 
@@ -7009,9 +7006,7 @@ handler(settings)
     assert not any("unresolved decorator" in v for v in report.violations)
 
 
-def test_proven_local_attribute_replacement_decorator_erases_read(
-    contract, tmp_path: Path
-) -> None:
+def test_proven_local_attribute_replacement_decorator_erases_read(contract, tmp_path: Path) -> None:
     """Resolved attribute factories must honor a replacement callable."""
     (tmp_path / "attribute_replacement_resolved.py").write_text(
         """
