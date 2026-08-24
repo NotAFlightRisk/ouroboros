@@ -9893,6 +9893,91 @@ class TestGjcSetup:
 
         assert detected["gjc"] == "/opt/bin/gjc"
 
+    def test_old_gjc_contract_uses_owned_compatibility_bridge(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+        agent_dir = tmp_path / "gjc-agent"
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+        old_help = subprocess.CompletedProcess(
+            ["gjc", "mcp", "add", "--help"],
+            0,
+            stdout="Register MCP definitions for storage only",
+            stderr="",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup.subprocess.run", return_value=old_help),
+            patch("ouroboros.cli.commands.setup._register_gjc_mcp_server") as register,
+        ):
+            assert setup_cmd._setup_gjc("/opt/bin/gjc")
+
+        bridge = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        assert '"dispatch", "--runtime", "gjc"' in bridge.read_text(encoding="utf-8")
+        register.assert_not_called()
+
+    def test_native_gjc_contract_requires_sharing_and_standalone_autoload(self) -> None:
+        from ouroboros.cli.gjc_setup import gjc_native_mcp_autoload_support
+
+        storage_only = subprocess.CompletedProcess(
+            ["gjc", "mcp", "add", "--help"],
+            0,
+            stdout="--timeout=<int>\nDefinitions are storage-only.",
+            stderr="",
+        )
+        native = subprocess.CompletedProcess(
+            ["gjc", "mcp", "add", "--help"],
+            0,
+            stdout="--sharing=<value>\nordinary standalone sessions load registrations",
+            stderr="",
+        )
+
+        assert gjc_native_mcp_autoload_support(
+            "/opt/bin/gjc", run_command=lambda *_args, **_kwargs: storage_only
+        ) is False
+        assert gjc_native_mcp_autoload_support(
+            "/opt/bin/gjc", run_command=lambda *_args, **_kwargs: native
+        ) is True
+
+    def test_gjc_contract_probe_failure_does_not_replace_existing_route(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent_dir = tmp_path / "gjc-agent"
+        bridge = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text(setup_cmd._gjc_bridge_source_text(), encoding="utf-8")
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+
+        with patch(
+            "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
+            return_value=None,
+        ):
+            assert not setup_cmd._install_gjc_runtime_artifacts("/opt/bin/gjc")
+
+        assert bridge.exists()
+
+    def test_storage_only_gjc_preserves_custom_compatibility_bridge(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent_dir = tmp_path / "gjc-agent"
+        bridge = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text("operator extension\n", encoding="utf-8")
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+
+        with patch(
+            "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
+            return_value=False,
+        ):
+            assert not setup_cmd._install_gjc_runtime_artifacts("/opt/bin/gjc")
+
+        assert bridge.read_text(encoding="utf-8") == "operator extension\n"
+
+
     def test_setup_gjc_writes_config_rules_and_namespaced_skills(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -9906,6 +9991,10 @@ class TestGjcSetup:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup._register_gjc_mcp_server", return_value=True),
+            patch(
+                "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
+                return_value=True,
+            ),
         ):
             setup_cmd._setup_gjc("/opt/bin/gjc")
             setup_cmd._setup_gjc("/opt/bin/gjc")
@@ -9937,7 +10026,14 @@ class TestGjcSetup:
             stdout=json.dumps({"servers": []}),
             stderr="",
         )
-        added = subprocess.CompletedProcess(["gjc", "mcp", "add"], 0, stdout="{}", stderr="")
+        added = subprocess.CompletedProcess(
+            ["gjc", "mcp", "add"],
+            0,
+            stdout=json.dumps(
+                {"action": "add", "status": "created", "name": "ouroboros"}
+            ),
+            stderr="",
+        )
         managed_entry = {
             "name": "ouroboros",
             "runtimeStatus": "autoload",
@@ -10005,7 +10101,14 @@ class TestGjcSetup:
             stdout=json.dumps({"servers": []}),
             stderr="",
         )
-        added = subprocess.CompletedProcess(["gjc", "mcp", "add"], 0, stdout="{}", stderr="")
+        added = subprocess.CompletedProcess(
+            ["gjc", "mcp", "add"],
+            0,
+            stdout=json.dumps(
+                {"action": "add", "status": "created", "name": "ouroboros"}
+            ),
+            stderr="",
+        )
         with (
             patch("ouroboros.cli.gjc_setup.persisted_gjc_mcp_entry", return_value=None),
             patch(
@@ -10064,8 +10167,12 @@ class TestGjcSetup:
         ("field", "value"),
         [
             ("env", {"OUROBOROS_MCP_CONFIG": "/operator/config.yaml"}),
-            ("sharing", "global"),
+            ("sharing", "shared"),
             ("timeout", 1000),
+            ("cwd", "/operator/worktree"),
+            ("enabled", False),
+            ("autoload", False),
+            ("noInheritEnv", True),
         ],
     )
     def test_mcp_ownership_rejects_custom_execution_fields(self, field: str, value: object) -> None:
@@ -10138,27 +10245,14 @@ class TestGjcSetup:
     def test_registration_rollback_preserves_concurrent_operator_change(self) -> None:
         from ouroboros.cli import gjc_setup
 
-        operator_entry = {
-            "name": "ouroboros",
-            "runtimeStatus": "autoload",
-            "config": {
-                "type": "stdio",
-                "command": "docker",
-                "args": ["run", "operator-server"],
-            },
-        }
-        listed = subprocess.CompletedProcess(
-            ["gjc", "mcp", "list", "--json"],
-            0,
-            stdout=json.dumps({"servers": [operator_entry]}),
-            stderr="",
-        )
         state = {"created": True, "changed": True}
+        with patch(
+            "ouroboros.cli.gjc_setup.remove_persisted_gjc_mcp_server",
+            return_value=False,
+        ) as remove:
+            gjc_setup._rollback_new_gjc_mcp_registration(state)
 
-        with patch("ouroboros.cli.gjc_setup.subprocess.run", return_value=listed) as run:
-            gjc_setup._rollback_new_gjc_mcp_registration("/opt/bin/gjc", state)
-
-        run.assert_called_once()
+        remove.assert_called_once_with()
         assert state == {"created": True, "changed": True}
 
     @pytest.mark.parametrize("command", ["uvx", "/usr/local/bin/pipx"])
@@ -10190,6 +10284,10 @@ class TestGjcSetup:
             patch.object(setup_cmd, "_detect_runtimes", return_value={"gjc": "/opt/bin/gjc"}),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch.object(setup_cmd, "_register_gjc_mcp_server", return_value=False),
+            patch(
+                "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
+                return_value=True,
+            ),
         ):
             result = CliRunner().invoke(setup_cmd.app, ["--runtime", "gjc", "--non-interactive"])
 
@@ -10225,6 +10323,10 @@ class TestGjcSetup:
                 "_register_gjc_mcp_server",
                 side_effect=fail_after_operator_write,
             ),
+            patch(
+                "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
+                return_value=True,
+            ),
         ):
             assert not setup_cmd._setup_gjc("/opt/bin/gjc")
 
@@ -10248,6 +10350,10 @@ class TestGjcSetup:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch.object(setup_cmd, "_register_gjc_mcp_server", return_value=True),
+            patch(
+                "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
+                return_value=True,
+            ),
         ):
             assert setup_cmd._setup_gjc("/opt/bin/gjc")
 

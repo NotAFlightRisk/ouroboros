@@ -31,9 +31,9 @@ GJC agent events
 
 So "GJC is an Ouroboros runtime" means step 2b exists and is selectable. It
 does not mean GJC internals are imported into Ouroboros. Interactive GJC gains
-the Ouroboros command surface only after setup projects namespaced skills,
-an always-applied exact-command routing table, and the Ouroboros MCP registration
-into the active GJC agent profile.
+the Ouroboros command surface after setup activates either the native skill/MCP
+projection or, on older storage-only GJC releases, the setup-owned compatibility
+input bridge.
 
 ## Prerequisites
 
@@ -49,10 +49,10 @@ into the active GJC agent profile.
 # 1. Install and authenticate GJC, then confirm gjc is on PATH
 gjc
 
-# 2. Point Ouroboros at GJC and install the GJC skill/MCP projection
+# 2. Point Ouroboros at GJC and activate its supported interactive route
 ouroboros setup --runtime gjc
 
-# 3. Restart GJC so it loads the projected skills, routing rule, and MCP server
+# 3. Restart GJC so it loads the native projection or compatibility bridge
 gjc
 
 # 4. Use Ouroboros commands in the GJC session
@@ -133,8 +133,9 @@ This means:
 
 ### GJC Launches Ouroboros
 
-`ouroboros setup --runtime gjc` projects the shared Ouroboros runtime assets into
-the active GJC agent profile:
+`ouroboros setup --runtime gjc` first probes the installed GJC MCP contract. A
+host whose `gjc mcp` surface declares conventional standalone autoload receives
+the shared native projection in the active agent profile:
 
 ```text
 <agent-dir>/skills/ouroboros-*/SKILL.md
@@ -143,16 +144,21 @@ the active GJC agent profile:
 <agent-dir>/mcp.json                    # written through `gjc mcp add`
 ```
 
-The skills are namespaced so they cannot collide with GJC's four bundled workflow
-skills. The always-applied rule maps exact `ooo <command>` prefixes to the matching
-`/skill:ouroboros-<command>` entry before generic planning, search, or GJC's own
-`deep-interview` routing. Arguments after the prefix are preserved verbatim.
+The skills are namespaced so they cannot collide with GJC's bundled workflow
+skills. The always-applied rule maps exact `ooo <command>` prefixes to the
+matching `/skill:ouroboros-<command>` entry before generic planning, search, or
+GJC's own `deep-interview` routing. Arguments after the prefix are preserved
+verbatim.
 
-GJC autoloads the isolated Ouroboros MCP server from its own native MCP config.
-The GJC-specific child uses an empty setup-owned upstream bridge config because
-GJC already owns the host tool catalog; this avoids recursively starting the
-user's separate `~/.ouroboros/mcp_servers.yaml` fan-in during session startup.
-That user file is not modified.
+Native-capable GJC releases autoload the isolated Ouroboros MCP server from
+their own config. The GJC-specific child uses an empty setup-owned upstream
+bridge config so the user's separate `~/.ouroboros/mcp_servers.yaml` fan-in is
+not recursively started during session startup. That user file is not modified.
+
+If the installed GJC exposes only storage-only registration, setup does not
+pretend that a persisted server is active. It installs the owned compatibility
+input bridge instead and keeps the existing `ooo` dispatch path working. A
+later refresh migrates that bridge only after native activation validates.
 
 Interactive GJC sessions can then type:
 
@@ -162,9 +168,9 @@ ooo interview clarify this feature
 ooo status
 ```
 
-The obsolete setup-installed input extension is removed during migration. GJC
-remains a product-agnostic host: Ouroboros owns the projected skills, routing
-rule, MCP registration, refresh, and uninstall lifecycle.
+Setup removes an obsolete setup-owned input bridge only after native activation
+validates. GJC remains a product-agnostic host: Ouroboros owns the selected route,
+refresh, rollback, and uninstall lifecycle.
 
 ## GJC As LLM Backend
 
@@ -200,8 +206,8 @@ JSON extraction and validation rather than provider-native schema enforcement.
 | Native permission override | No; RPC mode is headless but exposes no per-invocation approval flag, so `permission_mode_support=ignored` |
 | Structured schema responses as LLM backend | Soft-enforced and validated |
 | Hard tool/schema envelope | No in v1 |
-| GJC extension loading | GJC-owned; Ouroboros installs no executable GJC extension |
-| Interactive GJC `ooo` frontdoor | Yes, via namespaced skills + always-applied routing + native MCP autoload |
+| GJC extension loading | GJC-owned; Ouroboros uses an input bridge only as the compatibility route for storage-only hosts |
+| Interactive GJC `ooo` frontdoor | Yes, via native skills/MCP autoload or the compatibility bridge selected during setup |
 
 ## v1 Limitations
 
@@ -229,6 +235,7 @@ provider error and prompt output; malformed JSON or schema-invalid payloads are
 rejected by Ouroboros after extraction and validation.
 
 **`ooo ...` is sent to the wrong GJC workflow**
-Run `ouroboros setup --runtime gjc`, restart GJC, and verify that
+Run `ouroboros setup --runtime gjc` and restart GJC. On native-capable releases,
 `gjc skills discover --source user --json` lists `ouroboros-interview` and
 `gjc mcp list --json` reports `ouroboros` with `runtimeStatus: "autoload"`.
+Storage-only releases instead keep `<agent-dir>/extensions/ouroboros-ooo-bridge/index.ts`.

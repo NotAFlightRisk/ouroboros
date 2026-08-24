@@ -191,7 +191,10 @@ def gjc_agent_dir(home: str | Path | None = None, environ: dict[str, str] | None
     config_dir_name = (
         env.get("GJC_CONFIG_DIR", "").strip() or env.get("PI_CONFIG_DIR", "").strip() or ".gjc"
     )
-    return root / config_dir_name.lstrip("/") / "agent"
+    normalized_parts = config_dir_name.replace("\\", "/").split("/")
+    if ".." in normalized_parts:
+        config_dir_name = ".gjc"
+    return root / config_dir_name.lstrip("/\\") / "agent"
 
 
 def gjc_instruction_path(

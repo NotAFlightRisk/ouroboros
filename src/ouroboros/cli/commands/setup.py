@@ -46,6 +46,7 @@ from ouroboros.cli.commands.claude_setup import (
 from ouroboros.cli.commands.claude_setup import (
     setup_claude_sdk as _setup_claude_sdk,
 )
+from ouroboros.cli.commands.gjc_bridge import gjc_ooo_bridge_source_text
 from ouroboros.cli.commands.pi_bridge import pi_ooo_bridge_source_text
 from ouroboros.cli.commands.setup_atomic_restore import restore_hermes, restore_hermes_receipt
 from ouroboros.cli.formatters import console
@@ -3678,6 +3679,17 @@ def _install_pi_ooo_bridge() -> bool:
     return True
 
 
+def _detect_gjc_bridge_dispatch_entry() -> tuple[str, list[str]]:
+    """Return the launcher a managed GJC compatibility bridge should use."""
+    return _detect_pi_bridge_dispatch_entry()
+
+
+def _gjc_bridge_source_text() -> str:
+    """Render the compatibility bridge for a GJC without native MCP autoload."""
+    command, args = _detect_gjc_bridge_dispatch_entry()
+    return gjc_ooo_bridge_source_text(command=command, args=args)
+
+
 def _install_gjc_skills() -> bool:
     """Project packaged Ouroboros skills into GJC's native user registry."""
     from ouroboros.gjc import install_gjc_skills
@@ -3744,7 +3756,12 @@ def _install_gjc_runtime_artifacts(
     *,
     registration_state: dict[str, bool] | None = None,
 ) -> bool:
-    """Install GJC artifacts atomically before retiring the legacy bridge."""
+    """Activate one complete GJC frontdoor before retiring any prior route."""
+    from ouroboros.cli.gjc_setup import (
+        gjc_bridge_path,
+        gjc_native_mcp_autoload_support,
+        install_gjc_compatibility_bridge,
+    )
     from ouroboros.gjc import setup_owned_gjc_skill_paths
     from ouroboros.runtime_instruction_artifacts import gjc_agent_dir, gjc_instruction_path
 
@@ -3754,23 +3771,38 @@ def _install_gjc_runtime_artifacts(
         *setup_owned_gjc_skill_paths(agent_dir=agent_dir),
         gjc_instruction_path(),
         _gjc_mcp_bridge_config_path(),
-        agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts",
+        gjc_bridge_path(),
     )
     try:
         snapshots = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
-        artifacts_installed = (
-            _install_gjc_mcp_bridge_config()
-            and _install_gjc_skills()
-            and _install_runtime_instruction_artifact("gjc")
+        native_mcp_support = gjc_native_mcp_autoload_support(
+            gjc_path, run_command=subprocess.run
         )
-        expected = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
-        if not artifacts_installed or not _register_gjc_mcp_server(
-            gjc_path, registration_state=state
-        ):
+        if native_mcp_support is None:
             succeeded = False
-        else:
-            succeeded = _remove_legacy_gjc_bridge()
+            expected = snapshots
+        elif not native_mcp_support:
+            succeeded = install_gjc_compatibility_bridge(
+                _gjc_bridge_source_text(),
+                _atomic_write_text,
+            )
             expected = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
+        else:
+            artifacts_installed = (
+                _install_gjc_mcp_bridge_config()
+                and _install_gjc_skills()
+                and _install_runtime_instruction_artifact("gjc")
+            )
+            expected = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
+            if not artifacts_installed or not _register_gjc_mcp_server(
+                gjc_path, registration_state=state
+            ):
+                succeeded = False
+            else:
+                succeeded = _remove_legacy_gjc_bridge()
+                expected = tuple(
+                    (path, _snapshot_path(path, follow_links=False)) for path in paths
+                )
     except OSError as exc:
         print_warning(f"Could not install GJC runtime artifacts: {exc}")
         succeeded = False
@@ -3784,7 +3816,6 @@ def _install_gjc_runtime_artifacts(
             expected if "expected" in locals() else snapshots,
             restore_path_snapshot=_restore_path_snapshot,
             snapshot_path=_snapshot_path,
-            gjc_path=gjc_path,
             registration_state=state,
         )
         for directory in (
