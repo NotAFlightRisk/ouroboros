@@ -2978,16 +2978,23 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             deferred = self._deferred_generators.get(identity)
             if deferred is None:
                 continue
-            if isinstance(deferred.node, ast.GeneratorExp):
-                self._consume_generator_expression(deferred.node, identity, mode=mode)
+            function_id = id(deferred.node)
+            if function_id in self._active_calls:
                 continue
-            self._visit_function_body(
-                deferred.node,
-                deferred.scoped,
-                consume_generator=True,
-                generator_consumer_mode=mode,
-                generator_identity=identity,
-            )
+            self._active_calls.add(function_id)
+            try:
+                if isinstance(deferred.node, ast.GeneratorExp):
+                    self._consume_generator_expression(deferred.node, identity, mode=mode)
+                    continue
+                self._visit_function_body(
+                    deferred.node,
+                    deferred.scoped,
+                    consume_generator=True,
+                    generator_consumer_mode=mode,
+                    generator_identity=identity,
+                )
+            finally:
+                self._active_calls.remove(function_id)
 
     def _consume_deferred_generator(self, node: ast.AST, *, mode: str = "full") -> None:
         self._consume_deferred_generator_value(self._expression_value(node), mode=mode)
@@ -3036,9 +3043,17 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def _consume_deferred_coroutine(self, node: ast.AST) -> None:
         value = self._expression_value(node)
         for identity in value.identity:
-            deferred = self._deferred_coroutines.get(identity)
-            if deferred is not None:
+            deferred = self._deferred_coroutines.pop(identity, None)
+            if deferred is None:
+                continue
+            function_id = id(deferred.node)
+            if function_id in self._active_calls:
+                continue
+            self._active_calls.add(function_id)
+            try:
                 self._visit_function_body(deferred.node, deferred.scoped)
+            finally:
+                self._active_calls.remove(function_id)
 
     def _consume_deferred_callable_iterator(self, node: ast.AST, *, mode: str = "full") -> None:
         """Execute callbacks only when their lazy map/filter is consumed."""
