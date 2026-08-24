@@ -562,6 +562,7 @@ worker transports; the remaining entries are user-selectable runtimes.
 | `gjc` | `GjcRuntime` | `gajae-code`, `gajae_code` | `src/ouroboros/orchestrator/gjc_runtime.py` |
 | `antigravity` | `AntigravityCLIRuntime` | `agy` | `src/ouroboros/orchestrator/antigravity_cli_runtime.py` |
 | `grok` | `GrokCliRuntime` | `grok_cli`, `grok_build` | `src/ouroboros/orchestrator/grok_cli_runtime.py` |
+| `host` | Host-dispatch runtime bridge | `host_dispatch` | `src/ouroboros/orchestrator/host_dispatch.py` |
 
 > Each runtime has different tool sets, permission models, and streaming
 > semantics. Ouroboros normalizes these differences at the adapter boundary,
