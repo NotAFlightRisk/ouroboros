@@ -10038,9 +10038,7 @@ class TestGjcSetup:
                     "--runtime",
                     "gjc",
                 ],
-                "env": {
-                    "OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())
-                },
+                "env": {"OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())},
             },
         }
         validated = subprocess.CompletedProcess(
@@ -10054,9 +10052,7 @@ class TestGjcSetup:
                 "ouroboros.cli.commands.setup.subprocess.run",
                 side_effect=[self._gjc_autoload_help(), listed, added, validated],
             ) as run,
-            patch(
-                "ouroboros.cli.gjc_setup.verify_gjc_mcp_endpoint", return_value=True
-            ) as verify,
+            patch("ouroboros.cli.gjc_setup.verify_gjc_mcp_endpoint", return_value=True) as verify,
         ):
             assert setup_cmd._register_gjc_mcp_server(
                 "/opt/bin/gjc",
@@ -10242,9 +10238,7 @@ class TestGjcSetup:
                     "--runtime",
                     "gjc",
                 ],
-                "env": {
-                    "OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())
-                },
+                "env": {"OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())},
             },
         }
         listed = subprocess.CompletedProcess(
@@ -10344,9 +10338,7 @@ class TestGjcSetup:
                 "ouroboros.cli.commands.setup.subprocess.run",
                 side_effect=[self._gjc_autoload_help(), listed],
             ),
-            patch(
-                "ouroboros.cli.gjc_setup.verify_gjc_mcp_endpoint", return_value=False
-            ) as verify,
+            patch("ouroboros.cli.gjc_setup.verify_gjc_mcp_endpoint", return_value=False) as verify,
         ):
             assert not setup_cmd._register_gjc_mcp_server("/opt/bin/gjc")
 

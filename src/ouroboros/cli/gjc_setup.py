@@ -253,11 +253,7 @@ def _listed_gjc_mcp_entry(
         print_warning("GJC MCP list returned an invalid server collection.")
         return False, None
     entry = next(
-        (
-            item
-            for item in servers
-            if isinstance(item, dict) and item.get("name") == "ouroboros"
-        ),
+        (item for item in servers if isinstance(item, dict) and item.get("name") == "ouroboros"),
         None,
     )
     return True, entry

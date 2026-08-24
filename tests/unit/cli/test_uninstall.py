@@ -557,9 +557,7 @@ class TestRemoveGjcArtifacts:
                             "gjc",
                         ],
                         "env": {
-                            "OUROBOROS_MCP_CONFIG": str(
-                                agent_dir / "ouroboros" / "mcp-bridge.yaml"
-                            )
+                            "OUROBOROS_MCP_CONFIG": str(agent_dir / "ouroboros" / "mcp-bridge.yaml")
                         },
                     },
                 },

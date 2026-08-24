@@ -3747,8 +3747,6 @@ def _install_gjc_runtime_artifacts(
     return False
 
 
-
-
 def _setup_gjc(gjc_path: str) -> bool:
     """Configure GJC through the ownership-safe runtime transaction."""
     from ouroboros.cli.gjc_setup import setup_gjc_runtime
