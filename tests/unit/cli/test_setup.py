@@ -10038,9 +10038,7 @@ class TestGjcSetup:
         added = subprocess.CompletedProcess(
             ["gjc", "mcp", "add"],
             0,
-            stdout=json.dumps(
-                {"action": "add", "status": receipt_status, "name": "ouroboros"}
-            ),
+            stdout=json.dumps({"action": "add", "status": receipt_status, "name": "ouroboros"}),
             stderr="",
         )
         managed_entry = {
