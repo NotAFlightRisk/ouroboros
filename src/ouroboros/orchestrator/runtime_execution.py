@@ -251,7 +251,7 @@ class RuntimeExecution(AsyncIterator[AgentMessage]):
             raise StopAsyncIteration
         if self._active_read is not None:
             raise RuntimeError("runtime execution already has an active provider read")
-        task = asyncio.create_task(anext(self._stream))
+        task: asyncio.Task[AgentMessage] = asyncio.create_task(anext(self._stream))
         self._active_read = task
         try:
             return await asyncio.shield(task)

@@ -45,9 +45,8 @@ from ouroboros.orchestrator.rate_limit import (
 from ouroboros.router.types import Resolved
 
 if TYPE_CHECKING:
-    from ouroboros.providers.base import CompletionConfig, CompletionResponse, Message
     from ouroboros.orchestrator.runtime_execution import RuntimeExecution
-
+    from ouroboros.providers.base import CompletionConfig, CompletionResponse, Message
 log = get_logger(__name__)
 
 
@@ -1029,16 +1028,7 @@ class AgentRuntime(Protocol):
         """Active permission mode (e.g. ``"acceptEdits"``), or ``None``."""
         ...
 
-    def acquire_execution(
-        self,
-        *,
-        prompt: str,
-        tools: list[str] | None = None,
-        system_prompt: str | None = None,
-        resume_handle: RuntimeHandle | None = None,
-        resume_session_id: str | None = None,
-        **kwargs: Any,
-    ) -> RuntimeExecution:
+    def acquire_execution(self, **kwargs: Any) -> RuntimeExecution:
         """Acquire verified termination authority before provider effects."""
         ...
 
@@ -1537,39 +1527,11 @@ class ClaudeAgentAdapter:
             },
         )
 
-    def acquire_execution(
-        self,
-        *,
-        prompt: str,
-        tools: list[str] | None = None,
-        system_prompt: str | None = None,
-        resume_handle: RuntimeHandle | None = None,
-        resume_session_id: str | None = None,
-        reasoning_effort: str | None = None,
-        model: str | None = None,
-    ) -> Any:
+    def acquire_execution(self, **kwargs: Any) -> Any:
         """Acquire Claude subprocess authority before sending the first prompt."""
-        from ouroboros.orchestrator.runtime_execution import (
-            RuntimeExecution,
-            RuntimeExecutionController,
-        )
+        from ouroboros.orchestrator.claude_owned_runtime import acquire_claude_execution
 
-        controller = RuntimeExecutionController(self._runtime_handle_backend)
-        stream = self.execute_task(
-            prompt=prompt,
-            tools=tools,
-            system_prompt=system_prompt,
-            resume_handle=resume_handle,
-            resume_session_id=resume_session_id,
-            reasoning_effort=reasoning_effort,
-            model=model,
-            _execution_controller=controller,
-        )
-        return RuntimeExecution(
-            backend=self._runtime_handle_backend,
-            stream=stream,
-            controller=controller,
-        )
+        return acquire_claude_execution(self, **kwargs)
 
     async def execute_task(
         self,
@@ -1730,104 +1692,31 @@ class ClaudeAgentAdapter:
 
                 options = ClaudeAgentOptions(**options_kwargs)
 
-                # Connect without a prompt, capture kill/reap authority, and only
-                # then send provider input. The one-shot query() helper cannot
-                # offer this pre-effect ownership boundary.
-                session_id: str | None = None
                 client = ClaudeSDKClient(options=options)
-                owned_process: Any | None = None
+                from ouroboros.orchestrator.claude_owned_runtime import (
+                    ClaudeRuntimeState,
+                    stream_owned_claude_client,
+                )
+
+                runtime_state = ClaudeRuntimeState(
+                    session_id=current_session_id,
+                    runtime_handle=current_runtime_handle,
+                )
                 try:
-                    connect_task = asyncio.create_task(client.connect())
-                    if _execution_controller is not None:
-                        async def _force_owned_client() -> bool:
-                            if not connect_task.done():
-                                connect_task.cancel()
-                            try:
-                                await connect_task
-                            except BaseException:
-                                pass
-                            transport = getattr(client, "_transport", None)
-                            process = getattr(transport, "_process", None)
-                            if process is None:
-                                return True
-                            if getattr(process, "returncode", None) is None:
-                                try:
-                                    process.terminate()
-                                except ProcessLookupError:
-                                    pass
-                                try:
-                                    await asyncio.wait_for(process.wait(), timeout=1.0)
-                                except TimeoutError:
-                                    try:
-                                        process.kill()
-                                    except ProcessLookupError:
-                                        pass
-                                    await process.wait()
-                            return getattr(process, "returncode", None) is not None
-
-                        _execution_controller.bind_process(_force_owned_client)
-                    await asyncio.shield(connect_task)
-                    transport = getattr(client, "_transport", None)
-                    owned_process = getattr(transport, "_process", None)
-                    if _execution_controller is not None and owned_process is None:
-                        from ouroboros.orchestrator.runtime_execution import (
-                            RuntimeExecutionUnavailable,
-                        )
-
-                        raise RuntimeExecutionUnavailable(
-                            "Claude SDK did not expose its owned subprocess before dispatch"
-                        )
-                    await client.query(prompt)
-                    sdk_messages = client.receive_response()
-                    async for sdk_message in sdk_messages:
-                        agent_message = self._convert_message(sdk_message)
-
-                        # Capture session ID from init message
-                        session_id = getattr(
-                            sdk_message, "session_id", None
-                        ) or agent_message.data.get("session_id")
-                        if session_id and (
-                            session_id != current_session_id
-                            or current_runtime_handle is None
-                        ):
-                            current_session_id = session_id
-                            current_runtime_handle = self._build_runtime_handle(
-                                session_id,
-                                current_runtime_handle,
-                                approval_mode=effective_permission_mode,
-                            )
-
-                        if current_runtime_handle:
-                            data = agent_message.data
-                            if (
-                                current_session_id
-                                and data.get("session_id") != current_session_id
-                            ):
-                                data = {**data, "session_id": current_session_id}
-                            agent_message = replace(
-                                agent_message,
-                                data=data,
-                                resume_handle=current_runtime_handle,
-                            )
-
+                    async for agent_message in stream_owned_claude_client(
+                        client=client,
+                        prompt=prompt,
+                        controller=_execution_controller,
+                        convert_message=self._convert_message,
+                        build_handle=self._build_runtime_handle,
+                        state=runtime_state,
+                        approval_mode=effective_permission_mode,
+                        log=log,
+                    ):
                         yield agent_message
-
-                        if agent_message.is_final:
-                            log.info(
-                                "orchestrator.adapter.task_completed",
-                                success=not agent_message.is_error,
-                                session_id=session_id,
-                            )
-
                 finally:
-                    await client.disconnect()
-                    if _execution_controller is not None:
-                        if owned_process is not None and getattr(
-                            owned_process, "returncode", None
-                        ) is None:
-                            owned_process.kill()
-                            await owned_process.wait()
-                        _execution_controller.mark_reaped()
+                    current_session_id = runtime_state.session_id
+                    current_runtime_handle = runtime_state.runtime_handle
                 # Success - exit retry loop
                 return
 
