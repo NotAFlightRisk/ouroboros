@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import Path
-
 from ouroboros.backends.capabilities import render_backend_skill_capability_guide
 
 GUIDE_FILENAME = "ouroboros-skill-capability-guide.md"
@@ -13,6 +13,7 @@ COPILOT_INSTRUCTIONS_DIRNAME = "ouroboros-instructions"
 COPILOT_AGENTS_FILENAME = "AGENTS.md"
 _SECTION_START = "<!-- ouroboros:skill-capability-guide:start -->"
 _SECTION_END = "<!-- ouroboros:skill-capability-guide:end -->"
+_GJC_OWNERSHIP_PREFIX = "<!-- ouroboros:gjc-guide-sha256:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +29,7 @@ def _render_section(backend: str) -> str:
     return f"{_SECTION_START}\n{guide}\n{_SECTION_END}\n"
 
 
-def _render_gjc_guide() -> str:
+def _render_gjc_guide_body() -> str:
     """Render GJC's always-applied exact-command routing and capability guide."""
     from ouroboros.gjc import GJC_SKILL_NAMESPACE
     from ouroboros.router import packaged_skill_dispatch_registry
@@ -70,6 +71,12 @@ def _render_gjc_guide() -> str:
         )
     )
     return "\n".join(lines)
+
+
+def _render_gjc_guide() -> str:
+    body = _render_gjc_guide_body()
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return f"{body}{_GJC_OWNERSHIP_PREFIX}{digest} -->\n"
 
 
 def _upsert_marked_section(existing: str, section: str) -> str:
@@ -119,15 +126,25 @@ def has_managed_section(path: str | Path) -> bool:
 
 
 def is_setup_managed_gjc_instruction(path: str | Path) -> bool:
-    """Return whether *path* is exactly the routing guide emitted by setup."""
+    """Return whether *path* is a complete routing guide emitted by setup."""
     candidate = Path(path)
     try:
-        return (
-            not candidate.is_symlink()
-            and candidate.read_text(encoding="utf-8") == _render_gjc_guide()
-        )
+        source = candidate.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return False
+    if candidate.is_symlink():
+        return False
+    if source == _render_gjc_guide_body():
+        return True
+    body, separator, digest_suffix = source.rpartition(_GJC_OWNERSHIP_PREFIX)
+    if not separator or not digest_suffix.endswith(" -->\n"):
+        return False
+    digest = digest_suffix.removesuffix(" -->\n")
+    return (
+        len(digest) == 64
+        and all(character in "0123456789abcdef" for character in digest)
+        and hashlib.sha256(body.encode("utf-8")).hexdigest() == digest
+    )
 
 
 def _write_managed_section(path: Path, backend: str) -> Path:
@@ -253,14 +270,13 @@ def install_gjc_instruction_artifact(
     home: str | Path | None = None,
     environ: dict[str, str] | None = None,
 ) -> RuntimeInstructionArtifact:
-    """Install GJC's setup-owned global rules guidance file."""
+    """Install GJC routing without replacing an operator-owned rules file."""
+    path = gjc_instruction_path(home=home, environ=environ)
+    if os.path.lexists(path) and not is_setup_managed_gjc_instruction(path):
+        raise OSError(f"preserved user-managed GJC instruction guide at {path}")
     return RuntimeInstructionArtifact(
         backend="gjc",
-        path=_write_exact_guide(
-            gjc_instruction_path(home=home, environ=environ),
-            "gjc",
-            content=_render_gjc_guide(),
-        ),
+        path=_write_exact_guide(path, "gjc", content=_render_gjc_guide()),
     )
 
 

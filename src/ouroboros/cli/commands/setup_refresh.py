@@ -96,7 +96,23 @@ def refresh_runtime_artifacts() -> None:
     has_projected_skill = gjc_skills.is_dir() and any(
         path.name.startswith("ouroboros-") for path in gjc_skills.iterdir()
     )
-    gjc_expected = gjc_bridge.exists() or has_projected_skill or gjc_instruction_path().exists()
+    from ouroboros.cli.gjc_setup import (
+        gjc_mcp_bridge_config_path,
+        is_setup_managed_gjc_mcp_bridge_config,
+        is_setup_managed_gjc_mcp_entry,
+        persisted_gjc_mcp_entry,
+    )
+
+    bridge_config = gjc_mcp_bridge_config_path()
+    has_managed_bridge_config = is_setup_managed_gjc_mcp_bridge_config(bridge_config)
+    has_managed_registration = is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry())
+    gjc_expected = (
+        gjc_bridge.exists()
+        or has_projected_skill
+        or gjc_instruction_path().exists()
+        or has_managed_bridge_config
+        or has_managed_registration
+    )
     if gjc_expected:
         from ouroboros.config import get_gjc_cli_path
 

@@ -29,12 +29,6 @@ _GJC_MCP_TIMEOUT = 30000
 _GJC_MCP_RUNTIME_STATUS = "autoload"
 _GJC_MCP_CONFIG_FIELDS = {"type", "command", "args", "env", "sharing", "timeout"}
 _GJC_MCP_HELP_MARKERS = ("--sharing=<value>", "ordinary standalone sessions")
-_GJC_BRIDGE_SIGNATURES = (
-    "const COMMAND_RE = /^\\s*ooo(?:\\s+|$)/i;",
-    '"dispatch", "--runtime", "gjc"',
-    "_OUROBOROS_GJC_BRIDGE_DEPTH",
-    "export default function ouroborosBridge",
-)
 
 
 def gjc_mcp_config_path() -> Path:
@@ -50,11 +44,14 @@ def gjc_mcp_bridge_config_path() -> Path:
 def install_gjc_mcp_bridge_config(
     atomic_write_text: Callable[..., object],
 ) -> bool:
-    """Install the empty bridge config without replacing user-managed content."""
+    """Install the isolated config only when setup owns the target path."""
     path = gjc_mcp_bridge_config_path()
     if path.is_symlink() or (path.exists() and not is_setup_managed_gjc_mcp_bridge_config(path)):
-        print_info(f"Preserved user-managed GJC MCP bridge config at {path}")
-        return True
+        print_error(
+            f"Preserved user-managed GJC MCP bridge config at {path}; "
+            "native activation requires an isolated setup-owned configuration."
+        )
+        return False
     try:
         atomic_write_text(path, _GJC_MCP_BRIDGE_CONFIG_CONTENT, mode=0o600)
     except OSError as exc:
@@ -367,26 +364,31 @@ def register_gjc_mcp_server(
             remove_persisted_gjc_mcp_server()
         print_warning("GJC MCP add returned malformed JSON; activation cannot be owned safely.")
         return False
-    created_by_setup = (
+
+    persisted = persisted_gjc_mcp_entry()
+    persisted_by_setup = is_setup_managed_gjc_mcp_entry(persisted)
+    if persisted_by_setup and registration_state is not None:
+        registration_state.update(created=True, changed=True)
+    receipt_matches_request = (
         isinstance(add_payload, dict)
         and add_payload.get("action") == "add"
         and add_payload.get("name") == "ouroboros"
-        and add_payload.get("status") == "created"
     )
-    if not created_by_setup:
-        print_warning("GJC did not report creation of the requested Ouroboros MCP registration.")
+    if not receipt_matches_request:
+        if persisted_by_setup and remove_persisted_gjc_mcp_server():
+            if registration_state is not None:
+                registration_state.update(created=False, changed=False)
+        print_warning("GJC did not report adding the requested Ouroboros MCP registration.")
         return False
-    if registration_state is not None:
-        registration_state.update(created=True, changed=True)
+
     validated_ok, validated = _listed_gjc_mcp_entry(gjc_path, run_command)
-    persisted = persisted_gjc_mcp_entry()
     if (
         not validated_ok
         or not is_setup_managed_gjc_mcp_entry(validated, allow_redacted_env=True)
-        or not is_setup_managed_gjc_mcp_entry(persisted)
+        or not persisted_by_setup
         or not is_active_gjc_mcp_entry(validated)
     ):
-        if existing is None and is_setup_managed_gjc_mcp_entry(persisted):
+        if existing is None and persisted_by_setup:
             if remove_persisted_gjc_mcp_server():
                 if registration_state is not None:
                     registration_state.update(created=False, changed=False)
@@ -403,15 +405,15 @@ def gjc_bridge_path() -> Path:
 
 
 def is_setup_managed_gjc_bridge(path: Path | None = None) -> bool:
-    """Return whether the bridge is an exact known Ouroboros bridge generation."""
+    """Return whether the bridge is a complete setup-rendered generation."""
+    from ouroboros.cli.commands.gjc_bridge import is_gjc_ooo_bridge_source_text
+
     candidate = path or gjc_bridge_path()
     try:
         source = candidate.read_text(encoding="utf-8")
     except (FileNotFoundError, OSError, UnicodeDecodeError):
         return False
-    return not candidate.is_symlink() and all(
-        signature in source for signature in _GJC_BRIDGE_SIGNATURES
-    )
+    return not candidate.is_symlink() and is_gjc_ooo_bridge_source_text(source)
 
 
 def install_gjc_compatibility_bridge(

@@ -642,6 +642,25 @@ class TestRemoveGjcArtifacts:
 
         assert not bridge.exists()
 
+    def test_preserves_modified_compatibility_bridge(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        bridge = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text(
+            gjc_ooo_bridge_source_text("ouroboros", []).replace(
+                "6 * 60 * 60 * 1000", "30 * 1000", 1
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}):
+            from ouroboros.cli.gjc_setup import remove_legacy_gjc_bridge
+
+            assert remove_legacy_gjc_bridge()
+
+        assert bridge.exists()
+        assert "30 * 1000" in bridge.read_text(encoding="utf-8")
+
     def test_preserves_custom_routing_guide(self, tmp_path: Path) -> None:
         agent_dir = tmp_path / "agent"
         guide = agent_dir / "rules" / "ouroboros-skill-capability-guide.md"

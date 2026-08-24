@@ -8,6 +8,8 @@ the MCP registration before retiring a compatibility bridge.
 
 from __future__ import annotations
 
+import json
+
 from pathlib import Path
 from unittest.mock import patch
 
@@ -189,6 +191,57 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
             encoding="utf-8"
         )
         register_mcp.assert_called_once()
+
+    def test_refreshes_from_persistent_gjc_mcp_state_only(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / ".gjc" / "agent"
+        bridge_config = agent_dir / "ouroboros" / "mcp-bridge.yaml"
+        bridge_config.parent.mkdir(parents=True)
+        bridge_config.write_text(
+            "# Managed by ouroboros setup --runtime gjc\nmcp_servers: []\n",
+            encoding="utf-8",
+        )
+        mcp_path = agent_dir / "mcp.json"
+        mcp_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "ouroboros": {
+                            "type": "stdio",
+                            "command": "uvx",
+                            "args": [
+                                "--isolated",
+                                "--python",
+                                ">=3.12",
+                                "--from",
+                                "ouroboros-ai[mcp]",
+                                "ouroboros",
+                                "mcp",
+                                "serve",
+                                "--runtime",
+                                "gjc",
+                            ],
+                            "env": {"OUROBOROS_MCP_CONFIG": str(bridge_config)},
+                            "sharing": "per-session",
+                            "timeout": 30000,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/bin/gjc"),
+            patch(
+                "ouroboros.cli.commands.setup._install_gjc_runtime_artifacts",
+                return_value=True,
+            ) as install,
+        ):
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 0
+        install.assert_called_once_with("/opt/bin/gjc")
+        assert "Refreshed runtime artifacts: gjc" in result.output
 
     def test_legacy_gjc_bridge_registers_mcp_before_removal(self, tmp_path: Path) -> None:
         bridge = tmp_path / ".gjc" / "agent" / "extensions" / "ouroboros-ooo-bridge" / "index.ts"

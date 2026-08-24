@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 
 
-def gjc_ooo_bridge_source_text(command: str, args: list[str]) -> str:
-    """Render the owned GJC input bridge for hosts without native MCP autoload."""
+_OWNERSHIP_PREFIX = "// ouroboros-setup-sha256:"
+
+
+def _gjc_ooo_bridge_source_body(command: str, args: list[str]) -> str:
     default_command = json.dumps(command)
     default_args = json.dumps(args)
     return f"""// Managed by `ouroboros setup --runtime gjc`.
@@ -75,3 +79,39 @@ export default function ouroborosBridge(gjc: ExtensionAPI) {{
   }});
 }}
 """
+
+
+def gjc_ooo_bridge_source_text(command: str, args: list[str]) -> str:
+    """Render an exactly identifiable GJC compatibility bridge generation."""
+    body = _gjc_ooo_bridge_source_body(command, args)
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return f"{body}{_OWNERSHIP_PREFIX}{digest}\n"
+
+
+def is_gjc_ooo_bridge_source_text(source: str) -> bool:
+    """Return whether *source* is a complete setup-rendered bridge generation."""
+    body, separator, digest_line = source.rpartition(_OWNERSHIP_PREFIX)
+    if separator:
+        digest = digest_line.removesuffix("\n")
+        return (
+            len(digest) == 64
+            and all(character in "0123456789abcdef" for character in digest)
+            and source == f"{body}{_OWNERSHIP_PREFIX}{digest}\n"
+            and hashlib.sha256(body.encode("utf-8")).hexdigest() == digest
+        )
+
+    command_match = re.search(r"^const DEFAULT_COMMAND = (.+);$", source, re.MULTILINE)
+    args_match = re.search(r"^const DEFAULT_ARGS: string\[\] = (.+);$", source, re.MULTILINE)
+    if command_match is None or args_match is None:
+        return False
+    try:
+        command = json.loads(command_match.group(1))
+        args = json.loads(args_match.group(1))
+    except json.JSONDecodeError:
+        return False
+    return (
+        isinstance(command, str)
+        and isinstance(args, list)
+        and all(isinstance(arg, str) for arg in args)
+        and source == _gjc_ooo_bridge_source_body(command, args)
+    )
