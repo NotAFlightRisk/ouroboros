@@ -132,7 +132,6 @@ def has_managed_gjc_skill_projection(*, agent_dir: str | Path) -> bool:
     )
 
 
-
 def _publish_skill(source_dir: Path, target_path: Path) -> None:
     if target_path.is_symlink():
         raise OSError(f"Refusing to replace symlinked GJC skill: {target_path}")

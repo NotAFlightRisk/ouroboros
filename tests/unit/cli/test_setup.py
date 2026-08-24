@@ -10408,11 +10408,14 @@ class TestGjcSetup:
 
         assert config_path.read_text(encoding="utf-8") == original
         assert concurrent_skill.read_text(encoding="utf-8") == "user generation\n"
-        assert tuple(
-            path
-            for path in (agent_dir / "skills").iterdir()
-            if path.name.startswith("ouroboros-")
-        ) == ()
+        assert (
+            tuple(
+                path
+                for path in (agent_dir / "skills").iterdir()
+                if path.name.startswith("ouroboros-")
+            )
+            == ()
+        )
         assert not (agent_dir / "rules").exists()
         assert not (agent_dir / "ouroboros" / "mcp-bridge.yaml").exists()
 
