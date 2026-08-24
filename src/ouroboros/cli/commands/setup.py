@@ -30,12 +30,24 @@ import sys
 import tomllib
 from typing import Annotated, Literal
 
+from rich.markup import escape
 from rich.prompt import Prompt
 from rich.table import Table
 import typer
 import yaml
 
 from ouroboros.bigbang.brownfield import scan_and_register, set_default_repo
+from ouroboros.cli.commands.claude_setup import (
+    setup_claude as _setup_claude,
+)
+from ouroboros.cli.commands.claude_setup import (
+    setup_claude_cli as _setup_claude_cli,
+)
+from ouroboros.cli.commands.claude_setup import (
+    setup_claude_sdk as _setup_claude_sdk,
+)
+from ouroboros.cli.commands.pi_bridge import pi_ooo_bridge_source_text
+from ouroboros.cli.commands.setup_atomic_restore import restore_hermes, restore_hermes_receipt
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_error,
@@ -56,8 +68,19 @@ from ouroboros.cli.opencode_config import (
 from ouroboros.cli.opencode_config import (
     is_bridge_plugin_entry as _is_bridge_plugin_entry,
 )
+from ouroboros.cli.setup_model_config import (
+    has_explicit_codex_model_override as _has_explicit_codex_model_override,
+)
+from ouroboros.cli.setup_model_config import (
+    is_shipped_default_roster as _is_shipped_default_roster,
+)
+from ouroboros.cli.setup_model_config import (
+    neutralize_fresh_codex_model_defaults as _neutralize_fresh_codex_model_defaults,
+)
+from ouroboros.cli.windows_codex_mcp import apply_windows_codex_mcp_mode, is_native_windows
 from ouroboros.codex.cli_policy import resolve_codex_cli_path
 from ouroboros.codex.home import resolve_codex_home
+from ouroboros.codex.runtime_profile import codex_uses_profile_v2 as _shared_codex_uses_profile_v2
 from ouroboros.config._model_defaults import (
     DEFAULT_CONSENSUS_OPUS_MODEL,
     DEFAULT_OPUS_MODEL,
@@ -65,6 +88,11 @@ from ouroboros.config._model_defaults import (
     recognized_shipped_defaults,
 )
 from ouroboros.core.errors import ConfigError
+from ouroboros.package_profiles import (
+    UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
+    UVX_PYTHON_FLOOR,
+    has_unsupported_claude_sdk_mcp_mix,
+)
 from ouroboros.persistence.brownfield import BrownfieldStore
 
 
@@ -81,7 +109,16 @@ class _SetupCodexCliLogger:
 
 def _build_uvx_mcp_args(package_spec: str) -> list[str]:
     """Return the canonical uvx args for the requested Ouroboros package spec."""
-    return ["--from", package_spec, "ouroboros", "mcp", "serve"]
+    return [
+        "--isolated",
+        "--python",
+        UVX_PYTHON_FLOOR,
+        "--from",
+        package_spec,
+        "ouroboros",
+        "mcp",
+        "serve",
+    ]
 
 
 def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, object] | None:
@@ -89,8 +126,10 @@ def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, o
 
     Direct ``ouroboros`` and ``python -m`` fallbacks are deliberately excluded:
     their environments may contain the Claude SDK's MCP 1.x dependency or no
-    MCP extra at all. ``uvx`` and ``pipx run`` both create a package-isolated
-    process whose ``[mcp]`` extra is known to contain MCP 2.
+    MCP extra at all. ``uvx --isolated`` and ``pipx run`` both create a
+    package-isolated process whose ``[mcp]`` extra is known to contain MCP 2.
+    ``uvx --from`` without ``--isolated`` is insufficient: uv may reuse an
+    already installed Ouroboros tool whose environment contains MCP 1.x.
     Matches the contract in install.sh and skills/setup/SKILL.md.
     """
     if shutil.which("uvx"):
@@ -170,7 +209,7 @@ def _commit_runtime_activation(
 
 
 def _ensure_claude_mcp_entry() -> None:
-    """Fail closed for the standalone Claude SDK profile.
+    """Explain the process boundary for legacy callers.
 
     Kept as a compatibility shim for callers from older plugin artifacts. The
     current Claude Agent SDK requires MCP 1.x, while the Ouroboros protocol
@@ -178,8 +217,10 @@ def _ensure_claude_mcp_entry() -> None:
     isolated process. Never mutate user-owned Claude MCP configuration here.
     """
     print_warning(
-        "Skipped Ouroboros MCP registration for the standalone Claude SDK profile. "
-        "Use a supported CLI-backed runtime setup for the isolated MCP 2 server."
+        escape(
+            "Claude SDK stays on MCP 1.x. Launch the Ouroboros MCP 2 server from "
+            "the separate ouroboros-ai[mcp] profile with --runtime claude-cli."
+        )
     )
 
 
@@ -200,7 +241,10 @@ def _get_current_backend() -> str | None:
         return None
     try:
         data = yaml.safe_load(config_path.read_text()) or {}
-        return data.get("orchestrator", {}).get("runtime_backend")
+        backend = data.get("orchestrator", {}).get("runtime_backend")
+        if backend == "claude_mcp":
+            return "claude-cli"
+        return backend
     except Exception:
         return None
 
@@ -219,6 +263,16 @@ def _resolve_setup_codex_cli_path(
     ).cli_path
 
 
+def _runtime_cli_from_env(env_key: str, command_name: str) -> str | None:
+    """Resolve an explicit runtime executable before consulting PATH."""
+    configured = os.environ.get(env_key, "").strip()
+    if configured:
+        resolved = shutil.which(str(Path(configured).expanduser()))
+        return str(Path(resolved).absolute()) if resolved is not None else None
+    resolved = shutil.which(command_name)
+    return str(Path(resolved).absolute()) if resolved is not None else None
+
+
 def _detect_runtimes() -> dict[str, str | None]:
     """Detect available runtime CLIs in PATH.
 
@@ -226,10 +280,12 @@ def _detect_runtimes() -> dict[str, str | None]:
     and persisted orchestrator ``*_cli_path`` settings so users with non-PATH
     installs are still detected.
     """
-    runtimes: dict[str, str | None] = {}
-    for name in ("claude", "codex", "opencode", "hermes"):
-        path = shutil.which(name)
-        runtimes[name] = path
+    runtimes: dict[str, str | None] = {
+        "claude": _runtime_cli_from_env("OUROBOROS_CLI_PATH", "claude"),
+        "codex": shutil.which("codex"),
+        "opencode": _runtime_cli_from_env("OUROBOROS_OPENCODE_CLI_PATH", "opencode"),
+        "hermes": _runtime_cli_from_env("OUROBOROS_HERMES_CLI_PATH", "hermes"),
+    }
 
     # Codex: mirror the shared runtime launch resolver so setup persists the
     # executable that nested execution will actually use.
@@ -382,7 +438,6 @@ _CODEX_MCP_SECTION_TEMPLATE = """# Ouroboros MCP hookup for Codex CLI.
 OUROBOROS_AGENT_RUNTIME = "codex"
 OUROBOROS_LLM_BACKEND = "codex"
 """
-
 _CODEX_MCP_COMMENT_LINES = (
     "# Ouroboros MCP hookup for Codex CLI.",
     "# Keep Ouroboros runtime settings and per-role model overrides in",
@@ -391,11 +446,21 @@ _CODEX_MCP_COMMENT_LINES = (
     "# This file is only for the Codex MCP/env registration block.",
 )
 
-CodexMcpMode = Literal["auto", "preserve", "stdio"]
+CodexMcpMode = Literal["auto", "http", "preserve", "stdio"]
 _CODEX_APP_CLI_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
-_CODEX_UVX_MCP_ARGS = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
+_CODEX_UVX_MCP_ARGS = _build_uvx_mcp_args("ouroboros-ai[mcp]")
 _CODEX_LEGACY_UVX_MCP_ARGS: tuple[tuple[str, ...], ...] = (
     tuple(_CODEX_UVX_MCP_ARGS),
+    (
+        "--python",
+        UVX_PYTHON_FLOOR,
+        "--from",
+        "ouroboros-ai[mcp]",
+        "ouroboros",
+        "mcp",
+        "serve",
+    ),
+    ("--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"),
     ("--from", "ouroboros-ai", "ouroboros", "mcp", "serve"),
     ("ouroboros", "mcp", "serve"),
 )
@@ -403,8 +468,23 @@ _CODEX_MANAGED_MCP_ENV = {
     "OUROBOROS_AGENT_RUNTIME": "codex",
     "OUROBOROS_LLM_BACKEND": "codex",
 }
-_CODEX_DIRECT_MCP_ARGS = ["mcp", "serve", "--runtime", "codex", "--llm-backend", "codex"]
+_CODEX_DIRECT_MCP_BASE_ARGS = ("mcp", "serve")
+_CODEX_DIRECT_MCP_ARGS = [
+    *_CODEX_DIRECT_MCP_BASE_ARGS,
+    "--runtime",
+    "codex",
+    "--llm-backend",
+    "codex",
+]
 _CODEX_MODULE_MCP_ARGS = ["-m", "ouroboros", *_CODEX_DIRECT_MCP_ARGS]
+_CODEX_LEGACY_DIRECT_MCP_ARGS = (
+    tuple(_CODEX_DIRECT_MCP_ARGS),
+    _CODEX_DIRECT_MCP_BASE_ARGS,
+)
+_CODEX_LEGACY_MODULE_MCP_ARGS = (
+    tuple(_CODEX_MODULE_MCP_ARGS),
+    ("-m", "ouroboros", *_CODEX_DIRECT_MCP_BASE_ARGS),
+)
 _CODEX_PROFILE_COMMENT = (
     "# Ouroboros task profile anchor. Generated by ouroboros setup; edit freely."
 )
@@ -478,43 +558,11 @@ _CODEX_DEFAULT_LLM_ROLE_PROFILES: dict[str, str] = {
     "agent_runtime_evaluation": "deep",
 }
 
-_DEFAULT_CONSENSUS_MODELS = (
-    "openrouter/openai/gpt-4o",
-    DEFAULT_CONSENSUS_OPUS_MODEL,
-    "openrouter/google/gemini-2.5-pro",
-)
-
-_MISSING = object()
-
-_CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS: dict[str, tuple[tuple[tuple[str, ...], object], ...]] = {
-    "ambiguity": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "assertion_extraction": ((("evaluation", "assertion_extraction_model"), DEFAULT_SONNET_MODEL),),
-    "brownfield_explore": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "clarification": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "consensus_advocate": ((("consensus", "advocate_model"), DEFAULT_CONSENSUS_OPUS_MODEL),),
-    "consensus_judge": ((("consensus", "judge_model"), "openrouter/google/gemini-2.5-pro"),),
-    "consensus_vote": ((("consensus", "models"), _DEFAULT_CONSENSUS_MODELS),),
-    "context_compression": ((("llm", "context_compression_model"), "gpt-4"),),
-    "dependency_analysis": ((("llm", "dependency_analysis_model"), DEFAULT_SONNET_MODEL),),
-    "mechanical_detection": ((("evaluation", "assertion_extraction_model"), DEFAULT_SONNET_MODEL),),
-    "ontology_analysis": (
-        (("llm", "ontology_analysis_model"), DEFAULT_SONNET_MODEL),
-        (("consensus", "devil_model"), "openrouter/openai/gpt-4o"),
-    ),
-    "pm_interview": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "qa": ((("llm", "qa_model"), DEFAULT_SONNET_MODEL),),
-    "reflect": ((("resilience", "reflect_model"), DEFAULT_OPUS_MODEL),),
-    "seed_generation": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "semantic_evaluation": ((("evaluation", "semantic_model"), DEFAULT_OPUS_MODEL),),
-    "wonder": ((("resilience", "wonder_model"), DEFAULT_OPUS_MODEL),),
-}
-
 
 def _normalize_codex_mcp_mode(value: str) -> CodexMcpMode:
-    """Validate and normalize the Codex MCP setup mode."""
     normalized = value.lower()
-    if normalized not in {"auto", "preserve", "stdio"}:
-        print_error("Unsupported Codex MCP mode. Use one of: auto, preserve, stdio.")
+    if normalized not in {"auto", "http", "preserve", "stdio"}:
+        print_error("Unsupported Codex MCP mode. Use one of: auto, http, preserve, stdio.")
         raise typer.Exit(1)
     return normalized  # type: ignore[return-value]
 
@@ -623,9 +671,9 @@ def _codex_release_mcp_launcher() -> tuple[str, list[str]] | None:
 def _render_codex_mcp_section() -> str | None:
     """Render the managed Codex MCP block for the current install source.
 
-    Release installs keep the historical ``uvx --from ouroboros-ai[mcp]``
-    command so Codex can bootstrap the MCP extra even if the invoking Python
-    environment lacks it. Dev/git installs must instead point Codex at this
+    Release installs use ``uvx --isolated --from ouroboros-ai[mcp]`` so Codex
+    can bootstrap the MCP extra without reusing a conflicting installed tool.
+    Dev/git installs must instead point Codex at this
     Python environment; otherwise setup silently downgrades the MCP server back
     to the latest PyPI release and hides main-branch fixes under test.
     """
@@ -690,11 +738,30 @@ def _is_setup_managed_codex_mcp_entry(
 
     if Path(command).name == "uvx":
         return tuple(str(arg) for arg in args) in _CODEX_LEGACY_UVX_MCP_ARGS
+    if Path(command).name == "ouroboros":
+        args_tuple = tuple(str(arg) for arg in args)
+        if has_managed_comment:
+            return args_tuple in _CODEX_LEGACY_DIRECT_MCP_ARGS
+        return (
+            args_tuple == _CODEX_DIRECT_MCP_BASE_ARGS
+            and env == _CODEX_MANAGED_MCP_ENV
+            and _command_matches_path_program(command, "ouroboros")
+        )
     if not has_managed_comment:
         return False
-    if Path(command).name == "ouroboros":
-        return args == _CODEX_DIRECT_MCP_ARGS
-    return args == _CODEX_MODULE_MCP_ARGS
+    return tuple(str(arg) for arg in args) in _CODEX_LEGACY_MODULE_MCP_ARGS
+
+
+def _command_matches_path_program(command: str, program: str) -> bool:
+    """Return whether a configured command is the exact PATH-selected program."""
+    expected = shutil.which(program)
+    configured = shutil.which(command)
+    if expected is None or configured is None:
+        return False
+    try:
+        return Path(configured).resolve(strict=True) == Path(expected).resolve(strict=True)
+    except OSError:
+        return False
 
 
 _CODEX_WORKER_PROFILE_SECTION = """# Ouroboros Agent OS runtime profile for Codex worker subprocesses.
@@ -1141,43 +1208,7 @@ def _upsert_codex_mcp_section(raw: str, section: str) -> tuple[str, bool]:
 
 def _codex_uses_profile_v2(codex_path: str | None = None) -> bool:
     """Return whether ``codex --profile`` expects ``<name>.config.toml`` files."""
-    if codex_path is None:
-        return False
-
-    command = codex_path or "codex"
-    try:
-        result = subprocess.run(
-            [command, "--help"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return False
-
-    help_text = f"{result.stdout}\n{result.stderr}"
-    lines = help_text.splitlines()
-    for index, line in enumerate(lines):
-        if "--profile-v2" in line:
-            continue
-        if "--profile" not in line:
-            continue
-
-        description_lines: list[str] = []
-        for description_line in lines[index + 1 :]:
-            stripped = description_line.strip()
-            if stripped.startswith("-") or stripped.startswith("--"):
-                break
-            if stripped:
-                description_lines.append(stripped)
-        return any(
-            "Layer $CODEX_HOME/<name>.config.toml on top of the base user config"
-            in description_line
-            for description_line in description_lines
-        )
-
-    return False
+    return _shared_codex_uses_profile_v2(codex_path, run_command=subprocess.run) is True
 
 
 def _register_codex_mcp_server(
@@ -1208,11 +1239,32 @@ def _register_codex_mcp_server(
         print_info("Preserved Codex MCP config.")
         return True
 
-    rendered_section = _render_codex_mcp_section()
+    if is_native_windows():
+        handled, success, section = apply_windows_codex_mcp_mode(
+            mode,
+            codex_config=resolve_codex_home() / "config.toml",
+            launcher=(
+                (sys.executable, list(_CODEX_MODULE_MCP_ARGS))
+                if _is_dev_ouroboros_build()
+                else _codex_release_mcp_launcher()
+            )
+            if mode == "http"
+            else None,
+            print_info=print_info,
+            print_error=print_error,
+        )
+        if handled and (not success or section is None):
+            return success
+        rendered_section = section if handled else _render_codex_mcp_section()
+    else:
+        if mode == "http":
+            print_error("--mcp-mode http is only for native Windows Codex Desktop.")
+            return False
+        rendered_section = _render_codex_mcp_section()
     if rendered_section is None:
         print_error(
             "Could not find a launchable Ouroboros MCP command. Install uv, or install "
-            "Ouroboros with the [mcp] extra, then rerun setup."
+            "Ouroboros with the \\[mcp] extra, then rerun setup."
         )
         return False
 
@@ -1230,10 +1282,14 @@ def _register_codex_mcp_server(
 
         entry = _codex_mcp_entry_from_toml(parsed)
         has_managed_comment = _has_managed_codex_mcp_comment(raw)
-        if entry is not None and not _codex_mcp_entry_has_endpoint(entry) and mode != "stdio":
+        if (
+            entry is not None
+            and not _codex_mcp_entry_has_endpoint(entry)
+            and mode not in {"stdio", "http"}
+        ):
             print_error(
                 "Existing Codex Ouroboros MCP config has no usable command or URL; "
-                "Codex setup not saved. Use --mcp-mode stdio to replace it."
+                "Codex setup not saved. Use an explicit replacement mode."
             )
             return False
         if (
@@ -2107,41 +2163,6 @@ def _ensure_codex_profile_provider_mapping(profile: dict) -> dict:
     return provider_config
 
 
-def _get_nested_value(config_dict: dict, path: tuple[str, ...]) -> object:
-    """Read a nested config value, returning _MISSING when absent."""
-    current: object = config_dict
-    for part in path:
-        if not isinstance(current, dict) or part not in current:
-            return _MISSING
-        current = current[part]
-    return current
-
-
-def _has_explicit_codex_model_override(config_dict: dict, role: str) -> bool:
-    """Return True only when an existing legacy setting is a real user pin.
-
-    Default configs serialize their legacy model fields, including values from
-    prior shipped releases.  Field presence is consequently not provenance:
-    match the loader's shipped-default classification before deciding a field
-    should suppress the role's Codex effort profile.
-    """
-    for path, default in _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS.get(role, ()):
-        value = _get_nested_value(config_dict, path)
-        if value is _MISSING:
-            continue
-        if isinstance(default, str) and value in recognized_shipped_defaults(default):
-            continue
-        if (
-            isinstance(default, tuple)
-            and isinstance(value, (list, tuple))
-            and _is_shipped_default_roster(value, default)
-        ):
-            continue
-        if value != default:
-            return True
-    return False
-
-
 def _install_codex_default_llm_profiles(
     config_dict: dict,
     *,
@@ -2314,7 +2335,9 @@ class _ConcurrentSetupMutationError(OSError):
     """A managed path no longer matches the generation setup read."""
 
 
-def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _PathSnapshot:
+def _snapshot_path(
+    path: Path, *, _seen: frozenset[Path] = frozenset(), follow_links: bool = True
+) -> _PathSnapshot:
     """Snapshot a managed file or directory without following symlinks."""
     try:
         stat_result = path.lstat()
@@ -2325,15 +2348,22 @@ def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _Path
     mode = stat.S_IMODE(stat_result.st_mode)
     if stat.S_ISLNK(stat_result.st_mode):
         link_target = os.readlink(path)
+        if not follow_links:
+            return _PathSnapshot(kind="symlink", mode=mode, link_target=link_target)
         target_path = Path(link_target)
         if not target_path.is_absolute():
             target_path = path.parent / target_path
         normalized_target = target_path.expanduser().absolute()
         if normalized_target in _seen:
             return _PathSnapshot(kind="symlink", mode=mode, link_target=link_target)
-        target_snapshot = _snapshot_path(
-            target_path,
-            _seen=_seen | {current_path},
+        target_snapshot = (
+            _snapshot_path(target_path, _seen=_seen | {current_path})
+            if follow_links
+            else _snapshot_path(
+                target_path,
+                _seen=_seen | {current_path},
+                follow_links=False,
+            )
         )
         try:
             target_stat = target_path.lstat()
@@ -2367,7 +2397,20 @@ def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _Path
 
     children: list[tuple[str, _PathSnapshot]] = []
     for child in sorted(path.iterdir(), key=lambda item: item.name):
-        children.append((child.name, _snapshot_path(child, _seen=_seen | {current_path})))
+        children.append(
+            (
+                child.name,
+                (
+                    _snapshot_path(child, _seen=_seen | {current_path})
+                    if follow_links
+                    else _snapshot_path(
+                        child,
+                        _seen=_seen | {current_path},
+                        follow_links=False,
+                    )
+                ),
+            )
+        )
     return _PathSnapshot(kind="directory", mode=mode, children=tuple(children))
 
 
@@ -2440,9 +2483,13 @@ def _restore_path_snapshot_if_current_matches(
     expected_current: _PathSnapshot | None,
     *,
     restore_link_targets: bool = True,
+    follow_links: bool = True,
 ) -> bool:
     """Restore only when the current path still matches setup's last known write."""
-    if expected_current is not None and _snapshot_path(path) != expected_current:
+    if (
+        expected_current is not None
+        and _snapshot_path(path, follow_links=follow_links) != expected_current
+    ):
         print_warning(f"Preserved concurrently changed setup path during rollback: {path}")
         return False
     _restore_path_snapshot(
@@ -2668,7 +2715,12 @@ def _config_execute_runtime_backend(config_dict: dict) -> str:
     return "codex" if backend.strip().lower() in {"codex", "codex_cli"} else backend
 
 
-def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
+def _setup_codex(
+    codex_path: str,
+    *,
+    mcp_mode: CodexMcpMode = "auto",
+    preserve_existing_llm: bool = False,
+) -> bool:
     """Configure Ouroboros for the Codex runtime."""
     from ouroboros.config.loader import ensure_config_dir, get_default_config
     from ouroboros.config.models import get_config_dir, get_default_credentials
@@ -2718,13 +2770,19 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
 
     try:
         previous_execute_backend = _config_execute_runtime_backend(config_dict)
-        # Set runtime and LLM backend to codex
+        # Runtime integration and authoring/evaluation provider selection are
+        # independent. Interactive setup keeps its historical behavior, while
+        # updater-driven refreshes preserve an explicitly split LLM backend.
         orchestrator_config = _ensure_mapping_section(config_dict, "orchestrator")
         orchestrator_config["runtime_backend"] = "codex"
         orchestrator_config["codex_cli_path"] = codex_path
 
         llm_config = _ensure_mapping_section(config_dict, "llm")
-        llm_config["backend"] = "codex"
+        if not preserve_existing_llm or fresh_config or not llm_config.get("backend"):
+            llm_config["backend"] = "codex"
+
+        if fresh_config:
+            _neutralize_fresh_codex_model_defaults(config_dict)
 
         added_profiles, updated_profiles, added_role_profiles = _install_codex_default_llm_profiles(
             config_dict,
@@ -2900,20 +2958,26 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
     return True
 
 
-def _install_hermes_artifacts() -> None:
+def _install_hermes_artifacts() -> object | bool:
     """Install packaged Ouroboros skills into ~/.hermes/."""
     from ouroboros.hermes.artifacts import install_hermes_skills
 
     hermes_dir = Path.home() / ".hermes"
 
     try:
-        skill_path = install_hermes_skills(hermes_dir=hermes_dir, prune=True)
-        print_success(f"Installed Hermes skills → {skill_path}")
-    except FileNotFoundError:
-        print_error("Could not locate packaged skills for Hermes.")
+        publication = install_hermes_skills(
+            hermes_dir=hermes_dir,
+            prune=True,
+            return_receipt=True,
+        )
+        print_success(f"Installed Hermes skills → {publication.target}")
+    except OSError as exc:
+        print_error(f"Could not install packaged skills for Hermes: {exc}")
+        return False
+    return publication
 
 
-def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> None:
+def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> bool:
     """Install a setup-owned runtime instruction artifact when supported."""
     from ouroboros.runtime_instruction_artifacts import (
         install_copilot_instruction_artifact,
@@ -2932,13 +2996,14 @@ def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> Non
     }
     installer = installers.get(backend)
     if installer is None:
-        return
+        return False
     try:
         artifact = installer(**kwargs)
     except OSError as exc:
         print_warning(f"Could not install {backend} instruction artifact: {exc}")
-        return
+        return False
     print_success(f"Installed {backend.title()} instruction guide → {artifact.path}")
+    return True
 
 
 def _register_hermes_mcp_server(*, detected: dict[str, object] | None = None) -> bool:
@@ -3024,6 +3089,56 @@ def _setup_hermes(hermes_path: str) -> bool:
         config_dict["orchestrator"] = orch
     orch["runtime_backend"] = "hermes"
     orch["hermes_cli_path"] = hermes_path
+    from ouroboros.hermes.artifacts import (
+        HERMES_SKILL_CATEGORY,
+        HERMES_SKILL_NAME,
+        HermesPublicationReceipt,
+    )
+
+    hermes_skill_target = (
+        Path.home() / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / HERMES_SKILL_NAME
+    )
+    if hermes_skill_target.is_symlink():
+        print_error(f"Hermes activation refused symlinked skill target: {hermes_skill_target}")
+        return False
+    hermes_skill_snapshot = _snapshot_path(hermes_skill_target, follow_links=False)
+    hermes_publication = _install_hermes_artifacts()
+    if not hermes_publication:
+        print_error("Hermes runtime activation incomplete: required skills were not installed.")
+        return False
+
+    try:
+        hermes_skill_published = _snapshot_path(hermes_skill_target, follow_links=False)
+    except OSError as exc:
+        print_error(f"Hermes activation could not snapshot published skills: {exc}")
+        try:
+            restored = isinstance(
+                hermes_publication, HermesPublicationReceipt
+            ) and restore_hermes_receipt(
+                hermes_skill_target,
+                hermes_skill_snapshot,
+                hermes_publication,
+            )
+            if not restored:
+                print_warning("Preserved concurrent Hermes skill changes during rollback.")
+        except OSError as rollback_exc:
+            print_error(f"Hermes activation rollback could not restore skills: {rollback_exc}")
+        return False
+
+    def rollback_hermes_skills() -> None:
+        try:
+            if isinstance(
+                hermes_publication, HermesPublicationReceipt
+            ) and not hermes_publication.matches(hermes_skill_target):
+                print_warning("Preserved concurrent Hermes skill changes during rollback.")
+                return
+            restored = restore_hermes(
+                hermes_skill_target, hermes_skill_snapshot, hermes_skill_published
+            )
+            if not restored:
+                print_warning("Preserved concurrent Hermes skill changes during rollback.")
+        except OSError as exc:
+            print_error(f"Hermes activation rollback could not restore skills: {exc}")
 
     if not _commit_runtime_activation(
         runtime_name="Hermes",
@@ -3038,13 +3153,11 @@ def _setup_hermes(hermes_path: str) -> bool:
         register_host=lambda: _register_hermes_mcp_server(detected=detected),
         create_defaults=create_default_config,
     ):
+        rollback_hermes_skills()
         return False
 
     print_success(f"Configured Hermes runtime (CLI: {hermes_path})")
     print_info(f"Config saved to: {config_path}")
-
-    # Install Ouroboros skills for Hermes
-    _install_hermes_artifacts()
     return True
 
 
@@ -3388,25 +3501,6 @@ def _apply_copilot_default_model(
             section[key] = list(model_roster)
 
 
-def _is_shipped_default_roster(
-    current: list | tuple,
-    shipped_roster: tuple[str, ...],
-) -> bool:
-    """True when ``current`` is a shipped default roster (current or legacy).
-
-    Element-wise match against ``recognized_shipped_defaults`` so a roster
-    persisted before a pin bump (e.g. the old OpenRouter Opus slug in the
-    consensus slot) is still recognized as an untouched shipped default.
-    """
-    current_tuple = tuple(current)
-    if len(current_tuple) != len(shipped_roster):
-        return False
-    return all(
-        str(candidate) in recognized_shipped_defaults(default)
-        for candidate, default in zip(current_tuple, shipped_roster, strict=True)
-    )
-
-
 def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
     """Configure Ouroboros for the GitHub Copilot CLI runtime.
 
@@ -3443,8 +3537,9 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Copilot setup.")
         return False
 
-    # Live-discover available Copilot models. Falls back silently to a
-    # bundled snapshot when the GitHub API is unreachable or unauthenticated.
+    # Live-discover available Copilot models. When the GitHub API is
+    # unreachable or unauthenticated, use a bundled snapshot and warn that it
+    # may be stale.
     models = list_copilot_models(refresh=True)
     if used_fallback():
         print_warning(
@@ -3544,81 +3639,7 @@ def _detect_pi_bridge_dispatch_entry() -> tuple[str, list[str]]:
 def _pi_ooo_bridge_source_text() -> str:
     """Return the managed Pi extension source for ``ooo`` frontdoor dispatch."""
     command, args = _detect_pi_bridge_dispatch_entry()
-    default_command = json.dumps(command)
-    default_args = json.dumps(args)
-    return f"""/**
- * Ouroboros ooo bridge for Pi.
- *
- * Managed by `ouroboros setup --runtime pi`.
- * Routes exact-prefix `ooo ...` inputs from interactive Pi into Ouroboros'
- * shared skill dispatcher instead of sending them to the model as chat.
- */
-import type {{ ExtensionAPI, ExtensionContext }} from "@earendil-works/pi-coding-agent";
-
-const COMMAND_RE = /^\\s*ooo(?:\\s+|$)/i;
-const UNSUPPORTED_DISPATCH_EXIT_CODE = 78;
-const TIMEOUT_MS = Number(process.env.OUROBOROS_PI_BRIDGE_TIMEOUT_MS || 6 * 60 * 60 * 1000);
-const DEFAULT_COMMAND = {default_command};
-const DEFAULT_ARGS = {default_args};
-
-function ouroborosEntry(): {{ command: string; args: string[] }} {{
-  if (process.env.OUROBOROS_CLI) return {{ command: process.env.OUROBOROS_CLI, args: [] }};
-  return {{ command: DEFAULT_COMMAND, args: DEFAULT_ARGS }};
-}}
-
-function outputText(stdout: string, stderr: string): string {{
-  const out = stdout.trim();
-  const err = stderr.trim();
-  if (out && err) return `${{out}}\\n\\n${{err}}`;
-  return out || err || "(no output)";
-}}
-
-async function dispatch(pi: ExtensionAPI, text: string, ctx: ExtensionContext): Promise<boolean> {{
-  ctx.ui.notify(`Ouroboros dispatch: ${{text}}`, "info");
-  const entry = ouroborosEntry();
-  const result = await pi.exec(
-    entry.command,
-    [...entry.args, "dispatch", "--runtime", "pi", "--cwd", ctx.cwd, text],
-    {{ cwd: ctx.cwd, timeout: TIMEOUT_MS }},
-  );
-  if (result.code === UNSUPPORTED_DISPATCH_EXIT_CODE) {{
-    ctx.ui.notify(`Ouroboros did not claim command; continuing in Pi`, "info");
-    return false;
-  }}
-  const body = outputText(result.stdout || "", result.stderr || "");
-  pi.sendMessage({{
-    customType: "ouroboros",
-    content: body,
-    display: true,
-    details: {{ command: text, exitCode: result.code }},
-  }});
-  if (result.code !== 0) {{
-    ctx.ui.notify(`Ouroboros dispatch failed (${{result.code ?? "unknown"}})`, "error");
-  }}
-  return true;
-}}
-
-export default function ouroborosBridge(pi: ExtensionAPI) {{
-  pi.registerCommand("ooo", {{
-    description: "Dispatch an Ouroboros ooo command",
-    handler: async (args, ctx) => {{
-      const text = `ooo ${{args}}`.trim();
-      await dispatch(pi, text, ctx);
-    }},
-  }});
-
-  pi.on("input", async (event, ctx) => {{
-    if (event.source === "extension") {{
-      return {{ action: "continue" }};
-    }}
-    if (!COMMAND_RE.test(event.text)) {{
-      return {{ action: "continue" }};
-    }}
-    const handled = await dispatch(pi, event.text.trim(), ctx);
-    return {{ action: handled ? "handled" : "continue" }};
-  }});
-}}
-"""
+    return pi_ooo_bridge_source_text(command=command, args=args)
 
 
 def _install_pi_ooo_bridge() -> bool:
@@ -3876,6 +3897,37 @@ def _setup_grok(grok_path: str) -> None:
 def _setup_zcode(zcode_path: str) -> None:
     """Configure Ouroboros for the Zcode CLI runtime."""
     _setup_runtime_only_backend("zcode", zcode_path, "zcode_cli_path")
+    _warn_zcode_model_config()
+
+
+def _warn_zcode_model_config() -> None:
+    """Warn when the Zcode CLI itself has no usable model provider config.
+
+    Ouroboros setup only records the CLI path; the Zcode CLI separately
+    resolves its model from ``~/.zcode/cli/config.json`` on every headless
+    run and exits with ``Model config is missing`` when that file has no
+    effective ``model.main`` reference. Without this probe the failure only
+    appears mid-execution, after Ouroboros has already spawned the CLI.
+    """
+
+    from ouroboros.config.zcode_model_config import inspect_zcode_model_config
+
+    status = inspect_zcode_model_config()
+    if status.ok:
+        return
+
+    print_warning(f"Zcode model provider config not ready: {status.detail}")
+    print_info(
+        "Headless Zcode runs will exit with 'Model config is missing' until "
+        f"{status.config_path} defines model.main."
+    )
+    print_info(
+        'Example: {"model": {"main": "builtin:zai-coding-plan/GLM-5.3"}, '
+        '"provider": {"builtin:zai-coding-plan": {"kind": "anthropic", '
+        '"options": {"baseURL": "https://api.z.ai/api/anthropic", "apiKey": "..."}}}} '
+        "(model.main must be the provider/model string). "
+        "See docs/runtime-guides/zcode.md"
+    )
 
 
 def _setup_pi(pi_path: str) -> None:
@@ -3947,47 +3999,6 @@ def _setup_goose(goose_path: str) -> None:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
     print_success(f"Configured Goose runtime (CLI: {goose_path})")
-    print_info(f"Config saved to: {config_path}")
-
-
-def _setup_claude(claude_path: str) -> None:
-    """Configure Ouroboros for the Claude Code runtime."""
-    from ouroboros.config.loader import create_default_config, ensure_config_dir
-
-    config_dir = ensure_config_dir()
-    config_path = config_dir / "config.yaml"
-
-    if config_path.exists():
-        config_dict = yaml.safe_load(config_path.read_text()) or {}
-    else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text()) or {}
-
-    # Set runtime and LLM backend to claude
-    config_dict.setdefault("orchestrator", {})
-    config_dict["orchestrator"]["runtime_backend"] = "claude"
-    config_dict["orchestrator"]["cli_path"] = claude_path
-
-    config_dict.setdefault("llm", {})
-    config_dict["llm"]["backend"] = "claude"
-
-    with config_path.open("w") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
-
-    # Do not register the isolated MCP 2 server with this Claude SDK profile.
-    # The protocol server excludes ``claude-agent-sdk`` (it pins MCP 1.x), and
-    # the persisted *runtime* backend below still requires it — a registration
-    # here would boot and then fail lazily on execution tools. The *LLM* half of
-    # that dependency is gone as of Q00/ouroboros#1839 (``ClaudeCodeAdapter``
-    # falls back to the ``claude`` CLI), so lifting this skip now needs the same
-    # fallback on ``ClaudeAgentAdapter``, not a change here.
-    print_warning(
-        "Skipped Ouroboros MCP registration for the standalone Claude SDK profile: "
-        "its MCP 1.x runtime cannot share the isolated MCP 2 server process. "
-        "Use a supported CLI-backed runtime setup to register the MCP server."
-    )
-
-    print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
     print_info(f"Config saved to: {config_path}")
 
 
@@ -4152,7 +4163,7 @@ def _detect_opencode_mcp_command() -> dict[str, list[str]] | None:
     stale global binary and a newer uvx install use the newer one.
     """
     if shutil.which("uvx"):
-        return {"command": ["uvx", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]}
+        return {"command": ["uvx", *_build_uvx_mcp_args("ouroboros-ai[mcp]")]}
     if shutil.which("pipx"):
         return {
             "command": [
@@ -4217,12 +4228,10 @@ def _atomic_write_text(
     mode: int | None = None,
     expected_current: _PathSnapshot | None = None,
 ) -> _PathSnapshot:
-    """Write *content* to *path* atomically — temp file + ``os.replace``.
+    """Write *content* atomically through a temp file and ``os.replace``.
 
-    Readers always see either the pre-existing file or the final content —
-    never a truncated partial.  Caller is expected to have created
-    ``path.parent`` already.  Raises :class:`OSError` on failure; callers
-    decide how to surface that.
+    Readers see either the previous file or the final content, never partial
+    bytes. Raises :class:`OSError` on failure for callers to surface.
     """
     import os
     import tempfile
@@ -4240,17 +4249,19 @@ def _atomic_write_text(
         dir=str(write_path.parent),
     )
     try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(content)
+        try:
+            os.chmod(tmp_name, mode)
+        except OSError:
+            pass  # e.g. Windows FAT — not fatal
+        actual_mode = stat.S_IMODE(Path(tmp_name).lstat().st_mode)
         if expected_current is not None:
             _require_path_snapshot(path, expected_current)
         os.replace(tmp_name, write_path)
-        try:
-            os.chmod(write_path, mode)
-        except OSError:
-            pass  # e.g. Windows FAT — not fatal
-        return _PathSnapshot(kind="file", mode=mode, contents=content.encode("utf-8"))
+        return _PathSnapshot(kind="file", mode=actual_mode, contents=content.encode("utf-8"))
     except OSError:
         try:
             os.close(fd)
@@ -4724,7 +4735,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, antigravity, grok, zcode).",
+            help="Runtime backend to configure (claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, antigravity, grok, zcode).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -4745,9 +4756,17 @@ def setup(
         str,
         typer.Option(
             "--mcp-mode",
-            help="Codex MCP config mode: auto preserves user-managed entries, preserve skips MCP changes, stdio replaces with the managed stdio entry.",
+            help="Codex MCP config mode: auto preserves native-Windows safety and user entries; http explicitly writes the native-Windows loopback URL; preserve skips MCP changes; stdio replaces with the managed entry on supported hosts.",
         ),
     ] = "auto",
+    preserve_existing_llm: Annotated[
+        bool,
+        typer.Option(
+            "--preserve-existing-llm",
+            help="Preserve an existing independent LLM backend during runtime refresh.",
+            hidden=True,
+        ),
+    ] = False,
 ) -> None:
     """Set up Ouroboros for your environment.
 
@@ -4772,6 +4791,9 @@ def setup(
     """
     if ctx.invoked_subcommand is not None:
         return
+    if has_unsupported_claude_sdk_mcp_mix():
+        print_error(escape(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE))
+        raise typer.Exit(1)
 
     console.print("\n[bold cyan]Ouroboros Setup[/bold cyan]\n")
 
@@ -4784,6 +4806,10 @@ def setup(
     # Detect available runtimes
     detected = _detect_runtimes()
     available = {k: v for k, v in detected.items() if v is not None}
+    # All Claude profiles share one executable. Expose an explicit alias only
+    # when already configured so no-argument setup preserves its transport.
+    if current_backend in {"claude-sdk", "claude-cli"} and "claude" in available:
+        available[current_backend] = available["claude"]
 
     if available:
         console.print("[bold]Detected runtimes:[/bold]")
@@ -4857,7 +4883,22 @@ def setup(
         if not claude_path:
             print_error("Claude Code CLI not found in PATH.")
             raise typer.Exit(1)
-        _setup_claude(claude_path)
+        if not _setup_claude(claude_path):
+            raise typer.Exit(1)
+    elif selected in ("claude-cli", "claude_mcp"):
+        claude_path = available.get("claude")
+        if not claude_path:
+            print_error("Claude Code CLI not found in PATH.")
+            raise typer.Exit(1)
+        if not _setup_claude_cli(claude_path):
+            raise typer.Exit(1)
+    elif selected in ("claude-sdk", "claude_sdk"):
+        claude_path = available.get("claude")
+        if not claude_path:
+            print_error("Claude Code CLI not found in PATH.")
+            raise typer.Exit(1)
+        if not _setup_claude_sdk(claude_path):
+            raise typer.Exit(1)
     elif selected in ("codex", "codex_cli"):
         codex_path = available.get("codex")
         if not codex_path:
@@ -4870,7 +4911,11 @@ def setup(
             else:
                 print_error("Codex CLI not found in PATH or Codex App bundle.")
             raise typer.Exit(1)
-        if not _setup_codex(codex_path, mcp_mode=_normalize_codex_mcp_mode(mcp_mode)):
+        if not _setup_codex(
+            codex_path,
+            mcp_mode=_normalize_codex_mcp_mode(mcp_mode),
+            preserve_existing_llm=preserve_existing_llm,
+        ):
             raise typer.Exit(1)
     elif selected in ("opencode", "opencode_cli"):
         opencode_path = available.get("opencode")
@@ -5025,94 +5070,10 @@ def _opencode_bridge_dest() -> Path:
 
 @app.command("refresh")
 def refresh_artifacts() -> None:
-    """Refresh installed Ouroboros artifacts for every detected runtime.
+    """Refresh artifacts installed by a previous setup."""
+    from ouroboros.cli.commands.setup_refresh import refresh_runtime_artifacts
 
-    Rewrites rules, skills, bridges, and instruction guides that a previous
-    setup already installed — without changing MCP registrations, the runtime
-    selection, or ~/.ouroboros/config.yaml. Codex follows ``ouroboros codex
-    refresh`` semantics and refreshes whenever Codex is present; every other
-    artifact refreshes only when it already exists, so a deliberately removed
-    integration (e.g. OpenCode subprocess mode) is never resurrected.
-    """
-    from ouroboros.hermes.artifacts import HERMES_SKILL_CATEGORY, HERMES_SKILL_NAME
-    from ouroboros.runtime_instruction_artifacts import (
-        copilot_instruction_path,
-        gemini_instruction_path,
-        gjc_agent_dir,
-        gjc_instruction_path,
-        has_managed_section,
-        kiro_instruction_path,
-        opencode_instruction_path,
-    )
-
-    refreshed: list[str] = []
-
-    codex_dir = _codex_home_candidate_for_setup()
-    if codex_dir.exists() or shutil.which("codex"):
-        from ouroboros.codex import install_codex_artifacts
-
-        try:
-            result = install_codex_artifacts(codex_dir=codex_dir, prune=False)
-        except OSError as exc:
-            # One runtime failing must not leave the remaining ones stale.
-            print_warning(f"Could not refresh Codex artifacts: {exc}")
-        else:
-            print_success(f"Installed Codex rules → {result.rules_path}")
-            print_success(
-                f"Installed {len(result.skill_paths)} Codex skills → {codex_dir / 'skills'}"
-            )
-            refreshed.append("codex")
-
-    hermes_skill_dir = Path.home() / ".hermes" / "skills" / HERMES_SKILL_CATEGORY
-    if (hermes_skill_dir / HERMES_SKILL_NAME).exists():
-        try:
-            _install_hermes_artifacts()
-        except OSError as exc:
-            print_warning(f"Could not refresh Hermes artifacts: {exc}")
-        else:
-            refreshed.append("hermes")
-
-    opencode_dir = opencode_config_dir()
-    opencode_touched = False
-    if _opencode_bridge_dest().exists():
-        opencode_touched = _install_opencode_bridge_plugin()
-    if has_managed_section(opencode_instruction_path(opencode_dir)):
-        _install_runtime_instruction_artifact("opencode", config_dir=opencode_dir)
-        opencode_touched = True
-    if opencode_touched:
-        refreshed.append("opencode")
-
-    if has_managed_section(gemini_instruction_path()):
-        _install_runtime_instruction_artifact("gemini")
-        refreshed.append("gemini")
-
-    if kiro_instruction_path().exists():
-        _install_runtime_instruction_artifact("kiro")
-        refreshed.append("kiro")
-
-    if copilot_instruction_path().exists():
-        _install_runtime_instruction_artifact("copilot")
-        refreshed.append("copilot")
-
-    pi_bridge = Path.home() / ".pi" / "agent" / "extensions" / _PI_OOO_BRIDGE_FILENAME
-    if pi_bridge.exists():
-        if _install_pi_ooo_bridge():
-            refreshed.append("pi")
-
-    gjc_touched = False
-    gjc_bridge = gjc_agent_dir() / "extensions" / _GJC_OOO_BRIDGE_SUBDIR / _GJC_OOO_BRIDGE_FILENAME
-    if gjc_bridge.exists():
-        gjc_touched = _install_gjc_ooo_bridge()
-    if gjc_instruction_path().exists():
-        _install_runtime_instruction_artifact("gjc")
-        gjc_touched = True
-    if gjc_touched:
-        refreshed.append("gjc")
-
-    if refreshed:
-        print_success(f"Refreshed runtime artifacts: {', '.join(refreshed)}")
-    else:
-        print_info("No installed runtime artifacts found to refresh.")
+    refresh_runtime_artifacts()
 
 
 # ── Brownfield subcommands ───────────────────────────────────────

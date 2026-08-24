@@ -73,7 +73,6 @@ from ouroboros.core.seed_contract_prompt import (
 )
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import TaskWorkspace, heartbeat_lock, release_lock
-from ouroboros.observability.drift import DriftMeasurement
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     DEFAULT_TOOLS,
@@ -83,6 +82,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
     resolve_worker_cwd,
 )
+from ouroboros.orchestrator.adaptive_concurrency import adaptive_concurrency_policy
 from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
     plan_fan_out_concurrency,
@@ -103,7 +103,6 @@ from ouroboros.orchestrator.decomposition_limits import (
     validate_max_decomposition_depth,
 )
 from ouroboros.orchestrator.events import (
-    create_drift_measured_event,
     create_execution_terminal_event,
     create_guidance_injected_event,
     create_mcp_tools_loaded_event,
@@ -152,8 +151,19 @@ from ouroboros.orchestrator.execution_runtime_scope import (
     ExecutionNodeIdentity,
     build_ac_runtime_scope,
 )
+from ouroboros.orchestrator.execution_semantics import (
+    CURRENT_EXECUTION_SEMANTICS_VERSION,
+    migrated_pre_verify_shell_execution_semantics,
+    pre_adaptive_execution_semantics_rejection,
+    valid_execution_semantics_contract,
+    valid_legacy_preflight_execution_semantics_contract,
+)
 from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
+from ouroboros.orchestrator.legacy_identity import (
+    legacy_task_workspace_identity,
+    note_legacy_identity_path,
+)
 from ouroboros.orchestrator.mcp_tools import (
     MCPToolProvider,
     SessionToolCatalog,
@@ -161,6 +171,7 @@ from ouroboros.orchestrator.mcp_tools import (
     enumerate_runtime_builtin_tool_definitions,
     serialize_tool_catalog,
 )
+from ouroboros.orchestrator.parallel_executor_models import CoordinatorQuotaPause
 from ouroboros.orchestrator.policy import (
     PolicyContext,
     PolicyDecision,
@@ -194,6 +205,10 @@ from ouroboros.orchestrator.session import (
     SessionStatus,
     SessionTracker,
     runtime_resume_identity_from_payload,
+)
+from ouroboros.orchestrator.verify_shell import (
+    capture_verify_shell_identity,
+    resolve_verify_shell,
 )
 from ouroboros.orchestrator.workflow_state import ActivityType, coerce_ac_marker_update
 from ouroboros.persistence.checkpoint import CheckpointStore
@@ -265,15 +280,6 @@ def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
             return False
         seen.add(key)
     return False
-
-
-class _UnresolvedProjectIdentity:
-    """Sentinel type separating omitted resolution from resolved absence."""
-
-    __slots__ = ()
-
-
-_UNRESOLVED_PROJECT_IDENTITY = _UnresolvedProjectIdentity()
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,6 +355,7 @@ class RecoverableFailurePause:
     resume_hint: str
     pause_seconds: int | None = None
     resume_after: datetime | None = None
+    coordinator_owner: CoordinatorQuotaPause | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1063,6 +1070,10 @@ class OrchestratorRunner:
         _execution_config = _config.execution
         self._run_verify_commands = _execution_config.run_verify_commands
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
+        verify_shell = resolve_verify_shell() if self._run_verify_commands else None
+        self._verify_shell_identity = (
+            capture_verify_shell_identity(verify_shell) if verify_shell is not None else None
+        )
         self._ac_retry_attempts = _execution_config.ac_retry_attempts
         from ouroboros.config import (
             get_context_pack_enabled,
@@ -2375,13 +2386,13 @@ class OrchestratorRunner:
         return current_seed_id, tuple(cohort)
 
     def _plan_parallel_workers(self, requested_workers: int | None = None) -> int:
-        """Return the effective fan-out worker count for the connected backend.
+        """Return the initial fan-out estimate for the connected backend.
 
-        Ouroboros caps delivery fan-out to the connected backend's known
-        concurrency limit so it does not stampede the LLM's rate/quota window
-        (R3). Backends whose underlying LLM limits are unknown — the CLI
-        runtimes — serialize by default and are raised only via
-        ``OUROBOROS_MAX_CONCURRENCY``.
+        Backends whose underlying LLM limits are unknown — the CLI runtimes —
+        start serialized. ParallelACExecutor treats this immutable pre-flight
+        value as an AIMD initial window, shrinking on provider pressure and
+        cautiously probing toward ``max_parallel_workers`` after sustained
+        success.
         """
         limits = resolve_backend_limits(self._adapter.runtime_backend)
         requested = self._max_parallel_workers if requested_workers is None else requested_workers
@@ -3301,23 +3312,6 @@ class OrchestratorRunner:
                 },
             ) from exc
 
-    @classmethod
-    def _legacy_task_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
-        """Reproduce the pre-anchor managed-workspace representation exactly."""
-        project_root = Path(cls._canonical_path(workspace.repo_root))
-        source_workspace = Path(cls._canonical_path(workspace.original_cwd))
-        try:
-            workspace_path = source_workspace.relative_to(project_root).as_posix() or "."
-        except ValueError as exc:
-            raise OrchestratorError(
-                message="Cannot resume from an invalid historical task workspace",
-                details={"invalid": "legacy_task_workspace"},
-            ) from exc
-        return {
-            "project_root": str(project_root),
-            "workspace_path": workspace_path,
-        }
-
     @staticmethod
     def _project_identity_error(exc: ProjectIdentityError) -> OrchestratorError:
         """Normalize resolver failures at the orchestration lifecycle boundary."""
@@ -3367,7 +3361,7 @@ class OrchestratorRunner:
     def _legacy_proof_workspace_identity(self) -> dict[str, str] | None:
         """Reproduce the pre-Project-Map V1 nested workspace representation."""
         if self._task_workspace is not None:
-            return self._legacy_task_workspace_identity(self._task_workspace)
+            return legacy_task_workspace_identity(self._task_workspace, self._canonical_path)
         effective_cwd = self._effective_cwd()
         if not isinstance(effective_cwd, str) or not effective_cwd.strip():
             return None
@@ -3920,19 +3914,29 @@ class OrchestratorRunner:
     def _execution_semantics_contract(self) -> dict[str, object]:
         """Return every scalar setting that can change resumed AC effects."""
         backend_limits = resolve_backend_limits(self._adapter.runtime_backend)
+        effective_parallel_workers = plan_fan_out_concurrency(
+            self._max_parallel_workers,
+            backend_limits,
+        )
         return {
-            "version": 3,
+            "version": CURRENT_EXECUTION_SEMANTICS_VERSION,
             "run_verify_commands": self._run_verify_commands,
             "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
+            "verify_shell_identity": (
+                dict(self._verify_shell_identity)
+                if self._verify_shell_identity is not None
+                else None
+            ),
             "ac_retry_attempts": self._ac_retry_attempts,
             "cross_harness_redispatch": self._cross_harness_redispatch_enabled,
             "enable_decomposition": self._enable_decomposition,
             "decomposition_mode": self._decomposition_mode,
             "max_decomposition_depth": self._max_decomposition_depth,
             "max_parallel_workers": self._max_parallel_workers,
-            "effective_parallel_workers": plan_fan_out_concurrency(
-                self._max_parallel_workers,
-                backend_limits,
+            "effective_parallel_workers": effective_parallel_workers,
+            "adaptive_concurrency_policy": adaptive_concurrency_policy(
+                initial_limit=effective_parallel_workers,
+                max_limit=self._max_parallel_workers,
             ),
             "fat_harness_mode": self._fat_harness_mode,
             "shadow_replay_enabled": self._shadow_replay_enabled,
@@ -3950,114 +3954,10 @@ class OrchestratorRunner:
             "runtime_effect_capabilities": runtime_effect_capabilities_contract(self._adapter),
         }
 
-    @staticmethod
-    def _valid_execution_semantics_contract(value: object) -> bool:
-        """Validate the exact current scalar executor schema."""
-        expected_keys = frozenset(
-            {
-                "version",
-                "run_verify_commands",
-                "verify_command_timeout_seconds",
-                "ac_retry_attempts",
-                "cross_harness_redispatch",
-                "enable_decomposition",
-                "decomposition_mode",
-                "max_decomposition_depth",
-                "max_parallel_workers",
-                "effective_parallel_workers",
-                "fat_harness_mode",
-                "shadow_replay_enabled",
-                "checkpoint_store_enabled",
-                "session_signal_hub_enabled",
-                "context_pack_enabled",
-                "backend_limits_backend",
-                "backend_max_concurrency",
-                "backend_requests_per_minute",
-                "backend_tokens_per_minute",
-                "backend_self_governs_rate_limit",
-                "usage_limit_pause_seconds",
-                "runtime_effect_capabilities",
-            }
-        )
-        if not isinstance(value, Mapping) or not _mapping_has_exact_keys(value, expected_keys):
-            return False
-        boolean_keys = (
-            "run_verify_commands",
-            "cross_harness_redispatch",
-            "enable_decomposition",
-            "fat_harness_mode",
-            "shadow_replay_enabled",
-            "checkpoint_store_enabled",
-            "session_signal_hub_enabled",
-            "context_pack_enabled",
-            "backend_self_governs_rate_limit",
-        )
-        if (
-            type(value.get("version")) is not int
-            or value.get("version") != 3
-            or any(type(value.get(key)) is not bool for key in boolean_keys)
-        ):
-            return False
-        timeout = value.get("verify_command_timeout_seconds")
-        retries = value.get("ac_retry_attempts")
-        max_depth = value.get("max_decomposition_depth")
-        max_workers = value.get("max_parallel_workers")
-        effective_workers = value.get("effective_parallel_workers")
-        mode = value.get("decomposition_mode")
-        backend = value.get("backend_limits_backend")
-        backend_max_concurrency = value.get("backend_max_concurrency")
-        backend_limits = (
-            backend_max_concurrency,
-            value.get("backend_requests_per_minute"),
-            value.get("backend_tokens_per_minute"),
-        )
-        usage_limit_pause_seconds = value.get("usage_limit_pause_seconds")
-        expected_effective_workers = (
-            min(max_workers, backend_max_concurrency)
-            if type(max_workers) is int and type(backend_max_concurrency) is int
-            else max_workers
-        )
-        return bool(
-            type(timeout) is int
-            and timeout >= 1
-            and type(retries) is int
-            and retries >= 0
-            and type(max_depth) is int
-            and max_depth >= 0
-            and type(max_workers) is int
-            and max_workers >= 1
-            and type(effective_workers) is int
-            and 1 <= effective_workers <= max_workers
-            and effective_workers == expected_effective_workers
-            and isinstance(mode, str)
-            and mode in {"bounce_only", "off"}
-            and (value.get("enable_decomposition") is True or mode == "off")
-            and isinstance(backend, str)
-            and bool(backend)
-            and all(item is None or (type(item) is int and item >= 1) for item in backend_limits)
-            and type(usage_limit_pause_seconds) is int
-            and 1 <= usage_limit_pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
-            and valid_runtime_effect_capabilities_contract(value.get("runtime_effect_capabilities"))
-        )
-
-    @staticmethod
-    def _valid_legacy_preflight_execution_semantics_contract(value: object) -> bool:
-        """Recognize only the retired current-schema preflight snapshot.
-
-        The migration changes one authority bit (``preflight`` to
-        ``bounce_only``); every other effect-bearing field must already satisfy
-        the exact current schema.  This helper never feeds a live constructor.
-        """
-
-        if (
-            not isinstance(value, Mapping)
-            or value.get("decomposition_mode") != "preflight"
-            or value.get("enable_decomposition") is not True
-        ):
-            return False
-        migrated = dict(value)
-        migrated["decomposition_mode"] = "bounce_only"
-        return OrchestratorRunner._valid_execution_semantics_contract(migrated)
+    _valid_execution_semantics_contract = staticmethod(valid_execution_semantics_contract)
+    _valid_legacy_preflight_execution_semantics_contract = staticmethod(
+        valid_legacy_preflight_execution_semantics_contract
+    )
 
     def _execution_semantics_snapshot(
         self,
@@ -5254,6 +5154,11 @@ class OrchestratorRunner:
                     pause_seconds=pause.pause_seconds,
                     resume_after=pause.resume_after,
                     pause_kind=pause.pause_kind,
+                    pause_owner=(
+                        pause.coordinator_owner.owner_payload()
+                        if pause.coordinator_owner is not None
+                        else None
+                    ),
                 )
                 resolved, pending = await self._resolve_pause_publication(
                     session_id=tracker.session_id,
@@ -5679,9 +5584,7 @@ class OrchestratorRunner:
         seed_fingerprint: str | None = None,
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
         execution_inputs_contract: Mapping[str, Any] | None = None,
-        project_identity: ProjectIdentity | None | _UnresolvedProjectIdentity = (
-            _UNRESOLVED_PROJECT_IDENTITY
-        ),
+        project_identity: ProjectIdentity | None,
         runtime_handle: RuntimeHandle | None = None,
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
@@ -5738,12 +5641,7 @@ class OrchestratorRunner:
             ),
             "execution_inputs_fingerprint": self._execution_inputs_fingerprint(execution_inputs),
         }
-        resolved_project_identity = (
-            self._project_identity()
-            if isinstance(project_identity, _UnresolvedProjectIdentity)
-            else project_identity
-        )
-        workspace_identity = self._resolved_proof_workspace_identity(resolved_project_identity)
+        workspace_identity = self._resolved_proof_workspace_identity(project_identity)
         if workspace_identity is not None:
             proof_contract.update(workspace_identity)
         resolved_seed_fingerprint = seed_fingerprint
@@ -6117,145 +6015,6 @@ class OrchestratorRunner:
             restored[ac_index] = {"reason": reason, "commit": commit}
         return restored
 
-    def _validate_legacy_resume_identity(
-        self,
-        progress: Mapping[str, Any],
-        *,
-        seed: Seed | None,
-    ) -> None:
-        """Validate every recoverable identity field before legacy migration.
-
-        Legacy sessions predate the versioned execution contract, but their
-        authoritative start event already records the seed id/goal and runtime
-        backend. ``SessionRepository`` exposes that snapshot under
-        :data:`SESSION_START_IDENTITY_PROGRESS_KEY`; accepting a mismatched
-        current invocation would permanently bless the wrong seed/backend when
-        the migration checkpoint is written.
-        """
-
-        raw_start_identity = progress.get(SESSION_START_IDENTITY_PROGRESS_KEY)
-        if raw_start_identity is not None and not isinstance(raw_start_identity, Mapping):
-            raise OrchestratorError(
-                message="Cannot migrate a legacy session with invalid start identity",
-                details={"invalid": SESSION_START_IDENTITY_PROGRESS_KEY},
-            )
-        start_identity = raw_start_identity if isinstance(raw_start_identity, Mapping) else {}
-
-        if "seed_id" in start_identity:
-            persisted_seed_id = start_identity.get("seed_id")
-            current_seed_id = seed.metadata.seed_id if seed is not None else None
-            if (
-                not isinstance(persisted_seed_id, str)
-                or not persisted_seed_id.strip()
-                or current_seed_id != persisted_seed_id
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume a legacy session with a different Seed identity",
-                    details={
-                        "persisted_seed_id": persisted_seed_id,
-                        "current_seed_id": current_seed_id,
-                        "hint": "Resume with the original Seed, or start a new session.",
-                    },
-                )
-
-        if "seed_goal" in start_identity:
-            persisted_seed_goal = start_identity.get("seed_goal")
-            current_seed_goal = seed.goal if seed is not None else None
-            if (
-                not isinstance(persisted_seed_goal, str)
-                or not persisted_seed_goal.strip()
-                or current_seed_goal != persisted_seed_goal
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume a legacy session with a modified Seed goal",
-                    details={
-                        "persisted_seed_goal": persisted_seed_goal,
-                        "current_seed_goal": current_seed_goal,
-                        "hint": "Resume with the original Seed, or start a new session.",
-                    },
-                )
-
-        persisted_runtime_backend: object | None = None
-        if "runtime_backend" in start_identity:
-            persisted_runtime_backend = start_identity.get("runtime_backend")
-        elif "runtime_backend" in progress:
-            # Older start events may lack the backend while runtime progress
-            # still carries the backend that owns the resumable handle.
-            persisted_runtime_backend = progress.get("runtime_backend")
-        if persisted_runtime_backend is not None:
-            current_runtime_backend = self._runtime_backend_contract()
-            if (
-                not isinstance(persisted_runtime_backend, str)
-                or not persisted_runtime_backend.strip()
-                or current_runtime_backend != persisted_runtime_backend
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume a legacy session with a different runtime backend",
-                    details={
-                        "persisted_runtime_backend": persisted_runtime_backend,
-                        "current_runtime_backend": current_runtime_backend,
-                        "hint": "Resume with the original runtime, or start a new session.",
-                    },
-                )
-
-        if "llm_backend" in start_identity:
-            persisted_llm_backend = start_identity.get("llm_backend")
-            current_llm_backend = getattr(self._adapter, "llm_backend", None)
-            if (
-                not isinstance(persisted_llm_backend, str)
-                or not persisted_llm_backend.strip()
-                or current_llm_backend != persisted_llm_backend
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume a legacy session with a different LLM backend",
-                    details={
-                        "persisted_llm_backend": persisted_llm_backend,
-                        "current_llm_backend": current_llm_backend,
-                        "hint": "Resume with the original backend, or start a new session.",
-                    },
-                )
-
-        if "workspace" in progress:
-            persisted_task_workspace = TaskWorkspace.from_progress_dict(progress.get("workspace"))
-            if persisted_task_workspace is None:
-                raise OrchestratorError(
-                    message="Cannot migrate a legacy session with invalid workspace identity",
-                    details={"invalid": "workspace"},
-                )
-            persisted_workspace = self._task_resume_workspace_identity(persisted_task_workspace)
-            active_workspace = self._resume_workspace_identity()
-            if active_workspace != persisted_workspace:
-                raise OrchestratorError(
-                    message="Cannot resume a legacy session from a different project workspace",
-                    details={
-                        "persisted_workspace": persisted_workspace,
-                        "current_workspace": active_workspace,
-                        "hint": "Resume from the original project/workspace.",
-                    },
-                )
-        else:
-            runtime_progress = progress.get("runtime")
-            if isinstance(runtime_progress, Mapping) and "cwd" in runtime_progress:
-                persisted_cwd = runtime_progress.get("cwd")
-                if persisted_cwd is not None:
-                    current_cwd = self._effective_cwd()
-                    if (
-                        not isinstance(persisted_cwd, str)
-                        or not persisted_cwd.strip()
-                        or not isinstance(current_cwd, str)
-                        or self._canonical_path(current_cwd) != self._canonical_path(persisted_cwd)
-                    ):
-                        raise OrchestratorError(
-                            message=(
-                                "Cannot resume a legacy session from a different project workspace"
-                            ),
-                            details={
-                                "persisted_workspace": persisted_cwd,
-                                "current_workspace": current_cwd,
-                                "hint": "Resume from the original project/workspace.",
-                            },
-                        )
-
     def _restore_execution_contract(
         self,
         progress: Mapping[str, Any],
@@ -6350,6 +6109,43 @@ class OrchestratorRunner:
                     "missing": "frugality_proof, model_routing, resume, or foundation_a_authority"
                 },
             )
+
+        pre_adaptive_rejection = pre_adaptive_execution_semantics_rejection(
+            raw_execution_semantics,
+            raw_proof.get("execution_semantics_fingerprint"),
+            fingerprint=self._execution_semantics_fingerprint,
+        )
+        if pre_adaptive_rejection is not None:
+            raise OrchestratorError(
+                message=pre_adaptive_rejection.message,
+                details=pre_adaptive_rejection.details,
+            )
+
+        migrated_verify_shell_semantics = migrated_pre_verify_shell_execution_semantics(
+            raw_execution_semantics
+        )
+        if migrated_verify_shell_semantics is not None:
+            persisted_v4_fingerprint = raw_proof.get("execution_semantics_fingerprint")
+            if not isinstance(
+                persisted_v4_fingerprint, str
+            ) or persisted_v4_fingerprint != self._execution_semantics_fingerprint(
+                raw_execution_semantics
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid pre-verify-shell contract",
+                    details={"invalid": "execution_semantics_fingerprint"},
+                )
+            migrated_contract = deepcopy(dict(raw_contract))
+            migrated_proof = migrated_contract["frugality_proof"]
+            assert isinstance(migrated_proof, dict)
+            migrated_contract["execution_semantics"] = migrated_verify_shell_semantics
+            migrated_proof["execution_semantics_fingerprint"] = (
+                self._execution_semantics_fingerprint(migrated_verify_shell_semantics)
+            )
+            raw_contract = migrated_contract
+            raw_proof = migrated_proof
+            raw_execution_semantics = migrated_verify_shell_semantics
+            self._verify_shell_identity = None
 
         migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(
             raw_execution_semantics
@@ -6595,6 +6391,22 @@ class OrchestratorRunner:
             # Historical v9 session starts predate the additive project anchor.
             # Preserve their exact direct-cwd representation rather than
             # rewriting durable resume authority under the new resolver.
+            # Transitional (#1799): this branch is a package-wide
+            # project-identity support contract — see the removal criterion in
+            # orchestrator/legacy_identity.py and docs/rfc/project-map-v1.md.
+            # It does not bypass other resume gates. Removal is allowed only
+            # after the documented identity-compatibility window ends and must
+            # replace this path with a typed fail-closed rejection.
+            #
+            # Current prepared executions intentionally restore an anchorless
+            # contract-only mapping; only a durable historical start snapshot
+            # that still lacks the anchor counts as a legacy activation.
+            raw_start_snapshot = progress.get(SESSION_START_IDENTITY_PROGRESS_KEY)
+            if isinstance(raw_start_snapshot, Mapping):
+                note_legacy_identity_path(
+                    "resume_workspace_comparison",
+                    prepared_live_execution=prepared_live_execution,
+                )
             active_workspace = (
                 self._proof_workspace_identity()
                 if prepared_live_execution
@@ -7608,6 +7420,26 @@ class OrchestratorRunner:
                 else latest_pause(selected_pause, failure_pause)
             )
 
+        raw_coordinator_pause = getattr(parallel_result, "recoverable_coordinator_pause", None)
+        if raw_coordinator_pause is not None:
+            if not isinstance(raw_coordinator_pause, CoordinatorQuotaPause):
+                return None
+            consequence = raw_coordinator_pause.consequence
+            coordinator_pause = RecoverableFailurePause(
+                pause_kind=consequence.pause_kind,
+                reason=consequence.reason,
+                resume_hint=consequence.resume_hint,
+                pause_seconds=consequence.pause_seconds,
+                resume_after=consequence.resume_after,
+                coordinator_owner=raw_coordinator_pause,
+            )
+            found_failure = True
+            selected_pause = (
+                coordinator_pause
+                if selected_pause is None
+                else latest_pause(selected_pause, coordinator_pause)
+            )
+
         if not found_failure:
             return None
 
@@ -8609,6 +8441,11 @@ class OrchestratorRunner:
             )
         )
 
+    async def _close_adapter(self) -> None:
+        adapter_aclose = getattr(self._adapter, "aclose", None)
+        if inspect.iscoroutinefunction(adapter_aclose):
+            await adapter_aclose()
+
     async def execute_seed(
         self,
         seed: Seed,
@@ -8658,6 +8495,49 @@ class OrchestratorRunner:
 
         return await self.execute_precreated_session(**execute_kwargs)
 
+    def _apply_verify_command_gate(
+        self, seed: Seed
+    ) -> Result[SessionTracker, OrchestratorError] | None:
+        """Surface — or refuse — criteria nothing can deterministically judge.
+
+        Returns ``None`` when preparation may continue, which is every case in
+        the ``warn`` stage. Only the ``block`` stage produces an error.
+        """
+        from ouroboros.core.seed_verify_gate import (
+            render_verify_command_gate_warning,
+            unverifiable_criteria,
+            verify_command_gate_mode,
+        )
+
+        findings = unverifiable_criteria(seed)
+        if not findings:
+            return None
+
+        mode = verify_command_gate_mode()
+        indices = [finding.display_index for finding in findings]
+        if mode == "block":
+            return Result.err(
+                OrchestratorError(
+                    message=("Acceptance criteria carry no verify_command and no exemption reason"),
+                    details={
+                        "gate": "seed.verify_command_gate",
+                        "mode": mode,
+                        "unverifiable_ac_indices": indices,
+                        "guidance": render_verify_command_gate_warning(findings),
+                    },
+                )
+            )
+        log.warning(
+            "orchestrator.seed.verify_command_gate_warning",
+            mode=mode,
+            unverifiable_ac_indices=indices,
+            unverifiable_ac_count=len(findings),
+        )
+        # Text, not markup interpolation: descriptions and commands are seed
+        # text and may contain Rich tags (`[/yellow]` would raise MarkupError).
+        self._console.print(Text(render_verify_command_gate_warning(findings), style="yellow"))
+        return None
+
     async def prepare_session(
         self,
         seed: Seed,
@@ -8685,6 +8565,12 @@ class OrchestratorRunner:
         execution_id: str | None = None,
         session_id: str | None = None,
     ) -> Result[SessionTracker, OrchestratorError]:
+        # The verify-command gate runs here, at new-session preparation, so
+        # sessions already in flight are never re-judged under a gate that was
+        # tightened after they started.
+        gate_result = self._apply_verify_command_gate(seed)
+        if gate_result is not None:
+            return gate_result
         exec_id = execution_id or f"exec_{uuid4().hex[:12]}"
         resolved_session_id = session_id or f"orch_{uuid4().hex[:12]}"
         self._execution_guidance = None
@@ -9398,7 +9284,10 @@ class OrchestratorRunner:
                 ):
                     parallel_kwargs["force_sequential_levels"] = True
 
-                return await self._execute_parallel(**parallel_kwargs)
+                try:
+                    return await self._execute_parallel(**parallel_kwargs)
+                finally:
+                    await self._close_adapter()
 
             from ouroboros.orchestrator.dependency_analyzer import (
                 ACNode,
@@ -9663,25 +9552,17 @@ class OrchestratorRunner:
                             )
                             await self._event_store.append(progress_event)
 
-                        # Measure and emit drift periodically
-                        if messages_processed % PROGRESS_EMIT_INTERVAL == 0:
-                            # Measure and emit drift
-                            drift_measurement = DriftMeasurement()
-                            drift_metrics = drift_measurement.measure(
-                                current_output=message.content,
-                                constraint_violations=[],  # TODO: track violations
-                                current_concepts=[],  # TODO: extract concepts
-                                seed=seed,
-                            )
-                            drift_event = create_drift_measured_event(
-                                execution_id=exec_id,
-                                goal_drift=drift_metrics.goal_drift,
-                                constraint_drift=drift_metrics.constraint_drift,
-                                ontology_drift=drift_metrics.ontology_drift,
-                                combined_drift=drift_metrics.combined_drift,
-                                is_acceptable=drift_metrics.is_acceptable,
-                            )
-                            await self._event_store.append(drift_event)
+                        # NOTE: periodic drift measurement used to be emitted here
+                        # every PROGRESS_EMIT_INTERVAL messages, but the two inputs
+                        # it needs are not tracked anywhere in this loop. Passing
+                        # empty lists pinned constraint_drift to 0.0 (dropping 30%
+                        # of the weighted score) and ontology_drift to 1.0 (a fixed
+                        # +0.2 penalty), so combined_drift was always
+                        # goal_drift * 0.5 + 0.2 and is_acceptable (<= 0.3) was
+                        # effectively always False. Emitting nothing is preferable
+                        # to persisting a measurement we know is wrong; re-enable
+                        # only once constraint violations and ontology concepts are
+                        # actually tracked for the message being measured.
 
                         # Handle final message
                         if message.is_final:
@@ -10208,6 +10089,7 @@ class OrchestratorRunner:
                     session_id=tracker.session_id,
                     context="execute",
                 )
+                await self._close_adapter()
 
     async def _execute_parallel(
         self,
@@ -10400,16 +10282,15 @@ class OrchestratorRunner:
                 require_bound=True,
             )
 
-        # Cap fan-out to the connected backend's concurrency constraints so a
-        # parallel dispatch never stampedes the LLM's rate/quota window (R3).
+        # Start from pre-flight, then probe toward the worker budget after sustained success.
         if effective_workers < max_parallel_workers:
             self._console.print(
-                f"[yellow]Fan-out capped to {effective_workers} worker(s) for backend "
-                f"'{self._adapter.runtime_backend}' (requested {max_parallel_workers}). "
-                f"Override with OUROBOROS_MAX_CONCURRENCY.[/yellow]"
+                f"[yellow]Initial fan-out set to {effective_workers} worker(s) for backend "
+                f"'{self._adapter.runtime_backend}' (adaptive ceiling "
+                f"{max_parallel_workers}).[/yellow]"
             )
             log.info(
-                "orchestrator.runner.fan_out_capped",
+                "orchestrator.runner.fan_out_initialized",
                 runtime_backend=self._adapter.runtime_backend,
                 requested_workers=max_parallel_workers,
                 effective_workers=effective_workers,
@@ -10427,6 +10308,7 @@ class OrchestratorRunner:
             enable_decomposition=execution_semantics["enable_decomposition"],
             decomposition_mode=execution_semantics["decomposition_mode"],
             max_concurrent=effective_workers,
+            adaptive_max_concurrent=max_parallel_workers,
             max_decomposition_depth=max_decomposition_depth,
             inherited_runtime_handle=inherited_runtime_handle,
             task_cwd=self._effective_cwd(),
@@ -10442,6 +10324,10 @@ class OrchestratorRunner:
             route_economics=self._route_economics,
             run_verify_commands=execution_semantics["run_verify_commands"],
             verify_command_timeout_seconds=execution_semantics["verify_command_timeout_seconds"],
+            verify_shell_identity=cast(
+                Mapping[str, object] | None,
+                execution_semantics["verify_shell_identity"],
+            ),
             ac_retry_attempts=execution_semantics["ac_retry_attempts"],
             cross_harness_redispatch=execution_semantics["cross_harness_redispatch"],
             shadow_replay_enabled=execution_semantics["shadow_replay_enabled"],
@@ -10450,6 +10336,28 @@ class OrchestratorRunner:
             resolved_backend_limits=resolved_backend_limits,
             resolved_self_governs_rate_limit=execution_semantics["backend_self_governs_rate_limit"],
             expected_runtime_effect_capabilities=execution_semantics["runtime_effect_capabilities"],
+            usage_limit_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
+        )
+
+        raw_published_pause_owner = tracker.progress.get("pause_owner")
+        if (
+            tracker.status is SessionStatus.PAUSED
+            and raw_published_pause_owner is not None
+            and not isinstance(raw_published_pause_owner, Mapping)
+        ):
+            raise OrchestratorError(
+                message="Persisted coordinator pause owner is malformed",
+                details={
+                    "session_id": tracker.session_id,
+                    "execution_id": exec_id,
+                    "resume_blocked": "coordinator_pause_owner_invalid",
+                },
+            )
+        published_coordinator_pause_owner = (
+            dict(raw_published_pause_owner)
+            if tracker.status is SessionStatus.PAUSED
+            and isinstance(raw_published_pause_owner, Mapping)
+            else None
         )
 
         # Check for cancellation before starting parallel execution
@@ -10496,36 +10404,25 @@ class OrchestratorRunner:
             tracker = tracker.with_progress(resume_owner_progress)
 
         try:
-            try:
-                parallel_result = await parallel_executor.execute_parallel(
-                    seed=seed,
-                    execution_plan=execution_plan,
-                    session_id=tracker.session_id,
-                    execution_id=exec_id,
-                    tools=merged_tools,
-                    tool_catalog=tool_catalog.tools,
-                    system_prompt=system_prompt,
-                    externally_satisfied_acs=externally_satisfied_acs,
-                )
-            except ParallelExecutionCancelled as cancelled:
-                return await self._handle_cancellation(
-                    session_id=tracker.session_id,
-                    execution_id=exec_id,
-                    messages_processed=cancelled.messages_processed,
-                    start_time=start_time,
-                    expected_root_indices=range(len(seed.acceptance_criteria)),
-                )
-        finally:
-            # Release any warm worker-pool sessions the runtime holds (e.g. the
-            # codex-mcp persistent connection pool). The non-parallel path closes
-            # per-turn handles, but the parallel path otherwise leaves the pool to
-            # its idle TTL — a process-leak window after every run. Guard on
-            # ``iscoroutinefunction`` so this is a no-op for runtimes without a
-            # real async ``aclose`` (and so MagicMock test adapters, whose
-            # attribute access auto-creates a non-awaitable child, are skipped).
-            adapter_aclose = getattr(self._adapter, "aclose", None)
-            if inspect.iscoroutinefunction(adapter_aclose):
-                await adapter_aclose()
+            parallel_result = await parallel_executor.execute_parallel(
+                seed=seed,
+                execution_plan=execution_plan,
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                tools=merged_tools,
+                tool_catalog=tool_catalog.tools,
+                system_prompt=system_prompt,
+                externally_satisfied_acs=externally_satisfied_acs,
+                published_coordinator_pause_owner=published_coordinator_pause_owner,
+            )
+        except ParallelExecutionCancelled as cancelled:
+            return await self._handle_cancellation(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                messages_processed=cancelled.messages_processed,
+                start_time=start_time,
+                expected_root_indices=range(len(seed.acceptance_criteria)),
+            )
 
         # Check for cancellation after parallel execution
         if await self._check_cancellation(tracker.session_id):
@@ -10549,6 +10446,7 @@ class OrchestratorRunner:
                 now=datetime.now(UTC),
                 require_all_failures_recoverable=not bool(
                     getattr(parallel_result, "recoverable_route_pause", False)
+                    or getattr(parallel_result, "recoverable_coordinator_pause", False)
                 ),
                 default_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
             )
@@ -10628,6 +10526,11 @@ class OrchestratorRunner:
                 pause_seconds=recoverable_failure_pause.pause_seconds,
                 resume_after=recoverable_failure_pause.resume_after,
                 pause_kind=recoverable_failure_pause.pause_kind,
+                pause_owner=(
+                    recoverable_failure_pause.coordinator_owner.owner_payload()
+                    if recoverable_failure_pause.coordinator_owner is not None
+                    else None
+                ),
             )
             pause_status, pause_pending = await self._resolve_pause_publication(
                 session_id=tracker.session_id,
@@ -11367,19 +11270,22 @@ Note: This is a resumed session. Please continue from where execution was interr
                     seed,
                     tracker.progress.get("routing_parallel_externally_satisfied_acs"),
                 )
-                return await self._execute_parallel(
-                    seed=seed,
-                    exec_id=tracker.execution_id,
-                    tracker=tracker,
-                    merged_tools=merged_tools,
-                    tool_catalog=tool_catalog,
-                    system_prompt=system_prompt,
-                    start_time=start_time,
-                    execution_contract=execution_contract,
-                    externally_satisfied_acs=resume_externally_satisfied_acs,
-                    force_sequential_levels=force_sequential,
-                    resume_execution_plan=resume_execution_plan,
-                )
+                try:
+                    return await self._execute_parallel(
+                        seed=seed,
+                        exec_id=tracker.execution_id,
+                        tracker=tracker,
+                        merged_tools=merged_tools,
+                        tool_catalog=tool_catalog,
+                        system_prompt=system_prompt,
+                        start_time=start_time,
+                        execution_contract=execution_contract,
+                        externally_satisfied_acs=resume_externally_satisfied_acs,
+                        force_sequential_levels=force_sequential,
+                        resume_execution_plan=resume_execution_plan,
+                    )
+                finally:
+                    await self._close_adapter()
         except asyncio.CancelledError:
             cancellation_result = (
                 await self._drain_requested_cancellation_before_pre_execution_cleanup(
@@ -12127,6 +12033,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     session_id=session_id,
                     context="resume",
                 )
+                await self._close_adapter()
 
 
 __all__ = [

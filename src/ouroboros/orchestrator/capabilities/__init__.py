@@ -12,12 +12,12 @@ import os
 from pathlib import Path
 import stat
 from typing import TYPE_CHECKING, Any
-import unicodedata
 
 import yaml
 
 from ouroboros.mcp.types import MCPToolDefinition
 from ouroboros.observability.logging import get_logger
+from ouroboros.orchestrator.capabilities.question_text import normalize_question_text
 from ouroboros.orchestrator.mcp_tools import (
     SessionToolCatalog,
     SessionToolCatalogEntry,
@@ -118,7 +118,8 @@ LateralPersonaMetadata = _lateral_personas.LateralPersonaMetadata
 LateralPersonaPanelMetadata = _lateral_personas.LateralPersonaPanelMetadata
 _lateral_persona_panel_metadata = _lateral_personas._lateral_persona_panel_metadata
 _lateral_persona_panel_request_schema = _lateral_personas._lateral_persona_panel_request_schema
-_pm_interview_subagent_metadata = _lateral_personas._pm_interview_subagent_metadata
+_pm_schemas = importlib.import_module(f"{__name__}.pm_schemas")
+_pm_orchestration_metadata = _pm_schemas._pm_orchestration_metadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,8 +154,7 @@ class CapabilityGraph:
 
 def stable_code_investigation_question_identity(question: str) -> str:
     """Return a deterministic identity for an interview-originating question."""
-    normalized = " ".join(unicodedata.normalize("NFKC", question).strip().split())
-    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(normalize_question_text(question).encode("utf-8")).hexdigest()[:16]
     return f"interview-question:{digest}"
 
 
@@ -378,22 +378,8 @@ def _ouroboros_execution_mode(name: str) -> str:
 
 
 def extract_capability_input_schema(tool: MCPToolDefinition) -> dict[str, Any]:
-    """Convert an MCP tool definition into capability input_schema metadata."""
-    schema = tool.to_input_schema()
-    properties = schema.get("properties", {})
-    required = schema.get("required", [])
-    return {
-        "type": schema.get("type", "object"),
-        "properties": {
-            str(name): dict(property_schema)
-            if isinstance(property_schema, Mapping)
-            else property_schema
-            for name, property_schema in (
-                properties.items() if isinstance(properties, Mapping) else ()
-            )
-        },
-        "required": list(required) if isinstance(required, Sequence) else [],
-    }
+    """Return a detached copy of the tool's complete JSON input schema."""
+    return tool.to_input_schema()
 
 
 def _input_schema_for_ouroboros_tool(tool: MCPToolDefinition) -> Mapping[str, Any]:
@@ -1330,7 +1316,7 @@ def _orchestration_metadata_for_ouroboros_tool(name: str) -> Mapping[str, Any]:
     if ralph_family_metadata:
         metadata["ralph_family"] = ralph_family_metadata
     if name == "ouroboros_pm_interview":
-        return {**metadata, "pm_interview_subagent": _pm_interview_subagent_metadata()}
+        return {**metadata, **_pm_orchestration_metadata()}
     if name not in {"ouroboros_interview", "ouroboros_lateral_think"}:
         return metadata
     lateral_panel = _lateral_persona_panel_metadata().to_dict()
@@ -1361,7 +1347,7 @@ def _orchestration_metadata_for_ouroboros_tool(name: str) -> Mapping[str, Any]:
                 "decision or low-confidence confirmation to the user."
             ),
         },
-        "question_advisory_fanout": _interview_question_advisory_fanout_metadata(),
+        "question_advisory_fanout": _interview_schemas._interview_question_advisory_fanout_metadata(),
         "lateral_panel": lateral_panel,
     }
 

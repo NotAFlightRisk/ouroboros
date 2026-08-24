@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -21,9 +22,14 @@ from typer.testing import CliRunner
 from ouroboros.cli.commands.plugin import (
     _enumerate_catalog,
     _select_plugins,
+    _shallow_clone,
 )
 from ouroboros.cli.commands.plugin import (
     app as plugin_app,
+)
+from ouroboros.cli.commands.plugin_cache import (
+    GIT_CLONE_TIMEOUT_SECONDS,
+    GIT_REV_PARSE_TIMEOUT_SECONDS,
 )
 from ouroboros.plugin.lockfile import Lockfile
 from ouroboros.plugin.trust_store import TrustStore
@@ -2421,6 +2427,420 @@ def test_add_routes_git_plus_ssh_url_through_clone(
     assert Lockfile(paths["lockfile"]).read()["github-pr-ops"].source_kind == "git"
 
 
+@pytest.mark.parametrize("mode", ["add", "install"])
+def test_failed_url_refresh_preserves_last_known_good_cache(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """#1826: a failed clone must not destroy the previous cached repository.
+
+    Both URL entry points used to delete the live cache directory before
+    attempting the replacement clone, so a transient network failure turned
+    into irreversible loss of the last-known-good cache. The refresh must
+    stage the new clone beside the cache and leave the old bytes untouched
+    on any failure, without littering the cache root.
+    """
+    paths = _common_paths(tmp_path)
+    cache_root = tmp_path / "cache"
+    url = "https://github.com/Q00/ouroboros-plugins.git"
+    clone_dest = cache_root / "github.com_Q00_ouroboros-plugins.git"
+    clone_dest.mkdir(parents=True)
+    (clone_dest / "sentinel.txt").write_text("last known good")
+
+    def _network_down(repo_url: str, dest: Path) -> str:
+        raise subprocess.CalledProcessError(
+            128, ["git", "clone"], stderr="simulated network failure"
+        )
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin._shallow_clone", _network_down)
+
+    selector = (
+        ["add", url, "--plugin", "github-pr-ops"]
+        if mode == "add"
+        else ["install", "github-pr-ops", "--from", url]
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            *selector,
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--cache-root",
+            str(cache_root),
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "git clone failed" in result.output
+    assert (clone_dest / "sentinel.txt").read_text() == "last known good", (
+        "a failed refresh deleted the last-known-good cache"
+    )
+    assert sorted(entry.name for entry in cache_root.iterdir()) == [clone_dest.name], (
+        "a failed refresh left staging or backup litter in the cache root"
+    )
+
+
+@pytest.mark.parametrize("mode", ["add", "install"])
+def test_url_refresh_filesystem_failure_is_reported_without_traceback(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """Promotion errors follow the CLI error contract and name recovery artifacts."""
+    paths = _common_paths(tmp_path)
+    cache_root = tmp_path / "cache"
+    url = "https://github.com/Q00/ouroboros-plugins.git"
+
+    def _disk_failure(*_args: object, **_kwargs: object) -> str:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.plugin_cache.stage_url_cache_refresh", _disk_failure
+    )
+    selector = (
+        ["add", url, "--plugin", "github-pr-ops"]
+        if mode == "add"
+        else ["install", "github-pr-ops", "--from", url]
+    )
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            *selector,
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--cache-root",
+            str(cache_root),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "plugin cache refresh failed" in result.output
+    assert "No space left on device" in result.output
+    assert ".bak-*" in result.output
+    assert result.exception is not None
+    assert not isinstance(result.exception, OSError)
+
+
+@pytest.mark.parametrize("mode", ["add", "install"])
+def test_url_refresh_reports_exact_retained_backup_path(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """Both public commands identify the sole surviving recovery copy."""
+    from ouroboros.cli.commands.plugin_cache import CacheRefreshRecoveryError
+
+    paths = _common_paths(tmp_path)
+    cache_root = tmp_path / "cache"
+    backup = cache_root / ".ouroboros-cache-deadbeefcafe.bak-123456789abc"
+    url = "https://github.com/Q00/ouroboros-plugins.git"
+
+    def _double_failure(*_args: object, **_kwargs: object) -> str:
+        raise CacheRefreshRecoveryError(
+            "promotion and automatic restoration failed", backup_path=backup
+        )
+
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.plugin_cache.stage_url_cache_refresh", _double_failure
+    )
+    selector = (
+        ["add", url, "--plugin", "github-pr-ops"]
+        if mode == "add"
+        else ["install", "github-pr-ops", "--from", url]
+    )
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            *selector,
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--cache-root",
+            str(cache_root),
+        ],
+    )
+
+    assert result.exit_code == 1
+    # Rich wraps long paths inside a bordered panel. Remove only rendering
+    # characters so the exact path can be asserted independent of width.
+    import re
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    squashed = re.sub(r"[│╭╮╰╯─\s]+", "", plain)
+    assert str(backup) in squashed
+    assert "restoreitto" in squashed
+
+
+@pytest.mark.parametrize("mode", ["add", "install"])
+def test_successful_url_refresh_replaces_stale_cache(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """A successful refresh fully replaces the stale cache, with no litter."""
+    paths = _common_paths(tmp_path)
+    cache_root = tmp_path / "cache"
+    url = "https://github.com/Q00/ouroboros-plugins.git"
+    clone_dest = cache_root / "github.com_Q00_ouroboros-plugins.git"
+    clone_dest.mkdir(parents=True)
+    (clone_dest / "stale.txt").write_text("previous refresh")
+
+    def _fake_clone(repo_url: str, dest: Path) -> str:
+        plugin_dir = dest / "plugins" / "github-pr-ops"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+        return "cafef00d"
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin._shallow_clone", _fake_clone)
+
+    selector = (
+        ["add", url, "--plugin", "github-pr-ops"]
+        if mode == "add"
+        else ["install", "github-pr-ops", "--from", url]
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            *selector,
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--cache-root",
+            str(cache_root),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not (clone_dest / "stale.txt").exists(), "stale cache content survived the refresh"
+    assert (clone_dest / "plugins" / "github-pr-ops" / "ouroboros.plugin.json").exists()
+    assert sorted(entry.name for entry in cache_root.iterdir()) == [clone_dest.name], (
+        "refresh left staging or backup litter in the cache root"
+    )
+    assert Lockfile(paths["lockfile"]).read()["github-pr-ops"].source_kind == "git"
+
+
+def test_stage_url_cache_refresh_restores_backup_when_promote_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If promoting the staged clone fails, the previous cache is restored.
+
+    The swap renames the live cache aside before promoting staging; a
+    failure between those two steps must put the old bytes back rather
+    than leaving the destination missing.
+    """
+    from ouroboros.cli.commands.plugin_cache import stage_url_cache_refresh
+
+    cache_root = tmp_path / "cache"
+    dest = cache_root / "repo"
+    dest.mkdir(parents=True)
+    (dest / "good.txt").write_text("keep me")
+
+    real_rename = os.rename
+    calls = {"n": 0}
+
+    def flaky_rename(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:  # dest→backup succeeds, staging→dest fails
+            raise OSError(28, "No space left on device")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin_cache.os.rename", flaky_rename)
+
+    def _clone(staging: Path) -> str:
+        staging.mkdir()
+        (staging / "new.txt").write_text("fresh clone")
+        return "cafef00d"
+
+    with pytest.raises(OSError):
+        stage_url_cache_refresh(_clone, dest)
+
+    assert (dest / "good.txt").read_text() == "keep me", "prior cache was not restored"
+    assert sorted(entry.name for entry in cache_root.iterdir()) == ["repo"], (
+        "promote failure left staging or backup litter"
+    )
+
+
+def test_failed_restore_preserves_backup_for_manual_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even when promotion AND restoration both fail, the old bytes survive.
+
+    The restore rename is the last automatic recovery step; when it also
+    fails, the renamed-aside backup directory is the sole remaining copy of
+    the last-known-good cache and must stay on disk for manual recovery.
+    """
+    from ouroboros.cli.commands.plugin_cache import (
+        CacheRefreshRecoveryError,
+        stage_url_cache_refresh,
+    )
+
+    cache_root = tmp_path / "cache"
+    dest = cache_root / "repo"
+    dest.mkdir(parents=True)
+    (dest / "good.txt").write_text("keep me")
+
+    real_rename = os.rename
+    calls = {"n": 0}
+
+    def double_fault(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:  # staging → dest promotion
+            raise OSError(28, "No space left on device")
+        if calls["n"] == 3:  # backup → dest restoration
+            raise OSError(5, "Input/output error")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin_cache.os.rename", double_fault)
+
+    def _clone(staging: Path) -> str:
+        staging.mkdir()
+        (staging / "new.txt").write_text("fresh clone")
+        return "cafef00d"
+
+    with pytest.raises(CacheRefreshRecoveryError) as exc_info:
+        stage_url_cache_refresh(_clone, dest)
+
+    assert calls["n"] == 3, "expected promotion and restoration to both be attempted"
+    backups = [entry for entry in cache_root.iterdir() if ".bak-" in entry.name]
+    assert len(backups) == 1, f"expected the backup to survive, found {backups}"
+    assert (backups[0] / "good.txt").read_text() == "keep me", (
+        "the last-known-good bytes were lost with no automatic copy remaining"
+    )
+    assert exc_info.value.backup_path == backups[0]
+    assert [entry for entry in cache_root.iterdir() if ".staging-" in entry.name] == [], (
+        "staging debris left behind"
+    )
+
+
+def test_interrupted_clone_drops_staging_and_keeps_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user interrupt mid-clone cleans staging and leaves the cache alone."""
+    from ouroboros.cli.commands.plugin_cache import stage_url_cache_refresh
+
+    cache_root = tmp_path / "cache"
+    dest = cache_root / "repo"
+    dest.mkdir(parents=True)
+    (dest / "good.txt").write_text("keep me")
+
+    def _interrupted_clone(staging: Path) -> str:
+        staging.mkdir()
+        (staging / "partial.txt").write_text("half a clone")
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        stage_url_cache_refresh(_interrupted_clone, dest)
+
+    assert (dest / "good.txt").read_text() == "keep me"
+    assert [entry for entry in cache_root.iterdir() if ".staging-" in entry.name] == [], (
+        "an interrupted clone left a partial staging tree"
+    )
+
+
+def test_interrupted_promotion_restores_cache_and_drops_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupt after parking the live cache still rolls the swap back."""
+    from ouroboros.cli.commands.plugin_cache import stage_url_cache_refresh
+
+    cache_root = tmp_path / "cache"
+    dest = cache_root / "repo"
+    dest.mkdir(parents=True)
+    (dest / "good.txt").write_text("keep me")
+    real_rename = os.rename
+    calls = {"n": 0}
+
+    def interrupted_promote(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise KeyboardInterrupt
+        return real_rename(src, dst)
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin_cache.os.rename", interrupted_promote)
+
+    def _clone(staging: Path) -> str:
+        staging.mkdir()
+        (staging / "new.txt").write_text("fresh clone")
+        return "cafef00d"
+
+    with pytest.raises(KeyboardInterrupt):
+        stage_url_cache_refresh(_clone, dest)
+
+    assert calls["n"] == 3, "the parked backup was not restored after interruption"
+    assert (dest / "good.txt").read_text() == "keep me"
+    assert sorted(entry.name for entry in cache_root.iterdir()) == ["repo"]
+
+
+def test_interrupt_after_backup_rename_still_restores_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupt landing right after the backup rename must not strand the cache.
+
+    Ownership of the parked backup has to be recorded before the rename's
+    side effect exists; otherwise an interrupt in that window skips the
+    restore branch and the public cache path is left absent.
+    """
+    from ouroboros.cli.commands.plugin_cache import stage_url_cache_refresh
+
+    cache_root = tmp_path / "cache"
+    dest = cache_root / "repo"
+    dest.mkdir(parents=True)
+    (dest / "good.txt").write_text("keep me")
+
+    real_rename = os.rename
+    calls = {"n": 0}
+
+    def rename_then_interrupt(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:  # dest → backup: perform the side effect, then interrupt
+            real_rename(src, dst)
+            raise KeyboardInterrupt
+        return real_rename(src, dst)
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin_cache.os.rename", rename_then_interrupt)
+
+    def _clone(staging: Path) -> str:
+        staging.mkdir()
+        (staging / "new.txt").write_text("fresh clone")
+        return "cafef00d"
+
+    with pytest.raises(KeyboardInterrupt):
+        stage_url_cache_refresh(_clone, dest)
+
+    assert dest.exists() and (dest / "good.txt").read_text() == "keep me", (
+        "the cache was stranded under .bak-* instead of being restored"
+    )
+    litter = [entry.name for entry in cache_root.iterdir() if entry.name != "repo"]
+    assert litter == [], f"interrupt left litter behind: {litter}"
+
+
+def test_refresh_uses_bounded_sibling_names_near_name_max(tmp_path: Path) -> None:
+    """Temporary artifacts stay valid when the destination is already long."""
+    from ouroboros.cli.commands.plugin_cache import stage_url_cache_refresh
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    dest = cache_root / ("r" * 235)
+    dest.mkdir()
+    (dest / "old.txt").write_text("old")
+    seen_staging_name = ""
+
+    def _clone(staging: Path) -> str:
+        nonlocal seen_staging_name
+        seen_staging_name = staging.name
+        staging.mkdir()
+        (staging / "new.txt").write_text("new")
+        return "cafef00d"
+
+    assert stage_url_cache_refresh(_clone, dest) == "cafef00d"
+
+    name_max = os.pathconf(cache_root, "PC_NAME_MAX")
+    assert len(os.fsencode(seen_staging_name)) <= name_max
+    assert (dest / "new.txt").read_text() == "new"
+    assert sorted(entry.name for entry in cache_root.iterdir()) == [dest.name]
+
+
 def test_trust_rejects_undeclared_scope(runner: CliRunner, tmp_path: Path) -> None:
     """`ooo plugin trust --scope <typo>` must refuse to persist a grant
     for a scope the manifest does not declare. Otherwise the command
@@ -4736,3 +5156,201 @@ def test_catalog_register_does_not_lose_concurrent_updates(tmp_path: Path) -> No
         f"concurrent register lost updates: missing "
         f"{expected - plugins_recorded}, got {plugins_recorded}"
     )
+
+
+def test_shallow_clone_bounds_git_and_refuses_credential_prompts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both git calls must be timed and non-interactive.
+
+    `capture_output=True` hides a credential prompt, so an untimed
+    `git clone` against an unreachable host or a private repository hangs
+    `ooo plugin add` silently and forever. Every invocation therefore carries
+    a timeout, a `DEVNULL` stdin, and an environment that makes git fail
+    instead of prompting.
+    """
+    calls: list[tuple[list[str], dict]] = []
+
+    def _spy(argv, *_args, **kwargs):
+        calls.append((list(argv), kwargs))
+        if argv[:2] == ["git", "clone"]:
+            Path(argv[-1]).mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="cafef00d\n", stderr="")
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin.subprocess.run", _spy)
+
+    sha = _shallow_clone("https://github.com/Q00/ouroboros-plugins.git", tmp_path / "clone")
+
+    assert sha == "cafef00d"
+    assert [argv[:2] for argv, _ in calls] == [["git", "clone"], ["git", "rev-parse"]]
+    for argv, kwargs in calls:
+        assert kwargs["stdin"] is subprocess.DEVNULL, argv
+        assert kwargs["timeout"] > 0, argv
+        assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0", argv
+        assert kwargs["env"]["GIT_ASKPASS"] == "true", argv
+    clone_kwargs = calls[0][1]
+    rev_parse_kwargs = calls[1][1]
+    # Network reach gets a generous ceiling; a local object-store read does not.
+    assert clone_kwargs["timeout"] == GIT_CLONE_TIMEOUT_SECONDS
+    assert rev_parse_kwargs["timeout"] == GIT_REV_PARSE_TIMEOUT_SECONDS
+    assert clone_kwargs["timeout"] > rev_parse_kwargs["timeout"]
+
+
+@pytest.mark.parametrize("mode", ["add", "install"])
+def test_url_refresh_clone_timeout_is_reported_without_traceback(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """A timed-out clone follows the CLI error contract instead of crashing.
+
+    `subprocess.TimeoutExpired` is a `SubprocessError`, not an `OSError`, so
+    the call sites must widen their `except` clause or the new timeout turns a
+    hang into an unhandled traceback.
+    """
+    paths = _common_paths(tmp_path)
+    cache_root = tmp_path / "cache"
+    url = "https://github.com/Q00/ouroboros-plugins.git"
+
+    def _clone_timed_out(repo_url: str, dest: Path) -> str:
+        raise subprocess.TimeoutExpired(["git", "clone", "--depth", "1", repo_url], 300)
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin._shallow_clone", _clone_timed_out)
+
+    selector = (
+        ["add", url, "--plugin", "github-pr-ops"]
+        if mode == "add"
+        else ["install", "github-pr-ops", "--from", url]
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            *selector,
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--cache-root",
+            str(cache_root),
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "timed out" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit), result.exception
+
+
+# ---------------------------------------------------------------------------
+# git_noninteractive_env: inherited SSH transport preservation (review round 2)
+# ---------------------------------------------------------------------------
+
+
+def test_git_noninteractive_env_preserves_inherited_git_ssh_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """git_noninteractive_env() must preserve a caller-supplied GIT_SSH_COMMAND.
+
+    Users relying on GIT_SSH_COMMAND for a nonstandard port, identity file,
+    proxy jump, SSH config, or wrapper script must not have those settings
+    silently discarded. The function must append -oBatchMode=yes to the
+    inherited command rather than replacing it.
+
+    Regression catch for the ouroboros-agent BLOCKING finding at
+    src/ouroboros/cli/commands/plugin_cache.py:46 (HEAD 967bf3492).
+    """
+    from ouroboros.cli.commands.plugin_cache import git_noninteractive_env
+
+    custom_cmd = "ssh -i /home/deploy/.ssh/id_ed25519 -o ProxyJump=bastion.internal"
+    monkeypatch.setenv("GIT_SSH_COMMAND", custom_cmd)
+
+    env = git_noninteractive_env()
+
+    # The inherited command is preserved.
+    assert custom_cmd in env["GIT_SSH_COMMAND"], (
+        f"caller-supplied GIT_SSH_COMMAND was discarded; got {env['GIT_SSH_COMMAND']!r}"
+    )
+    # BatchMode=yes is appended.
+    assert "-oBatchMode=yes" in env["GIT_SSH_COMMAND"], (
+        f"BatchMode=yes was not appended; got {env['GIT_SSH_COMMAND']!r}"
+    )
+    # The other noninteractive variables are still set.
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GIT_ASKPASS"] == "true"
+    assert env["SSH_ASKPASS"] == "true"
+
+
+def test_git_noninteractive_env_defaults_when_no_inherited_ssh_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no GIT_SSH_COMMAND is inherited, the fallback is ssh -oBatchMode=yes."""
+    from ouroboros.cli.commands.plugin_cache import git_noninteractive_env
+
+    monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
+
+    env = git_noninteractive_env()
+
+    assert env["GIT_SSH_COMMAND"] == "ssh -oBatchMode=yes"
+
+
+def test_git_noninteractive_env_respects_existing_batchmode_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the caller already specifies BatchMode, do not append a duplicate."""
+    from ouroboros.cli.commands.plugin_cache import git_noninteractive_env
+
+    # -oBatchMode=no is a conscious caller choice (e.g. testing). Respect it.
+    custom = "ssh -oBatchMode=no -i /tmp/key"
+    monkeypatch.setenv("GIT_SSH_COMMAND", custom)
+
+    env = git_noninteractive_env()
+
+    assert env["GIT_SSH_COMMAND"] == custom, (
+        f"existing BatchMode setting was overridden; got {env['GIT_SSH_COMMAND']!r}"
+    )
+
+
+def test_git_noninteractive_env_handles_wrapper_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wrapper script (common in CI) is preserved with BatchMode appended."""
+    from ouroboros.cli.commands.plugin_cache import git_noninteractive_env
+
+    wrapper = "/usr/local/bin/ssh-wrapper.sh"
+    monkeypatch.setenv("GIT_SSH_COMMAND", wrapper)
+
+    env = git_noninteractive_env()
+
+    assert env["GIT_SSH_COMMAND"] == f"{wrapper} -oBatchMode=yes"
+
+
+def test_shallow_clone_passes_inherited_ssh_command_to_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_shallow_clone must forward the preserved GIT_SSH_COMMAND to git.
+
+    End-to-end regression: set a custom GIT_SSH_COMMAND, call
+    _shallow_clone, and verify the subprocess.run env includes it.
+    """
+    custom_cmd = "ssh -p 2222 -i /opt/keys/deploy"
+    monkeypatch.setenv("GIT_SSH_COMMAND", custom_cmd)
+
+    calls: list[tuple[list[str], dict]] = []
+
+    def _spy(argv, *_args, **kwargs):
+        calls.append((list(argv), kwargs))
+        if argv[:2] == ["git", "clone"]:
+            Path(argv[-1]).mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="deadbeef\n", stderr="")
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin.subprocess.run", _spy)
+
+    sha = _shallow_clone("git@github.com:Q00/ouroboros-plugins.git", tmp_path / "clone")
+
+    assert sha == "deadbeef"
+    # Both git calls must carry the preserved custom SSH command.
+    for argv, kwargs in calls:
+        git_ssh = kwargs["env"]["GIT_SSH_COMMAND"]
+        assert custom_cmd in git_ssh, (
+            f"custom GIT_SSH_COMMAND not forwarded to {argv[:2]}; got {git_ssh!r}"
+        )
+        assert "-oBatchMode=yes" in git_ssh

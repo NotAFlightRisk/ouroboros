@@ -15,6 +15,7 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 import yaml
 
 from ouroboros.cli.commands.cancel import _cancel_session
@@ -475,10 +476,14 @@ async def test_precreated_session_rejects_stale_running_tracker_after_durable_pa
     contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
 
     try:
-        first = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+        with capture_logs() as legacy_logs:
+            first = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
         assert first.is_ok
         assert first.value.success is False
         assert runtime.execute_calls == 1
+        assert [
+            entry for entry in legacy_logs if entry["event"] == "project_map.legacy_identity_path"
+        ] == []
         durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
         assert durable.is_ok and durable.value.status is SessionStatus.PAUSED
 
@@ -2099,11 +2104,18 @@ async def test_pre_anchor_resume_invalid_workspace_cleans_claim_before_retry(
             "reconstruct_session",
             side_effect=reconstruct_historical_then_durable,
         ):
-            first = await runner.resume_session(tracker.session_id, _seed())
-            second = await runner.resume_session(tracker.session_id, _seed())
+            with capture_logs() as legacy_logs:
+                first = await runner.resume_session(tracker.session_id, _seed())
+                second = await runner.resume_session(tracker.session_id, _seed())
 
         assert first.is_err
         assert first.error.message == "Cannot resolve project identity"
+        legacy_activations = [
+            entry for entry in legacy_logs if entry["event"] == "project_map.legacy_identity_path"
+        ]
+        assert [entry["entry_point"] for entry in legacy_activations] == [
+            "resume_workspace_comparison"
+        ]
         assert second.is_err
         assert second.error.details.get("resume_blocked") != "process_local_execution_in_progress"
         assert runtime.execute_calls == 0
@@ -5720,7 +5732,9 @@ def test_clear_cancellation_request_retries_and_surfaces_final_failure(
 
 def test_process_local_contract_is_not_a_cross_run_proof_cohort_key() -> None:
     runner = _runner()
-    contract = runner._build_execution_contract(seed=_seed())
+    contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=_seed()
+    )
 
     assert (
         runner._proof_cohort_identity(
@@ -6998,7 +7012,9 @@ def test_diagnostic_contract_builds_do_not_leak_registry_issuances() -> None:
     issued_before = len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued)
 
     for _ in range(25):
-        contract = runner._build_execution_contract(seed=_seed())
+        contract = runner._build_execution_contract(
+            project_identity=runner._project_identity(), seed=_seed()
+        )
         assert contract["foundation_a_authority"]["scope"] == "process_local"
 
     assert len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued) == issued_before

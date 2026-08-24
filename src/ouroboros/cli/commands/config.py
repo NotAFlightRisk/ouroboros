@@ -111,6 +111,7 @@ _CLI_PATH_ENV_BY_BACKEND = {
     "antigravity": "OUROBOROS_ANTIGRAVITY_CLI_PATH",
     "grok": "OUROBOROS_GROK_CLI_PATH",
     "ourocode": "OUROBOROS_OUROCODE_CLI_PATH",
+    "dsh": "OUROBOROS_DSH_CLI_PATH",
     "pi": "OUROBOROS_PI_CLI_PATH",
     "zcode": "OUROBOROS_ZCODE_CLI_PATH",
 }
@@ -827,7 +828,8 @@ def backend(
         console.quiet = True
         setup_mod.print_error = _tracking_print_error  # type: ignore[assignment]
         if new_backend == "claude":
-            _setup_claude(cli_path)
+            if _setup_claude(cli_path) is False:
+                setup_failed = True
         elif new_backend == "codex":
             if _setup_codex(cli_path) is False:
                 setup_failed = True

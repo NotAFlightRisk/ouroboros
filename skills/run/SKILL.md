@@ -1,5 +1,5 @@
 ---
-name: run
+name: ouroboros-run
 description: "Execute a Seed specification through the workflow engine"
 aliases: [execute]
 mcp_tool: ouroboros_execute_seed
@@ -8,14 +8,14 @@ mcp_args:
   cwd: "$CWD"
 ---
 
-# /ouroboros:run
+# /ouroboros:ouroboros-run
 
 Execute a Seed specification through the Ouroboros workflow engine.
 
 ## Usage
 
 ```
-/ouroboros:run [seed_file_or_content]
+/ouroboros:ouroboros-run [seed_file_or_content]
 ```
 
 **Trigger keywords:** "ouroboros run", "execute seed"
@@ -27,8 +27,9 @@ Execute a Seed specification through the Ouroboros workflow engine.
 3. **Execution**: The orchestrator runs the workflow with PAL routing
 4. **Progress**: Real-time progress updates via session tracking
 5. **Result**: Execution summary with pass/fail status
-6. **Verification status**: Run-only results are `executed_unverified` until
-   `ooo evaluate <session_id>` performs formal 3-stage verification
+6. **Convergence**: completed runs enqueue formal evaluation by default. An
+   explicit rejection continues through a bounded Ralph loop until approved or
+   the configured evolution budget/stop condition is reached.
 
 ## Instructions
 
@@ -75,7 +76,11 @@ fallback instead of retrying the failing call.
    - If neither: Check conversation history for a recently generated seed
 
    Before a fresh start, when the user has not already chosen an efficiency
-   policy, ask in outcome language:
+   policy, first check the persistent default: when `execution.default_policy`
+   in `~/.ouroboros/config.yaml` is `efficient` or `quality_first`, do not ask —
+   omit both arguments and the server applies the configured default (the start
+   handoff still reports the resolved policy). When it is `ask` or unset, ask
+   in outcome language:
 
    - **Efficient execution** — start parallel/decomposed work economically and
      strengthen the route only when recovery requires it. Send
@@ -155,16 +160,40 @@ fallback instead of retrying the failing call.
    For full details later: `ouroboros_ac_tree_hud(session_id=<session_id>)`
    ```
 
-   When `response.meta.job_observer` is present and the host has an independent
-   child/subagent session primitive, spawn exactly one observer session and pass
-   that object unchanged. Codex requires explicit native subagent delegation;
-   Claude Code uses one Task/Agent child. The observer must:
+   **Text-only host compatibility (OMP and similar bridges):**
+
+   If `response.meta.job_observer` is unavailable, inspect the response content
+   for the final sentinel block:
+
+   ```text
+   <!-- ouroboros-job-observer-v1 base64
+   <payload>
+   -->
+   ```
+
+   Base64-decode `<payload>`, then fail closed unless it passes the canonical v1
+   validation implemented by `extract_job_observer_inline_handoff`: exactly one
+   bounded terminal sentinel; fixed protocol, role, ownership, wait/result tools,
+   restrictions, and follow-result keys; internally consistent IDs; and a
+   `job_id` matching the visible start receipt. Use visible Job/Session/Execution
+   IDs only as identity anchors, never to reconstruct the nested contract. If
+   structured and inline surfaces differ or validation fails, do not spawn an
+   observer; report a transport-integrity failure.
+
+   When a structured or recovered `job_observer` is present and the host has an
+   independent child/subagent session primitive, spawn exactly one observer
+   session and pass that object unchanged. Codex uses `spawn_agent`, OMP uses
+   one native Task child, and Claude Code uses one Task/Agent child. The observer must:
 
    - On Codex, call the native `spawn_agent` primitive exactly once with
-     `task_name="run_observer"` and include `response.meta.job_observer`
-     unchanged in the child message. A `wait` call is not a spawn.
+     `task_name="run_observer"` and include the structured or recovered
+     `job_observer` unchanged in the child message. A `wait` call is not a spawn.
    - Require the spawn result to return a live child ID/path before saying an
      observer is connected or before ending the start turn.
+   - On OMP, submit exactly one Task item named `RunObserver` with the recovered
+     or structured contract unchanged, require the returned live agent/job ID,
+     and use the host wait/inbox relay until the observer returns terminal.
+     A job-status poll in the parent is not an observer spawn.
 
    - remain read-only: no repository edits, execution control, or worker fan-out;
    - own the job cursor exclusively and reload deferred MCP schemas immediately
@@ -444,10 +473,10 @@ fallback instead of retrying the failing call.
    - Show execution summary
 
 10. **Post-execution QA and formal evaluation** (automatic):
-   `ouroboros_start_execute_seed` automatically runs QA after successful execution.
+   `ouroboros_start_execute_seed` automatically runs QA after execution.
    The QA verdict is included in the final job result text. This QA check is
    **not** the formal 3-stage evaluator. On servers that return
-   `chained_evaluate_job_id`, the successful run has already enqueued the formal
+   `chained_evaluate_job_id`, the run has already enqueued the formal
    evaluator as a separate bounded background job.
    To skip: pass `skip_qa: true` to the tool.
 
@@ -456,6 +485,10 @@ fallback instead of retrying the failing call.
    - Fetch its verdict with `ouroboros_job_result` after terminal status
    - Render **APPROVED** when `final_approved: true`; otherwise render not approved and list failed ACs or the failure reason from the evaluation result
    - If the evaluate job failed or timed out, keep the run success intact and show `Next: ooo evaluate <session_id>` as the manual retry
+   - If the evaluation result contains `chained_ralph_job_id`, continue observing
+     that job before presenting the final outcome. Report approval/convergence or
+     the bounded Ralph stop reason; do not call the run blocked merely because
+     its first evaluation was rejected.
 
    If `chained_evaluate_job_id` is absent, keep the legacy path verbatim:
    - **PASS**: `Next: ooo evaluate <session_id> for formal 3-stage verification`
@@ -479,7 +512,7 @@ Without MCP, you can still:
 ## Example
 
 ```
-User: /ouroboros:run seed.yaml
+User: /ouroboros:ouroboros-run seed.yaml
 
 [Reads seed.yaml, validates, starts background execution]
 

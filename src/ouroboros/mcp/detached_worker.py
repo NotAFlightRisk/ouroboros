@@ -15,12 +15,15 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from ouroboros import telemetry as usage_telemetry
 from ouroboros.mcp.detached_jobs import (
     DetachedJobRequest,
     cleanup_worker_artifacts,
+    encode_tool_error_rejection,
     status_path_for,
     write_private_json,
 )
+from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.server.adapter import create_ouroboros_server
 from ouroboros.mcp.tools.background import start_background_tool_job
@@ -75,6 +78,19 @@ async def _record_start_failure(
         return
     if not snapshot.is_terminal:
         await manager.drain(grace_seconds=0.5)
+
+
+async def _compensate_unaccepted_start_failure(
+    manager: JobManager,
+    request: DetachedJobRequest,
+    error: str,
+) -> None:
+    """Record rejection without interrupting an accepted live owner."""
+    accepted_live_owner = manager.has_accepted_job(request.job_id) and manager.has_live_job_task(
+        request.job_id
+    )
+    if not accepted_live_owner:
+        await _record_start_failure(manager, request, error)
 
 
 async def _run_probe(manager: JobManager, request: DetachedJobRequest) -> None:
@@ -189,8 +205,37 @@ async def run_worker(request_path: Path) -> int:
                 raise ValueError(f"Unknown detached Start tool: {request.tool_name}")
             result = await handler.handle(dict(request.arguments))
             if result.is_err:
-                error = result.error.message
-                await _record_start_failure(manager, request, error)
+                error = result.error
+                try:
+                    await manager.get_snapshot(request.job_id)
+                except ValueError:
+                    if isinstance(error, MCPToolError):
+                        manager.abandon_reserved_job_id(request.job_id)
+                        try:
+                            rejection = encode_tool_error_rejection(error)
+                        except ValueError as exc:
+                            try:
+                                _status(
+                                    request_path,
+                                    "failed",
+                                    error=f"Invalid detached tool rejection: {exc}",
+                                )
+                            except Exception:
+                                pass
+                            return 1
+                        _status(
+                            request_path,
+                            "rejected",
+                            job_id=request.job_id,
+                            request_tool_name=request.tool_name,
+                            rejection=rejection,
+                        )
+                        return 1
+                await _compensate_unaccepted_start_failure(
+                    manager,
+                    request,
+                    error.message,
+                )
             else:
                 returned_job_id = result.value.meta.get("job_id")
                 if returned_job_id != request.job_id:
@@ -216,8 +261,9 @@ async def run_worker(request_path: Path) -> int:
             pass
         if manager is not None and request is not None:
             try:
-                await _record_start_failure(manager, request, error)
+                await _compensate_unaccepted_start_failure(manager, request, error)
                 await _wait_for_terminal(manager, request.job_id)
+                cleanup_artifacts = True
             except Exception:
                 pass
         return 1
@@ -236,12 +282,34 @@ async def run_worker(request_path: Path) -> int:
             cleanup_worker_artifacts(request_path)
 
 
+def _flush_telemetry_before_exit() -> None:
+    """Deliver the queued terminal `workflow_outcome` event before this
+    worker process exits.
+
+    run_worker only returns once the owned job has a durable terminal event,
+    which is exactly when JobManager queues the one `workflow_outcome` event
+    PostHog's published counting rule reads (see TELEMETRY.md). That event
+    sits in telemetry's daemon-thread queue until something flushes it;
+    nothing else in this process ever will, and this worker is about to
+    exit. A detached job worker is a short-lived background process, not an
+    interactive command, so a bounded exit delay here does not violate
+    telemetry's "never blocks a command" contract -- there is no command
+    left to keep responsive by the time this runs.
+    """
+    usage_telemetry.flush(timeout=5.0)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 1:
         print("usage: python -m ouroboros.mcp.detached_worker REQUEST.json", file=sys.stderr)
         return 2
-    return asyncio.run(run_worker(Path(args[0]).expanduser().resolve()))
+    try:
+        return asyncio.run(run_worker(Path(args[0]).expanduser().resolve()))
+    finally:
+        # Covers every run_worker exit path (success, failure, compensation)
+        # since it wraps the whole asyncio.run call.
+        _flush_telemetry_before_exit()
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised through subprocess tests

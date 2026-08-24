@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros import __version__
+from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.config.models import (
     EvaluationConfig,
     LLMConfig,
@@ -20,9 +21,11 @@ from ouroboros.config.models import (
     RuntimeProfileConfig,
 )
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import ReferenceCue, ReferenceOrigin
 from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPToolError
 from ouroboros.mcp.server.adapter import MCPServerAdapter, create_ouroboros_server
 from ouroboros.mcp.server.security import AuthConfig, AuthMethod, RateLimitConfig
+from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -559,6 +562,150 @@ class TestMCPServerAdapterIntegration:
         assert prompt_result.messages[0].content.text == "Hello, MCP!"
 
     @pytest.mark.asyncio
+    async def test_public_v2_generate_seed_preserves_typed_reopen_error(self) -> None:
+        """The public generate-seed path exposes machine-readable recovery data."""
+        from mcp import Client
+        from mcp.server import MCPServer
+        from mcp.shared.exceptions import MCPError as SDKMCPError
+
+        state = InterviewState(
+            interview_id="session-unresolved-reference",
+            initial_context="Build an issue tool",
+            status=InterviewStatus.COMPLETED,
+            ambiguity_score=0.1,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="What outcome matters most?",
+                    user_response="Fast triage.",
+                )
+            ],
+            reference_cues=(
+                ReferenceCue(
+                    reference_id="linear",
+                    label="Linear-like",
+                    origin=ReferenceOrigin.USER_TEXT,
+                ),
+            ),
+        )
+        handler = GenerateSeedHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        adapter = MCPServerAdapter(name="typed-error-boundary")
+        adapter.register_tool(handler)
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers._plugin_load_state",
+                AsyncMock(return_value=Result.ok(state)),
+            ),
+            patch.object(MCPServer, "run_stdio_async", new=AsyncMock()),
+        ):
+            await adapter.serve(transport="stdio")
+            async with Client(adapter._mcp_server, mode="auto") as client:
+                with pytest.raises(SDKMCPError) as error_info:
+                    await client.call_tool(
+                        "ouroboros_generate_seed",
+                        {"session_id": state.interview_id},
+                    )
+
+        assert error_info.value.data == {
+            "error_code": "interview_reopen_required",
+            "details": {
+                "code": "interview_reopen_required",
+                "blockers": [
+                    {
+                        "candidate_id": "reference-0:contrast-required",
+                        "code": "reference_confirmation_required",
+                        "reason": "required_unknown",
+                        "section": "context",
+                        "reference_ids": ["linear"],
+                    }
+                ],
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_public_v2_boundary_keeps_untyped_errors_as_tool_results(self) -> None:
+        """Existing untyped failures remain ordinary MCP execution-error results."""
+        from mcp import Client
+        from mcp.server import MCPServer
+
+        class UntypedErrorTool:
+            @property
+            def definition(self) -> MCPToolDefinition:
+                return MCPToolDefinition(
+                    name="untyped_error",
+                    description="Return an ordinary tool failure",
+                )
+
+            async def handle(self, arguments: dict[str, object]):
+                del arguments
+                return Result.err(
+                    MCPToolError(
+                        "Ordinary tool failure",
+                        tool_name="untyped_error",
+                    )
+                )
+
+        adapter = MCPServerAdapter(name="untyped-error-boundary")
+        adapter.register_tool(UntypedErrorTool())
+
+        with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+            await adapter.serve(transport="stdio")
+
+        async with Client(adapter._mcp_server, mode="auto") as client:
+            result = await client.call_tool("untyped_error", {})
+
+        assert result.is_error is True
+        assert result.content[0].text == "Ordinary tool failure"
+
+    @pytest.mark.asyncio
+    async def test_public_v2_boundary_does_not_expose_non_json_tool_error_details(
+        self,
+    ) -> None:
+        """Malformed typed details fall back to the SDK's ordinary safe error result."""
+        from mcp import Client
+        from mcp.server import MCPServer
+
+        class UnsafeDetails:
+            def __repr__(self) -> str:
+                return "private-runtime-object"
+
+        class UnsafeTypedErrorTool:
+            @property
+            def definition(self) -> MCPToolDefinition:
+                return MCPToolDefinition(
+                    name="unsafe_typed_error",
+                    description="Return malformed typed details",
+                )
+
+            async def handle(self, arguments: dict[str, object]):
+                del arguments
+                return Result.err(
+                    MCPToolError(
+                        "Typed tool failure",
+                        tool_name="unsafe_typed_error",
+                        error_code="unsafe_details_probe",
+                        details={"private": UnsafeDetails()},
+                    )
+                )
+
+        adapter = MCPServerAdapter(name="unsafe-details-boundary")
+        adapter.register_tool(UnsafeTypedErrorTool())
+
+        with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+            await adapter.serve(transport="stdio")
+
+        async with Client(adapter._mcp_server, mode="auto") as client:
+            result = await client.call_tool("unsafe_typed_error", {})
+
+        assert result.is_error is True
+        assert result.content[0].text == "Typed tool failure"
+        assert "private-runtime-object" not in result.content[0].text
+
+    @pytest.mark.asyncio
     async def test_public_v2_boundary_preserves_canonical_schema_and_binary_resource(
         self,
     ) -> None:
@@ -694,10 +841,12 @@ class TestCreateOuroborosServer:
         "ouroboros_brownfield",
         "ouroboros_cancel_execution",
         "ouroboros_cancel_job",
+        "ouroboros_checklist_verify",
         "ouroboros_evaluate",
         "ouroboros_evolve_rewind",
         "ouroboros_evolve_step",
         "ouroboros_execute_seed",
+        "ouroboros_fetch_artifact",
         "ouroboros_generate_seed",
         "ouroboros_interview",
         "ouroboros_job_result",
@@ -707,6 +856,7 @@ class TestCreateOuroborosServer:
         "ouroboros_lineage_status",
         "ouroboros_measure_drift",
         "ouroboros_pm_interview",
+        "ouroboros_project_status",
         "ouroboros_qa",
         "ouroboros_query_events",
         "ouroboros_query_projection",
@@ -720,6 +870,11 @@ class TestCreateOuroborosServer:
         "ouroboros_start_evolve_step",
         "ouroboros_start_execute_seed",
         "ouroboros_start_ralph",
+        # Added in #1754. This set held the re-entry tool's ABSENCE in place:
+        # `skills/interview/SKILL.md` documented the tool while this pin
+        # asserted the shipped server did not have it, so the wiring gap had a
+        # guardian rather than merely lacking a test.
+        "ouroboros_submit_fanout_results",
     }
 
     def test_creates_server_with_defaults(self) -> None:
@@ -729,30 +884,102 @@ class TestCreateOuroborosServer:
         assert server.info.name == "ouroboros-mcp"
         assert server.info.version == __version__
         tool_names = {tool.name for tool in server.info.tools}
+        assert len(tool_names) == 36
         assert tool_names == self.EXPECTED_OUROBOROS_SERVER_TOOLS
 
-    def test_synapse_tools_and_execute_paths_share_one_composition_root_hub(self) -> None:
-        """Public admission and active execution must use the same live queue."""
+    def test_checklist_verify_reuses_the_registered_evaluator(self) -> None:
+        """Checklist verification must not create a parallel evaluation authority."""
+        from ouroboros.mcp.tools.evaluation_handlers import (
+            ChecklistVerifyHandler,
+            EvaluateHandler,
+        )
+
+        server = create_ouroboros_server()
+        evaluate = server._tool_handlers["ouroboros_evaluate"]
+        checklist = server._tool_handlers["ouroboros_checklist_verify"]
+
+        assert isinstance(evaluate, EvaluateHandler)
+        assert isinstance(checklist, ChecklistVerifyHandler)
+        assert checklist.evaluate_handler is evaluate
+
+    @pytest.mark.asyncio
+    async def test_public_client_initializes_lists_and_routes_checklist_verify(self) -> None:
+        """The shipped server exposes and invokes checklist verify across MCP v2."""
+        from mcp import Client
+        from mcp.server import MCPServer
+
+        server = create_ouroboros_server(runtime_backend="claude_mcp")
+        with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+            await server.serve(transport="stdio")
+
+        async with Client(server._mcp_server, mode="auto") as client:
+            tool_names = {tool.name for tool in (await client.list_tools()).tools}
+            result = await client.call_tool(
+                "ouroboros_checklist_verify",
+                {
+                    "session_id": "ses_issue_1978",
+                    "seed_content": "goal: missing acceptance criteria",
+                    "artifact": "candidate",
+                },
+            )
+
+            assert client.server_info.name == "ouroboros-mcp"
+
+        assert "ouroboros_checklist_verify" in tool_names
+        assert result.is_error is True
+        assert "Seed validation failed" in result.content[0].text
+
+    @pytest.mark.asyncio
+    async def test_synapse_control_and_execution_paths_use_durable_relay(self) -> None:
+        """Control persists remotely while each execution process owns its live queue."""
+        from ouroboros.mcp.tools.evolution_handlers import EvolveStepHandler
         from ouroboros.mcp.tools.execution_handlers import (
             ExecuteSeedHandler,
             StartExecuteSeedHandler,
         )
         from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler
+        from ouroboros.persistence.event_store import EventStore
 
-        server = create_ouroboros_server()
-        runtime_context = server._runtime_context
-        execute = server._tool_handlers["ouroboros_execute_seed"]
-        start_execute = server._tool_handlers["ouroboros_start_execute_seed"]
-        signal = server._tool_handlers["ouroboros_session_signal"]
+        captured_runner_kwargs: dict[str, object] = {}
 
-        assert runtime_context is not None
-        assert runtime_context.synapse is not None
-        assert isinstance(execute, ExecuteSeedHandler)
-        assert isinstance(start_execute, StartExecuteSeedHandler)
-        assert isinstance(signal, SynapseSignalHandler)
-        assert execute.session_signal_hub is runtime_context.synapse
-        assert start_execute._execute_handler.session_signal_hub is runtime_context.synapse
-        assert signal.mailbox.delivery_queue is runtime_context.synapse
+        class CapturingRunner:
+            def __init__(self, **kwargs: object) -> None:
+                captured_runner_kwargs.update(kwargs)
+
+            async def execute_seed(self, **_kwargs: object) -> str:
+                return "evolve execution completed"
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        with patch("ouroboros.orchestrator.runner.OrchestratorRunner", CapturingRunner):
+            server = create_ouroboros_server(event_store=store)
+
+        try:
+            runtime_context = server._runtime_context
+            execute = server._tool_handlers["ouroboros_execute_seed"]
+            start_execute = server._tool_handlers["ouroboros_start_execute_seed"]
+            evolve = server._tool_handlers["ouroboros_evolve_step"]
+            signal = server._tool_handlers["ouroboros_session_signal"]
+
+            assert runtime_context is not None
+            assert runtime_context.synapse is not None
+            assert isinstance(execute, ExecuteSeedHandler)
+            assert isinstance(start_execute, StartExecuteSeedHandler)
+            assert isinstance(evolve, EvolveStepHandler)
+            assert isinstance(signal, SynapseSignalHandler)
+            assert execute.session_signal_hub is runtime_context.synapse
+            assert start_execute._execute_handler.session_signal_hub is runtime_context.synapse
+            assert signal.mailbox.delivery_queue is None
+
+            assert evolve.evolutionary_loop is not None
+            result = await evolve.evolutionary_loop.executor(
+                MagicMock(),
+                execution_id="evolve:lin_test:generation:1",
+            )
+
+            assert result == "evolve execution completed"
+            assert captured_runner_kwargs["session_signal_hub"] is runtime_context.synapse
+        finally:
+            await server.shutdown()
 
     def test_create_server_forwards_bridge_context_to_auto_handler(self) -> None:
         """Auto resume rebuilds should retain bridge access from server wiring."""
@@ -867,9 +1094,16 @@ class TestCreateOuroborosServer:
 
             create_ouroboros_server(runtime_backend="codex", llm_backend="codex")
 
-        mock_create_llm_adapter.assert_called_once()
-        assert mock_create_llm_adapter.call_args.kwargs["backend"] == "codex"
-        assert mock_create_llm_adapter.call_args.kwargs["max_turns"] == 15
+        assert len(mock_create_llm_adapter.call_args_list) == 3
+        assert [call.kwargs["backend"] for call in mock_create_llm_adapter.call_args_list] == [
+            "codex",
+            "codex",
+            "codex",
+        ]
+        assert [
+            call.kwargs["frugality_proof"] for call in mock_create_llm_adapter.call_args_list
+        ] == [False, True, True]
+        assert {call.kwargs["max_turns"] for call in mock_create_llm_adapter.call_args_list} == {15}
 
     def test_evolution_adapter_factory_resolves_live_backend_with_cwd(self) -> None:
         """Per-call evolution adapter factory must not freeze startup llm_backend."""
@@ -974,6 +1208,51 @@ class TestCreateOuroborosServer:
         assert mock_wonder_engine.call_args.kwargs["adapter_backend"] == "codex"
         assert mock_reflect_engine.call_args.kwargs["adapter_backend"] == "codex"
 
+    @pytest.mark.asyncio
+    async def test_mcp_host_capability_is_not_inferred_from_reflect_worker(self) -> None:
+        """A server-composed Gemini worker cannot label a Claude host sequential."""
+        from ouroboros.mcp.host_context import (
+            DispatchAuthority,
+            HostFamily,
+            HostIdentityStatus,
+            MCPHostContext,
+            use_mcp_host_context,
+        )
+
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(
+                runtime_backend="claude",
+                runtime_profile=RuntimeProfileConfig(stages={"reflect": "gemini"}),
+            ),
+        )
+        with (
+            patch("ouroboros.config.load_config", return_value=config),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+            patch("ouroboros.providers.create_llm_adapter", return_value=MagicMock()),
+            patch("ouroboros.orchestrator.create_agent_runtime", return_value=MagicMock()),
+        ):
+            server = create_ouroboros_server(runtime_backend="claude")
+
+        lateral = server._tool_handlers["ouroboros_lateral_think"]
+        assert lateral.agent_runtime_backend == "gemini"
+        host = MCPHostContext(
+            host_family=HostFamily.CLAUDE_CODE,
+            identity_status=HostIdentityStatus.KNOWN,
+            dispatch_authority=DispatchAuthority.MCP_HOST,
+        )
+        with use_mcp_host_context(host):
+            result = await lateral.handle(
+                {
+                    "problem_context": "stuck on X",
+                    "current_approach": "tried Y",
+                    "persona": "all",
+                }
+            )
+
+        assert result.is_ok
+        assert result.unwrap().meta["dispatch_mode"] == "host_decides"
+        assert result.unwrap().meta["host_action"] == "dispatch_subagents_if_supported"
+
     def test_legacy_llm_backend_config_override_honored_at_composition_root(self) -> None:
         """No per-stage profile: config.llm.backend drives internal LLM roles.
 
@@ -1049,8 +1328,15 @@ class TestCreateOuroborosServer:
 
             create_ouroboros_server(runtime_backend="opencode", llm_backend="opencode")
 
-        mock_create_llm_adapter.assert_called_once()
-        assert mock_create_llm_adapter.call_args.kwargs["backend"] == "opencode"
+        assert len(mock_create_llm_adapter.call_args_list) == 3
+        assert [call.kwargs["backend"] for call in mock_create_llm_adapter.call_args_list] == [
+            "opencode",
+            "opencode",
+            "opencode",
+        ]
+        assert [
+            call.kwargs["frugality_proof"] for call in mock_create_llm_adapter.call_args_list
+        ] == [False, True, True]
         mock_create_runtime.assert_called_once()
         assert mock_create_runtime.call_args.kwargs["backend"] == "opencode"
 

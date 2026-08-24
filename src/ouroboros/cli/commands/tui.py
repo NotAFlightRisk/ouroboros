@@ -18,6 +18,7 @@ import typer
 
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 from ouroboros.config.models import resolve_event_store_path
+from ouroboros.package_profiles import UVX_PYTHON_FLOOR
 from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
 app = typer.Typer(
@@ -58,8 +59,16 @@ def monitor_command(
 
     Starts a terminal UI that shows a list of all sessions found in the
     database. You can then select a session to monitor in real-time.
+
+    The monitor attaches to the event store as an observer and does not own the
+    running execution, so pause/resume controls are not offered on either
+    backend. Use `ouroboros cancel execution` to stop a run.
     """
     resolved_db_path = db_path or _resolve_event_store_path_or_exit()
+    print_info(
+        "This monitor does not own the execution: pause/resume are not available here. "
+        "Use 'ouroboros cancel execution' to stop a run."
+    )
     if backend == "slt":
         _run_slt_backend(resolved_db_path)
         return
@@ -74,7 +83,7 @@ def monitor_command(
             "Install with:\n"
             "  pip install 'ouroboros-ai[tui]'\n\n"
             "Or run directly with uvx:\n"
-            "  uvx --from 'ouroboros-ai[tui]' ouroboros tui monitor",
+            "  uvx --python '>=3.12' --from 'ouroboros-ai[tui]' ouroboros tui monitor",
         )
         raise typer.Exit(1) from e
 
@@ -206,6 +215,8 @@ def _monitor_argv(db_path: Path) -> list[str]:
         return [entrypoint, "tui", "monitor", "--db-path", str(db_path)]
     return [
         "uvx",
+        "--python",
+        UVX_PYTHON_FLOOR,
         "--from",
         "ouroboros-ai[tui]",
         "ouroboros",

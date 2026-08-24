@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 import inspect
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from pydantic import ValidationError as PydanticValidationError
@@ -19,7 +19,9 @@ import structlog
 import yaml
 
 from ouroboros.config.loader import (
+    default_execution_efficiency_mode,
     get_auto_evaluate_enabled,
+    get_auto_evolve_enabled,
     get_max_parallel_workers,
     resolve_execution_model,
 )
@@ -50,7 +52,10 @@ from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools._dashboard import resolve_dashboard_run_url
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
-from ouroboros.mcp.tools.job_observer import build_job_observer_contract
+from ouroboros.mcp.tools.job_observer import (
+    append_job_observer_inline_handoff,
+    build_job_observer_contract,
+)
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     DELEGATED_TO_SUBAGENT,
@@ -96,6 +101,10 @@ from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
+
+if TYPE_CHECKING:
+    from ouroboros.mcp.tools.evaluation_handlers import StartEvaluateHandler
+    from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
 
 
 _PROCESS_LOCAL_BACKGROUND_OWNED_BLOCKS = frozenset(
@@ -231,6 +240,12 @@ def _resolve_execution_preferences_request(
         raise ValueError("efficiency_mode must be adaptive or quality_first")
     if raw_assurance is not None and not isinstance(raw_assurance, str):
         raise ValueError("frugality_assurance must be off, observe, or strict")
+    if raw_efficiency is None and not is_resume:
+        # Persistent default policy fills the fresh-start gap (#1733):
+        # explicit arguments won above, resume keeps its persisted contract,
+        # and the coupled frugality default still derives from the mode, so
+        # strict can never appear implicitly.
+        raw_efficiency = default_execution_efficiency_mode()
     preferences = resolve_execution_preferences(raw_efficiency, raw_assurance)
     return (
         preferences,
@@ -579,13 +594,6 @@ def resolve_auto_evaluate(config_flag: bool, per_call_override: bool | None) -> 
     return config_flag
 
 
-def _run_succeeded(result: MCPToolResult) -> bool:
-    """Return True when a synchronous execute_seed result reached successful completion."""
-    if result.is_error:
-        return False
-    return result.meta.get("success") is True
-
-
 def _result_session_id(result: MCPToolResult, fallback: str | None) -> str | None:
     session_id = result.meta.get("session_id")
     return session_id if isinstance(session_id, str) and session_id else fallback
@@ -596,85 +604,6 @@ def _result_evaluation_working_dir(result: MCPToolResult, fallback: Path) -> Pat
     if isinstance(worktree_path, str) and worktree_path:
         return Path(worktree_path)
     return fallback
-
-
-def _append_result_text(
-    result: MCPToolResult,
-    text: str,
-    *,
-    meta: dict[str, Any],
-) -> MCPToolResult:
-    return MCPToolResult(
-        content=(
-            *result.content,
-            MCPContentItem(type=ContentType.TEXT, text=text),
-        ),
-        is_error=result.is_error,
-        meta=meta,
-        structured_content=result.structured_content,
-    )
-
-
-def _evaluation_enqueued_meta(
-    run_result: MCPToolResult,
-    *,
-    session_id: str | None,
-    evaluation_job_id: str,
-) -> dict[str, Any]:
-    retry_step = f"ooo evaluate {session_id}" if session_id else "ooo evaluate <session_id>"
-    return {
-        **run_result.meta,
-        **_run_only_verification_meta(
-            session_id,
-            verification_status="evaluation_enqueued",
-        ),
-        "chained_evaluate_job_id": evaluation_job_id,
-        "evaluation_status": "enqueued",
-        "next_step": (
-            f"ouroboros_job_wait {evaluation_job_id}, then ouroboros_job_result {evaluation_job_id}"
-        ),
-        "manual_retry_next_step": retry_step,
-    }
-
-
-def _evaluation_enqueued_text(session_id: str | None, evaluation_job_id: str) -> str:
-    retry_step = f"ooo evaluate {session_id}" if session_id else "ooo evaluate <session_id>"
-    return (
-        "\nFormal Evaluation: queued as a bounded background job\n"
-        f"Chained Evaluation Job ID: {evaluation_job_id}\n"
-        f"Next: poll ouroboros_job_wait(job_id={evaluation_job_id}) and "
-        f"then ouroboros_job_result(job_id={evaluation_job_id}).\n"
-        f"Manual Retry: {retry_step}\n"
-    )
-
-
-def _evaluation_enqueue_failed_meta(
-    run_result: MCPToolResult,
-    *,
-    session_id: str | None,
-    error: str,
-) -> dict[str, Any]:
-    retry_step = f"ooo evaluate {session_id}" if session_id else "ooo evaluate <session_id>"
-    meta = dict(run_result.meta)
-    if "verification_status" not in meta:
-        meta.update(_run_only_verification_meta(session_id))
-    meta.update(
-        {
-            "evaluation_status": "enqueue_failed",
-            "evaluation_error": error[:1000],
-            "next_step": retry_step,
-        }
-    )
-    return meta
-
-
-def _evaluation_enqueue_failed_text(session_id: str | None, error: str) -> str:
-    retry_step = f"ooo evaluate {session_id}" if session_id else "ooo evaluate <session_id>"
-    return (
-        "\nFormal Evaluation: enqueue failed; run result remains successful.\n"
-        f"Evaluation Error: {error[:1000]}\n"
-        f"Next: {retry_step}\n"
-    )
 
 
 def _plugin_verification_meta(
@@ -753,6 +682,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
     session_signal_hub: Any | None = field(default=None, repr=False)
+    seed_handoff_registry: "SeedHandoffRegistry | None" = field(default=None, repr=False)
     _background_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     _process_local_resume_owners: dict[str, OrchestratorRunner] = field(
         default_factory=dict,
@@ -1155,7 +1085,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     description=(
                         "Execution efficiency policy. adaptive may start decomposed ACs "
                         "on lower-cost tiers and escalate on recovery; quality_first keeps "
-                        "children at the parent starting tier. Default: adaptive."
+                        "children at the parent starting tier. When omitted on a fresh "
+                        "start, a configured execution.default_policy supplies it; "
+                        "otherwise defaults to adaptive."
                     ),
                     required=False,
                     enum=("adaptive", "quality_first"),
@@ -1202,8 +1134,18 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     type=ToolInputType.BOOLEAN,
                     description=(
                         "Override execution.auto_evaluate for this call. When true, "
-                        "a successful background execute_seed run enqueues formal "
+                        "a completed background execute_seed run enqueues formal "
                         "3-stage evaluation as a separate bounded background job."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="auto_evolve",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "Override execution.auto_evolve for the chained evaluation. "
+                        "When true, an explicitly rejected evaluation starts a bounded "
+                        "Ralph continuation loop."
                     ),
                     required=False,
                 ),
@@ -1364,17 +1306,35 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 get_auto_evaluate_enabled(),
                 arguments.get("auto_evaluate"),
             )
+            auto_evolve = resolve_auto_evaluate(
+                get_auto_evolve_enabled(),
+                arguments.get("auto_evolve"),
+            )
+            seed_handoff_id = (
+                self.seed_handoff_registry.register(
+                    session_id=session_id,
+                    seed_content=seed_content,
+                )
+                if auto_evaluate
+                and session_id is not None
+                and self.seed_handoff_registry is not None
+                else None
+            )
             _effective_tier, _runner_tier, delegated_model_tier = _resolve_model_tier_request(
                 arguments
             )
             payload = build_execute_subagent(
                 seed_content=seed_content,
                 session_id=session_id,
-                seed_path=arguments.get("seed_path"),
+                # The original seed file may contain harness-owned assertions.
+                # The worker receives the sanitized inline projection only.
+                seed_path=None,
                 cwd=str(resolved_cwd),
                 max_iterations=max_iterations,
                 skip_qa=arguments.get("skip_qa", False),
                 auto_evaluate=auto_evaluate,
+                auto_evolve=auto_evolve,
+                seed_handoff_id=seed_handoff_id,
                 model_tier=delegated_model_tier,
                 efficiency_mode=execution_preferences.efficiency_mode.value,
                 frugality_assurance=execution_preferences.frugality_assurance.value,
@@ -2140,8 +2100,26 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         requested cwd is missing or is not a directory.  Otherwise the actual
         execution fails later inside the runtime with a less actionable
         ``FileNotFoundError``.
+
+        The same fail-closed reasoning covers the workspace policy: ``cwd``
+        arrives from the caller and becomes an agent runtime's working tree, so
+        a server started with confined roots must reject an outside directory
+        here rather than hand it to the runtime.
         """
+        from ouroboros.mcp.server.workspace import get_workspace_policy
+
         resolved_cwd = ExecuteSeedHandler._resolve_dispatch_cwd(raw_cwd)
+
+        policy = get_workspace_policy()
+        if not policy.permits(resolved_cwd):
+            return Result.err(
+                MCPToolError(
+                    f"Working directory is outside the permitted workspace: "
+                    f"{resolved_cwd} (allowed: {policy.describe()})",
+                    tool_name=tool_name,
+                )
+            )
+
         if not resolved_cwd.exists():
             return Result.err(
                 MCPToolError(
@@ -2330,6 +2308,8 @@ class StartExecuteSeedHandler:
     job_manager: JobManager | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    start_evaluate_handler: "StartEvaluateHandler | None" = field(default=None, repr=False)
+    seed_handoff_registry: "SeedHandoffRegistry | None" = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
@@ -2384,108 +2364,6 @@ class StartExecuteSeedHandler:
                     ),
                     required=False,
                 ),
-            ),
-        )
-
-    async def _enqueue_chained_evaluation(
-        self,
-        run_result: MCPToolResult,
-        *,
-        session_id: str | None,
-        seed_content: str,
-        working_dir: Path,
-    ) -> MCPToolResult:
-        from ouroboros.mcp.tools.evaluation_handlers import StartEvaluateHandler
-
-        artifact = run_result.text_content or "Execution completed successfully."
-        evaluation_arguments: dict[str, Any] = {
-            "session_id": session_id,
-            "artifact": artifact,
-            "artifact_type": "code",
-            "seed_content": seed_content,
-            "working_dir": str(working_dir),
-        }
-        try:
-            seed_dict = yaml.safe_load(seed_content)
-            if isinstance(seed_dict, dict):
-                seed = Seed.from_dict(seed_dict)
-                acceptance_criteria = [
-                    stripped
-                    for text in ac_texts(seed.acceptance_criteria)
-                    if (stripped := text.strip())
-                ]
-                if acceptance_criteria:
-                    evaluation_arguments["acceptance_criteria"] = acceptance_criteria
-            else:
-                log.warning(
-                    "mcp.tool.start_execute_seed.chained_evaluate.seed_not_mapping",
-                    session_id=session_id,
-                )
-        except yaml.YAMLError as exc:
-            log.warning(
-                "mcp.tool.start_execute_seed.chained_evaluate.yaml_error",
-                session_id=session_id,
-                error=str(exc),
-            )
-        except (ValidationError, PydanticValidationError) as exc:
-            log.warning(
-                "mcp.tool.start_execute_seed.chained_evaluate.seed_validation_error",
-                session_id=session_id,
-                error=str(exc),
-            )
-        try:
-            start_evaluate = StartEvaluateHandler(
-                event_store=self._event_store,
-                job_manager=self._job_manager,
-                llm_backend=self._execute_handler.llm_backend,
-                agent_runtime_backend=self.agent_runtime_backend,
-                opencode_mode=self.opencode_mode,
-            )
-            evaluate_result = await start_evaluate.handle(evaluation_arguments)
-        except Exception as exc:  # noqa: BLE001 - evaluation must never flip run success.
-            error = str(exc)
-            return _append_result_text(
-                run_result,
-                _evaluation_enqueue_failed_text(session_id, error),
-                meta=_evaluation_enqueue_failed_meta(
-                    run_result,
-                    session_id=session_id,
-                    error=error,
-                ),
-            )
-
-        if evaluate_result.is_err:
-            error = evaluate_result.error.message
-            return _append_result_text(
-                run_result,
-                _evaluation_enqueue_failed_text(session_id, error),
-                meta=_evaluation_enqueue_failed_meta(
-                    run_result,
-                    session_id=session_id,
-                    error=error,
-                ),
-            )
-
-        evaluation_job_id = evaluate_result.value.meta.get("job_id")
-        if not isinstance(evaluation_job_id, str) or not evaluation_job_id:
-            error = "StartEvaluateHandler did not return a pollable evaluation job_id"
-            return _append_result_text(
-                run_result,
-                _evaluation_enqueue_failed_text(session_id, error),
-                meta=_evaluation_enqueue_failed_meta(
-                    run_result,
-                    session_id=session_id,
-                    error=error,
-                ),
-            )
-
-        return _append_result_text(
-            run_result,
-            _evaluation_enqueued_text(session_id, evaluation_job_id),
-            meta=_evaluation_enqueued_meta(
-                run_result,
-                session_id=session_id,
-                evaluation_job_id=evaluation_job_id,
             ),
         )
 
@@ -2675,17 +2553,33 @@ class StartExecuteSeedHandler:
                 get_auto_evaluate_enabled(),
                 arguments.get("auto_evaluate"),
             )
+            auto_evolve = resolve_auto_evaluate(
+                get_auto_evolve_enabled(),
+                arguments.get("auto_evolve"),
+            )
+            seed_handoff_id = (
+                self.seed_handoff_registry.register(
+                    session_id=plugin_session_id,
+                    seed_content=seed_content,
+                )
+                if auto_evaluate and self.seed_handoff_registry is not None
+                else None
+            )
             _effective_tier, _runner_tier, delegated_model_tier = _resolve_model_tier_request(
                 arguments
             )
             payload = build_execute_subagent(
                 seed_content=seed_content,
                 session_id=plugin_session_id,
-                seed_path=arguments.get("seed_path"),
+                # The original seed file may contain harness-owned assertions.
+                # The worker receives the sanitized inline projection only.
+                seed_path=None,
                 cwd=arguments.get("cwd"),
                 max_iterations=arguments.get("max_iterations", 10),
                 skip_qa=arguments.get("skip_qa", False),
                 auto_evaluate=auto_evaluate,
+                auto_evolve=auto_evolve,
+                seed_handoff_id=seed_handoff_id,
                 model_tier=delegated_model_tier,
                 efficiency_mode=execution_preferences.efficiency_mode.value,
                 frugality_assurance=execution_preferences.frugality_assurance.value,
@@ -2751,9 +2645,12 @@ class StartExecuteSeedHandler:
             execution_id = f"exec_{uuid4().hex[:12]}"
             new_session_id = f"orch_{uuid4().hex[:12]}"
 
-        auto_evaluate_enabled = resolve_auto_evaluate(
-            get_auto_evaluate_enabled(),
-            arguments.get("auto_evaluate"),
+        from ouroboros.mcp.tools.run_evaluate_chain import snapshot_run_successor_policy
+
+        arguments, auto_evaluate_enabled, auto_evolve_enabled = snapshot_run_successor_policy(
+            arguments,
+            configured_auto_evaluate=get_auto_evaluate_enabled(),
+            configured_auto_evolve=get_auto_evolve_enabled(),
         )
 
         # The shared pipeline owns the ``should_cancel()`` pre-work guard.
@@ -2771,8 +2668,12 @@ class StartExecuteSeedHandler:
                 run_result,
                 session_id or new_session_id,
             )
-            if auto_evaluate_enabled and run_session_id and _run_succeeded(run_result):
-                return await self._enqueue_chained_evaluation(
+            # Failed AC execution is evaluable; pauses and cancellation are not.
+            from ouroboros.mcp.tools import run_evaluate_chain
+
+            evaluable = run_evaluate_chain.is_evaluable_run_result(run_result)
+            if auto_evaluate_enabled and run_session_id and evaluable:
+                return await run_evaluate_chain.enqueue_chained_evaluation(
                     run_result,
                     session_id=run_session_id,
                     seed_content=seed_content,
@@ -2780,6 +2681,8 @@ class StartExecuteSeedHandler:
                         run_result,
                         resolved_cwd,
                     ),
+                    auto_evolve=auto_evolve_enabled,
+                    start_evaluate_handler=self.start_evaluate_handler,
                 )
             return run_result
 
@@ -2822,6 +2725,16 @@ class StartExecuteSeedHandler:
             snapshot.links.execution_id or execution_id, self._event_store
         )
         dashboard_line = f"Live Dashboard: {dashboard_url}\n" if dashboard_url else ""
+        observer = build_job_observer_contract(
+            job_id=snapshot.job_id,
+            cursor=snapshot.cursor,
+            session_id=snapshot.links.session_id,
+            execution_id=snapshot.links.execution_id,
+            follow_result_job_keys=(
+                "chained_evaluate_job_id",
+                "chained_ralph_job_id",
+            ),
+        )
         text = (
             f"Started background execution.\n\n"
             f"Job ID: {snapshot.job_id}\n"
@@ -2837,6 +2750,7 @@ class StartExecuteSeedHandler:
             "Use ouroboros_ac_tree_hud(session_id, cursor) for live progress and "
             "ouroboros_job_result(job_id) for the final output."
         )
+        text = append_job_observer_inline_handoff(text, observer)
         meta: dict[str, Any] = {
             "job_id": snapshot.job_id,
             "session_id": snapshot.links.session_id,
@@ -2848,13 +2762,7 @@ class StartExecuteSeedHandler:
             "llm_backend": llm_backend,
             "efficiency_mode": execution_preferences.efficiency_mode.value,
             "frugality_assurance": execution_preferences.frugality_assurance.value,
-            "job_observer": build_job_observer_contract(
-                job_id=snapshot.job_id,
-                cursor=snapshot.cursor,
-                session_id=snapshot.links.session_id,
-                execution_id=snapshot.links.execution_id,
-                follow_result_job_keys=("chained_evaluate_job_id",),
-            ),
+            "job_observer": observer,
             **_run_only_verification_meta(snapshot.links.session_id),
         }
         if idempotency_key:

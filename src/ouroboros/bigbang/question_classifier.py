@@ -16,12 +16,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 import json
-import re
 
 import structlog
 
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -192,6 +192,11 @@ Marking as a decision point for later."
 """
 
 
+def classification_policy_prompt() -> str:
+    """Return routing policy text without the standalone classifier schema."""
+    return _CLASSIFICATION_SYSTEM_PROMPT.split("## Response Format", 1)[0].rstrip()
+
+
 @dataclass
 class QuestionClassifier:
     """Classifies interview questions as PM-answerable, DEV-only, or decide-later.
@@ -311,20 +316,19 @@ class QuestionClassifier:
         Raises:
             ValueError: If response cannot be parsed.
         """
-        text = response.strip()
-
-        # Extract JSON from markdown code blocks if present
-        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if json_match:
-            text = json_match.group(1)
-        else:
-            json_match = re.search(r"\{.*\}", text, re.DOTALL)
-            if json_match:
-                text = json_match.group(0)
+        # One authoritative payload or nothing (#1838).
+        text = extract_json_payload(response.strip())
+        if text is None:
+            raise ValueError("no unambiguous JSON payload in classification response")
 
         data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError("classification payload must be a JSON object")
 
-        category_str = data.get("category", "planning").lower()
+        raw_category = data.get("category", "planning")
+        if not isinstance(raw_category, str):
+            raise ValueError("classification category must be a string")
+        category_str = raw_category.lower()
         if category_str == "decide_later":
             category = QuestionCategory.DECIDE_LATER
         elif category_str == "development":
@@ -333,10 +337,13 @@ class QuestionClassifier:
             category = QuestionCategory.PLANNING
 
         reframed = data.get("reframed_question", original_question)
-        if not reframed or not reframed.strip():
+        if not isinstance(reframed, str) or not reframed.strip():
             reframed = original_question
 
-        is_decide_later = bool(data.get("decide_later", False))
+        raw_decide_later = data.get("decide_later", False)
+        if not isinstance(raw_decide_later, bool):
+            raise ValueError("classification decide_later must be a boolean")
+        is_decide_later = raw_decide_later
         placeholder = data.get("placeholder_response", "")
 
         # Ensure decide-later always has a placeholder
@@ -349,12 +356,15 @@ class QuestionClassifier:
             if not placeholder:
                 placeholder = _DEFAULT_PLACEHOLDER
 
+        raw_defer_to_dev = data.get("defer_to_dev", False)
+        if not isinstance(raw_defer_to_dev, bool):
+            raise ValueError("classification defer_to_dev must be a boolean")
         return ClassificationResult(
             original_question=original_question,
             category=category,
             reframed_question=reframed,
             reasoning=data.get("reasoning", ""),
-            defer_to_dev=bool(data.get("defer_to_dev", False)),
+            defer_to_dev=raw_defer_to_dev,
             decide_later=is_decide_later,
             placeholder_response=placeholder,
         )

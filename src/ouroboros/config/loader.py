@@ -61,6 +61,7 @@ from ouroboros.config.models import (  # noqa: E402
     get_default_config,
     get_default_credentials,
 )
+from ouroboros.config.untrusted_env import is_untrusted_env_denied_key
 from ouroboros.core.errors import ConfigError  # noqa: E402
 from ouroboros.orchestrator_stage import (  # noqa: E402
     Stage,
@@ -170,169 +171,11 @@ def _is_placeholder_api_key(value: str) -> bool:
     )
 
 
-# Environment variables that determine HOW Ouroboros executes work. This
-# is the single authoritative trust boundary: a cloned repository's `.env`
-# must not be able to change which binary runs or whether the user's
-# approval gate applies. Four classes, all remote-code-execution sinks
-# when sourced from an untrusted location:
-#   1. Explicit CLI path overrides fed straight into a subprocess.
-#   2. Runtime/backend selectors that pick which adapter (and therefore
-#      which executable) is spawned — a selector can route to a backend
-#      whose CLI then resolves via a weak shutil.which / bare-name lookup.
-#   3. Permission-mode overrides — setting acceptEdits/bypassPermissions
-#      silently removes the human approval gate, letting a malicious repo
-#      auto-approve arbitrary tool calls (effectively RCE).
-#   4. Runtime-native preload hooks such as NODE_OPTIONS, which can execute
-#      attacker-controlled code before a spawned JavaScript CLI starts.
-# These keys are only honored from trusted sources (the real process
-# environment, ~/.ouroboros/.env, ~/.ouroboros/config.yaml), never from
-# the project-directory .env that travels with a cloned repo. Trusted .env
-# files still follow the loader's normal "do not override an already-set
-# real process environment value" precedence. Enforcing this here — at the
-# .env load — keeps the policy in one place rather than split across
-# downstream sinks.
-_UNTRUSTED_ENV_DENYLIST = frozenset(
-    {
-        # Search PATH used by shutil.which()/bare executable spawning.
-        "PATH",
-        # Node/Electron preload hook. A project .env could otherwise inject a
-        # --require/--import payload before a spawned JavaScript CLI starts.
-        "NODE_OPTIONS",
-        # Non-LD_/DYLD_ dynamic-loader controls used by supported or adjacent
-        # Unix platforms. Prefix families are rejected below.
-        "LDR_PRELOAD",
-        "LIBPATH",
-        "SHLIB_PATH",
-        # Explicit executable-path overrides.
-        "OUROBOROS_CLI_PATH",
-        "OUROBOROS_CODEX_CLI_PATH",
-        "OUROBOROS_COPILOT_CLI_PATH",
-        "OUROBOROS_KIRO_CLI_PATH",
-        "OUROBOROS_OPENCODE_CLI_PATH",
-        "OUROBOROS_HERMES_CLI_PATH",
-        "OUROBOROS_GOOSE_CLI_PATH",
-        "OUROBOROS_GEMINI_CLI_PATH",
-        "OUROBOROS_PI_CLI_PATH",
-        "OUROBOROS_GJC_CLI_PATH",
-        "OUROBOROS_ANTIGRAVITY_CLI_PATH",
-        "OUROBOROS_GROK_CLI_PATH",
-        "OUROBOROS_OUROCODE_CLI_PATH",
-        "OUROBOROS_ZCODE_CLI_PATH",
-        # Bare provider aliases (no OUROBOROS_ prefix) that adapters also
-        # honor and then execute. Any new such alias MUST be added here:
-        # `opencode_config._configured_opencode_cli_path` reads
-        # OPENCODE_CLI_PATH and runs it via subprocess.run.
-        "OPENCODE_CLI_PATH",
-        # Spawned-CLI discovery roots. The gjc CLI resolves its agent dir
-        # (rules/skills/extensions it loads into every session) from these
-        # vars; an untrusted repo .env must not be able to point a spawned
-        # gjc at attacker-controlled instruction/extension directories.
-        "GJC_CODING_AGENT_DIR",
-        "GJC_CONFIG_DIR",
-        "PI_CONFIG_DIR",
-        # Copilot custom-instruction roots — same instruction-injection class
-        # as GJC_CODING_AGENT_DIR. `copilot/cli_policy.py` derives the child
-        # env from os.environ and only *appends* the setup-owned dir, so an
-        # untrusted .env entry survives and a spawned Copilot loads attacker
-        # AGENTS.md from it.
-        "COPILOT_CUSTOM_INSTRUCTIONS_DIRS",
-        # Ouroboros agent-definition root. `agents/loader.py` resolves every
-        # agent's role/persona markdown (socratic-interviewer, evaluator, …)
-        # from this dir first; an untrusted .env pointing it at a committed
-        # repo dir lets a cloned repo replace the system prompt of every
-        # spawned sub-agent — instruction injection, same class as above.
-        "OUROBOROS_AGENTS_DIR",
-        # Backend config-home roots. The spawned vendor CLI resolves its own
-        # config file — which can name MCP servers to launch, disable the
-        # approval gate, and widen the sandbox — from these vars, and the var
-        # passes through the child env untouched (it is not in any backend's
-        # strip_keys). An untrusted repo .env must not redirect a nested agent
-        # at attacker-controlled config. Codex honors $CODEX_HOME/config.toml
-        # (mcp_servers.<name>.command/args -> arbitrary command execution;
-        # approval_policy="never" + sandbox_mode="danger-full-access" ->
-        # silent removal of the human approval gate). OpenCode resolves its
-        # config from OPENCODE_CONFIG / OPENCODE_CONFIG_DIR and otherwise
-        # falls back to $XDG_CONFIG_HOME/opencode. Completes CVE-2026-47211.
-        "CODEX_HOME",
-        "OPENCODE_CONFIG",
-        "OPENCODE_CONFIG_DIR",
-        "XDG_CONFIG_HOME",
-        # Platform home selectors also choose Ouroboros' trusted config root.
-        # A project .env must not turn a repository directory into ~/.ouroboros.
-        "HOME",
-        "USERPROFILE",
-        "HOMEDRIVE",
-        "HOMEPATH",
-        # Ouroboros' own MCP-bridge / plugin execution roster roots. Each
-        # selects a file whose contents name an external command that the
-        # bridge or plugin dispatcher then spawns verbatim — direct RCE, the
-        # same threat model as the backend config-home roots above:
-        #   - OUROBOROS_MCP_CONFIG -> mcp/bridge/config.py:discover_config
-        #     returns the path; the YAML's server `command`/`args` are spawned
-        #     via stdio_client (loader -> discover_config -> MCPClientAdapter
-        #     -> stdio_client).
-        #   - OUROBOROS_PLUGIN_LOCKFILE / OUROBOROS_PLUGIN_TRUST_ROOT ->
-        #     plugin_dispatch resolves the installed-plugin roster and trust
-        #     root from these; redirecting them lets a cloned repo register an
-        #     attacker manifest / mark a malicious plugin as trusted, so
-        #     `ooo <name>` dispatches into attacker code.
-        "OUROBOROS_MCP_CONFIG",
-        "OUROBOROS_PLUGIN_LOCKFILE",
-        "OUROBOROS_PLUGIN_TRUST_ROOT",
-        # SSRF guard toggle. `mcp/types.py` blocks loopback/private/link-local
-        # MCP transport targets unless this is "1"; an untrusted .env must not
-        # be able to re-enable connections to internal addresses.
-        "OUROBOROS_ALLOW_LOCAL_TRANSPORT",
-        # Runtime/backend selectors — choose which adapter is spawned.
-        "OUROBOROS_AGENT_RUNTIME",
-        "OUROBOROS_RUNTIME",
-        "OUROBOROS_LLM_BACKEND",
-        # Backend profile selector (get_runtime_profile): chooses the
-        # orchestrator backend profile and therefore which backend behavior /
-        # executable is used — same routing class as the selectors above.
-        "OUROBOROS_RUNTIME_PROFILE",
-        # Permission-mode overrides — must not silently disable the
-        # user's approval gate from an untrusted repo.
-        "OUROBOROS_AGENT_PERMISSION_MODE",
-        "OUROBOROS_LLM_PERMISSION_MODE",
-        "OUROBOROS_OPENCODE_PERMISSION_MODE",
-        # Tool-capability override file. The override YAML can lower a tool's
-        # approval_class (e.g. ELEVATED -> DEFAULT), weakening the human
-        # approval gate for non-built-in tools. External control of this path
-        # is therefore an approval-gate-bypass sink — same class as the
-        # permission-mode overrides above.
-        "OUROBOROS_TOOL_CAPABILITIES",
-        # Execution-cost/behavior dial — an untrusted repo .env must not be able
-        # to force a higher (or invalid) reasoning-effort level for every AC,
-        # which changes runtime cost and behavior. Follows the same trusted-source
-        # policy as the runtime/permission overrides above (RFC #1405).
-        "OUROBOROS_AGENT_REASONING_EFFORT",
-        # Explicit constructor model pin. Besides changing cost/capability, this
-        # disables tier routing by design, so an untrusted project .env must not
-        # be able to force an arbitrary model or bypass the frugality policy.
-        "OUROBOROS_EXECUTION_MODEL",
-        # Model-tier experiment controls are the same trust class: a cloned repo
-        # must not disable routing or opt the user into shadow replay, which
-        # re-executes successful children and can double token spend.
-        "OUROBOROS_MODEL_TIER_ROUTING",
-        "OUROBOROS_SHADOW_REPLAY",
-    }
-)
-_UNTRUSTED_ENV_DENIED_PREFIXES = ("DYLD_", "LD_")
-
 # The reasoning-effort vocabulary every native runtime accepts (mirrors
 # OrchestratorConfig.reasoning_effort). A value outside this set — Codex-only
 # ``minimal``, Claude-only ``max``, or a typo — must never reach a runtime, so the
 # env override is validated against it before use.
 _VALID_REASONING_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh"})
-
-
-def _is_untrusted_env_denied_key(key: str) -> bool:
-    """Return whether an untrusted .env key may alter execution routing."""
-    normalized = key.upper()
-    return normalized in _UNTRUSTED_ENV_DENYLIST or normalized.startswith(
-        _UNTRUSTED_ENV_DENIED_PREFIXES
-    )
 
 
 def _load_env_file(path: Path, *, trusted: bool = False) -> None:
@@ -384,7 +227,7 @@ def _load_env_file(path: Path, *, trusted: bool = False) -> None:
         if not _is_assignable_env_key(key):
             continue
 
-        if not trusted and _is_untrusted_env_denied_key(key):
+        if not trusted and is_untrusted_env_denied_key(key):
             # Untrusted project-directory .env must not redirect which
             # binary Ouroboros executes (remote code execution guard).
             continue
@@ -782,10 +625,10 @@ def get_cli_path() -> str | None:
     Priority:
         1. OUROBOROS_CLI_PATH environment variable
         2. config.yaml orchestrator.cli_path
-        3. None (use SDK default)
+        3. None (let the active Claude runtime resolve its default)
 
     Returns:
-        Path to CLI binary or None to use SDK default.
+        Path to CLI binary or None to use the active runtime default.
     """
     # 1. Check environment variable (highest priority)
     env_path = os.environ.get("OUROBOROS_CLI_PATH", "").strip()
@@ -801,7 +644,7 @@ def get_cli_path() -> str | None:
         # Config doesn't exist or is invalid - fall back to default
         pass
 
-    # 3. Default: None (SDK uses bundled CLI)
+    # 3. Default: None (the selected Claude runtime resolves its own CLI)
     return None
 
 
@@ -812,7 +655,7 @@ def get_agent_runtime_backend() -> str:
         1. OUROBOROS_AGENT_RUNTIME environment variable
         2. OUROBOROS_RUNTIME environment variable
         3. config.yaml orchestrator.runtime_backend
-        4. "claude"
+        4. "claude" (Claude Agent SDK runtime)
 
     Returns:
         Normalized runtime backend name.
@@ -885,21 +728,15 @@ def _env_flag(name: str) -> bool | None:
 
 
 def get_cross_harness_redispatch_enabled() -> bool:
-    """Whether a terminally failing AC may redispatch onto an alternative harness.
+    """Return explicit process-level opt-in for cross-harness mutation.
 
-    Priority:
-        1. OUROBOROS_CROSS_HARNESS_REDISPATCH environment variable
-        2. config.yaml execution.cross_harness_redispatch
-        3. True (default: meta-harness recovery is on, but a no-op unless a
-           second runtime backend is actually installed)
+    Historical releases materialized ``true`` into generated config files, so
+    a persisted scalar cannot distinguish operator consent from the old default.
+    Only the environment flag is therefore authoritative during the deprecation
+    window; absent explicit process consent, one run keeps one runtime.
     """
     env = _env_flag("OUROBOROS_CROSS_HARNESS_REDISPATCH")
-    if env is not None:
-        return env
-    try:
-        return load_config().execution.cross_harness_redispatch
-    except ConfigError:
-        return True
+    return env if env is not None else False
 
 
 def get_n_version_tournament_enabled() -> bool:
@@ -1244,11 +1081,52 @@ def get_max_parallel_workers() -> int:
 
 
 def get_auto_evaluate_enabled() -> bool:
-    """Return whether successful execute_seed runs should enqueue formal evaluation."""
+    """Return whether execute_seed runs should enqueue formal evaluation."""
     try:
         return load_config().execution.auto_evaluate
     except ConfigError:
         return True
+
+
+def get_auto_evolve_enabled() -> bool:
+    """Return whether rejected formal evaluations should enqueue Ralph."""
+
+    try:
+        return load_config().execution.auto_evolve
+    except ConfigError:
+        return True
+
+
+def default_execution_efficiency_mode() -> str | None:
+    """Map ``execution.default_policy`` to a fresh-start efficiency mode.
+
+    ``None`` — for ``ask`` or an unreadable config — preserves the
+    interactive-prompt contract exactly (#1733). ``efficient`` and
+    ``quality_first`` return the efficiency mode whose documented coupling
+    supplies the paired frugality default (adaptive/observe and
+    quality_first/off); strict assurance never derives from here. Explicit
+    invocation arguments take precedence at the call sites, and resumed
+    sessions never consult this.
+    """
+    try:
+        policy = load_config().execution.default_policy
+    except ConfigError:
+        return None
+    if policy == "efficient":
+        return "adaptive"
+    if policy == "quality_first":
+        return "quality_first"
+    return None
+
+
+def get_auto_evolve_max_generations() -> int:
+    """Return the bounded generation budget for automatic Ralph chaining."""
+
+    try:
+        value = load_config().execution.auto_evolve_max_generations
+    except ConfigError:
+        return 3
+    return max(1, min(10, value))
 
 
 def get_runtime_profile() -> str | None:
@@ -1481,6 +1359,31 @@ def get_goose_cli_path() -> str | None:
     return None
 
 
+def get_configured_verify_bash_path() -> str | None:
+    """Get ``orchestrator.verify_bash_path`` — config only, never the env.
+
+    The usual env-then-config accessor shape is deliberately not used here.
+    :func:`ouroboros.orchestrator.verify_shell.resolve_verify_shell` reads
+    ``OUROBOROS_VERIFY_BASH`` itself, and reaches this function only after
+    finding that value stale; an accessor that returned the environment first
+    would hand back the same stale path and hide the configured shell entirely.
+    Executability is checked by that caller, which falls through to its own
+    candidate list when the configured value no longer resolves.
+
+    Returns:
+        Configured shell path or None.
+    """
+    try:
+        config = load_config()
+        verify_bash_path = getattr(config.orchestrator, "verify_bash_path", None)
+        if verify_bash_path:
+            return str(Path(verify_bash_path).expanduser())
+    except ConfigError:
+        pass
+
+    return None
+
+
 def get_pi_cli_path() -> str | None:
     """Get Pi CLI path from environment variable or config file.
 
@@ -1556,6 +1459,56 @@ def get_ourocode_cli_path() -> str | None:
     return None
 
 
+def get_dsh_cli_path() -> str | None:
+    """Get the DeepSeek Harness ACP server path from env or config file.
+
+    Priority:
+        1. OUROBOROS_DSH_CLI_PATH environment variable
+        2. config.yaml orchestrator.dsh_cli_path
+        3. None (resolve ``dsh-acp-demo`` from PATH at runtime)
+
+    Returns:
+        Path to the ``dsh-acp-demo`` executable or None.
+    """
+    env_path = os.environ.get("OUROBOROS_DSH_CLI_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        if config.orchestrator.dsh_cli_path:
+            return config.orchestrator.dsh_cli_path
+    except ConfigError:
+        pass
+
+    return None
+
+
+def get_dsh_config_path() -> str | None:
+    """Get the dsh Cordis composition file path from env or config file.
+
+    Priority:
+        1. OUROBOROS_DSH_CONFIG_PATH environment variable
+        2. config.yaml orchestrator.dsh_config_path
+        3. None (the dsh client fails closed before spawning)
+
+    Returns:
+        Path to the trusted composition YAML, or None when dsh is not configured.
+    """
+    env_path = os.environ.get("OUROBOROS_DSH_CONFIG_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        if config.orchestrator.dsh_config_path:
+            return config.orchestrator.dsh_config_path
+    except ConfigError:
+        pass
+
+    return None
+
+
 def get_opencode_mode() -> str | None:
     """Get configured OpenCode integration mode from config file.
 
@@ -1574,6 +1527,43 @@ def get_opencode_mode() -> str | None:
         return config.orchestrator.opencode_mode
     except ConfigError:
         return None
+
+
+def get_telemetry_enabled() -> bool:
+    """Whether anonymous usage telemetry may send events.
+
+    Every control that can disable telemetry is resolved first; any one of
+    them wins unconditionally (TELEMETRY.md: "Any one of these disables
+    telemetry completely"):
+
+        1. DO_NOT_TRACK environment variable (any truthy value disables)
+        2. OUROBOROS_TELEMETRY=0/false/off/no
+        3. config.yaml telemetry.enabled: false
+        4. invalid or unreadable configuration (fails closed)
+
+    Only when no disabling source is present does telemetry run (default:
+    on, with first-run notice and TELEMETRY.md contract). An explicit
+    ``OUROBOROS_TELEMETRY=1`` is therefore never an override: it cannot
+    re-enable collection against a persisted opt-out or malformed
+    configuration. A privacy preference can be present in a file whose
+    unrelated field no longer validates; it is never safe to turn collection
+    back on merely because the full application config could not be
+    constructed.
+    """
+    if os.environ.get("DO_NOT_TRACK", "").strip().lower() in ("1", "true", "on", "yes"):
+        return False
+    if _env_flag("OUROBOROS_TELEMETRY") is False:
+        return False
+    config_path = get_config_dir() / "config.yaml"
+    # ``Path.exists()`` is false for a dangling symlink. Treat that as invalid
+    # persisted configuration rather than the genuinely-absent default-on
+    # case; ``load_config`` below will reject the unreadable target.
+    if not config_path.exists() and not config_path.is_symlink():
+        return True
+    try:
+        return load_config(config_path).telemetry.enabled
+    except (ConfigError, OSError):
+        return False
 
 
 def get_gemini_cli_path() -> str | None:
@@ -1859,7 +1849,8 @@ def get_llm_backend_for_stage(
     except ConfigError:
         # Config unreadable: still honor an env-level LLM override and the
         # caller's default agent before the documented get_llm_backend() default.
-        return _explicit_llm_backend_override() or fallback_runtime_backend or get_llm_backend()
+        fallback = _explicit_llm_backend_override() or fallback_runtime_backend or get_llm_backend()
+        return _guard_llm_completion_backend(fallback)
 
     return _guard_llm_completion_backend(resolved)
 
@@ -1931,7 +1922,8 @@ def get_llm_backend_for_role(
     except ConfigError:
         # Config unreadable: still honor an env-level LLM override and the
         # caller's default agent before the documented get_llm_backend() default.
-        return _explicit_llm_backend_override() or fallback_runtime_backend or get_llm_backend()
+        fallback = _explicit_llm_backend_override() or fallback_runtime_backend or get_llm_backend()
+        return _guard_llm_completion_backend(fallback)
 
     return _guard_llm_completion_backend(resolved)
 
@@ -2129,34 +2121,23 @@ def _normalize_configured_model_for_backend(
     if not candidate:
         return _default_model_for_backend(default_model, backend=backend)
 
-    resolved = _resolve_llm_backend_for_models(backend)
     # Recognize the current shipped default AND prior-release shipped defaults
     # (#1324): a config persisted before a pin bump still holds the old literal,
-    # and for Claude-incapable backends it must normalize to the sentinel just
-    # like the current default would. Genuinely explicit, never-shipped ids are
-    # absent from this set and fall through to be preserved verbatim.
+    # and it must normalize exactly like the current default would. Genuinely
+    # explicit, never-shipped ids are absent from this set and are preserved
+    # verbatim.
     is_shipped_default = candidate in (
         *recognized_shipped_defaults(default_model),
         *extra_shipped_defaults,
     )
-    if resolved in _CODEX_LLM_BACKENDS and is_shipped_default:
-        return _CODEX_DEFAULT_MODEL
-    if resolved in _KIRO_LLM_BACKENDS and is_shipped_default:
-        return _KIRO_DEFAULT_MODEL
-    if resolved in _COPILOT_LLM_BACKENDS and is_shipped_default:
-        return _COPILOT_DEFAULT_MODEL
-    if resolved in _HERMES_LLM_BACKENDS and is_shipped_default:
-        return _HERMES_DEFAULT_MODEL
-    if resolved in _PI_LLM_BACKENDS and is_shipped_default:
-        return _PI_DEFAULT_MODEL
-    if resolved in _GJC_LLM_BACKENDS and is_shipped_default:
-        return _GJC_DEFAULT_MODEL
-    if resolved in _ANTIGRAVITY_LLM_BACKENDS and is_shipped_default:
-        return _ANTIGRAVITY_DEFAULT_MODEL
-    if resolved in _GROK_LLM_BACKENDS and is_shipped_default:
-        return _GROK_DEFAULT_MODEL
-    if resolved in _ZCODE_LLM_BACKENDS and is_shipped_default:
-        return _ZCODE_DEFAULT_MODEL
+    if is_shipped_default:
+        # A recognized shipped default — current or prior-release — is a pin
+        # the user never chose, so every backend maps it to its own default:
+        # Claude-incapable backends keep their sentinel as before, and
+        # Claude-capable backends now take the current default pin instead of
+        # leaking a retired id to the API (#2069). Never-shipped ids are
+        # deliberate user pins and fall through verbatim.
+        return _default_model_for_backend(default_model, backend=backend)
 
     return candidate
 
@@ -2174,14 +2155,15 @@ def _normalize_configured_models_for_backend(
 
     # Match the shipped roster element-wise against current + legacy shipped
     # defaults (#1324), so a roster persisted before a pin bump (e.g. the old
-    # OpenRouter Opus slug in the consensus slot) still normalizes to the
-    # backend-safe sentinel for Claude-incapable backends instead of leaking an
-    # unrunnable id.
+    # OpenRouter Opus slug in the consensus slot) resolves exactly like the
+    # current shipped roster. Claude-incapable backends receive their safe
+    # sentinel; Claude-capable backends receive the current provider pin rather
+    # than replaying a retired model id.
     is_shipped_roster = len(normalized) == len(default_models) and all(
         candidate in recognized_shipped_defaults(default)
         for candidate, default in zip(normalized, default_models, strict=True)
     )
-    if _resolve_llm_backend_for_models(backend) in _SENTINEL_DEFAULT_BACKENDS and is_shipped_roster:
+    if is_shipped_roster:
         return _default_models_for_backend(default_models, backend=backend)
 
     return normalized

@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
 import pytest
 
+from ouroboros.config import loader
 from ouroboros.config.loader import (
-    _UNTRUSTED_ENV_DENYLIST,
     _is_assignable_env_key,
     _load_env_file,
 )
+from ouroboros.config.untrusted_env import UNTRUSTED_ENV_DENYLIST
 
 
 @pytest.fixture(autouse=True)
@@ -86,7 +88,7 @@ def test_load_env_file_skips_template_placeholders(tmp_path: Path, monkeypatch) 
 # Derive directly from the source of truth so this regression suite can never
 # drift out of sync with the denylist again — a previous drift (missing the
 # gjc/PI/config-home roots) is exactly how an incomplete fix slips past CI.
-_DENYLISTED_KEYS = tuple(sorted(_UNTRUSTED_ENV_DENYLIST))
+_DENYLISTED_KEYS = tuple(sorted(UNTRUSTED_ENV_DENYLIST))
 
 
 def test_denylist_covers_known_execution_routing_keys() -> None:
@@ -105,6 +107,8 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "SHLIB_PATH",
         "OUROBOROS_CLI_PATH",
         "OPENCODE_CLI_PATH",
+        # Suffix-less alias read by the `ooo` frontdoor bridges (gjc, Pi).
+        "OUROBOROS_CLI",
         # Spawned-CLI / agent instruction + extension roots.
         "GJC_CODING_AGENT_DIR",
         "GJC_CONFIG_DIR",
@@ -126,10 +130,27 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_PLUGIN_LOCKFILE",
         "OUROBOROS_PLUGIN_TRUST_ROOT",
         "OUROBOROS_ALLOW_LOCAL_TRANSPORT",
+        # Operator-owned telemetry preference and destination must never be
+        # supplied by a cloned repository. DO_NOT_TRACK belongs here too: it
+        # is the cross-tool opt-out signal get_telemetry_enabled() checks
+        # first, and an untrusted project .env loads before the trusted
+        # ~/.ouroboros/.env and never overrides an already-set value.
+        # CI/GITHUB_ACTIONS are the same boundary: telemetry.py stamps
+        # ci=true from these, and the published counting rule excludes
+        # ci=true from the weekly-active metric, so a cloned repo shipping
+        # CI=1 could deregister genuine local users from that metric.
+        "OUROBOROS_TELEMETRY",
+        "OUROBOROS_POSTHOG_API_KEY",
+        "OUROBOROS_POSTHOG_HOST",
+        "OUROBOROS_FIRST_COMMAND_SURFACE",
+        "DO_NOT_TRACK",
+        "CI",
+        "GITHUB_ACTIONS",
         # Runtime/backend selectors + permission/capability overrides.
         "OUROBOROS_AGENT_RUNTIME",
         "OUROBOROS_LLM_BACKEND",
         "OUROBOROS_RUNTIME_PROFILE",
+        "OUROBOROS_CROSS_HARNESS_REDISPATCH",
         "OUROBOROS_AGENT_PERMISSION_MODE",
         "OUROBOROS_TOOL_CAPABILITIES",
         # Execution-cost/behavior dial — must not be forced from an untrusted repo.
@@ -137,9 +158,195 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_EXECUTION_MODEL",
         "OUROBOROS_MODEL_TIER_ROUTING",
         "OUROBOROS_SHADOW_REPLAY",
+        # Shell startup files and option state. Bash sources BASH_ENV before
+        # the first command of `bash -c`, which is how the verify gate runs an
+        # AC's contract: a repo-supplied file holding `exit 0` would make every
+        # failing contract pass.
+        "BASH_ENV",
+        "ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "BASH_XTRACEFD",
     }
-    missing = required - _UNTRUSTED_ENV_DENYLIST
+    missing = required - UNTRUSTED_ENV_DENYLIST
     assert not missing, f"denylist regressed, missing: {sorted(missing)}"
+
+
+# The `ooo` frontdoor bridges pick the executable they dispatch to from an
+# environment variable. Those sources live outside Python's import graph, so
+# nothing else ties them to the denylist: the alias they read (OUROBOROS_CLI)
+# was missed precisely because it lacks the _CLI_PATH suffix every sibling has.
+# Discover dispatch sources from their executable sink instead of maintaining a
+# second bridge roster here. Every discovered source must independently yield
+# at least one inspected key, so one healthy bridge cannot hide parser drift in
+# another bridge.
+_PACKAGE_ROOT = Path(loader.__file__).resolve().parent.parent
+_BRIDGE_SOURCE_SUFFIXES = frozenset({".cjs", ".js", ".mjs", ".py", ".ts"})
+_JS_IDENTIFIER = r"[A-Za-z_$][A-Za-z0-9_$]*"
+_BRIDGE_DISPATCH_SINK_RE = re.compile(rf"\b{_JS_IDENTIFIER}\.command\b")
+_BRIDGE_ENTRY_ENV_RE = re.compile(
+    r"process\.env(?:\.([A-Z0-9_]+)|\[\s*['\"]([A-Z0-9_]+)['\"]\s*\])"
+    r"\s*\)\s*return\s*\{\{?\s*command",
+)
+
+
+def _discover_bridge_dispatch_sources(package_root: Path) -> tuple[Path, ...]:
+    """Find packaged sources that dispatch a resolved bridge entry command."""
+    sources: list[Path] = []
+    for source in package_root.rglob("*"):
+        if not source.is_file() or source.suffix not in _BRIDGE_SOURCE_SUFFIXES:
+            continue
+        text = source.read_text(encoding="utf-8")
+        if "process.env" in text and _BRIDGE_DISPATCH_SINK_RE.search(text):
+            sources.append(source)
+    return tuple(sorted(sources))
+
+
+def _bridge_dispatch_entry_env_keys(source_text: str) -> frozenset[str]:
+    """Extract dot- or bracket-style environment keys used as commands."""
+    return frozenset(
+        key
+        for match in _BRIDGE_ENTRY_ENV_RE.finditer(source_text)
+        for key in match.groups()
+        if key is not None
+    )
+
+
+def _validated_bridge_dispatch_env_keys(package_root: Path) -> dict[Path, frozenset[str]]:
+    """Discover every bridge and fail if any source cannot be inspected."""
+    sources = _discover_bridge_dispatch_sources(package_root)
+    assert sources, "no bridge dispatch sources found — discovery contract drifted"
+
+    found_by_source: dict[Path, frozenset[str]] = {}
+    for source in sources:
+        keys = _bridge_dispatch_entry_env_keys(source.read_text(encoding="utf-8"))
+        assert keys, f"bridge dispatch-entry extraction drifted for {source}"
+        found_by_source[source] = keys
+    return found_by_source
+
+
+def test_bridge_dispatch_entry_env_keys_are_denylisted() -> None:
+    """Every env var a bridge turns into an exec command must be denylisted."""
+    found_by_source = _validated_bridge_dispatch_env_keys(_PACKAGE_ROOT)
+
+    missing = {
+        key: str(source)
+        for source, keys in found_by_source.items()
+        for key in keys
+        if key not in UNTRUSTED_ENV_DENYLIST
+    }
+    assert not missing, f"bridge exec-command env keys missing from denylist: {missing}"
+
+
+@pytest.mark.parametrize(
+    "access",
+    ("process.env.OUROBOROS_CLI", 'process.env["OUROBOROS_CLI"]'),
+)
+def test_bridge_dispatch_entry_env_key_extraction_covers_supported_access_styles(
+    access: str,
+) -> None:
+    """A bridge changing to bracket-style access remains inspected."""
+    source = f"if ({access}) return {{ command: {access}, args: [] }};"
+
+    assert _bridge_dispatch_entry_env_keys(source) == frozenset({"OUROBOROS_CLI"})
+
+
+def test_bridge_dispatch_source_discovery_covers_new_sources(tmp_path: Path) -> None:
+    """Adding a packaged bridge does not require updating a test-side roster."""
+    source = tmp_path / "future_bridge" / "index.ts"
+    source.parent.mkdir()
+    source.write_text(
+        "if (process.env.NEW_BRIDGE_CLI) "
+        "return { command: process.env.NEW_BRIDGE_CLI, args: [] };\n"
+        "await vendor.exec(entry.command, []);\n",
+        encoding="utf-8",
+    )
+
+    assert _validated_bridge_dispatch_env_keys(tmp_path) == {source: frozenset({"NEW_BRIDGE_CLI"})}
+
+
+def test_bridge_dispatch_source_discovery_is_identifier_independent(tmp_path: Path) -> None:
+    """Renaming one bridge's resolved entry cannot remove it from inspection."""
+    entry_source = tmp_path / "entry.ts"
+    entry_source.write_text(
+        "if (process.env.ENTRY_CLI) "
+        "return { command: process.env.ENTRY_CLI, args: [] };\n"
+        "await vendor.exec(entry.command, []);\n",
+        encoding="utf-8",
+    )
+    resolved_source = tmp_path / "resolved.ts"
+    resolved_source.write_text(
+        "if (process.env.RESOLVED_CLI) "
+        "return { command: process.env.RESOLVED_CLI, args: [] };\n"
+        "await vendor.exec(resolved.command, []);\n",
+        encoding="utf-8",
+    )
+
+    assert _validated_bridge_dispatch_env_keys(tmp_path) == {
+        entry_source: frozenset({"ENTRY_CLI"}),
+        resolved_source: frozenset({"RESOLVED_CLI"}),
+    }
+
+
+def test_bridge_dispatch_validation_is_non_vacuous_per_source(tmp_path: Path) -> None:
+    """One parseable bridge cannot hide extraction drift in another bridge."""
+    good = tmp_path / "good.ts"
+    good.write_text(
+        "if (process.env.GOOD_CLI) return { command: process.env.GOOD_CLI, args: [] };\n"
+        "await vendor.exec(entry.command, []);\n",
+        encoding="utf-8",
+    )
+    drifted = tmp_path / "drifted.ts"
+    drifted.write_text(
+        "const command = process.env.DRIFTED_CLI;\n"
+        "if (command) return { command, args: [] };\n"
+        "await vendor.exec(entry.command, []);\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError, match=r"extraction drifted for .*drifted\.ts"):
+        _validated_bridge_dispatch_env_keys(tmp_path)
+
+
+def test_untrusted_env_cannot_set_bridge_cli_alias(tmp_path: Path, monkeypatch) -> None:
+    """A cloned repo's .env must not choose the binary the `ooo` bridge runs."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("OUROBOROS_CLI=./.tools/helper\n", encoding="utf-8")
+    monkeypatch.delenv("OUROBOROS_CLI", raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert "OUROBOROS_CLI" not in os.environ
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "BASH_XTRACEFD", "BASH_FUNC_pytest%%"],
+)
+def test_untrusted_env_cannot_set_shell_startup_controls(
+    key: str, tmp_path: Path, monkeypatch
+) -> None:
+    """Bash sources `BASH_ENV` before the first command of `bash -c`, which is
+    how the verify gate runs an AC's contract: a repo-supplied file holding
+    `exit 0` would make every failing contract pass."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{key}=./.tools/always-pass.sh\n", encoding="utf-8")
+    monkeypatch.delenv(key, raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert key not in os.environ
+
+
+def test_trusted_env_may_still_set_bridge_cli_alias(tmp_path: Path, monkeypatch) -> None:
+    """~/.ouroboros/.env keeps the operator's escape hatch for a non-PATH install."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("OUROBOROS_CLI=/opt/ouroboros/bin/ouroboros\n", encoding="utf-8")
+    monkeypatch.delenv("OUROBOROS_CLI", raising=False)
+
+    _load_env_file(env_file, trusted=True)
+
+    assert os.environ["OUROBOROS_CLI"] == "/opt/ouroboros/bin/ouroboros"
 
 
 def test_project_env_cannot_redirect_trusted_home_during_import(tmp_path: Path) -> None:
@@ -196,6 +403,152 @@ def test_untrusted_env_cannot_set_bare_opencode_alias(
     _load_env_file(env_file, trusted=False)
 
     assert "OPENCODE_CLI_PATH" not in os.environ
+
+
+def test_untrusted_env_cannot_set_do_not_track(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Simple case: a project .env's DO_NOT_TRACK is simply never loaded --
+    no value from an untrusted source can reach os.environ at all, so it
+    can neither force-disable telemetry nor block a later trusted value."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("DO_NOT_TRACK=0\n")
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert "DO_NOT_TRACK" not in os.environ
+
+
+def test_project_do_not_track_cannot_override_persisted_user_opt_out(
+    tmp_path: Path,
+) -> None:
+    """The reviewer's exact probe: project DO_NOT_TRACK=0 must not prevent a
+    user's persisted DO_NOT_TRACK=1 (in the trusted ~/.ouroboros/.env) from
+    ever being applied. Before the fix, the untrusted project .env loaded
+    first (module import order), set DO_NOT_TRACK=0 unconditionally, and the
+    trusted home .env's "do not override an already-set value" precedence
+    then silently discarded the user's opt-out -- get_telemetry_enabled()
+    returned True. Spawned as a real subprocess so both module-import-time
+    _load_env_file() calls run in their real order, exactly like production."""
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    project.mkdir()
+    (home / ".ouroboros").mkdir(parents=True)
+    (project / ".env").write_text("DO_NOT_TRACK=0\n", encoding="utf-8")
+    (home / ".ouroboros" / ".env").write_text("DO_NOT_TRACK=1\n", encoding="utf-8")
+
+    script = f"""
+import os
+from pathlib import Path
+from unittest.mock import patch
+
+home = Path({str(home)!r})
+with patch.object(Path, "home", side_effect=lambda: home):
+    import ouroboros.config.loader
+    from ouroboros.config.loader import get_telemetry_enabled
+    print(os.environ.get("DO_NOT_TRACK", "<unset>"))
+    print(get_telemetry_enabled())
+"""
+    environment = os.environ.copy()
+    for key in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "DO_NOT_TRACK"):
+        environment.pop(key, None)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=project,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.splitlines() == ["1", "False"]
+
+
+@pytest.mark.parametrize("key", ["CI", "GITHUB_ACTIONS"])
+def test_untrusted_env_cannot_set_ci_classification(
+    tmp_path: Path,
+    monkeypatch,
+    key: str,
+) -> None:
+    """Simple case: a project .env's CI/GITHUB_ACTIONS is simply never
+    loaded -- CI classification feeds the published counting rule's
+    ci!=true exclusion, so an untrusted value here could silently
+    deregister genuine local users from that metric."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{key}=1\n")
+    monkeypatch.delenv(key, raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert key not in os.environ
+
+
+def test_project_ci_cannot_deregister_local_users_from_the_counting_rule(
+    tmp_path: Path,
+) -> None:
+    """The reviewer's exact probe: a project .env shipping CI=1 must not
+    stamp ci=true on a genuine local command_run event -- that would
+    silently exclude the event from the published active-user rule
+    (ci!=true). Spawned as a real subprocess so module-import-time
+    _load_env_file() runs in its real order before telemetry ever
+    captures anything, exactly like production. Real CI runners set CI in
+    the actual process environment (stripped from this subprocess's env
+    below), which the loader never overrides regardless of the denylist,
+    so this only proves a cloned repo's own .env lost the ability to
+    forge the classification -- genuine CI detection is untouched (see
+    test_genuine_process_ci_still_stamps_ci_true in test_telemetry.py)."""
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    project.mkdir()
+    (home / ".ouroboros").mkdir(parents=True)
+    (project / ".env").write_text("CI=1\n", encoding="utf-8")
+
+    script = f"""
+import os
+from pathlib import Path
+from unittest.mock import patch
+
+home = Path({str(home)!r})
+with patch.object(Path, "home", side_effect=lambda: home):
+    import ouroboros.config.loader
+    from ouroboros import telemetry
+
+    print(os.environ.get("CI", "<unset>"))
+
+    captured = []
+    telemetry._post = lambda batch: captured.extend(batch)
+    telemetry.capture_cli_command("run")
+    telemetry.flush(timeout=2.0)
+    props = captured[0]["properties"] if captured else {{}}
+    print("ci" in props)
+"""
+    environment = os.environ.copy()
+    for key in (
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "CI",
+        "GITHUB_ACTIONS",
+        "DO_NOT_TRACK",
+        "OUROBOROS_TELEMETRY",
+    ):
+        environment.pop(key, None)
+    environment["OUROBOROS_POSTHOG_API_KEY"] = "phc_test"
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=project,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.splitlines() == ["<unset>", "False"]
 
 
 def test_untrusted_env_cannot_set_node_options(
@@ -323,6 +676,50 @@ def test_untrusted_env_cannot_redirect_backend_config_home(
     _load_env_file(env_file, trusted=False)
 
     assert key not in os.environ
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "UV_INDEX",
+        "UV_DEFAULT_INDEX",
+        "UV_CONFIG_FILE",
+        "UV_INDEX_CORP_USERNAME",
+        "PIP_INDEX_URL",
+        "PIP_EXTRA_INDEX_URL",
+        "PIP_CONFIG_FILE",
+        "PIPX_DEFAULT_PYTHON",
+    ],
+)
+def test_untrusted_env_cannot_configure_package_manager(
+    tmp_path: Path,
+    monkeypatch,
+    key: str,
+) -> None:
+    """A cloned repo cannot redirect the persistent self-update package source."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{key}=https://attacker.invalid/simple\n")
+    monkeypatch.delenv(key, raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert key not in os.environ
+
+
+@pytest.mark.parametrize("key", ["UV_INDEX", "PIP_INDEX_URL", "PIPX_DEFAULT_PYTHON"])
+def test_trusted_env_may_configure_package_manager(
+    tmp_path: Path,
+    monkeypatch,
+    key: str,
+) -> None:
+    """Real process/home configuration stays available for private installations."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{key}=https://packages.example/simple\n")
+    monkeypatch.delenv(key, raising=False)
+
+    _load_env_file(env_file, trusted=True)
+
+    assert os.environ[key] == "https://packages.example/simple"
 
 
 def test_untrusted_env_cannot_set_mixed_case_path(
@@ -561,7 +958,7 @@ class TestEnvValueGrammar:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """Delegating the grammar must not delegate the trust policy."""
-        denied = sorted(_UNTRUSTED_ENV_DENYLIST)[0]
+        denied = sorted(UNTRUSTED_ENV_DENYLIST)[0]
         monkeypatch.setenv(denied, "original")
         env_file = tmp_path / ".env"
         env_file.write_text(f"{denied}=hijacked\n", encoding="utf-8")

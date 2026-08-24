@@ -5,7 +5,6 @@ Supports both standard workflow execution and agent-runtime orchestrator mode.
 """
 
 import asyncio
-from enum import Enum
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -21,6 +20,7 @@ if TYPE_CHECKING:
 
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
+from ouroboros.cli.logging_setup import configure_cli_logging
 from ouroboros.config.loader import (
     get_config_dir,
     get_max_parallel_workers,
@@ -42,6 +42,12 @@ from ouroboros.orchestrator.decomposition_limits import (
     DEFAULT_MAX_DECOMPOSITION_DEPTH,
     MAX_DURABLE_DECOMPOSITION_DEPTH,
     validate_max_decomposition_depth,
+)
+from ouroboros.package_profiles import (
+    PublicAgentRuntimeBackend as AgentRuntimeBackend,
+)
+from ouroboros.package_profiles import (
+    public_runtime_backend,
 )
 
 
@@ -131,24 +137,6 @@ app = typer.Typer(
     no_args_is_help=True,
     cls=_DefaultWorkflowGroup,
 )
-
-
-class AgentRuntimeBackend(str, Enum):  # noqa: UP042
-    """Supported orchestrator runtime backends for CLI selection."""
-
-    CLAUDE = "claude"
-    CODEX = "codex"
-    OPENCODE = "opencode"
-    HERMES = "hermes"
-    GEMINI = "gemini"
-    COPILOT = "copilot"
-    GOOSE = "goose"
-    KIRO = "kiro"
-    PI = "pi"
-    GJC = "gjc"
-    ANTIGRAVITY = "antigravity"
-    GROK = "grok"
-    ZCODE = "zcode"
 
 
 def _derive_quality_bar(seed: "Seed") -> str:
@@ -292,14 +280,28 @@ def _resolve_cli_project_dir(
     *,
     seed_data: dict[str, Any] | None = None,
     project_dir: Path | None = None,
+    fallback_dir: Path | None = None,
 ) -> Path:
-    """Resolve the project directory for CLI execution and verification."""
+    """Resolve the project directory for CLI execution and verification.
+
+    ``fallback_dir`` replaces the Seed file's own folder as the base used when
+    the Seed does not say where it belongs. Callers that hold a better answer
+    than "wherever the file sits" pass it — `init` passes the directory the
+    interview was run from — so a Seed written to the global store cannot turn
+    that store into a workspace. It stays a *fallback*: an explicit
+    ``project_dir``, Seed metadata, and a valid brownfield target all still win,
+    and every one of those decisions is made here, once.
+    """
     if project_dir is not None:
         return project_dir.expanduser().resolve()
 
     seed_data = seed_data or {}
     detected_root = _detect_project_root_from_seed_path(seed_file)
-    seed_base = detected_root or seed_file.parent.resolve()
+    seed_base = (
+        detected_root
+        or (fallback_dir.expanduser().resolve() if fallback_dir is not None else None)
+        or seed_file.parent.resolve()
+    )
     metadata_project_dir = _resolve_raw_metadata_project_dir(seed_data, stable_base=seed_base)
     if metadata_project_dir is not None:
         return _directory_for_runtime(metadata_project_dir)
@@ -597,6 +599,7 @@ async def _run_orchestrator(
     max_decomposition_depth: int | None = None,
     skip_completed: str | None = None,
     project_dir: Path | None = None,
+    project_fallback_dir: Path | None = None,
 ) -> None:
     """Run workflow via orchestrator mode.
 
@@ -612,6 +615,8 @@ async def _run_orchestrator(
         max_decomposition_depth: Optional recursive decomposition depth cap override.
         skip_completed: Optional path to a marker file for already-satisfied ACs.
         project_dir: Optional explicit project directory for seed path resolution.
+        project_fallback_dir: Directory to stand in for the Seed file's folder
+            when the Seed itself does not say where it belongs.
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import (
@@ -673,7 +678,13 @@ async def _run_orchestrator(
         seed_file,
         seed_data=seed_data,
         project_dir=project_dir,
+        fallback_dir=project_fallback_dir,
     )
+    # Always visible, never inferred by the reader: this is the directory the
+    # agent will write in. Seed metadata, a brownfield target, a caller's
+    # fallback, and `--project-dir` can each decide it, so printing the winner
+    # is the only way the person knows before the first write lands.
+    print_info(f"Project directory: {project_dir}")
     session_repo = SessionRepository(event_store)
     workspace: TaskWorkspace | None = None
     execution_id: str | None = None
@@ -737,6 +748,18 @@ async def _run_orchestrator(
         max_parallel_workers=resolved_max_parallel_workers,
         fat_harness_mode=resolved_fat_harness_mode,
     )
+
+    # The URL is emitted before execution starts so it can be opened while the
+    # board is still empty. It is pinned with ?run= and therefore remains
+    # correct when other run/auto invocations use the same singleton daemon.
+    try:
+        from ouroboros.mcp.tools._dashboard import resolve_dashboard_run_url
+
+        dashboard_url = await resolve_dashboard_run_url(execution_id, event_store)
+    except Exception:  # noqa: BLE001 - observability must never block execution
+        dashboard_url = None
+    if dashboard_url:
+        print_info(f"Live Dashboard: {dashboard_url}")
 
     # Execute
     try:
@@ -896,7 +919,8 @@ def workflow(
         typer.Option(
             "--runtime",
             help=(
-                "Agent runtime backend for orchestrator mode (claude, codex, "
+                "Agent runtime backend for orchestrator mode (claude, claude-sdk, "
+                "claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
                 "antigravity, grok, or zcode)."
             ),
@@ -978,6 +1002,11 @@ def workflow(
         # Skip ACs already satisfied by the working tree
         ouroboros run seed.yaml --skip-completed docs/completed.yaml
     """
+    # Apply the saved logging.level before the orchestrator is imported: its
+    # module-level get_logger() auto-configures logging at the default level,
+    # and whichever runs first wins.
+    configure_cli_logging(debug=debug)
+
     # Validate MCP config requires orchestrator mode
     if mcp_config and not orchestrator and not resume_session:
         print_warning("--mcp-config requires --orchestrator flag. Enabling orchestrator mode.")
@@ -1000,7 +1029,7 @@ def workflow(
                     debug,
                     parallel=not sequential,
                     no_qa=no_qa,
-                    runtime_backend=runtime.value if runtime else None,
+                    runtime_backend=public_runtime_backend(runtime.value if runtime else None),
                     max_decomposition_depth=max_decomposition_depth,
                     skip_completed=skip_completed,
                     project_dir=project_dir,

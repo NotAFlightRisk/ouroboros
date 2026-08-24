@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBreakdown
 from ouroboros.bigbang.interview import InterviewState, InterviewStatus
 from ouroboros.cli.commands.init import (
+    InterviewLoopOutcome,
     SeedGenerationResult,
     _generate_seed_from_interview,
     _get_adapter,
@@ -18,7 +19,7 @@ from ouroboros.cli.commands.init import (
     _start_workflow,
 )
 from ouroboros.cli.main import app
-from ouroboros.core.errors import ProviderError
+from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.types import Result
 
 runner = CliRunner()
@@ -38,12 +39,151 @@ class TestInitWorkflowRuntimeHandoff:
         ):
             await _start_workflow(
                 Path("/tmp/generated-seed.yaml"),
-                use_orchestrator=True,
                 runtime_backend="codex",
             )
 
         mock_run_orchestrator.assert_awaited_once()
         assert mock_run_orchestrator.await_args.kwargs["runtime_backend"] == "codex"
+
+    @pytest.mark.asyncio
+    async def test_start_workflow_runs_without_the_orchestrator_flag(self) -> None:
+        """Answering yes must execute the Seed, not print a placeholder.
+
+        The handoff used to run only when `--orchestrator` was passed and
+        otherwise printed "Standard workflow execution not yet implemented",
+        so the confirmation named an action it did not perform.
+        """
+        mock_run_orchestrator = AsyncMock()
+
+        with patch(
+            "ouroboros.cli.commands.run._run_orchestrator",
+            new=mock_run_orchestrator,
+        ):
+            await _start_workflow(Path("/tmp/generated-seed.yaml"))
+
+        mock_run_orchestrator.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_start_workflow_passes_the_invocation_directory_as_fallback(self) -> None:
+        """The handoff supplies a fallback dir; the run command still decides.
+
+        `init` deliberately does not read the Seed to pick a directory. A second
+        reader of the same metadata can disagree with the run command's own
+        rules — a stale `target_dir` was honored here and rejected there, which
+        landed execution back in `~/.ouroboros/seeds`.
+        """
+        mock_run_orchestrator = AsyncMock()
+
+        with patch(
+            "ouroboros.cli.commands.run._run_orchestrator",
+            new=mock_run_orchestrator,
+        ):
+            await _start_workflow(
+                Path("/tmp/generated-seed.yaml"),
+                project_fallback_dir=Path("/tmp/project"),
+            )
+
+        kwargs = mock_run_orchestrator.await_args.kwargs
+        assert kwargs["project_fallback_dir"] == Path("/tmp/project")
+        assert "project_dir" not in kwargs
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("raised", "expected"),
+        [(typer.Exit(1), typer.Exit), (KeyboardInterrupt(), KeyboardInterrupt)],
+    )
+    async def test_start_workflow_propagates_execution_failure(
+        self, raised: BaseException, expected: type[BaseException]
+    ) -> None:
+        """A failed workflow must not leave `init start` looking successful.
+
+        `_run_orchestrator` reports every failure as `typer.Exit(1)` and never
+        exits zero, so catching it printed the error and still returned normally
+        — a script could not tell a built product from a failed one.
+        """
+        with patch(
+            "ouroboros.cli.commands.run._run_orchestrator",
+            new=AsyncMock(side_effect=raised),
+        ):
+            with pytest.raises(expected) as exc_info:
+                await _start_workflow(Path("/tmp/generated-seed.yaml"))
+
+        if expected is typer.Exit:
+            assert exc_info.value.exit_code == 1
+
+    @pytest.mark.asyncio
+    async def test_accepting_the_final_prompt_hands_off_the_invocation_directory(
+        self, tmp_path: Path
+    ) -> None:
+        """The final wiring: accepting runs the Seed from where init was run."""
+        state = InterviewState(
+            interview_id="interview_handoff",
+            initial_context="Build a CLI",
+            status=InterviewStatus.COMPLETED,
+        )
+        engine = MagicMock()
+        engine.start_interview = AsyncMock(return_value=Result.ok(state))
+        engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+        seed_path = tmp_path / "seed.yaml"
+        start_workflow = AsyncMock()
+
+        with (
+            patch("ouroboros.cli.commands.init._get_adapter", return_value=MagicMock()),
+            patch("ouroboros.cli.commands.init.InterviewEngine", return_value=engine),
+            patch(
+                "ouroboros.cli.commands.init._run_interview_loop",
+                new=AsyncMock(return_value=InterviewLoopOutcome(state=state)),
+            ),
+            patch(
+                "ouroboros.cli.commands.init._get_init_event_store",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "ouroboros.cli.commands.init._generate_seed_from_interview",
+                new=AsyncMock(return_value=(seed_path, SeedGenerationResult.SUCCESS)),
+            ),
+            patch("ouroboros.cli.commands.init.Confirm.ask", return_value=True),
+            patch("ouroboros.cli.commands.init._start_workflow", new=start_workflow),
+        ):
+            await _run_interview("Build a CLI", state_dir=tmp_path)
+
+        start_workflow.assert_awaited_once()
+        assert start_workflow.await_args.kwargs["project_fallback_dir"] == Path.cwd()
+
+    @pytest.mark.asyncio
+    async def test_declining_the_final_prompt_starts_no_workflow(self, tmp_path: Path) -> None:
+        """Declining stays side-effect free."""
+        state = InterviewState(
+            interview_id="interview_decline",
+            initial_context="Build a CLI",
+            status=InterviewStatus.COMPLETED,
+        )
+        engine = MagicMock()
+        engine.start_interview = AsyncMock(return_value=Result.ok(state))
+        engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+        start_workflow = AsyncMock()
+
+        with (
+            patch("ouroboros.cli.commands.init._get_adapter", return_value=MagicMock()),
+            patch("ouroboros.cli.commands.init.InterviewEngine", return_value=engine),
+            patch(
+                "ouroboros.cli.commands.init._run_interview_loop",
+                new=AsyncMock(return_value=InterviewLoopOutcome(state=state)),
+            ),
+            patch(
+                "ouroboros.cli.commands.init._get_init_event_store",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "ouroboros.cli.commands.init._generate_seed_from_interview",
+                new=AsyncMock(return_value=(tmp_path / "seed.yaml", SeedGenerationResult.SUCCESS)),
+            ),
+            patch("ouroboros.cli.commands.init.Confirm.ask", return_value=False),
+            patch("ouroboros.cli.commands.init._start_workflow", new=start_workflow),
+        ):
+            await _run_interview("Build a CLI", state_dir=tmp_path)
+
+        start_workflow.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_aborted_interview_does_not_report_completion_or_generate_seed(
@@ -69,7 +209,7 @@ class TestInitWorkflowRuntimeHandoff:
             patch("ouroboros.cli.commands.init.InterviewEngine", return_value=engine),
             patch(
                 "ouroboros.cli.commands.init._run_interview_loop",
-                new=AsyncMock(return_value=aborted_state),
+                new=AsyncMock(return_value=InterviewLoopOutcome(state=aborted_state)),
             ),
             patch(
                 "ouroboros.cli.commands.init._get_init_event_store",
@@ -111,7 +251,12 @@ class TestInitWorkflowRuntimeHandoff:
         engine = MagicMock()
         engine.start_interview = AsyncMock(return_value=Result.ok(initial_state))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
-        run_loop = AsyncMock(side_effect=[completed_state, aborted_state])
+        run_loop = AsyncMock(
+            side_effect=[
+                InterviewLoopOutcome(state=completed_state),
+                InterviewLoopOutcome(state=aborted_state),
+            ]
+        )
         generate_seed = AsyncMock(
             side_effect=[
                 (None, SeedGenerationResult.CONTINUE_INTERVIEW),
@@ -182,6 +327,21 @@ class TestInitWorkflowRuntimeHandoff:
         run_loop.assert_not_awaited()
         mock_generate_seed.assert_not_awaited()
 
+    def test_cli_exit_code_reports_a_failed_workflow(self) -> None:
+        """The shell must see a failed build as a failure.
+
+        The command wrapper re-raises `typer.Exit`, so the orchestrator's
+        `typer.Exit(1)` now reaches the caller instead of being absorbed at the
+        handoff.
+        """
+        with patch(
+            "ouroboros.cli.commands.init._run_interview",
+            new=AsyncMock(side_effect=typer.Exit(1)),
+        ):
+            result = runner.invoke(app, ["init", "start", "Build a REST API"])
+
+        assert result.exit_code == 1
+
     def test_cli_forwards_llm_backend_to_interview_flow(self) -> None:
         """CLI wiring forwards the explicit LLM backend into the interview coroutine."""
         mock_run_interview = AsyncMock()
@@ -223,6 +383,19 @@ class TestInitWorkflowRuntimeHandoff:
 
         assert result.exit_code == 0, result.output
         assert mock_run_interview.await_args.args[6] == "pi"
+
+    def test_cli_accepts_dsh_llm_backend_for_interview_flow(self) -> None:
+        """DeepSeek Harness is reachable from the direct interview CLI."""
+        mock_run_interview = AsyncMock()
+
+        with patch("ouroboros.cli.commands.init._run_interview", new=mock_run_interview):
+            result = runner.invoke(
+                app,
+                ["init", "start", "Build a REST API", "--llm-backend", "dsh"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mock_run_interview.await_args.args[6] == "dsh"
 
     def test_get_adapter_respects_configured_llm_backend_without_flags(self) -> None:
         """init start without flags uses llm.backend config instead of forcing LiteLLM."""
@@ -285,6 +458,18 @@ class TestInitWorkflowRuntimeHandoff:
         assert "Using Claude Code" in result.output
         assert "Using LiteLLM" not in result.output
         assert mock_run_interview.await_args.args[6] is None
+
+    @pytest.mark.parametrize("runtime", ["claude", "claude-sdk"])
+    def test_public_claude_runtime_selects_sdk(self, runtime: str) -> None:
+        mock_run_interview = AsyncMock()
+        with patch("ouroboros.cli.commands.init._run_interview", new=mock_run_interview):
+            result = runner.invoke(
+                app,
+                ["init", "start", "Build a REST API", "--runtime", runtime],
+            )
+
+        assert result.exit_code == 0
+        assert mock_run_interview.await_args.args[5] == "claude"
 
     def test_get_adapter_uses_interview_use_case_for_opencode(self) -> None:
         """Interview adapter creation stays backend-neutral for OpenCode."""
@@ -356,7 +541,9 @@ class TestInitWorkflowRuntimeHandoff:
             patch("ouroboros.cli.commands.init.SeedGenerator", return_value=mock_generator),
             patch("ouroboros.cli.commands.init.print_error") as mock_print_error,
         ):
-            seed_path, result = await _generate_seed_from_interview(state, llm_adapter)
+            seed_path, result = await _generate_seed_from_interview(
+                state, llm_adapter, engine=_persistence_engine()
+            )
 
         assert seed_path is None
         assert result == SeedGenerationResult.CANCELLED
@@ -412,7 +599,9 @@ class TestInitWorkflowRuntimeHandoff:
             patch("ouroboros.cli.commands.init.SeedGenerator", return_value=mock_generator),
             patch("ouroboros.cli.commands.init.Prompt.ask", return_value="2"),
         ):
-            seed_path, result = await _generate_seed_from_interview(state, llm_adapter)
+            seed_path, result = await _generate_seed_from_interview(
+                state, llm_adapter, engine=_persistence_engine()
+            )
 
         assert result == SeedGenerationResult.SUCCESS
         assert seed_path is not None
@@ -422,3 +611,147 @@ class TestInitWorkflowRuntimeHandoff:
         assert call_kwargs.get("force") is True
         passed_score = mock_generator.generate.call_args.args[1]
         assert passed_score.overall_score == 0.45
+
+
+def _scored(overall: float, clarity: float, justification: str) -> AmbiguityScore:
+    def component(name: str, weight: float) -> ComponentScore:
+        return ComponentScore(
+            name=name,
+            clarity_score=clarity,
+            weight=weight,
+            justification=justification,
+        )
+
+    return AmbiguityScore(
+        overall_score=overall,
+        breakdown=ScoreBreakdown(
+            goal_clarity=component("Goal", 0.4),
+            constraint_clarity=component("Constraints", 0.3),
+            success_criteria_clarity=component("Success", 0.3),
+        ),
+    )
+
+
+def _persistence_engine() -> MagicMock:
+    engine = MagicMock()
+    engine.save_state = AsyncMock(return_value=Result.ok(Path("/tmp/interview.json")))
+    return engine
+
+
+class TestSeedGenerationPersistsAmbiguity:
+    """CLI seed generation must persist the score like the MCP path (#1901)."""
+
+    @pytest.mark.asyncio
+    async def test_successful_generation_persists_score_and_breakdown(self) -> None:
+        state = InterviewState(
+            interview_id="interview_persist_success",
+            initial_context="Build a CLI",
+        )
+        score = _scored(0.05, 0.95, "clear")
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(score))
+        mock_seed = MagicMock()
+        mock_seed.metadata.seed_id = "seed_persist_success"
+        mock_generator = MagicMock()
+        mock_generator.generate = AsyncMock(return_value=Result.ok(mock_seed))
+        mock_generator.save_seed = AsyncMock(return_value=Result.ok(Path("/tmp/seed.yaml")))
+        engine = _persistence_engine()
+
+        with (
+            patch("ouroboros.cli.commands.init.AmbiguityScorer", return_value=mock_scorer),
+            patch("ouroboros.cli.commands.init.SeedGenerator", return_value=mock_generator),
+        ):
+            seed_path, result = await _generate_seed_from_interview(
+                state, MagicMock(), engine=engine
+            )
+
+        assert result == SeedGenerationResult.SUCCESS
+        assert seed_path is not None
+        assert state.ambiguity_score == pytest.approx(0.05)
+        assert state.ambiguity_breakdown == score.breakdown.model_dump(mode="json")
+        engine.save_state.assert_awaited_once_with(state)
+
+    @pytest.mark.asyncio
+    async def test_persistence_failure_is_nonfatal(self) -> None:
+        state = InterviewState(
+            interview_id="interview_persist_warn",
+            initial_context="Build a CLI",
+        )
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(_scored(0.05, 0.95, "clear")))
+        mock_seed = MagicMock()
+        mock_seed.metadata.seed_id = "seed_persist_warn"
+        mock_generator = MagicMock()
+        mock_generator.generate = AsyncMock(return_value=Result.ok(mock_seed))
+        mock_generator.save_seed = AsyncMock(return_value=Result.ok(Path("/tmp/seed.yaml")))
+        engine = MagicMock()
+        engine.save_state = AsyncMock(
+            return_value=Result.err(ValidationError("disk full", field="state"))
+        )
+
+        with (
+            patch("ouroboros.cli.commands.init.AmbiguityScorer", return_value=mock_scorer),
+            patch("ouroboros.cli.commands.init.SeedGenerator", return_value=mock_generator),
+        ):
+            seed_path, result = await _generate_seed_from_interview(
+                state, MagicMock(), engine=engine
+            )
+
+        assert result == SeedGenerationResult.SUCCESS
+        assert seed_path is not None
+        assert state.ambiguity_score == pytest.approx(0.05)
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_scoring_still_persists_score(self) -> None:
+        # The reporter's monitor scenario: even without a generated seed, a
+        # completed interview that scored must not read as never-scored.
+        state = InterviewState(
+            interview_id="interview_persist_cancel",
+            initial_context="Build a CLI",
+        )
+        score = _scored(0.45, 0.5, "unclear")
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(score))
+        engine = _persistence_engine()
+
+        with (
+            patch("ouroboros.cli.commands.init.AmbiguityScorer", return_value=mock_scorer),
+            patch("ouroboros.cli.commands.init.SeedGenerator", return_value=MagicMock()),
+            patch("ouroboros.cli.commands.init.Prompt.ask", return_value="3"),
+        ):
+            seed_path, result = await _generate_seed_from_interview(
+                state, MagicMock(), engine=engine
+            )
+
+        assert result == SeedGenerationResult.CANCELLED
+        assert seed_path is None
+        assert state.ambiguity_score == pytest.approx(0.45)
+        engine.save_state.assert_awaited_once_with(state)
+
+    @pytest.mark.asyncio
+    async def test_continue_interview_invalidates_persisted_score(self) -> None:
+        # Reopening bypasses record_response's reopen contract, so the helper
+        # must clear the snapshot it just persisted; an in-progress interview
+        # with a live score would be exactly the staleness #1901 fixes.
+        state = InterviewState(
+            interview_id="interview_persist_reopen",
+            initial_context="Build a CLI",
+        )
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(_scored(0.45, 0.5, "unclear")))
+        engine = _persistence_engine()
+
+        with (
+            patch("ouroboros.cli.commands.init.AmbiguityScorer", return_value=mock_scorer),
+            patch("ouroboros.cli.commands.init.SeedGenerator", return_value=MagicMock()),
+            patch("ouroboros.cli.commands.init.Prompt.ask", return_value="1"),
+        ):
+            seed_path, result = await _generate_seed_from_interview(
+                state, MagicMock(), engine=engine
+            )
+
+        assert result == SeedGenerationResult.CONTINUE_INTERVIEW
+        assert seed_path is None
+        assert state.ambiguity_score is None
+        assert state.ambiguity_breakdown is None
+        assert engine.save_state.await_count == 2

@@ -92,6 +92,7 @@ class _LLMAdapterRequest:
     max_retries: int
     io_recorder: IOJournalRecorder | None
     strict_mcp_config: bool
+    frugality_proof: bool
 
 
 def resolve_llm_backend(backend: str | None = None) -> str:
@@ -170,6 +171,7 @@ def _create_codex_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
         timeout=request.timeout,
         max_retries=request.max_retries,
         runtime_profile=get_runtime_profile(),
+        strict_mcp_config=request.strict_mcp_config,
     )
 
 
@@ -276,6 +278,19 @@ def _create_ourocode_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
     )
 
 
+def _create_dsh_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    from ouroboros.config import get_dsh_cli_path, get_dsh_config_path
+    from ouroboros.providers.dsh_llm_adapter import DshLLMAdapter
+
+    return DshLLMAdapter(
+        cli_path=request.cli_path or get_dsh_cli_path(),
+        cwd=request.cwd,
+        config_path=get_dsh_config_path(),
+        timeout=request.timeout,
+        io_recorder=request.io_recorder,
+    )
+
+
 def _create_zcode_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
     from ouroboros.providers.zcode_cli_adapter import ZcodeCliLLMAdapter
 
@@ -323,6 +338,7 @@ def _create_litellm_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
         timeout=request.timeout,
         max_retries=request.max_retries,
         io_recorder=request.io_recorder,
+        frugality_proof=request.frugality_proof,
     )
 
 
@@ -351,6 +367,7 @@ _LLM_ADAPTER_FACTORIES: dict[str, Callable[[_LLMAdapterRequest], LLMAdapter]] = 
     "_create_pi_adapter": _create_pi_adapter,
     "_create_gjc_adapter": _create_gjc_adapter,
     "_create_ourocode_adapter": _create_ourocode_adapter,
+    "_create_dsh_adapter": _create_dsh_adapter,
     "_create_kiro_adapter": _create_kiro_adapter,
     "_create_litellm_adapter": _create_litellm_adapter,
     "_create_zcode_adapter": _create_zcode_adapter,
@@ -373,8 +390,14 @@ def create_llm_adapter(
     max_retries: int = 3,
     io_recorder: IOJournalRecorder | None = None,
     strict_mcp_config: bool = False,
+    frugality_proof: bool = False,
 ) -> LLMAdapter:
-    """Create an LLM adapter from config or explicit options."""
+    """Create an LLM adapter from config or explicit options.
+
+    ``frugality_proof`` asks registered completion producers to seal a
+    measurable execution envelope. It is opt-in so ordinary user-facing
+    flows retain their existing retry and timeout policies.
+    """
     resolved_backend = resolve_llm_backend(backend)
     # Backends in ``_BACKENDS_WITH_SOFT_TOOL_ENFORCEMENT`` accept the
     # envelope but enforce it via prompt injection + post-hoc detection
@@ -400,11 +423,11 @@ def create_llm_adapter(
         permission_mode=permission_mode,
         use_case=use_case,
     )
-    if io_recorder is not None and resolved_backend not in ("litellm", "ourocode"):
+    if io_recorder is not None and resolved_backend not in ("litellm", "ourocode", "dsh"):
         log.warning(
             "create_llm_adapter.io_recorder_unsupported_backend",
             backend=resolved_backend,
-            hint="Only LiteLLM and ourocode accept adapter-level IOJournalRecorder wiring.",
+            hint="Only LiteLLM, ourocode, and dsh accept adapter-level IOJournalRecorder wiring.",
         )
     spec = get_backend_factory_spec(resolved_backend, kind="llm")
     if spec is None or spec.llm_adapter_factory is None:
@@ -425,6 +448,7 @@ def create_llm_adapter(
             max_retries=max_retries,
             io_recorder=io_recorder,
             strict_mcp_config=strict_mcp_config,
+            frugality_proof=frugality_proof,
         )
     )
 

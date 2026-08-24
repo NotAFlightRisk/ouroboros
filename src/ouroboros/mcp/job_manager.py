@@ -18,6 +18,8 @@ import structlog
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
+from ouroboros.mcp.failure_taxonomy import classify_failure
+from ouroboros.mcp.telemetry_boundary import JobTelemetryBoundary
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.events import create_execution_terminal_event
 from ouroboros.orchestrator.evidence.common import validate_attempt_judgment_payload
@@ -26,10 +28,12 @@ from ouroboros.orchestrator.execution_authority import (
     request_process_local_cancellation,
 )
 from ouroboros.orchestrator.heartbeat import (
-    current_process_identity,
     is_holder_alive,
     is_owned_by_current_process,
-    is_process_identity_alive,
+)
+from ouroboros.orchestrator.persisted_process_identity import (
+    current_persisted_process_owner,  # noqa: F401 - compatibility patch seam
+    persisted_process_owner_alive,
 )
 from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
 from ouroboros.orchestrator.session import (
@@ -134,6 +138,33 @@ def _safe_result_payload(result: Any) -> dict[str, Any]:
     }
 
 
+def _enrich_terminal_data(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Add fixed recovery metadata to a terminal payload.
+
+    This helper is shared by durable writes and read-only synthetic
+    projections. Existing producer-owned metadata, especially an actionable
+    ``next_step`` such as ``ooo evaluate <session_id>``, takes precedence over
+    the generic fallback supplied by the taxonomy.
+    """
+    enriched = dict(data)
+    status = enriched.get("status")
+    if not isinstance(status, str):
+        return enriched
+    resolution = classify_failure(
+        status,
+        enriched.get("result_meta") if isinstance(enriched.get("result_meta"), dict) else None,
+    )
+    if resolution is None:
+        return enriched
+    existing_meta = enriched.get("result_meta")
+    result_meta = dict(existing_meta) if isinstance(existing_meta, dict) else {}
+    result_meta.setdefault("failure_reason_code", resolution.reason_code.value)
+    result_meta.setdefault("recovery_action", resolution.recovery_action.value)
+    result_meta.setdefault("next_step", resolution.next_step)
+    enriched["result_meta"] = result_meta
+    return enriched
+
+
 def _canonical_acceptance_payload(payload: Mapping[str, Any]) -> str:
     """Return a stable representation for idempotent plan-entry comparison."""
     return json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -168,40 +199,27 @@ _STRANDED_INTERRUPTED_EVENT_ID_PREFIX = "mcp-job-stranded-interrupted-"
 _DRAIN_INTERRUPTED_EVENT_ID_PREFIX = "mcp-job-drain-interrupted-"
 _DRAIN_GRACE_SECONDS = 5.0
 _TERMINAL_APPEND_RETRY_DELAY_SECONDS = 0.05
+_TERMINAL_JOB_EVENTS = frozenset(
+    {"mcp.job.completed", "mcp.job.failed", "mcp.job.cancelled", "mcp.job.interrupted"}
+)
 
 
 def _drain_interrupted_data() -> dict[str, Any]:
     """Terminal payload for jobs interrupted by server shutdown (drain)."""
-    return {
-        "status": JobStatus.INTERRUPTED.value,
-        "message": "Job interrupted: MCP server shut down before the job finished",
-        "error": "MCP server shut down before the job reached a terminal state",
-        "result_text": "MCP server shut down before the job reached a terminal state",
-        "result_meta": {"interrupted_from_shutdown": True},
-        "is_error": True,
-    }
+    return _enrich_terminal_data(
+        {
+            "status": JobStatus.INTERRUPTED.value,
+            "message": "Job interrupted: MCP server shut down before the job finished",
+            "error": "MCP server shut down before the job reached a terminal state",
+            "result_text": "MCP server shut down before the job reached a terminal state",
+            "result_meta": {"interrupted_from_shutdown": True},
+            "is_error": True,
+        }
+    )
 
 
 logger = logging.getLogger(__name__)
 log = structlog.get_logger(__name__)
-
-
-def _read_owner_identity(created_data: dict[str, Any]) -> tuple[int | None, float | None]:
-    """Extract the recorded owning-process identity from a job-created event.
-
-    Returns ``(None, None)`` for jobs created before owner identity was
-    recorded, which the reconciler treats conservatively (never reconciled on
-    liveness grounds — we cannot prove the owner is dead).
-    """
-    pid_raw = created_data.get("owner_pid")
-    start_raw = created_data.get("owner_start_time")
-    pid = pid_raw if isinstance(pid_raw, int) and not isinstance(pid_raw, bool) else None
-    start = (
-        float(start_raw)
-        if isinstance(start_raw, (int, float)) and not isinstance(start_raw, bool)
-        else None
-    )
-    return pid, start
 
 
 def _consume_task_result(task: asyncio.Task[Any]) -> None:
@@ -290,15 +308,17 @@ def _progress_accounting_failed_job_event(job_id: str, blocker: str) -> BaseEven
         type="mcp.job.failed",
         aggregate_type="job",
         aggregate_id=job_id,
-        data={
-            "status": JobStatus.FAILED.value,
-            "message": "Job failed: workflow progress accounting stalled",
-            "error": blocker,
-            "result_text": blocker,
-            "result_meta": {"failed_from_progress_accounting_stall": True},
-            "is_error": True,
-            "timestamp": datetime.now(UTC).isoformat(),
-        },
+        data=_enrich_terminal_data(
+            {
+                "status": JobStatus.FAILED.value,
+                "message": "Job failed: workflow progress accounting stalled",
+                "error": blocker,
+                "result_text": blocker,
+                "result_meta": {"failed_from_progress_accounting_stall": True},
+                "is_error": True,
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+        ),
     )
 
 
@@ -309,15 +329,17 @@ def _linked_execution_failed_job_event(job_id: str, failure: str) -> BaseEvent:
         type="mcp.job.failed",
         aggregate_type="job",
         aggregate_id=job_id,
-        data={
-            "status": JobStatus.FAILED.value,
-            "message": "Job failed: linked execution recorded failure",
-            "error": failure,
-            "result_text": failure,
-            "result_meta": {"failed_from_linked_execution_failure": True},
-            "is_error": True,
-            "timestamp": datetime.now(UTC).isoformat(),
-        },
+        data=_enrich_terminal_data(
+            {
+                "status": JobStatus.FAILED.value,
+                "message": "Job failed: linked execution recorded failure",
+                "error": failure,
+                "result_text": failure,
+                "result_meta": {"failed_from_linked_execution_failure": True},
+                "is_error": True,
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+        ),
     )
 
 
@@ -328,29 +350,33 @@ def _orphaned_job_interrupted_event(job_id: str) -> BaseEvent:
         type="mcp.job.interrupted",
         aggregate_type="job",
         aggregate_id=job_id,
-        data={
-            "status": JobStatus.INTERRUPTED.value,
-            "message": "Job interrupted: owning process is no longer alive",
-            "error": "Owning process exited before the job reached a terminal state",
-            "result_text": "Owning process exited before the job reached a terminal state",
-            "result_meta": {"interrupted_from_dead_owner": True},
-            "is_error": True,
-            "timestamp": datetime.now(UTC).isoformat(),
-        },
+        data=_enrich_terminal_data(
+            {
+                "status": JobStatus.INTERRUPTED.value,
+                "message": "Job interrupted: owning process is no longer alive",
+                "error": "Owning process exited before the job reached a terminal state",
+                "result_text": "Owning process exited before the job reached a terminal state",
+                "result_meta": {"interrupted_from_dead_owner": True},
+                "is_error": True,
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+        ),
     )
 
 
 def _stranded_job_interrupted_data() -> dict[str, Any]:
     """Terminal payload for a job whose task was released without a terminal event."""
-    return {
-        "status": JobStatus.INTERRUPTED.value,
-        "message": "Job interrupted: job task released without persisting a terminal state",
-        "error": "Job task exited without persisting a terminal event",
-        "result_text": "Job task exited without persisting a terminal event",
-        "result_meta": {"interrupted_from_stranded_job_task": True},
-        "is_error": True,
-        "timestamp": datetime.now(UTC).isoformat(),
-    }
+    return _enrich_terminal_data(
+        {
+            "status": JobStatus.INTERRUPTED.value,
+            "message": "Job interrupted: job task released without persisting a terminal state",
+            "error": "Job task exited without persisting a terminal event",
+            "result_text": "Job task exited without persisting a terminal event",
+            "result_meta": {"interrupted_from_stranded_job_task": True},
+            "is_error": True,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+    )
 
 
 def _stranded_job_interrupted_event(job_id: str) -> BaseEvent:
@@ -370,7 +396,7 @@ def _snapshot_with_terminal_event(
     cursor: int,
 ) -> JobSnapshot:
     """Project a terminal job event onto an existing reconstructed snapshot."""
-    data = event.data
+    data = _enrich_terminal_data(event.data)
     status = JobStatus(data.get("status", snapshot.status.value))
     return replace(
         snapshot,
@@ -432,16 +458,12 @@ class JobManager:
         self._cleanup_running = False
         self._last_cleanup_monotonic = time.monotonic()
         self._live_snapshots: dict[str, JobSnapshot] = {}
+        self._telemetry = JobTelemetryBoundary()
 
     def get_cached_snapshot(self, job_id: str) -> JobSnapshot | None:
-        """Return a snapshot that is safe to use without durable reconciliation.
+        """Return cache only when durable reconciliation is unnecessary.
 
-        The in-process cache is updated from persisted job events, but a
-        non-terminal entry can outlive the task that owned the job.  Once that
-        happens, :meth:`get_snapshot` must inspect linked execution evidence
-        and owner liveness before callers report the job as still running.
-        Terminal snapshots are monotonic, while a non-terminal snapshot is a
-        valid fast path only while this manager still owns a live job task.
+        Non-terminal cache is valid only while this manager owns a live task.
         """
         snapshot = self._live_snapshots.get(job_id)
         if snapshot is None or snapshot.is_terminal:
@@ -559,6 +581,12 @@ class JobManager:
         self._forced_inline_allocations.discard(job_id)
         self._known_job_ids.discard(job_id)
 
+    def settle_external_job_acceptance(self, job_id: str) -> None:
+        """Convert a detached reservation into a known externally owned job."""
+        self._reserved_job_ids.discard(job_id)
+        self._forced_inline_allocations.discard(job_id)
+        self._known_job_ids.add(job_id)
+
     async def start_job(
         self,
         *,
@@ -569,67 +597,16 @@ class JobManager:
         job_id: str | None = None,
     ) -> JobSnapshot:
         """Create and start a new background job."""
-        await self._ensure_initialized()
+        from ouroboros.mcp.job_start import start_managed_job
 
-        if job_id is None:
-            job_id = await self.allocate_job_id()
-        elif job_id not in self._reserved_job_ids:
-            if job_id in self._known_job_ids or await self._job_exists(job_id):
-                raise ValueError(f"Job already exists: {job_id}")
-            self._known_job_ids.add(job_id)
-        self._reserved_job_ids.discard(job_id)
-        job_links = links or JobLinks()
-
-        owner_pid, owner_start_time = current_process_identity()
-        await self._append_event(
-            "mcp.job.created",
-            job_id,
-            {
-                "job_type": job_type,
-                "status": JobStatus.QUEUED.value,
-                "message": initial_message,
-                "links": {
-                    "session_id": job_links.session_id,
-                    "execution_id": job_links.execution_id,
-                    "lineage_id": job_links.lineage_id,
-                    "preserve_runner_result": job_links.preserve_runner_result,
-                },
-                # Owning-process identity for authoritative zombie reconciliation:
-                # if this process dies before writing a terminal event, a later
-                # reader can prove the job can no longer make progress.
-                "owner_pid": owner_pid,
-                "owner_start_time": owner_start_time,
-            },
+        return await start_managed_job(
+            self,
+            job_type=job_type,
+            initial_message=initial_message,
+            runner=runner,
+            links=links,
+            job_id=job_id,
         )
-
-        # Normalise ``runner`` to a Task so ``_run_job`` can rely on Task
-        # semantics (cancellation, ``done()``). Coroutines are wrapped via
-        # ``create_task``; pre-built Tasks are reused; bare awaitables (e.g.
-        # ``Future``) are wrapped through an inner coroutine so cancellation
-        # and GC remain consistent.
-        if isinstance(runner, asyncio.Task):
-            runner_task = runner
-        elif inspect.iscoroutine(runner):
-            runner_task = asyncio.create_task(runner)
-        else:
-
-            async def _await_runner(_awaitable: Any = runner) -> Any:
-                return await _awaitable
-
-            runner_task = asyncio.create_task(_await_runner())
-        self._runner_tasks[job_id] = runner_task
-        task = asyncio.create_task(self._run_job(job_id, job_type, runner_task))
-        self._tasks[job_id] = task
-        self._monitors[job_id] = asyncio.create_task(self._monitor_job(job_id))
-        # Registered synchronously with the task dicts above: marks THIS manager
-        # instance as the runner owner, so the in-process stranded-job
-        # reconciliation in get_snapshot only ever applies to jobs whose live
-        # tasks this instance owned and released (another instance in the same
-        # process cannot prove task liveness and must never terminalize live
-        # work).
-        self._started_job_ids.add(job_id)
-
-        return await self.get_snapshot(job_id)
 
     async def _job_exists(self, job_id: str) -> bool:
         events, _ = await self._event_store.get_events_after("job", job_id, last_row_id=0)
@@ -1995,6 +1972,7 @@ class JobManager:
             raise ValueError(f"Job not found: {job_id}")
 
         created = events[0]
+        self._telemetry.remember(job_id, created.data)
         created_links = created.data.get("links", {})
         status = JobStatus(created.data.get("status", JobStatus.QUEUED.value))
         message = created.data.get("message", "")
@@ -2050,16 +2028,14 @@ class JobManager:
             result_payload=result_payload,
             error=error,
         )
-        owner_pid, owner_start_time = _read_owner_identity(created.data)
-        owner_is_dead = self._job_owner_is_dead(owner_pid, owner_start_time)
+        owner_is_dead = self._job_owner_is_dead(created.data)
         snapshot = await self._recover_linked_execution_terminal_snapshot(
             snapshot,
             owner_is_dead=owner_is_dead,
         )
         snapshot = await self._reconcile_orphaned_job_snapshot(
             snapshot,
-            owner_pid=owner_pid,
-            owner_start_time=owner_start_time,
+            owner_data=created.data,
         )
         return await self._reconcile_stranded_started_job_snapshot(snapshot)
 
@@ -2169,26 +2145,22 @@ class JobManager:
 
     def _job_owner_is_dead(
         self,
-        owner_pid: int | None,
-        owner_start_time: float | None,
+        owner_data: Mapping[str, object],
     ) -> bool:
         """Return True only when the recorded owning process is provably gone.
 
         Conservative by design: a missing owner identity (legacy jobs) or a
         still-running owner — including a different live process — returns
         False, so a job is never reconciled away while it might still progress.
-        PID recycling is guarded by the recorded process start time.
+        PID reuse is fenced by versioned Linux identity or legacy epoch time.
         """
-        if owner_pid is None:
-            return False
-        return not is_process_identity_alive(owner_pid, owner_start_time)
+        return persisted_process_owner_alive(owner_data) is False
 
     async def _reconcile_orphaned_job_snapshot(
         self,
         snapshot: JobSnapshot,
         *,
-        owner_pid: int | None,
-        owner_start_time: float | None,
+        owner_data: Mapping[str, object],
     ) -> JobSnapshot:
         """Reconcile a non-terminal job whose owning process is gone.
 
@@ -2208,7 +2180,7 @@ class JobManager:
             or snapshot.job_id in self._runner_tasks
         ):
             return snapshot
-        if not self._job_owner_is_dead(owner_pid, owner_start_time):
+        if not self._job_owner_is_dead(owner_data):
             return snapshot
         # A linked runtime (execute/auto/evaluate) runs in its own session
         # process with a heartbeat lock. If that holder is still alive it — not
@@ -2392,6 +2364,19 @@ class JobManager:
                 self._monitors.get(job_id),
             )
         )
+
+    def has_accepted_job(self, job_id: str) -> bool:
+        """Return whether this manager crossed the local enqueue boundary."""
+        return job_id in self._started_job_ids
+
+    def has_unresolved_job_acceptance(self, job_id: str) -> bool:
+        """Return whether a reserved job was not definitively rejected.
+
+        Detached launch keeps the parent reservation while worker acceptance
+        is pending or externally owned. Definitive launch failures abandon it;
+        local acceptance instead moves the id into ``_started_job_ids``.
+        """
+        return job_id in self._reserved_job_ids or job_id in self._started_job_ids
 
     async def cancel_job(self, job_id: str) -> JobSnapshot:
         """Request cancellation for a running job."""
@@ -2926,6 +2911,9 @@ class JobManager:
             self._monitor_terminalized_jobs.discard(job_id)
             self._drained_job_ids.discard(job_id)
             self._started_job_ids.discard(job_id)
+            self._reserved_job_ids.discard(job_id)
+            self._forced_inline_allocations.discard(job_id)
+            self._telemetry.forget(job_id)
         return len(expired)
 
     async def _append_event(
@@ -2936,7 +2924,12 @@ class JobManager:
         *,
         event_id: str | None = None,
     ) -> None:
-        """Persist one job event."""
+        """Persist one job event and observe its durable terminal boundary."""
+        if event_type in _TERMINAL_JOB_EVENTS:
+            status = data.get("status")
+            if not isinstance(status, str):
+                status = event_type.removeprefix("mcp.job.")
+            data = _enrich_terminal_data({**data, "status": status})
         await self._ensure_initialized()
         cursor = await self._event_store.append_with_rowid(
             BaseEvent(
@@ -2948,3 +2941,4 @@ class JobManager:
             )
         )
         self._merge_live_snapshot(job_id, data, cursor=cursor)
+        self._telemetry.observe(event_type, job_id, data)

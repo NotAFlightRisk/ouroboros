@@ -291,6 +291,21 @@ class TestQuestionClassifierPassthrough:
         assert classification.original_question == planning_q
 
     @pytest.mark.asyncio
+    async def test_classify_fenced_array_falls_back_to_passthrough(self) -> None:
+        """A fenced top-level array is malformed shape, not a crash (#1838)."""
+        adapter = MagicMock()
+        question = "What is the target market?"
+        adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion("```json\n[]\n```")))
+
+        classifier = QuestionClassifier(llm_adapter=adapter)
+        result = await classifier.classify(question)
+
+        assert result.is_ok
+        classification = result.value
+        assert classification.output_type == ClassifierOutputType.PASSTHROUGH
+        assert classification.question_for_pm == question
+
+    @pytest.mark.asyncio
     async def test_classify_parse_failure_defaults_to_passthrough(self) -> None:
         """When LLM response cannot be parsed, default is PASSTHROUGH."""
         adapter = MagicMock()
@@ -533,3 +548,38 @@ class TestQuestionClassifierDecideLater:
         assert cr.output_type == ClassifierOutputType.DECIDE_LATER
         assert cr.question_for_pm == question  # returned to user for decision
         assert "initial deployment" in cr.placeholder_response
+
+
+def test_shared_classification_policy_omits_standalone_response_schema() -> None:
+    from ouroboros.bigbang.question_classifier import classification_policy_prompt
+
+    policy = classification_policy_prompt()
+
+    assert "**PLANNING**" in policy
+    assert "**DEVELOPMENT**" in policy
+    assert "**DECIDE_LATER**" in policy
+    assert "## Response Format" not in policy
+    assert "Respond ONLY with valid JSON" not in policy
+
+
+@pytest.mark.parametrize("category", [None, 7, []])
+def test_parse_rejects_non_string_category(category) -> None:
+    classifier = QuestionClassifier(llm_adapter=MagicMock())
+
+    with pytest.raises(ValueError, match="category must be a string"):
+        classifier._parse_response(
+            json.dumps({"category": category, "reframed_question": "Question?"}),
+            "Question?",
+        )
+
+
+@pytest.mark.parametrize("field", ["decide_later", "defer_to_dev"])
+@pytest.mark.parametrize("value", ["false", 0, None])
+def test_parse_rejects_non_boolean_routing_flags(field, value) -> None:
+    classifier = QuestionClassifier(llm_adapter=MagicMock())
+
+    with pytest.raises(ValueError, match=rf"{field} must be a boolean"):
+        classifier._parse_response(
+            json.dumps({"category": "planning", field: value}),
+            "Question?",
+        )

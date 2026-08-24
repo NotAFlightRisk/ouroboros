@@ -14,7 +14,7 @@ The V1 delivery is intentionally split:
    `orchestrator.session.started` fields.
 2. **Projection (implemented)** — complete EventStore history plus frozen
    `ProjectRunSummary` and `ProjectRecord` values.
-3. **Query surfaces (planned)** — read-only MCP/CLI output with JSON parity.
+3. **Query surfaces (implemented)** — read-only MCP/CLI output with JSON parity.
 
 This document fixes the identity decision that previously blocked #1389. A
 project is a deterministic label over run events, not a writable first-class
@@ -215,6 +215,58 @@ map. Complete top-level anchors from the public low-level event producer also
 remain readable when no execution contract exists; nested identity is compared
 only when it is present.
 
+### Legacy pre-anchor sessions (transitional)
+
+Sessions started before the anchor landed carry no `project_id` on their
+durable `orchestrator.session.started` event. Resume detects this from the
+persisted start-identity snapshot itself (`has_project_anchor` is false) —
+never from a version heuristic — and takes a preserved legacy path instead of
+the resolver: the exact pre-anchor direct-cwd (or managed-task-workspace)
+representation is reproduced for the workspace comparison. Rewriting these
+sessions under the current resolver would make resume disagree with their own
+immutable start events.
+
+This dual representation is a transitional surface, not a second contract:
+
+- **Implementation.** The legacy representation and its activation event live
+  in `orchestrator/legacy_identity.py`; the consuming branch in the runner
+  carries a comment pointing back here.
+- **Observability.** Every activation emits the structured log event
+  `project_map.legacy_identity_path` with `entry_point`
+  `resume_workspace_comparison` and a `prepared_live_execution` context flag.
+  An activation is counted only when a durable start-identity snapshot is
+  present and still lacks the anchor; current prepared executions restore an
+  intentionally anchorless contract-only snapshot and never count. The event
+  is an advisory liveness signal only — the default file sink rotates away
+  after `LoggingConfig.max_log_days` (seven) days, file logging may be
+  disabled, and a sink that cannot be created is skipped — so absence from
+  available logs can never prove inactivity and carries no removal
+  authority.
+- **Removal criterion.** The seam is a package-wide project-identity
+  compatibility contract. EventStores are local and independently configured
+  per installation, so no store inspection — maintainer-side or otherwise —
+  can establish that other installations hold no pre-anchor sessions, and no
+  such inspection authorizes removal. Removal is instead governed by a finite
+  support window this RFC declares: every release published before 2027-07-29
+  must retain the pre-anchor project-identity representation for sessions
+  started before the anchor (2026-07-29). This window governs only the identity
+  seam; it does not bypass independently versioned execution-contract,
+  provider, permission, or workspace compatibility gates, all of which remain
+  fail-closed. After the window ends, a release may delete
+  `legacy_identity.py` and the runner's legacy branch only as a documented
+  breaking change that simultaneously replaces the branch with a
+  fail-closed rejection: when `_project_start_identity` finds a persisted
+  start-identity snapshot without the complete anchor, resume must raise a
+  typed error naming the last identity-compatible release — never silently
+  rewrite the session under the current resolver, and never strand it without
+  explanation. Operators who want to know whether the identity cutover affects
+  their installation can run a per-installation inventory preflight before
+  upgrading — enumerate sessions with `EventStore.get_all_sessions()`,
+  read each persisted `_session_start_identity` snapshot, and treat any
+  session that cannot be enumerated or read as pre-anchor — but this
+  preflight is a verification tool for that one store only; it grants no
+  package-wide removal authority.
+
 ## Authority boundary
 
 Project identity is an indexing and attribution contract only:
@@ -244,6 +296,24 @@ Project identity is an indexing and attribution contract only:
 6. an explicit limit below the attributable population raises a typed error
    instead of returning an unmarked recent window; and
 7. projection performs no EventStore write and grants no execution authority.
+
+## V1 query surfaces
+
+`ouroboros_project_status` and `ouroboros status project` share the same
+read-only handler. Both resolve the canonical Project Map identity from an
+explicit project/workspace directory or the caller directory, optionally filter
+by one canonical repository-relative workspace, and apply a positive complete-run
+safety limit. A limit below the attributable population, an identity conflict,
+or any reconstruction/storage failure returns an error with no partial
+`ProjectRecord`.
+
+The MCP tool publishes the serialized `ProjectRecord` as `structuredContent`;
+`ouroboros status project --json` emits that exact object with deterministic key
+ordering. Handler-owned EventStores are opened with SQLite `mode=ro` and
+`initialize(create_schema=False)`. The composition root may inject its shared
+EventStore, but the handler invokes only read methods and still skips schema
+creation. Neither surface writes materialized project state, controls execution,
+or contributes acceptance evidence.
 
 ## V1 non-goals
 

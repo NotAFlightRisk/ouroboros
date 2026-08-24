@@ -3,6 +3,7 @@
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
 from ouroboros import __version__
@@ -81,6 +82,16 @@ class TestCommandGroups:
         result = runner.invoke(app, ["seed", "--help"])
         assert result.exit_code == 0
         assert "Seed" in result.output
+
+    def test_seed_command_accepts_and_forwards_dsh_backend(self) -> None:
+        run_seed = AsyncMock(return_value=Path("seed.yaml"))
+
+        with patch("ouroboros.cli.commands.seed._run_seed_generation", new=run_seed):
+            result = runner.invoke(app, ["seed", "interview_1", "--llm-backend", "dsh"])
+
+        assert result.exit_code == 0, result.output
+        assert run_seed.await_args.args == ("interview_1",)
+        assert run_seed.await_args.kwargs["llm_backend"] == "dsh"
 
 
 class TestRunCommands:
@@ -208,6 +219,12 @@ class TestStatusCommands:
         assert result.exit_code == 0
         assert "details" in result.output.lower()
 
+    def test_status_project_help(self) -> None:
+        """Test read-only cross-run project status help."""
+        result = runner.invoke(app, ["status", "project", "--help"])
+        assert result.exit_code == 0
+        assert "read-only" in result.output.lower()
+
     def test_status_health_help(self) -> None:
         """Test status health command help."""
         result = runner.invoke(app, ["status", "health", "--help"])
@@ -248,7 +265,10 @@ class TestMCPCommands:
             "ouroboros.cli.commands.mcp._run_mcp_server",
             new=AsyncMock(),
         ) as mock_run_mcp_server:
-            result = runner.invoke(app, ["mcp", "serve", "--llm-backend", "pi"])
+            result = runner.invoke(
+                app,
+                ["mcp", "serve", "--runtime", "pi", "--llm-backend", "pi"],
+            )
 
         assert result.exit_code == 0
         mock_run_mcp_server.assert_awaited_once_with(
@@ -256,8 +276,12 @@ class TestMCPCommands:
             8080,
             "stdio",
             None,
-            None,
             "pi",
+            "pi",
+            auth_token="",
+            allowed_hosts=(),
+            allowed_origins=(),
+            workspace_roots=(),
         )
 
     def test_mcp_info(self) -> None:
@@ -306,6 +330,21 @@ class TestShorthandCommands:
 
         # Should invoke workflow command (orchestrator by default calls _run_orchestrator)
         mock_run_orchestrator.assert_awaited_once()
+
+    @pytest.mark.parametrize("runtime", ["claude", "claude-sdk"])
+    def test_run_public_claude_runtime_selects_sdk(self, tmp_path: Path, runtime: str) -> None:
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text("goal: test\nacceptance_criteria:\n  - criterion: test\n")
+
+        mock_run_orchestrator = AsyncMock()
+        with patch(
+            "ouroboros.cli.commands.run._run_orchestrator",
+            new=mock_run_orchestrator,
+        ):
+            result = runner.invoke(app, ["run", str(seed_file), "--runtime", runtime])
+
+        assert result.exit_code == 0
+        assert mock_run_orchestrator.await_args.kwargs["runtime_backend"] == "claude"
 
     def test_run_shorthand_with_no_orchestrator(self, tmp_path: Path) -> None:
         """Test that 'ouroboros run seed.yaml --no-orchestrator' uses placeholder mode."""
@@ -558,5 +597,8 @@ class TestWorkflowIRCommands:
 
         result = runner.invoke(app, ["workflow-ir", "inspect", str(seed_file), "--json"])
 
+        # The blank-AC boundary is enforced by the Seed schema itself, so the
+        # command now fails during seed load rather than in the IR adapter.
         assert result.exit_code == 1
-        assert "must be non-blank" in result.output
+        assert "Workflow IR inspection failed" in result.output
+        assert "acceptance_criteria.0.description" in result.output

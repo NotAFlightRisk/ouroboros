@@ -114,6 +114,32 @@ def test_packaged_skills_dir_supports_installed_wheel_layout(tmp_path: Path) -> 
     assert _packaged_skills_dir(module_file) == wheel_skills_dir
 
 
+def test_discovery_uses_directory_identity_when_host_name_is_prefixed(tmp_path: Path) -> None:
+    skills_dir = tmp_path / "skills"
+    skill_dir = skills_dir / "status"
+    skill_dir.mkdir(parents=True)
+    skill_dir.joinpath("SKILL.md").write_text(
+        """---
+name: ouroboros-status
+mcp_tool: ouroboros_session_status
+mcp_args:
+  session_id: "$1"
+---
+""",
+        encoding="utf-8",
+    )
+
+    assert discover_skill_tool_mappings(skills_dir) == (
+        SkillToolMapping(
+            skill_name="status",
+            mcp_tool="ouroboros_session_status",
+            skill_path="skills/status/SKILL.md",
+            mcp_args={"session_id": "$1"},
+            context_keys=("session_id",),
+        ),
+    )
+
+
 def test_packaged_skill_frontmatter_exposes_declared_mcp_tools() -> None:
     mappings = discover_skill_tool_mappings()
     by_skill = {mapping.skill_name: mapping for mapping in mappings}
@@ -146,7 +172,6 @@ def test_packaged_skill_frontmatter_exposes_tool_specific_context_keys() -> None
             "max_interview_rounds",
             "max_repair_rounds",
             "skip_run",
-            "complete_product",
             "pipeline_timeout_seconds",
             "efficiency_mode",
             "frugality_assurance",
@@ -288,7 +313,6 @@ def test_discover_skill_context_keys_merges_packaged_frontmatter_and_body_usage(
         "max_interview_rounds",
         "max_repair_rounds",
         "skip_run",
-        "complete_product",
         "pipeline_timeout_seconds",
         "efficiency_mode",
         "frugality_assurance",

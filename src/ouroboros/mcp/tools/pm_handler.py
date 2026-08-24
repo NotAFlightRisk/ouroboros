@@ -19,7 +19,7 @@ ambiguity scoring.  User controls when to stop.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
@@ -28,9 +28,10 @@ from typing import Any
 import structlog
 
 from ouroboros.backends import backend_supports_tool_envelope
+from ouroboros.bigbang.ambiguity import qualifies_for_seed_completion
 from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.interview import (
-    InterviewRound,
+    MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewState,
 )
 from ouroboros.bigbang.pm_completion import (
@@ -38,13 +39,31 @@ from ouroboros.bigbang.pm_completion import (
     maybe_complete_pm_interview,
 )
 from ouroboros.bigbang.pm_document import save_pm_document
-from ouroboros.bigbang.pm_interview import PM_UNCERTAINTY_GUIDANCE, PMInterviewEngine
+from ouroboros.bigbang.pm_interview import (
+    PM_UNCERTAINTY_GUIDANCE,
+    PMInterviewEngine,
+    PMInterviewTurnPlan,
+    decision_round_count,
+)
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.host_context import resolve_request_subagent_dispatch
+from ouroboros.mcp.tools.advisory_dispatch import append_question_advisory_dispatch
+from ouroboros.mcp.tools.fanout import FanoutRegistry
+from ouroboros.mcp.tools.pm_batch import (
+    batch_entries_for_turns,
+    batch_turn_meta_and_text,
+    externalize_advisory_payloads,
+    interview_answer_lock,
+    record_turn_answers,
+    skip_hint_suffix,
+    turn_answers,
+)
+from ouroboros.mcp.tools.question_advisory import attach_question_advisory
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     build_pm_interview_subagent,
@@ -59,6 +78,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.orchestrator.capabilities.pm_schemas import pm_repository_roster
 from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.pm.handoff import build_pm_dev_handoff_next_step
@@ -155,6 +175,12 @@ def _save_pm_meta(
             "decide_later_items": combined_decide_later,
             "codebase_context": engine.codebase_context,
             "pending_reframe": pending_reframe,
+            # The reframe routing of the turn on the wire, whole — a batch
+            # holds several, and the single entry above stays for older
+            # readers. Planning replaces this map rather than adding to it, so
+            # an abandoned turn's routing cannot reach a later question that
+            # merely reads the same (RFC #2222 revision 4).
+            "pending_reframes": dict(getattr(engine, "_reframe_map", {})),
             "cwd": cwd,
             "brownfield_repos": list(getattr(engine, "_selected_brownfield_repos", [])),
             "classifications": [
@@ -348,11 +374,53 @@ class PMInterviewHandler:
     event_store: EventStore | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    fanout_registry: FanoutRegistry | None = field(default=None, repr=False)
+    findings_store: Any | None = field(default=None, repr=False)
+    _answer_locks: dict[str, asyncio.Lock] = field(default_factory=dict, repr=False)
+
+    async def _attach_advisory(self, meta: dict[str, Any], session_id: str, question: str) -> None:
+        """Attach the evidence lanes to one PM turn that shows ``question``.
+
+        The lanes, their contracts and their requiredness all come from this
+        tool's catalog in the capability registry, through the same fan-out the
+        interview runs. Nothing here is PM-shaped except the roster, which is
+        the boundary PM's code lane is bounded by.
+
+        The roster is read from persisted PM meta rather than from the engine,
+        because two of the four question turns run on a session loaded from disk
+        and have no engine state to read it from. Reading one source on all four
+        is what keeps the roster from depending on how the turn was reached.
+
+        ``findings_store`` travels the same way and for the same reason: any of
+        the four turns can have recent findings behind it, so a turn reached by
+        resume must be able to say where they are just as the turn that asked
+        directly can.
+        """
+        pm_meta = _load_pm_meta(session_id, data_dir=self.data_dir)
+        attach_question_advisory(
+            meta,
+            tool_name="ouroboros_pm_interview",
+            session_id=session_id,
+            question=question,
+            repository_roster=pm_repository_roster(
+                pm_meta.get("brownfield_repos") if pm_meta else None
+            ),
+            dispatch_mode=resolve_request_subagent_dispatch(
+                self.agent_runtime_backend,
+                self.opencode_mode,
+            ),
+            runtime_backend=self.agent_runtime_backend,
+            opencode_mode=self.opencode_mode,
+            fanout_registry=self.fanout_registry,
+            findings_store=self.findings_store,
+        )
+        # RFC #2222: briefs travel as references, not bodies (see pm_batch).
+        await externalize_advisory_payloads(meta, self.findings_store)
 
     @property
     def definition(self) -> MCPToolDefinition:
         """Return the tool definition with flat optional parameters."""
-        return MCPToolDefinition(
+        definition = MCPToolDefinition(
             name="ouroboros_pm_interview",
             description=(
                 "PM interview for product requirements gathering. "
@@ -378,8 +446,36 @@ class PMInterviewHandler:
                 MCPToolParameter(
                     name="answer",
                     type=ToolInputType.STRING,
-                    description="PM's response to the current interview question",
+                    description=(
+                        "PM's response to a single-question turn. Pass the question it "
+                        "answers as 'last_question'. This singular form is mutually "
+                        "exclusive with 'answers'; for a turn that asked more than one "
+                        "question, use 'answers' instead."
+                    ),
                     required=False,
+                ),
+                MCPToolParameter(
+                    name="answers",
+                    type=ToolInputType.ARRAY,
+                    description=(
+                        "A turn's answers, sent together: [{question, answer}, ...], one "
+                        "entry per question the turn asked. This batch form is mutually "
+                        "exclusive with 'answer'. A turn is recorded whole, so collect "
+                        "every answer before calling. Each entry names its own question "
+                        "and the batch accepts one to three entries."
+                    ),
+                    required=False,
+                    items={
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string", "minLength": 1},
+                            "answer": {"type": "string", "minLength": 1},
+                        },
+                        "required": ["question", "answer"],
+                        "additionalProperties": False,
+                    },
+                    min_items=1,
+                    max_items=3,
                 ),
                 MCPToolParameter(
                     name="action",
@@ -418,17 +514,19 @@ class PMInterviewHandler:
                     name="last_question",
                     type=ToolInputType.STRING,
                     description=(
-                        "The question text from the previous child session's response. "
-                        "In plugin mode each dispatch creates a new child session whose "
-                        "questions are not automatically persisted server-side. Pass the "
-                        "child's last question here when submitting an answer so the "
-                        "PM interview transcript preserves the real question text instead "
-                        "of a placeholder."
+                        "The question this answer is answering. A turn persists "
+                        "nothing when it asks, on any runtime, so an answer without "
+                        "its question is refused — there is no remembered question "
+                        "to file it under, and the round behind it is one somebody "
+                        "already answered."
                     ),
                     required=False,
                 ),
             ),
         )
+        input_schema = definition.to_input_schema()
+        input_schema["not"] = {"required": ["answer", "answers"]}
+        return replace(definition, input_schema=input_schema)
 
     def _get_engine(self) -> PMInterviewEngine:
         """Return the injected engine or create a new one using the server's configured backend."""
@@ -472,6 +570,7 @@ class PMInterviewHandler:
         initial_context = arguments.get("initial_context")
         session_id = arguments.get("session_id")
         answer = arguments.get("answer")
+        answers = arguments.get("answers")
         cwd_arg = arguments.get("cwd")
         selected_repos: list[str] | None = arguments.get("selected_repos")
         last_question = arguments.get("last_question")
@@ -541,6 +640,15 @@ class PMInterviewHandler:
                         state.is_brownfield = True
                         state.codebase_paths = [{"path": cwd, "role": "primary"}]
 
+                # The selected roster is recorded on the state, in the field the
+                # other start paths already write. It was held only in
+                # ``pm_meta``, so anything reading the state saw a session with
+                # no repositories: the direct CLI's brownfield refusal, and the
+                # seed generator's own check.
+                if selected_repos:
+                    state.codebase_paths = [
+                        {"path": str(path), "role": "primary"} for path in selected_repos
+                    ]
                 save_result = await _plugin_save_state(state_dir, state)
                 if save_result.is_err:
                     return Result.err(
@@ -609,6 +717,19 @@ class PMInterviewHandler:
                 selected_repos = _plugin_repo_paths(persisted_repos)
                 meta["brownfield_repos"] = persisted_repos
                 meta["status"] = "interview_started"
+                # The other entrance to the same roster, recorded the same way.
+                if selected_repos:
+                    repo_state = await _plugin_load_state(state_dir, session_id)
+                    if repo_state.is_ok:
+                        repo_state.value.codebase_paths = [
+                            {"path": str(path), "role": "primary"} for path in selected_repos
+                        ]
+                        repo_state.value.mark_updated()
+                        marked = await _plugin_save_state(state_dir, repo_state.value)
+                        if marked.is_err:
+                            return Result.err(
+                                MCPToolError(str(marked.error), tool_name="ouroboros_pm_interview")
+                            )
                 _save_pm_meta(
                     session_id,
                     engine=None,
@@ -650,13 +771,26 @@ class PMInterviewHandler:
                         if not initial_context and meta.get("initial_context"):
                             initial_context = meta["initial_context"]
 
-                # Gate: generate requires interview evidence.  In plugin
-                # mode is_complete is never set (child owns progression),
-                # so we gate on answered rounds instead.  The child session
-                # performs the real completeness validation.
+                # Gate: generate requires an interview decision.  In plugin
+                # mode is_complete is never set (child owns progression), so
+                # we gate on the rounds instead.  The child session performs
+                # the real completeness validation.
+                #
+                # A round is not a decision.  A confirmed lane finding occupies
+                # one while being a fact the user adopted, and the transcript
+                # built three lines down withholds its content -- so counting it
+                # here would authorise a PM seed from a session where the user
+                # decided nothing and hand the child an empty transcript under a
+                # prompt saying the interview is complete.  Read ``provenance``
+                # rather than the marker, the same field ``check_completion``
+                # counts in-process, so the two runtimes agree by default.
                 if action == "generate":
-                    answered_rounds = [r for r in state.rounds if r.user_response is not None]
-                    if not state.is_complete and not answered_rounds:
+                    decided_rounds = [
+                        r
+                        for r in state.rounds
+                        if r.user_response is not None and r.provenance == "user"
+                    ]
+                    if not state.is_complete and not decided_rounds:
                         return Result.err(
                             MCPToolError(
                                 "Interview has no answered rounds and is not "
@@ -675,20 +809,50 @@ class PMInterviewHandler:
                 # the parent LLM sees the child's response (which contains the
                 # question) and passes it back here so we can persist the real
                 # question text instead of a placeholder.
-                if answer:
-                    # ``record_answer`` fills a round persisted question-only or
-                    # appends a new one, and settles provenance where the answer
-                    # arrives rather than at construction. Fall back to a
-                    # descriptive placeholder for backward compatibility
-                    # (callers that don't supply last_question yet).
-                    has_pending = bool(state.rounds) and state.rounds[-1].user_response is None
-                    if has_pending:
-                        question_text = last_question or state.rounds[-1].question
-                    else:
-                        question_text = (
-                            last_question if last_question else "(continued from subagent)"
+                # A singular legacy/plugin resume may intentionally replace a
+                # stale placeholder through ``last_question``. Only the batch
+                # transport claims the persisted pending round is the turn it
+                # is answering, so only that shape makes the stored identity
+                # authoritative enough to validate.
+                planned_questions = (
+                    [state.rounds[-1].question]
+                    if answers is not None
+                    and state.rounds
+                    and state.rounds[-1].user_response is None
+                    else None
+                )
+                pairs, pair_error = turn_answers(
+                    answers,
+                    answer,
+                    last_question,
+                    planned_questions=planned_questions,
+                )
+                if pair_error:
+                    return Result.err(MCPToolError(pair_error, tool_name="ouroboros_pm_interview"))
+                if pairs:
+                    # The same recorder the in-process branch uses, not a
+                    # second one that agrees with it today. A pair became a
+                    # round here once by a loop of its own, and that loop
+                    # spelled `[decide_later]` as a sentence the user typed:
+                    # a control token committed as a decision, and an open
+                    # question the generated seed never heard was open.
+                    #
+                    # No engine is passed, and none is built: this runtime
+                    # dispatches generation to a child precisely so the server
+                    # need not hold an LLM adapter, and an answer being written
+                    # down must not be what finally requires one.
+                    #
+                    # Every answer names its question, on every runtime: a turn
+                    # persists nothing when it asks (RFC #2222 revision 4), so
+                    # there is no stored question to prefer over the echo.
+                    record_result = await record_turn_answers(None, state, pairs)
+                    if record_result.is_err:
+                        return Result.err(
+                            MCPToolError(
+                                str(record_result.error), tool_name="ouroboros_pm_interview"
+                            )
                         )
-                    state.record_answer(question_text, answer)
+                    state = record_result.value
                     state.mark_updated()
                     save_result = await _plugin_save_state(state_dir, state)
                     if save_result.is_err:
@@ -720,9 +884,12 @@ class PMInterviewHandler:
                     "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                     "next_turn_hint": (
-                        "When the user answers, pass the child session's "
-                        "question text as 'last_question' alongside 'answer' "
-                        "to preserve PM interview transcript fidelity."
+                        "When the user answers, send the turn's answers as "
+                        "'answers': [{question, answer}] — each answer names "
+                        "its own question. A single answer may instead pass "
+                        "the child session's question text as 'last_question' "
+                        "alongside 'answer'. Either way the question travels "
+                        "with the answer, which is what the transcript keeps."
                     ),
                 },
             )
@@ -767,7 +934,15 @@ class PMInterviewHandler:
 
             # ── Resume with answer ─────────────────────────────────
             if action == "resume" and session_id:
-                return await self._handle_answer(engine, session_id, answer, cwd)
+                async with interview_answer_lock(self._answer_locks, session_id):
+                    return await self._handle_answer(
+                        engine,
+                        session_id,
+                        answer,
+                        cwd,
+                        last_question=last_question,
+                        answers=answers,
+                    )
 
             return Result.err(
                 MCPToolError(
@@ -872,14 +1047,8 @@ class PMInterviewHandler:
         # Compute diff
         diff = _compute_deferred_diff(engine, deferred_before, decide_later_before)
 
-        # Record unanswered round
-        state.rounds.append(
-            InterviewRound(
-                round_number=state.current_round_number,
-                question=question,
-                user_response=None,
-            )
-        )
+        # RFC #2222 revision 4: a turn persists nothing when it asks. The
+        # question travels in the response and comes back with its answer.
         state.mark_updated()
 
         # Persist — check save result to avoid handing back a session that wasn't written
@@ -904,9 +1073,7 @@ class PMInterviewHandler:
 
         # Check classification to signal skip eligibility
         classification = _last_classification(engine)
-        is_decide_later = classification == "decide_later"
-        is_deferred = classification == "deferred"
-        skip_eligible = is_decide_later or is_deferred
+        skip_eligible = classification in ("decide_later", "deferred")
 
         meta = {
             "session_id": state.interview_id,
@@ -920,6 +1087,7 @@ class PMInterviewHandler:
             "pending_reframe": pending_reframe,
             **diff,
         }
+        await self._attach_advisory(meta, state.interview_id, question)
 
         log.info(
             "pm_handler.started",
@@ -936,27 +1104,14 @@ class PMInterviewHandler:
             f"PM interview started. Session ID: {state.interview_id}\n\n"
             f"{PM_UNCERTAINTY_GUIDANCE}\n\n{question}"
         )
-        if is_decide_later:
-            start_text += (
-                "\n\n💡 This question can be deferred. "
-                'The user may answer now, or choose "decide later" to skip it. '
-                "If they choose to decide later, pass "
-                f'answer="[decide_later]" with session_id="{state.interview_id}".'
-            )
-        elif is_deferred:
-            start_text += (
-                "\n\n💡 This is a technical question that can be deferred to the dev phase. "
-                "The user may answer now, or choose to defer it. "
-                "If they choose to defer, pass "
-                f'answer="[deferred]" with session_id="{state.interview_id}".'
-            )
+        start_text += skip_hint_suffix(classification, state.interview_id)
 
         return Result.ok(
             MCPToolResult(
                 content=(
                     MCPContentItem(
                         type=ContentType.TEXT,
-                        text=start_text,
+                        text=append_question_advisory_dispatch(start_text, meta),
                     ),
                 ),
                 is_error=False,
@@ -1121,9 +1276,15 @@ class PMInterviewHandler:
         """Return the first question when select_repos is called on an already-started session.
 
         This handles the case where the caller sends ``select_repos`` more
-        than once for the same session.  Instead of re-starting the
-        interview (which would create duplicate state), we load the existing
-        ``InterviewState`` and replay the first question from its rounds.
+        than once for the same session. Instead of re-starting the interview
+        (which would create duplicate state), the existing ``InterviewState``
+        is loaded and a question is planned from it.
+
+        It plans rather than replays because a turn persists nothing when it
+        asks (RFC #2222 revision 4): the question the first call returned was
+        never written down, so there is none to hand back. This is the same
+        trade a reconnect makes — one regenerated question, and no half-written
+        state to keep consistent.
         """
         log.info(
             "pm_handler.select_repos.idempotent",
@@ -1141,44 +1302,49 @@ class PMInterviewHandler:
             )
 
         state = load_result.value
-        # Return the last unanswered round's question (the pending PM-facing prompt),
-        # not rounds[0] which may be a hidden auto-deferred/auto-decided question.
-        pending = next(
-            (r for r in reversed(state.rounds) if r.user_response is None),
-            None,
-        )
-        first_question = (
-            pending.question
-            if pending
-            else (state.rounds[-1].question if state.rounds else "No question available.")
-        )
-
         engine.restore_meta(meta)
+        question_result = await engine.ask_next_question(state)
+        if question_result.is_err:
+            return Result.err(
+                MCPToolError(
+                    f"Session {session_id} is already started but a question could "
+                    f"not be planned: {question_result.error}",
+                    tool_name="ouroboros_pm_interview",
+                )
+            )
+        first_question = question_result.value
+
         classification = _last_classification(engine)
-        is_decide_later = classification == "decide_later"
-        is_deferred = classification == "deferred"
-        skip_eligible = is_decide_later or is_deferred
+        skip_eligible = classification in ("decide_later", "deferred")
+
+        resume_meta: dict[str, Any] = {
+            "session_id": session_id,
+            "status": "interview_started",
+            "question": first_question,
+            "is_brownfield": state.is_brownfield,
+            "idempotent": True,
+            "classification": classification,
+            "skip_eligible": skip_eligible,
+        }
+        # A resumed question is shown to the user like any other, so it carries
+        # the lanes like any other. This is the turn where the "every question"
+        # rule would otherwise fail quietly: the answer that follows looks
+        # identical whether or not evidence was ever fetched for it.
+        await self._attach_advisory(resume_meta, session_id, first_question)
 
         return Result.ok(
             MCPToolResult(
                 content=(
                     MCPContentItem(
                         type=ContentType.TEXT,
-                        text=(
-                            f"PM interview started. Session ID: {session_id}\n\n{first_question}"
+                        text=append_question_advisory_dispatch(
+                            f"PM interview started. Session ID: {session_id}\n\n{first_question}",
+                            resume_meta,
                         ),
                     ),
                 ),
                 is_error=False,
-                meta={
-                    "session_id": session_id,
-                    "status": "interview_started",
-                    "question": first_question,
-                    "is_brownfield": state.is_brownfield,
-                    "idempotent": True,
-                    "classification": classification,
-                    "skip_eligible": skip_eligible,
-                },
+                meta=resume_meta,
             )
         )
 
@@ -1192,8 +1358,16 @@ class PMInterviewHandler:
         session_id: str,
         answer: str | None,
         cwd: str,
+        last_question: str | None = None,
+        answers: Any = None,
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Resume session, record an answer, check completion, then ask next question.
+        """Record a turn's answers, check completion, then ask the next turn.
+
+        A turn is atomic (RFC #2222 revision 4): its answers arrive together,
+        each holding the question it belongs to, and the rounds they become are
+        the only durable state. A call with no answers is a host that lost its
+        turn — the next turn is planned from the transcript rather than
+        restored, so there is no pending question to reconcile against.
 
         Completion is determined by the engine's ambiguity score dropping
         below the threshold (requirements are clear).  User controls when
@@ -1212,62 +1386,24 @@ class PMInterviewHandler:
         if meta:
             engine.restore_meta(meta)
 
-        # If no answer provided, re-display the pending question (retry/reconnect)
-        if not answer and state.rounds and state.rounds[-1].user_response is None:
-            pending_question = state.rounds[-1].question
-            classification = _last_classification(engine)
-            is_decide_later = classification == "decide_later"
-            is_deferred = classification == "deferred"
-            skip_eligible = is_decide_later or is_deferred
-
-            pending_reframe = engine.get_pending_reframe()
-
-            # Include skip hint in re-displayed question
-            pending_text = f"Session {session_id}\n\n{pending_question}"
-            if is_decide_later:
-                pending_text += (
-                    "\n\n💡 This question can be deferred. "
-                    'The user may answer now, or choose "decide later" to skip it. '
-                    "If they choose to decide later, pass "
-                    f'answer="[decide_later]" with session_id="{session_id}".'
-                )
-            elif is_deferred:
-                pending_text += (
-                    "\n\n💡 This is a technical question that can be deferred to the dev phase. "
-                    "The user may answer now, or choose to defer it. "
-                    "If they choose to defer, pass "
-                    f'answer="[deferred]" with session_id="{session_id}".'
-                )
-
-            return Result.ok(
-                MCPToolResult(
-                    content=(
-                        MCPContentItem(
-                            type=ContentType.TEXT,
-                            text=pending_text,
-                        ),
-                    ),
-                    is_error=False,
-                    meta={
-                        "session_id": session_id,
-                        "input_type": "freeText",
-                        "response_param": "answer",
-                        "question": pending_question,
-                        "is_complete": False,
-                        "classification": classification,
-                        "skip_eligible": skip_eligible,
-                        "deferred_this_round": [],
-                        "decide_later_this_round": [],
-                        "interview_complete": False,
-                        "pending_reframe": pending_reframe,
-                        "new_deferred": [],
-                        "new_decide_later": [],
-                        "deferred_count": 0,
-                        "decide_later_count": len(engine.deferred_items)
-                        + len(engine.decide_later_items),
-                    },
-                )
-            )
+        # ── This turn's answers, each holding its question (RFC #2222 r4) ──
+        # ``last_question`` is also the legacy repair path for a stale pending
+        # question. A batched answer has no such override semantics: when a
+        # pending round exists, choosing ``answers`` proves that stored plan is
+        # the identity boundary this call is answering.
+        planned_questions = (
+            [state.rounds[-1].question]
+            if answers is not None and state.rounds and state.rounds[-1].user_response is None
+            else None
+        )
+        pairs, pair_error = turn_answers(
+            answers,
+            answer,
+            last_question,
+            planned_questions=planned_questions,
+        )
+        if pair_error:
+            return Result.err(MCPToolError(pair_error, tool_name="ouroboros_pm_interview"))
 
         # ── Per-round diff snapshot — must be BEFORE any skip/record call ──
         # Snapshot list lengths here so that items appended inside
@@ -1276,78 +1412,110 @@ class PMInterviewHandler:
         deferred_before = len(engine.deferred_items)
         decide_later_before = len(engine.decide_later_items)
 
-        # Record answer if provided
-        if answer and not state.rounds:
-            return Result.err(
-                MCPToolError(
-                    "Cannot record answer: no questions have been asked yet.",
-                    tool_name="ouroboros_pm_interview",
+        if pairs:
+            record_result = await record_turn_answers(engine, state, pairs)
+            if record_result.is_err:
+                return Result.err(
+                    MCPToolError(str(record_result.error), tool_name="ouroboros_pm_interview")
                 )
-            )
-        if answer and state.rounds:
-            last_question = state.rounds[-1].question
-            if state.rounds[-1].user_response is None:
-                state.rounds.pop()
-
-            # ── User chose to skip (decide later / defer to dev) ───
-            # The main session detects classification via response_meta
-            # and offers skip options.  The user's choice arrives as:
-            #   answer="[decide_later]" → skip_as_decide_later()
-            #   answer="[deferred]"     → skip_as_deferred()
-            # Guard: only honour the sentinel when the last question was
-            # actually classified as that type.  If a client sends
-            # "[decide_later]" for a passthrough/reframed question, treat
-            # it as a normal answer so no data is silently discarded.
-            stripped = answer.strip()
-            last_classification = _last_classification(engine)
-            if stripped == "[decide_later]" and last_classification == "decide_later":
-                skip_result = await engine.skip_as_decide_later(state, last_question)
-                if skip_result.is_err:
-                    return Result.err(
-                        MCPToolError(
-                            str(skip_result.error),
-                            tool_name="ouroboros_pm_interview",
-                        )
+            state = record_result.value
+            save_result = await engine.save_state(state)
+            if isinstance(save_result, Result) and save_result.is_err:
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to persist PM answer: {save_result.error}",
+                        tool_name="ouroboros_pm_interview",
                     )
-                state = skip_result.value
-                state.clear_stored_ambiguity()
-            elif stripped == "[deferred]" and last_classification == "deferred":
-                skip_result = await engine.skip_as_deferred(state, last_question)
-                if skip_result.is_err:
-                    return Result.err(
-                        MCPToolError(
-                            str(skip_result.error),
-                            tool_name="ouroboros_pm_interview",
-                        )
-                    )
-                state = skip_result.value
-                state.clear_stored_ambiguity()
-            else:
-                record_result = await engine.record_response(state, answer, last_question)
-                if record_result.is_err:
-                    return Result.err(
-                        MCPToolError(
-                            str(record_result.error),
-                            tool_name="ouroboros_pm_interview",
-                        )
-                    )
-                state = record_result.value
-                state.clear_stored_ambiguity()
-
-        # ── Completion check (AC 12) ─────────────────────────────
-        # Completion is determined by engine ambiguity scoring.
-        # When complete, auto-generate the PM document immediately
-        # (no separate "generate" call needed from the skill).
-        completion_result = await maybe_complete_pm_interview(state, engine)
-        if completion_result.is_err:
-            return Result.err(
-                MCPToolError(
-                    f"Failed to complete interview: {completion_result.error}",
-                    tool_name="ouroboros_pm_interview",
                 )
-            )
+            _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
 
-        state, completion = completion_result.value
+        completion: dict[str, Any] | None = None
+        supports_atomic_turn = (
+            isinstance(PMInterviewEngine, type)
+            and isinstance(engine, PMInterviewEngine)
+            and engine.supports_atomic_turn is True
+        )
+        batch_turns: list[PMInterviewTurnPlan] = []
+        if supports_atomic_turn:
+            turns_result = await engine.plan_next_turns(state)
+            if turns_result.is_err:
+                error_msg = str(turns_result.error)
+                return Result.ok(
+                    MCPToolResult(
+                        content=(
+                            MCPContentItem(
+                                type=ContentType.TEXT,
+                                text=(
+                                    f"Question generation failed. Session ID: {session_id}\n\n"
+                                    f'Resume with: session_id="{session_id}"\n\n'
+                                    f"Reason: {error_msg[:200]}"
+                                ),
+                            ),
+                        ),
+                        is_error=True,
+                        meta={"session_id": session_id, "recoverable": True},
+                    )
+                )
+            batch_turns = turns_result.value
+            turn: PMInterviewTurnPlan = batch_turns[0]
+            question = turn.question
+            if turn.ambiguity is not None:
+                state.store_ambiguity(
+                    score=turn.ambiguity.overall_score,
+                    breakdown=turn.ambiguity.breakdown.model_dump(mode="json"),
+                )
+                answered_rounds = decision_round_count(state)
+                if (
+                    answered_rounds >= MIN_ROUNDS_BEFORE_EARLY_EXIT
+                    and qualifies_for_seed_completion(
+                        turn.ambiguity,
+                        is_brownfield=state.is_brownfield,
+                    )
+                ):
+                    completion = {
+                        "interview_complete": True,
+                        "completion_reason": "ambiguity_resolved",
+                        "rounds_completed": answered_rounds,
+                        "ambiguity_score": turn.ambiguity.overall_score,
+                    }
+                    complete_result = await engine.complete_interview(state)
+                    if complete_result.is_err:
+                        return Result.err(
+                            MCPToolError(
+                                f"Failed to complete interview: {complete_result.error}",
+                                tool_name="ouroboros_pm_interview",
+                            )
+                        )
+                    state = complete_result.value
+        else:
+            completion_result = await maybe_complete_pm_interview(state, engine)
+            if completion_result.is_err:
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to complete interview: {completion_result.error}",
+                        tool_name="ouroboros_pm_interview",
+                    )
+                )
+            state, completion = completion_result.value
+            if completion is None:
+                question_result = await engine.ask_next_question(state)
+                if question_result.is_err:
+                    return Result.ok(
+                        MCPToolResult(
+                            content=(
+                                MCPContentItem(
+                                    type=ContentType.TEXT,
+                                    text=(
+                                        f"Question generation failed. Session ID: {session_id}\n\n"
+                                        f'Resume with: session_id="{session_id}"'
+                                    ),
+                                ),
+                            ),
+                            is_error=True,
+                            meta={"session_id": session_id, "recoverable": True},
+                        )
+                    )
+                question = question_result.value
         if completion is not None:
             save_result = await engine.save_state(state)
             if isinstance(save_result, Result) and save_result.is_err:
@@ -1450,42 +1618,61 @@ class PMInterviewHandler:
                 )
             )
 
-        question_result = await engine.ask_next_question(state)
-        if question_result.is_err:
-            error_msg = str(question_result.error)
-            if "empty response" in error_msg.lower():
-                return Result.ok(
-                    MCPToolResult(
-                        content=(
-                            MCPContentItem(
-                                type=ContentType.TEXT,
-                                text=(
-                                    f"Question generation failed. "
-                                    f"Session ID: {session_id}\n\n"
-                                    f'Resume with: session_id="{session_id}"'
-                                ),
-                            ),
-                        ),
-                        is_error=True,
-                        meta={"session_id": session_id, "recoverable": True},
-                    )
-                )
-            return Result.err(MCPToolError(error_msg, tool_name="ouroboros_pm_interview"))
-
-        question = question_result.value
-
         # Compute diff AFTER ask_next_question — new items are the
         # slice from the pre-snapshot length to current length
         diff = _compute_deferred_diff(engine, deferred_before, decide_later_before)
 
-        # Save unanswered round
-        state.rounds.append(
-            InterviewRound(
-                round_number=state.current_round_number,
-                question=question,
-                user_response=None,
+        # ── Batched turn (RFC #2222) — asked whole, answered whole ──
+        if len(batch_turns) > 1:
+            state.mark_updated()
+            save_result = await engine.save_state(state)
+            if isinstance(save_result, Result) and save_result.is_err:
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to persist resume state: {save_result.error}",
+                        tool_name="ouroboros_pm_interview",
+                    )
+                )
+            # The questions go out in the response and nowhere else. Persisting
+            # them would recreate the pending list revision 4 removed — the
+            # second place a turn was remembered, and the seam every replay and
+            # ordering defect lived in.
+            batch_entries = batch_entries_for_turns(batch_turns)
+            _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
+
+            # One fan-out per question in its own envelope, so fanout ids and
+            # payloads never overwrite each other (one wave, submit per envelope).
+            advisories: list[dict[str, Any]] = []
+            for t in batch_turns:
+                envelope: dict[str, Any] = {"question": t.question}
+                await self._attach_advisory(envelope, session_id, t.question)
+                advisories.append(envelope)
+
+            response_meta, response_text = batch_turn_meta_and_text(
+                session_id,
+                batch_entries,
+                advisories,
+                pending_reframe=engine.get_pending_reframe(),
+                diff=diff,
             )
-        )
+            for envelope in advisories:
+                response_text = append_question_advisory_dispatch(response_text, envelope)
+
+            log.info(
+                "pm_handler.question_batch_asked",
+                session_id=session_id,
+                batch_size=len(batch_entries),
+                **diff,
+            )
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text=response_text),),
+                    is_error=False,
+                    meta=response_meta,
+                )
+            )
+
+        # RFC #2222 revision 4: nothing is persisted until it is whole.
         state.mark_updated()
 
         save_result = await engine.save_state(state)
@@ -1505,9 +1692,7 @@ class PMInterviewHandler:
         classification = _last_classification(engine)
 
         # Signal to the caller that the user can skip this question
-        is_decide_later = classification == "decide_later"
-        is_deferred = classification == "deferred"
-        skip_eligible = is_decide_later or is_deferred
+        skip_eligible = classification in ("decide_later", "deferred")
 
         response_meta = {
             "session_id": session_id,
@@ -1524,6 +1709,7 @@ class PMInterviewHandler:
             "pending_reframe": pending_reframe,
             **diff,
         }
+        await self._attach_advisory(response_meta, session_id, question)
 
         log.info(
             "pm_handler.question_asked",
@@ -1536,27 +1722,14 @@ class PMInterviewHandler:
 
         # Build response text — include skip hint when applicable
         response_text = f"Session {session_id}\n\n{question}"
-        if is_decide_later:
-            response_text += (
-                "\n\n💡 This question can be deferred. "
-                'The user may answer now, or choose "decide later" to skip it. '
-                "If they choose to decide later, pass "
-                f'answer="[decide_later]" with session_id="{session_id}".'
-            )
-        elif is_deferred:
-            response_text += (
-                "\n\n💡 This is a technical question that can be deferred to the dev phase. "
-                "The user may answer now, or choose to defer it. "
-                "If they choose to defer, pass "
-                f'answer="[deferred]" with session_id="{session_id}".'
-            )
+        response_text += skip_hint_suffix(classification, session_id)
 
         return Result.ok(
             MCPToolResult(
                 content=(
                     MCPContentItem(
                         type=ContentType.TEXT,
-                        text=response_text,
+                        text=append_question_advisory_dispatch(response_text, response_meta),
                     ),
                 ),
                 is_error=False,

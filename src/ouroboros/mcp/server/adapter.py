@@ -32,8 +32,36 @@ from ouroboros.mcp.errors import (
     MCPServerError,
     MCPToolError,
 )
+from ouroboros.mcp.host_context import from_sdk_context, subagent_capability_extensions
+from ouroboros.mcp.server.auth import current_auth_context, resolve_network_security
+
+# Re-exported: split out in #1754, still imported from here by evaluation tests.
+from ouroboros.mcp.server.project_dir import (  # noqa: F401
+    _PROJECT_ROOT_MARKERS,
+    _looks_like_project_root,
+    _project_dir_from_artifact,
+    _project_dir_from_seed,
+)
 from ouroboros.mcp.server.protocol import PromptHandler, ResourceHandler, ToolHandler
-from ouroboros.mcp.server.security import AuthConfig, AuthMethod, RateLimitConfig, SecurityLayer
+from ouroboros.mcp.server.resource_lifecycle import ServerResourceLifecycle
+from ouroboros.mcp.server.security import (
+    AuthConfig,
+    AuthContext,
+    RateLimitConfig,
+    SecurityLayer,
+)
+
+# Re-exported: kept here for existing adapter-level tests and callers.
+from ouroboros.mcp.server.spec_verification_adapter import (
+    agent_results_from_execution_summary as _agent_results_from_execution_summary,
+)
+from ouroboros.mcp.server.spec_verification_adapter import (
+    evaluation_summary_for_unavailable_spec_verification as _evaluation_summary_for_unavailable_spec_verification,
+)
+from ouroboros.mcp.server.spec_verification_adapter import (
+    evaluation_summary_from_spec_verification as _evaluation_summary_from_spec_verification,
+)
+from ouroboros.mcp.telemetry_boundary import observe_adapter_tool_call, stamp_backend_context
 from ouroboros.mcp.types import (
     MCPCapabilities,
     MCPPromptDefinition,
@@ -46,7 +74,7 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
-from ouroboros.orchestrator.control_bus import ControlBus, ControlBusDrainError
+from ouroboros.orchestrator.control_bus import ControlBus
 
 if TYPE_CHECKING:
     from ouroboros.mcp.job_manager import JobManager
@@ -57,7 +85,6 @@ try:  # Keep the core package importable when the optional MCP extra is absent.
     from mcp.server import MCPServer as _SDKMCPServer
 except ImportError:  # pragma: no cover - exercised by packaging smoke tests.
     _SDKMCPServer = None  # type: ignore[assignment,misc]
-
 
 if _SDKMCPServer is not None:
 
@@ -89,32 +116,14 @@ if _SDKMCPServer is not None:
             arguments: dict[str, Any],
             context: Any = None,
         ) -> Any:
-            del context
-            from jsonschema import Draft202012Validator
+            from ouroboros.mcp.telemetry_boundary import call_sdk_tool
 
-            from ouroboros.mcp.sdk_mapping import tool_result_to_sdk
-
-            definition = next(
-                (item for item in await self._ouroboros_adapter.list_tools() if item.name == name),
-                None,
+            return await call_sdk_tool(
+                self._ouroboros_adapter,
+                name,
+                arguments,
+                host_context=from_sdk_context(context),
             )
-            if definition is None:
-                raise RuntimeError(f"Tool not found: {name}")
-
-            # Accept the one historical wrapper shape at the application edge,
-            # but validate the normalized payload against the canonical schema.
-            if set(arguments) == {"kwargs"} and isinstance(arguments.get("kwargs"), dict):
-                arguments = arguments["kwargs"]
-            _validate_parameter_constraints(definition.parameters, arguments)
-            Draft202012Validator(definition.to_input_schema()).validate(arguments)
-
-            result = await self._ouroboros_adapter.call_tool(name, arguments)
-            if result.is_err:
-                raise RuntimeError(str(result.error))
-            value = result.value
-            if definition.output_schema is not None:
-                Draft202012Validator(definition.output_schema).validate(value.structured_content)
-            return tool_result_to_sdk(value)
 
         async def list_resources(self) -> list[Any]:
             from ouroboros.mcp.sdk_mapping import resource_to_sdk
@@ -536,40 +545,6 @@ def _validate_parameter_constraints(
             raise ValueError(f"Invalid items for {parameter.name}: expected {item_type} values")
 
 
-_PROJECT_ROOT_MARKERS = (
-    # VCS (most universal — nearly every project has one)
-    ".git",
-    # Python
-    "pyproject.toml",
-    "setup.py",
-    "setup.cfg",
-    # Node.js
-    "package.json",
-    # Rust
-    "Cargo.toml",
-    # Go
-    "go.mod",
-    # Java / Kotlin
-    "pom.xml",
-    "build.gradle",
-    "build.gradle.kts",
-    # Ruby
-    "Gemfile",
-    # PHP
-    "composer.json",
-)
-
-
-def _looks_like_project_root(path: object) -> bool:
-    """Return True when the given path looks like a project root."""
-    from pathlib import Path
-
-    if not isinstance(path, Path):
-        return False
-
-    return any((path / marker).exists() for marker in _PROJECT_ROOT_MARKERS)
-
-
 def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None:
     """Parse legacy parallel execution output into task completion results.
 
@@ -582,17 +557,36 @@ def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None
     from ouroboros.core.lineage import EvaluationSummary, TaskResult
 
     task_line_matches = re.findall(
-        r"### (?:Task|AC) (\d+): \[(COMPLETED|FAILED|PASS|FAIL)\]\s*(.*)", artifact
+        r"### (?:Task|AC) (-?\d+): \[(COMPLETED|FAILED|PASS|FAIL)\]\s*(.*)", artifact
     )
     if not task_line_matches:
         return None
 
     seed_acs = getattr(seed, "acceptance_criteria", None) or ()
     feedback_metadata = _extract_feedback_metadata_from_artifact(artifact)
+    task_numbers = [int(task_number) for task_number, _, _ in task_line_matches]
+    invalid_task_numbers = sorted({number for number in task_numbers if number < 1})
+    if invalid_task_numbers:
+        rendered_numbers = ", ".join(str(number) for number in invalid_task_numbers)
+        return EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=1,
+            score=0.0,
+            drift_score=None,
+            failure_reason=(
+                f"invalid one-based task number(s): {rendered_numbers}; "
+                "formal AC evaluation not run"
+            ),
+            ac_results=(),
+            task_results=(),
+            feedback_metadata=feedback_metadata,
+            execution_completion_status="failed",
+            approval_status="not_evaluated",
+        )
 
     task_results: list[TaskResult] = []
-    for ac_num_str, status, description in task_line_matches:
-        task_idx = int(ac_num_str) - 1
+    for task_number, (_, status, description) in zip(task_numbers, task_line_matches, strict=True):
+        task_idx = task_number - 1
         task_content = (
             ac_text(seed_acs[task_idx]) if task_idx < len(seed_acs) else description.strip()
         )
@@ -610,12 +604,31 @@ def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None
         )
 
     total = len(task_results)
-    completed_count = sum(1 for result in task_results if result.completed)
-    score = completed_count / total if total > 0 else 0.0
+    reported_indices = [result.task_index for result in task_results]
+    reported_index_set = set(reported_indices)
+    if seed_acs:
+        expected_indices = set(range(len(seed_acs)))
+    else:
+        # Without a Seed, the report's highest one-based task number is the
+        # only available coverage boundary. Requiring the complete contiguous
+        # range keeps ``Task 2`` alone from masquerading as a complete run.
+        expected_indices = set(range(max(reported_indices, default=-1) + 1))
 
-    total_expected_tasks = len(seed_acs) if seed_acs else total
-    all_expected_tasks_reported = total >= total_expected_tasks
-    all_tasks_completed = completed_count == total and all_expected_tasks_reported
+    indices_are_unique = len(reported_indices) == len(reported_index_set)
+    exact_expected_coverage = reported_index_set == expected_indices
+    completed_expected_indices = {
+        result.task_index
+        for result in task_results
+        if result.completed and result.task_index in expected_indices
+    }
+    total_expected_tasks = len(expected_indices)
+    completed_count = len(completed_expected_indices)
+    score = completed_count / total_expected_tasks if total_expected_tasks > 0 else 0.0
+    all_tasks_completed = (
+        indices_are_unique
+        and exact_expected_coverage
+        and all(result.completed for result in task_results)
+    )
 
     failed_indices = [result.task_index + 1 for result in task_results if not result.completed]
     failure_reason = None
@@ -624,6 +637,26 @@ def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None
             failure_reason = (
                 f"{len(failed_indices)}/{total} tasks failed "
                 f"(Task {', '.join(str(i) for i in failed_indices)})"
+            )
+        elif not indices_are_unique:
+            failure_reason = (
+                "duplicate task indices in execution report; formal AC evaluation not run"
+            )
+        elif not exact_expected_coverage:
+            missing_indices = sorted(expected_indices - reported_index_set)
+            unexpected_indices = sorted(reported_index_set - expected_indices)
+            coverage_parts = []
+            if missing_indices:
+                coverage_parts.append(
+                    "missing Task " + ", ".join(str(index + 1) for index in missing_indices)
+                )
+            if unexpected_indices:
+                coverage_parts.append(
+                    "unexpected Task " + ", ".join(str(index + 1) for index in unexpected_indices)
+                )
+            failure_reason = (
+                "incomplete task coverage (" + "; ".join(coverage_parts) + "); "
+                "formal AC evaluation not run"
             )
         else:
             failure_reason = (
@@ -645,216 +678,6 @@ def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None
         execution_completion_status=execution_completion_status,
         approval_status="not_evaluated",
     )
-
-
-def _agent_results_from_execution_summary(mechanical: Any) -> dict[int, bool]:
-    """Return legacy agent-reported AC outcomes for spec verification.
-
-    Formal ``ACResult`` values take precedence when present.  For legacy
-    execution-only summaries, preserve the worker task completion signal via
-    ``source_ac_index`` so skipped/unverifiable assertions do not convert a
-    worker-reported failure into formal approval.
-    """
-    agent_results = {ac.ac_index: ac.passed for ac in mechanical.ac_results}
-    for task in mechanical.task_results:
-        source_ac_index = task.source_ac_index
-        if source_ac_index is None:
-            source_ac_index = task.task_index
-        agent_results.setdefault(source_ac_index, task.completed)
-    return agent_results
-
-
-def _evaluation_summary_from_spec_verification(
-    mechanical: Any,
-    verification_summary: Any,
-) -> Any | None:
-    """Promote complete verifier coverage into formal AC verdict results.
-
-    Spec verification may only return reports for ACs that produced extractable
-    assertions. Missing reports and reports with no concrete verification
-    results are not formal approval: they become failed/not-evaluated AC
-    results so a partial verifier pass cannot approve the whole run.
-    """
-    from ouroboros.core.lineage import ACResult, EvaluationSummary
-
-    reports = tuple(getattr(verification_summary, "reports", ()) or ())
-    if not reports:
-        return None
-
-    expected_ac_content: dict[int, str] = {
-        ac.ac_index: ac.ac_content for ac in mechanical.ac_results
-    }
-    expected_agent_results = _agent_results_from_execution_summary(mechanical)
-    for task in mechanical.task_results:
-        source_ac_index = task.source_ac_index
-        if source_ac_index is None:
-            source_ac_index = task.task_index
-        expected_ac_content.setdefault(source_ac_index, task.task_content)
-
-    reports_by_index = {report.ac_index: report for report in reports}
-    expected_indices = set(expected_ac_content) | set(expected_agent_results)
-    result_indices = sorted(expected_indices | set(reports_by_index))
-
-    ac_results: list[ACResult] = []
-    missing_indices: list[int] = []
-    unverifiable_indices: list[int] = []
-    for ac_index in result_indices:
-        report = reports_by_index.get(ac_index)
-        if report is None:
-            missing_indices.append(ac_index)
-            ac_results.append(
-                ACResult(
-                    ac_index=ac_index,
-                    ac_content=expected_ac_content.get(
-                        ac_index, f"Acceptance criterion {ac_index + 1}"
-                    ),
-                    passed=False,
-                    score=0.0,
-                    evidence="No spec verification report was produced for this AC.",
-                    verification_method="spec_verifier",
-                    ac_verdict_state="not_evaluated",
-                    final_verdict="fail",
-                    rendered_verdict="NOT_EVALUATED",
-                )
-            )
-            continue
-
-        details = [result.detail for result in report.results if result.detail]
-        evidence = "; ".join(details)
-        if not report.results:
-            unverifiable_indices.append(ac_index)
-            evidence = "No independently verifiable assertions; formal AC verdict not evaluated."
-            passed = False
-            verdict_state = "not_evaluated"
-            rendered_verdict = "NOT_EVALUATED"
-        else:
-            passed = bool(report.verified_pass)
-            verifier_overrode_pass = bool(report.agent_reported_pass) and not passed
-            verdict_state = "overridden" if verifier_overrode_pass else "evaluated"
-            rendered_verdict = "PASS" if passed else "FAIL"
-            if not evidence:
-                evidence = "Spec verifier produced no evidence details."
-
-        ac_results.append(
-            ACResult(
-                ac_index=report.ac_index,
-                ac_content=report.ac_text,
-                passed=passed,
-                score=1.0 if passed else 0.0,
-                evidence=evidence,
-                verification_method="spec_verifier",
-                ac_verdict_state=verdict_state,
-                final_verdict="pass" if passed else "fail",
-                rendered_verdict=rendered_verdict,
-            )
-        )
-
-    total = len(ac_results)
-    passed_count = sum(1 for result in ac_results if result.passed)
-    score = passed_count / total if total > 0 else 0.0
-    complete_coverage = bool(expected_indices) and expected_indices.issubset(reports_by_index)
-    execution_completed = mechanical.execution_completion_status == "completed"
-    approved = complete_coverage and passed_count == total and total > 0 and execution_completed
-
-    failure_reason = None
-    if not approved:
-        failed_indices = [result.ac_index + 1 for result in ac_results if not result.passed]
-        discrepancy_count = getattr(verification_summary, "discrepancy_count", 0)
-        reason_parts = []
-        if failed_indices:
-            reason_parts.append(
-                f"{len(failed_indices)}/{total} ACs failed "
-                f"(AC {', '.join(str(i) for i in failed_indices)})"
-            )
-        if discrepancy_count:
-            reason_parts.append(f"{discrepancy_count} spec verification override(s)")
-        if missing_indices:
-            reason_parts.append(
-                "missing verifier report for AC " + ", ".join(str(i + 1) for i in missing_indices)
-            )
-        if unverifiable_indices:
-            reason_parts.append(
-                "no independently verifiable assertions for AC "
-                + ", ".join(str(i + 1) for i in unverifiable_indices)
-            )
-        if not execution_completed:
-            reason_parts.append(
-                f"execution_completion_status={mechanical.execution_completion_status}"
-            )
-        if not reason_parts:
-            reason_parts.append("spec verification did not approve the run")
-        failure_reason = reason_parts[0]
-        if len(reason_parts) > 1:
-            failure_reason += f" [{'; '.join(reason_parts[1:])}]"
-
-    return EvaluationSummary(
-        final_approved=approved,
-        highest_stage_passed=3 if approved else 2,
-        score=score,
-        drift_score=None,
-        failure_reason=failure_reason,
-        ac_results=tuple(ac_results),
-        task_results=mechanical.task_results,
-        feedback_metadata=mechanical.feedback_metadata,
-        execution_completion_status=mechanical.execution_completion_status,
-        approval_status="approved" if approved else "rejected",
-    )
-
-
-def _project_dir_from_seed(seed: Any) -> str | None:
-    """Extract a likely project directory from seed metadata or brownfield context."""
-    if seed is None:
-        return None
-
-    seed_meta = getattr(seed, "metadata", None)
-    if seed_meta:
-        project_dir = getattr(seed_meta, "project_dir", None) or getattr(
-            seed_meta,
-            "working_directory",
-            None,
-        )
-        if project_dir:
-            return str(project_dir)
-
-    brownfield_context = getattr(seed, "brownfield_context", None)
-    context_references = getattr(brownfield_context, "context_references", ()) or ()
-
-    for reference in context_references:
-        path = getattr(reference, "path", None)
-        role = getattr(reference, "role", None)
-        if isinstance(path, str) and path and role == "primary":
-            return path
-
-    for reference in context_references:
-        path = getattr(reference, "path", None)
-        if isinstance(path, str) and path:
-            return path
-
-    return None
-
-
-def _project_dir_from_artifact(artifact: str) -> str | None:
-    """Extract a likely project root from Write/Edit/File tool output."""
-    from pathlib import Path
-    import re
-
-    # Match quoted paths (spaces allowed) and unquoted paths.
-    # Examples:  Write: /foo/bar.py  |  File: "/path with spaces/bar.py"
-    write_matches: list[str] = []
-    for m in re.finditer(r'(?:Write|Edit|File): (?:"([^"]+)"|(.+))', artifact):
-        path_candidate = m.group(1) or m.group(2)
-        if path_candidate:
-            write_matches.append(path_candidate.strip())
-    for path_str in write_matches:
-        candidate = Path(path_str).parent
-        for _ in range(10):
-            if _looks_like_project_root(candidate):
-                return str(candidate)
-            if candidate == candidate.parent:
-                break
-            candidate = candidate.parent
-
-    return None
 
 
 class MCPServerAdapter:
@@ -907,7 +730,9 @@ class MCPServerAdapter:
         self._resource_handlers: dict[str, ResourceHandler] = {}
         self._prompt_handlers: dict[str, PromptHandler] = {}
         self._mcp_server: Any = None
-        self._owned_resources: list[Any] = []  # objects with async close()
+        self._resource_lifecycle = ServerResourceLifecycle(server_name=name)
+        self._owned_resources = self._resource_lifecycle.owned_resources
+        self._startup_resources = self._resource_lifecycle.startup_resources
         self._runtime_context: AgentRuntimeContext | None = None
         self._job_manager: JobManager | None = None
         self._last_tool_activity = time.monotonic()
@@ -1025,6 +850,21 @@ class MCPServerAdapter:
         name: str,
         arguments: dict[str, Any],
         credentials: dict[str, str] | None = None,
+        auth_context: AuthContext | None = None,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Call a registered tool through the complete request observer."""
+        return await observe_adapter_tool_call(
+            name,
+            lambda: self._call_tool_impl(name, arguments, credentials, auth_context),
+            registered=name in self._tool_handlers,
+        )
+
+    async def _call_tool_impl(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        credentials: dict[str, str] | None = None,
+        auth_context: AuthContext | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Call a registered tool.
 
@@ -1032,6 +872,9 @@ class MCPServerAdapter:
             name: Name of the tool to call.
             arguments: Arguments for the tool.
             credentials: Optional credentials for authentication.
+            auth_context: Identity already established by the transport, for
+                network transports where the SDK verified the bearer token
+                before dispatch and the raw credential is no longer in reach.
 
         Returns:
             Result containing the tool result or an error.
@@ -1065,7 +908,12 @@ class MCPServerAdapter:
             return Result.err(error)
 
         # Security check
-        security_result = await self._security.check_request(name, arguments, credentials)
+        security_result = await self._security.check_request(
+            name,
+            arguments,
+            credentials,
+            pre_authenticated=auth_context,
+        )
         if security_result.is_err:
             log.info(
                 "mcp.server.call_tool.return",
@@ -1079,6 +927,7 @@ class MCPServerAdapter:
             return Result.err(security_result.error)
 
         try:
+            await self.startup()
             timeout = getattr(handler, "TIMEOUT_SECONDS", None)
 
             async def invoke_handler() -> Result[MCPToolResult, MCPServerError]:
@@ -1226,39 +1075,52 @@ class MCPServerAdapter:
         transport: str = "stdio",
         host: str = "localhost",
         port: int = 8080,
+        *,
+        allowed_hosts: tuple[str, ...] = (),
+        allowed_origins: tuple[str, ...] = (),
     ) -> None:
         """Start serving MCP requests.
 
         This method blocks until the server is stopped.
         Uses the MCP SDK v2's public ``MCPServer`` implementation.
 
+        Network transports are gated here rather than at the CLI, because this
+        is the one place every embedder passes through. The rule: a bind that
+        other machines can reach must carry credentials. A loopback bind may
+        stay credential-free -- the client already owns this process, and
+        Ouroboros supplies explicit SDK DNS-rebinding settings there, preserving
+        the SDK-compatible Host defaults while keeping an empty Origin policy
+        fail-closed.
+
         Args:
             transport: Transport type - "stdio", "sse", or "streamable-http"
                 (case-insensitive).
             host: Host to bind to for network transports. Defaults to "localhost".
             port: Port to bind to for network transports. Defaults to 8080.
+            allowed_hosts: ``Host`` header allowlist for network transports.
+                Required for wildcard binds, where the name clients use cannot
+                be inferred from the bind address.
+            allowed_origins: ``Origin`` header allowlist. Empty means every
+                browser-originated request is rejected, which is the intent for
+                a server whose clients are all non-browser MCP hosts.
 
         Raises:
-            ValueError: If transport is invalid or incompatible with security config.
+            ValueError: If transport is invalid, or the requested bind would
+                expose tool execution without credentials.
         """
         transport = validate_transport(transport)
 
-        # The SDK transport cannot provide credentials or client identity.
-        if self._security.auth_config.method != AuthMethod.NONE:
-            msg = (
-                f"MCPServer transport does not support authentication. "
-                f"Configured auth method: {self._security.auth_config.method.value}. "
-                f"All tool calls will be rejected. Use AuthMethod.NONE for MCPServer transports."
-            )
-            raise ValueError(msg)
-
-        if self._security.rate_limit_config.enabled:
-            msg = (
-                "MCPServer transport does not support rate limiting "
-                "(requires client identity). Configured rate_limit_config.enabled=True "
-                "will have no effect. Disable rate limiting for MCPServer transports."
-            )
-            raise ValueError(msg)
+        # Refuses an exposing bind and builds the SDK's credential and
+        # DNS-rebinding wiring. Lives in `auth` so this method stays a
+        # transport, not a second home for security policy.
+        wiring = resolve_network_security(
+            transport=transport,
+            host=host,
+            port=port,
+            security=self._security,
+            allowed_hosts=allowed_hosts,
+            allowed_origins=allowed_origins,
+        )
 
         if _SDKMCPServer is None:
             msg = "mcp package not installed. Install with: pip install 'ouroboros-ai[mcp]'"
@@ -1266,11 +1128,16 @@ class MCPServerAdapter:
 
         if _OuroborosSDKServer is None:  # pragma: no cover - mirrors import guard.
             raise ImportError("MCP SDK server boundary unavailable")
+
+        await self.startup()
         self._mcp_server = _OuroborosSDKServer(
             self,
             name=self._name,
             instructions=self._instructions,
             version=self._version,
+            token_verifier=wiring.token_verifier,
+            auth=wiring.auth_settings,
+            extensions=subagent_capability_extensions(),
         )
 
         # Register tools with MCPServer.
@@ -1321,12 +1188,16 @@ class MCPServerAdapter:
                         normalized_kwargs,
                     )
 
-                    # Route through call_tool() to enforce security checks.
-                    # MCPServer does not provide credentials, so:
-                    # - Input validation is enforced
-                    # - Auth/authorization will reject if any auth method configured
-                    # - Rate limiting cannot apply (requires client_id)
-                    result = await self.call_tool(h.definition.name, normalized_kwargs)
+                    # Route through call_tool() to enforce security checks. On a
+                    # token-protected network bind the SDK has already verified
+                    # the bearer token and the raw credential is gone by now, so
+                    # carry its decision across instead: that restores the client
+                    # identity authorization and rate limiting both key on.
+                    result = await self.call_tool(
+                        h.definition.name,
+                        normalized_kwargs,
+                        auth_context=current_auth_context(),
+                    )
                     if result.is_ok:
                         # Convert MCPToolResult to the SDK boundary type.
                         tool_result = result.value
@@ -1495,12 +1366,17 @@ class MCPServerAdapter:
         # Run the server with the appropriate transport
         try:
             if transport == "sse":
-                await self._mcp_server.run_sse_async(host=host, port=port)
+                await self._mcp_server.run_sse_async(
+                    host=host,
+                    port=port,
+                    transport_security=wiring.transport_security,
+                )
             elif transport == "streamable-http":
                 await self._mcp_server.run_streamable_http_async(
                     host=host,
                     port=port,
                     stateless_http=True,
+                    transport_security=wiring.transport_security,
                 )
             else:
                 await self._mcp_server.run_stdio_async()
@@ -1534,9 +1410,21 @@ class MCPServerAdapter:
         """Attach the session-scoped runtime context to the server object graph."""
         self._runtime_context = context
 
-    def register_owned_resource(self, resource: Any) -> None:
-        """Register a resource whose ``close()`` will be called on shutdown."""
-        self._owned_resources.append(resource)
+    def register_owned_resource(
+        self,
+        resource: Any,
+        *,
+        initialize_on_startup: bool = False,
+    ) -> None:
+        """Register a resource owned across explicit startup and shutdown."""
+        self._resource_lifecycle.register(
+            resource,
+            initialize_on_startup=initialize_on_startup,
+        )
+
+    async def startup(self) -> None:
+        """Initialize startup-owned resources exactly once before request work."""
+        await self._resource_lifecycle.startup()
 
     @property
     def job_manager(self) -> JobManager | None:
@@ -1603,25 +1491,7 @@ class MCPServerAdapter:
 
     async def shutdown(self) -> None:
         """Shutdown the server gracefully, closing owned resources."""
-        log.info("mcp.server.shutdown", name=self._name)
-        for resource in self._owned_resources:
-            close_fn = getattr(resource, "close", None)
-            if callable(close_fn):
-                try:
-                    await close_fn()
-                except ControlBusDrainError:
-                    log.error(
-                        "mcp.server.control_bus_close_failed",
-                        resource=type(resource).__name__,
-                    )
-                    raise
-                except Exception as exc:
-                    log.warning(
-                        "mcp.server.resource_close_failed",
-                        resource=type(resource).__name__,
-                        error=str(exc),
-                    )
-        self._owned_resources.clear()
+        await self._resource_lifecycle.shutdown()
 
 
 def create_ouroboros_server(
@@ -1634,10 +1504,12 @@ def create_ouroboros_server(
     event_store: Any | None = None,
     brownfield_store: Any | None = None,
     state_dir: Any | None = None,
+    project_dir: Any | None = None,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
     opencode_mode: str | None = None,
     mcp_bridge: Any | None = None,
+    runtime_adapter: Any | None = None,
     durable_jobs: bool = True,
     forced_inline_job_id: str | None = None,
 ) -> MCPServerAdapter:
@@ -1662,9 +1534,9 @@ def create_ouroboros_server(
         event_store: Optional EventStore instance. If not provided, creates default.
         brownfield_store: Optional BrownfieldStore instance for shared brownfield
             MCP access. If not provided, handlers create their own store.
-        state_dir: Optional pathlib.Path for interview state directory.
-                   If not provided, uses ``get_config_dir() / "data"``
-                   (typically ``~/.ouroboros/data``).
+        state_dir: Optional pathlib.Path for interview state directory. Defaults to
+            ``get_config_dir() / "data"`` (typically ``~/.ouroboros/data``).
+        project_dir: Effective project workspace; defaults to the safe launcher CWD.
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
         opencode_mode: Optional OpenCode integration mode (``"plugin"`` or
@@ -1672,6 +1544,9 @@ def create_ouroboros_server(
             ``orchestrator.opencode_mode`` in the config file. Controls
             whether ``_subagent`` envelopes are emitted (plugin) or handlers
             run in-process (subprocess / non-opencode runtimes).
+        runtime_adapter: Optional already-resolved execution runtime. Embedded
+            builtin interceptors pass their owner here so this composition
+            root does not recursively create the same runtime.
         durable_jobs: When true, Start* background work is owned by detached
             worker processes so it survives MCP/client turn shutdown.
         forced_inline_job_id: Internal one-shot recursion boundary used by a
@@ -1729,6 +1604,7 @@ def create_ouroboros_server(
         LineageStatusHandler,
         MeasureDriftHandler,
         ProjectionQueryHandler,
+        ProjectStatusHandler,
         QueryEventsHandler,
         RalphHandler,
         SessionStatusHandler,
@@ -1738,9 +1614,12 @@ def create_ouroboros_server(
         StartExecuteSeedHandler,
         StartRalphHandler,
     )
-    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
+    from ouroboros.mcp.tools.evaluation_composition import create_shared_evaluation_handlers
+    from ouroboros.mcp.tools.fanout import FanoutRegistry
+    from ouroboros.mcp.tools.fanout_composition import create_fanout_wiring
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
+    from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
     from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler, SynapseTargetsHandler
     from ouroboros.orchestrator import create_agent_runtime, resolve_agent_runtime_backend
     from ouroboros.orchestrator.runner import (
@@ -1809,6 +1688,14 @@ def create_ouroboros_server(
     evaluate_llm_backend = role_llm_backend("semantic_evaluation")
     reflect_llm_backend = role_llm_backend("reflect")
 
+    # Provider context for every subsequent telemetry event (TELEMETRY.md).
+    stamp_backend_context(
+        resolved_runtime_backend,
+        execute_runtime_backend,
+        interview_llm_backend,
+        evaluate_llm_backend,
+    )
+
     # Resolve opencode_mode from config file if caller did not pass one.
     # Controls _subagent envelope dispatch gate in every handler.
     if opencode_mode is None:
@@ -1819,17 +1706,21 @@ def create_ouroboros_server(
     # Resolve a safe working directory once so all consumers agree.
     # When the MCP server is spawned with cwd=/, Path.cwd() is unusable as a
     # project root, so _safe_cwd() falls back to $HOME.
-    effective_cwd = _safe_cwd()
-
-    # Materialize the default runtime once at server creation so backend wiring
-    # is validated up front and composition-root tests can assert the selected
-    # runtime backend without waiting for a tool invocation.
-    default_execute_runtime = create_agent_runtime(
-        backend=execute_runtime_backend,
-        model=None,
-        cwd=effective_cwd,
-        llm_backend=evaluate_llm_backend,
+    effective_cwd = Path(project_dir).expanduser().resolve() if project_dir else _safe_cwd()
+    # Materialize the default runtime once so composition validates backend wiring.
+    default_execute_runtime = runtime_adapter
+    runtime_adapter_backend = (
+        resolve_agent_runtime_backend(default_execute_runtime.runtime_backend)
+        if default_execute_runtime is not None
+        else None
     )
+    if default_execute_runtime is None or runtime_adapter_backend != execute_runtime_backend:
+        default_execute_runtime = create_agent_runtime(
+            backend=execute_runtime_backend,
+            model=None,
+            cwd=effective_cwd,
+            llm_backend=evaluate_llm_backend,
+        )
 
     # Create shared LLM adapter for interview/seed paths.
     # Evaluation constructs its own adapter with higher max_turns — see
@@ -1843,11 +1734,16 @@ def create_ouroboros_server(
 
     llm_adapters: dict[str, Any] = {}
 
-    def create_stage_llm_adapter(backend: str) -> Any:
+    def create_stage_llm_adapter(
+        backend: str,
+        *,
+        frugality_proof: bool = False,
+    ) -> Any:
         return create_llm_adapter(
             backend=backend,
             max_turns=stage_max_turns,
             cwd=effective_cwd,
+            frugality_proof=frugality_proof,
             allowed_tools=(
                 [] if backend_supports_tool_envelope(resolve_llm_backend(backend)) else None
             ),
@@ -1860,7 +1756,14 @@ def create_ouroboros_server(
 
     llm_adapter = shared_stage_llm_adapter(interview_llm_backend)
     evaluation_llm_adapter = shared_stage_llm_adapter(evaluate_llm_backend)
-    reflect_llm_adapter = shared_stage_llm_adapter(reflect_llm_backend)
+    reflect_llm_adapter = create_stage_llm_adapter(
+        reflect_llm_backend,
+        frugality_proof=True,
+    )
+    evolution_evaluation_llm_adapter = create_stage_llm_adapter(
+        evaluate_llm_backend,
+        frugality_proof=True,
+    )
 
     # The shared interview adapter above is catalog-sealed for
     # envelope-capable backends (``allowed_tools=[]`` → ``--tools ""``), so
@@ -1874,9 +1777,9 @@ def create_ouroboros_server(
     )
 
     # Create or use provided EventStore
-    if event_store is None:
-        from ouroboros.persistence.event_store import EventStore
+    from ouroboros.persistence.event_store import EventStore
 
+    if event_store is None:
         event_store = EventStore()
 
     # Create state directory for interviews
@@ -1909,13 +1812,9 @@ def create_ouroboros_server(
 
     def fresh_llm_adapter(role: str = "reflect"):
         backend = role_llm_backend(role)
-        return create_llm_adapter(
-            backend=backend,
-            max_turns=stage_max_turns,
-            cwd=effective_cwd,
-            allowed_tools=(
-                [] if backend_supports_tool_envelope(resolve_llm_backend(backend)) else None
-            ),
+        return create_stage_llm_adapter(
+            backend,
+            frugality_proof=True,
         )
 
     def fresh_reflect_stage_llm_adapter():
@@ -1946,7 +1845,7 @@ def create_ouroboros_server(
     # Disabled by default to reduce latency per generation step.
     evolve_stage1 = os.environ.get("OUROBOROS_EVOLVE_STAGE1", "false").lower() == "true"
     evolution_eval_pipeline = EvaluationPipeline(
-        llm_adapter=evaluation_llm_adapter,
+        llm_adapter=evolution_evaluation_llm_adapter,
         config=PipelineConfig(
             stage1_enabled=evolve_stage1,
             stage2_enabled=True,
@@ -2002,6 +1901,7 @@ def create_ouroboros_server(
             mcp_tool_prefix=_evo_mcp_prefix,
             debug=False,
             enable_decomposition=True,
+            session_signal_hub=session_signal_hub,
         )
         return await evolution_runner.execute_seed(
             seed=seed,
@@ -2021,7 +1921,7 @@ def create_ouroboros_server(
         return _parse_legacy_execution_task_summary(artifact, seed)
 
     spec_extractor = AssertionExtractor(
-        llm_adapter=evaluation_llm_adapter,
+        llm_adapter=evolution_evaluation_llm_adapter,
         model=get_llm_model_for_role(
             "assertion_extraction",
             backend=role_llm_backend("assertion_extraction"),
@@ -2054,12 +1954,18 @@ def create_ouroboros_server(
     ) -> EvaluationSummary | None:
         """Run spec verification and override mechanical results if discrepancies found.
 
-        Returns a corrected EvaluationSummary if discrepancies are detected,
-        or None if no override is needed (verification passed or unavailable).
+        Returns a formal EvaluationSummary whenever Seed AC verification can
+        be evaluated. Missing project context, extraction failure, and empty
+        extraction are explicit rejected summaries rather than mechanical-pass
+        fallbacks.
         """
         project_dir = _extract_project_dir(artifact, seed=seed)
         if not project_dir:
-            return None
+            return _evaluation_summary_for_unavailable_spec_verification(
+                mechanical,
+                seed,
+                "Spec verification unavailable: project directory could not be resolved.",
+            )
 
         seed_acs = getattr(seed, "acceptance_criteria", None) or ()
         if not seed_acs:
@@ -2067,33 +1973,47 @@ def create_ouroboros_server(
 
         seed_id = getattr(getattr(seed, "metadata", None), "seed_id", None)
         if not seed_id:
-            return None
+            return _evaluation_summary_for_unavailable_spec_verification(
+                mechanical,
+                seed,
+                "Spec verification unavailable: Seed identifier is missing.",
+            )
 
-        # Extract assertions from ACs (cached by seed_id)
         extract_result = await spec_extractor.extract(seed_id, ac_texts(seed_acs))
         if extract_result.is_err:
             log.warning("spec_verification.extraction_failed", error=str(extract_result.error))
-            return None
+            return _evaluation_summary_for_unavailable_spec_verification(
+                mechanical,
+                seed,
+                f"Spec assertion extraction failed: {extract_result.error}",
+            )
 
         assertions = extract_result.value
         if not assertions:
-            return None
+            return _evaluation_summary_for_unavailable_spec_verification(
+                mechanical,
+                seed,
+                "Spec assertion extraction produced no independently usable assertions.",
+            )
 
-        # Build agent results map from formal AC results or legacy task completion.
         agent_results = _agent_results_from_execution_summary(mechanical)
 
-        # Run verification
-        verifier = SpecVerifier(project_dir=project_dir)
+        # The evolutionary self-improvement loop is an evidence gate, not an
+        # exploratory report: unavailable/skipped outcomes must block approval.
+        verifier = SpecVerifier(project_dir=project_dir, strict=True)
         summary = verifier.verify_all(assertions, agent_results)
 
-        if summary.has_discrepancies:
+        if summary.has_confirmed_discrepancies:
+            override_count = sum(
+                1 for report in summary.reports if report.has_confirmed_discrepancy
+            )
             log.warning(
                 "spec_verification.discrepancies_found",
-                count=summary.discrepancy_count,
+                count=override_count,
                 project_dir=project_dir,
             )
 
-        return _evaluation_summary_from_spec_verification(mechanical, summary)
+        return _evaluation_summary_from_spec_verification(mechanical, summary, seed)
 
     async def _evolution_evaluator(seed: Any, execution_output: str | None) -> EvaluationSummary:
         await _ensure_evolution_store_initialized()
@@ -2120,6 +2040,22 @@ def create_ouroboros_server(
 
         # Fallback: LLM-based evaluation when no structured AC results
         acs = getattr(seed, "acceptance_criteria", None)
+
+        # The mechanical path needs ``### Task N: [COMPLETED]`` markers in the
+        # worker's report.  When they are absent this silently degrades to a
+        # single model verdict covering every AC at once, and on this path
+        # Stage 1 is off by default and Stage 3 is disabled, so nothing else
+        # intervenes.  Say so rather than letting every generation look the
+        # same from the outside.
+        log.warning(
+            "evolution.evaluation.mechanical_skipped",
+            reason="no '### Task N: [COMPLETED|FAILED]' markers in execution output",
+            seed_id=getattr(seed.metadata, "seed_id", None),
+            acceptance_criteria=len(acs) if acs else 0,
+            artifact_chars=len(artifact),
+            consequence=("falling back to one LLM verdict over all acceptance criteria combined"),
+        )
+
         if acs:
             current_ac = "\n".join(f"AC {i + 1}: {ac}" for i, ac in enumerate(ac_texts(acs)))
         else:
@@ -2175,6 +2111,8 @@ def create_ouroboros_server(
         import re
         import subprocess  # noqa: S404  # nosec
 
+        from ouroboros.evolution.validation_result import BUILTIN_COLLECTION_ATTEMPT_LIMIT
+
         project_dir = _extract_project_dir(execution_output or "", seed=seed)
 
         if not project_dir:
@@ -2202,7 +2140,7 @@ def create_ouroboros_server(
                 timeout=60,
             )
 
-        max_attempts = 3
+        max_attempts = BUILTIN_COLLECTION_ATTEMPT_LIMIT
         # Use Sonnet for validation fixes — import error resolution doesn't need Opus
         validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL") or execution_model
         if validation_model is None and execute_runtime_backend == "claude":
@@ -2257,7 +2195,11 @@ def create_ouroboros_server(
                 project_dir=project_dir,
             )
 
-            fix_result = await validation_adapter.execute_task_to_result(
+            from ouroboros.evolution.provider_usage import tracked_agent_task_to_result
+
+            fix_result = await tracked_agent_task_to_result(
+                validation_adapter,
+                role="evolution_validation_repair",
                 prompt=fix_prompt,
                 tools=["Read", "Edit", "Write", "Bash", "Glob", "Grep"],
             )
@@ -2274,6 +2216,13 @@ def create_ouroboros_server(
             f"Validation: {len(remaining)} errors remain after {max_attempts} attempts. "
             f"Remaining: {', '.join(remaining[:5])}"
         )
+
+    # These callables either use generation-scoped tracked provider helpers for
+    # every possible model call or stay deterministic.  The loop refuses a
+    # frugality PASS for arbitrary opaque evaluator/validator callables.
+    _evolution_evaluator.frugality_provider_tracking = True  # type: ignore[attr-defined]
+    _evolution_validator.frugality_provider_tracking = True  # type: ignore[attr-defined]
+    _evolution_executor.frugality_provider_tracking = True  # type: ignore[attr-defined]
 
     _scoped_reexecution_env = os.environ.get("OUROBOROS_SCOPED_REEXECUTION", "").strip().lower()
     _scoped_reexecution = _scoped_reexecution_env not in ("0", "false")
@@ -2312,6 +2261,11 @@ def create_ouroboros_server(
     # Create tool registry for dependency injection
     registry = ToolRegistry()
 
+    # The raw Seed remains parent-owned across plugin execution/evaluation.
+    # Both public execute surfaces and StartEvaluate must share this exact
+    # process-local vault; the opaque handle is useless in any other registry.
+    seed_handoff_registry = SeedHandoffRegistry()
+
     # Create and register tool handlers with injected dependencies
     execute_seed = ExecuteSeedHandler(
         event_store=event_store,
@@ -2320,12 +2274,13 @@ def create_ouroboros_server(
         opencode_mode=opencode_mode,
         llm_backend=evaluate_llm_backend,
         session_signal_hub=session_signal_hub,
+        seed_handoff_registry=seed_handoff_registry,
     )
     synapse_signal = SynapseSignalHandler(
         SessionSignalMailbox(
             event_store=event_store,
             target_resolver=session_signal_target_resolver,
-            delivery_queue=session_signal_hub,
+            delivery_queue=None,  # Detached worker imports at its safe boundary.
         )
     )
     evolve_step = EvolveStepHandler(
@@ -2339,13 +2294,6 @@ def create_ouroboros_server(
         mcp_bridge.tool_prefix
         if mcp_bridge is not None and hasattr(mcp_bridge, "tool_prefix")
         else ""
-    )
-    start_execute_seed = StartExecuteSeedHandler(
-        execute_handler=execute_seed,
-        event_store=event_store,
-        job_manager=job_manager,
-        agent_runtime_backend=execute_runtime_backend,
-        opencode_mode=opencode_mode,
     )
 
     def build_ralph_handler(
@@ -2368,6 +2316,78 @@ def create_ouroboros_server(
         agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
     )
+    # Automatic convergence is parent-owned even in passive plugin mode. Its
+    # private Ralph surface must therefore enqueue a real pollable job and use
+    # an evolve handler that does not emit another plugin delegation envelope.
+    parent_evolve_step = EvolveStepHandler(
+        evolutionary_loop=evolutionary_loop,
+        event_store=event_store,
+        agent_runtime_backend=execute_runtime_backend,
+        opencode_mode=None,
+    )
+    parent_start_ralph_handler = StartRalphHandler(
+        evolve_handler=parent_evolve_step,
+        event_store=event_store,
+        job_manager=job_manager,
+        agent_runtime_backend=execute_runtime_backend,
+        opencode_mode=None,
+    )
+    evaluate_handler, checklist_verify_handler = create_shared_evaluation_handlers(
+        EvaluateHandler, event_store, evaluate_llm_backend, evaluate_runtime_backend, opencode_mode
+    )
+    start_evaluate_handler = StartEvaluateHandler(
+        evaluate_handler=evaluate_handler,
+        event_store=event_store,
+        job_manager=job_manager,
+        llm_backend=evaluate_llm_backend,
+        agent_runtime_backend=evaluate_runtime_backend,
+        opencode_mode=opencode_mode,
+        start_ralph_handler=parent_start_ralph_handler,
+        seed_handoff_registry=seed_handoff_registry,
+    )
+    start_execute_seed = StartExecuteSeedHandler(
+        execute_handler=execute_seed,
+        event_store=event_store,
+        job_manager=job_manager,
+        agent_runtime_backend=execute_runtime_backend,
+        opencode_mode=opencode_mode,
+        start_evaluate_handler=start_evaluate_handler,
+        seed_handoff_registry=seed_handoff_registry,
+    )
+    # ONE registry, shared by every producer and by the re-entry tool. A fan-out
+    # registered by the interview handler is redeemed through
+    # ``ouroboros_submit_fanout_results``, so both sides must observe the same
+    # directory. Until #1754 this composition root injected no registry and
+    # registered no submit handler, so on the shipped stdio server no
+    # ``fanout_id`` was ever stamped and the re-entry contract in
+    # skills/interview/SKILL.md named a tool that was not there.
+    #
+    # Built at its FINAL directory rather than at the default plus a later
+    # re-root. This root resolved ``state_dir_path`` hundreds of lines above, so
+    # the mutable path never had a reason to exist here — and leaving it mutable
+    # is not free: a producer that registers before the first interview turn (a
+    # lateral panel) would have its record moved out from under an already
+    # issued fan-out id, whose valid submission then returns
+    # ``unknown_fanout_id``.
+    fanout_registry = FanoutRegistry(state_dir_path / "fanout")
+    # Create the lifecycle owner before its production handlers. Raw builtin
+    # runtime interception calls handlers directly rather than through
+    # ``call_tool()``, so durable fan-out publication receives this same
+    # explicit readiness boundary as server transport requests.
+    from ouroboros.backends import render_mcp_server_instructions
+    from ouroboros.mcp.update_notice import append_cached_update_notice
+
+    server = MCPServerAdapter(
+        name=name,
+        version=version,
+        # Every MCP host gets the cached update nudge (#2066); the append is
+        # offline-only and a no-op without a fresh cache entry.
+        instructions=append_cached_update_notice(
+            instructions if instructions is not None else render_mcp_server_instructions()
+        ),
+        auth_config=auth_config,
+        rate_limit_config=rate_limit_config,
+    )
     # No shared-adapter injection for interview handlers: the injected stage
     # adapter has no strict MCP isolation, and ``self.llm_adapter or ...``
     # would bypass the handler's own strict factory (#765, #1768). Injection
@@ -2377,6 +2397,7 @@ def create_ouroboros_server(
         llm_backend=interview_llm_backend,
         agent_runtime_backend=interview_runtime_backend,
         opencode_mode=opencode_mode,
+        fanout_registry=fanout_registry,
         suppress_tool_use_prompt_cues=interview_envelope_sealed,
     )
     generate_seed = GenerateSeedHandler(
@@ -2422,9 +2443,7 @@ def create_ouroboros_server(
             mcp_tool_prefix=auto_mcp_prefix,
             ralph_handler_factory=build_ralph_handler,
         ),
-        SessionStatusHandler(
-            event_store=event_store,
-        ),
+        SessionStatusHandler(event_store=event_store),
         RecordConductorDecisionHandler(event_store=event_store),
         SynapseTargetsHandler(session_signal_target_resolver),
         synapse_signal,
@@ -2446,11 +2465,11 @@ def create_ouroboros_server(
             event_store=event_store,
             job_manager=job_manager,
         ),
-        QueryEventsHandler(
+        QueryEventsHandler(event_store=event_store),
+        ProjectionQueryHandler(event_store=event_store),
+        ProjectStatusHandler(
             event_store=event_store,
-        ),
-        ProjectionQueryHandler(
-            event_store=event_store,
+            default_project_dir=effective_cwd,
         ),
         GenerateSeedHandler(
             interview_engine=interview_engine,
@@ -2461,41 +2480,30 @@ def create_ouroboros_server(
             agent_runtime_backend=interview_runtime_backend,
             opencode_mode=opencode_mode,
         ),
-        MeasureDriftHandler(
-            event_store=event_store,
-        ),
-        InterviewHandler(
-            interview_engine=interview_engine,
-            event_store=event_store,
-            llm_backend=interview_llm_backend,
-            agent_runtime_backend=interview_runtime_backend,
-            opencode_mode=opencode_mode,
-            suppress_tool_use_prompt_cues=interview_envelope_sealed,
-        ),
-        PMInterviewHandler(
-            data_dir=state_dir_path,
-            llm_backend=interview_llm_backend,
-            event_store=event_store,
-            agent_runtime_backend=interview_runtime_backend,
-            opencode_mode=opencode_mode,
-        ),
+        MeasureDriftHandler(event_store=event_store),
         BrownfieldHandler(_store=brownfield_store),
-        EvaluateHandler(
-            event_store=event_store,
-            llm_backend=evaluate_llm_backend,
-            agent_runtime_backend=evaluate_runtime_backend,
-            opencode_mode=opencode_mode,
-        ),
-        StartEvaluateHandler(
-            event_store=event_store,
-            job_manager=job_manager,
-            llm_backend=evaluate_llm_backend,
-            agent_runtime_backend=evaluate_runtime_backend,
-            opencode_mode=opencode_mode,
-        ),
+        evaluate_handler,
+        start_evaluate_handler,
+        checklist_verify_handler,
         LateralThinkHandler(
             agent_runtime_backend=reflect_runtime_backend,
             opencode_mode=opencode_mode,
+            fanout_registry=fanout_registry,
+        ),
+        # One store, and both producers are handed it rather than deriving a
+        # path from the workspace when a question is asked (RFC #2153).
+        *create_fanout_wiring(
+            interview_engine=interview_engine,
+            suppress_tool_use_prompt_cues=interview_envelope_sealed,
+            fanout_registry=fanout_registry,
+            workspace=effective_cwd,
+            event_store=event_store,
+            handler_event_store=event_store,
+            state_dir=state_dir_path,
+            llm_backend=interview_llm_backend,
+            agent_runtime_backend=interview_runtime_backend,
+            opencode_mode=opencode_mode,
+            ensure_ready=server.startup,
         ),
         evolve_step,
         StartEvolveStepHandler(
@@ -2537,19 +2545,6 @@ def create_ouroboros_server(
         EventsResourceHandler(event_store=event_store),
     ]
 
-    # Create server adapter. The MCP ``instructions`` field is the cross-provider
-    # "ubiquitous language" channel — default to the registry-rendered guidance so
-    # every MCP client (Claude included) receives it at session start.
-    from ouroboros.backends import render_mcp_server_instructions
-
-    server = MCPServerAdapter(
-        name=name,
-        version=version,
-        instructions=instructions if instructions is not None else render_mcp_server_instructions(),
-        auth_config=auth_config,
-        rate_limit_config=rate_limit_config,
-    )
-
     # Build the AgentRuntimeContext that #474 funnels through every
     # handler. For now the context only exposes the EventStore, the
     # backend labels, the optional MCP bridge, and a fresh ControlBus
@@ -2570,7 +2565,10 @@ def create_ouroboros_server(
     # Close the reactive control surface before stores/bridges it may
     # reference from subscriber tasks.
     server.register_owned_resource(control_bus)
-    server.register_owned_resource(event_store)
+    server.register_owned_resource(
+        event_store,
+        initialize_on_startup=type(event_store) is EventStore,
+    )
     if brownfield_store is not None:
         server.register_owned_resource(brownfield_store)
 

@@ -34,11 +34,14 @@ from ouroboros.cli.formatters.tables import (
     create_table,
     print_table,
 )
-from ouroboros.config.loader import load_config
+from ouroboros.config.loader import get_zcode_cli_path, load_config
 from ouroboros.config.models import resolve_event_store_path
+from ouroboros.config.zcode_model_config import inspect_zcode_model_config
 from ouroboros.events.base import BaseEvent
+from ouroboros.mcp.tools.project_status_handler import ProjectStatusHandler
 from ouroboros.mcp.tools.projection_handlers import ProjectionQueryHandler
 from ouroboros.persistence.event_store import EventStore, sqlite_database_url
+from ouroboros.zcode_cli_launcher import resolve_zcode_command_prefix
 
 app = typer.Typer(
     name="status",
@@ -342,11 +345,19 @@ async def _execution_events(
     return [latest] if latest is not None else []
 
 
-async def _validate_event_store(db_path: Path) -> None:
+async def _persisted_event_count(db_path: Path) -> int:
+    """Validate the store read-only and return its persisted event count.
+
+    ``create_schema=False`` keeps this a pure probe: a missing or corrupt
+    store fails cleanly and nothing is ever created or migrated (#1813).
+    """
     store = EventStore(sqlite_database_url(db_path), read_only=True)
     await store.initialize(create_schema=False)
     try:
+        # The one-row query validates the full column shape (a bare COUNT
+        # would accept any table that happens to be named `events`).
         await store.query_events(limit=1)
+        return await store.count_events()
     finally:
         await store.close()
 
@@ -447,6 +458,64 @@ def run_projection(
     tool_result = result.value
     if json_output:
         typer.echo(json.dumps(tool_result.meta, indent=2, sort_keys=True))
+        return
+    typer.echo(tool_result.text_content, nl=False)
+
+
+@app.command(name="project")
+def project_status(
+    project_dir: Annotated[
+        str | None,
+        typer.Argument(
+            metavar="[PROJECT_DIR]",
+            help="Project or workspace directory. Defaults to the current directory.",
+        ),
+    ] = None,
+    workspace: Annotated[
+        str | None,
+        typer.Option(
+            "--workspace",
+            help="Optional canonical project-relative workspace filter.",
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            help="Complete-run safety cap; the command never truncates silently.",
+        ),
+    ] = 100,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit the exact MCP ProjectRecord JSON payload."),
+    ] = False,
+) -> None:
+    """Show complete read-only run status for one project."""
+    if limit <= 0:
+        print_error("Project status failed: limit must be a positive integer")
+        raise typer.Exit(_STATUS_RUN_EXIT_MALFORMED_INPUT)
+    if workspace is not None and (not workspace or workspace != workspace.strip()):
+        print_error("Project status failed: workspace must be a canonical relative path")
+        raise typer.Exit(_STATUS_RUN_EXIT_MALFORMED_INPUT)
+
+    arguments: dict[str, Any] = {
+        "project_dir": project_dir if project_dir is not None else str(Path.cwd()),
+        "limit": limit,
+    }
+    if workspace is not None:
+        arguments["workspace"] = workspace
+
+    result = asyncio.run(ProjectStatusHandler().handle(arguments))
+    if result.is_err:
+        print_error(f"Project status failed: {escape(str(result.error))}")
+        raise typer.Exit(_STATUS_RUN_EXIT_GENERIC_ERROR)
+
+    tool_result = result.value
+    if json_output:
+        if not isinstance(tool_result.structured_content, dict):
+            print_error("Project status failed: MCP handler returned no ProjectRecord")
+            raise typer.Exit(_STATUS_RUN_EXIT_GENERIC_ERROR)
+        typer.echo(json.dumps(tool_result.structured_content, indent=2, sort_keys=True))
         return
     typer.echo(tool_result.text_content, nl=False)
 
@@ -625,6 +694,10 @@ def _print_health_details(checks: list[dict[str, str]]) -> None:
 def _candidate_cli_paths(backend: str, data: dict) -> list[str]:
     """Return CLI path candidates using the same precedence as runtime launchers."""
     candidates: list[str] = []
+    if backend == "zcode":
+        zcode_path = get_zcode_cli_path()
+        if zcode_path:
+            candidates.append(zcode_path)
     env_key = _CLI_PATH_ENV_BY_BACKEND.get(backend)
     if env_key is not None:
         env_path = os.environ.get(env_key, "").strip()
@@ -674,15 +747,51 @@ def _check_runtime_backend(data: dict) -> dict[str, str]:
             continue
         expanded = Path(candidate).expanduser()
         if expanded.is_absolute() or len(expanded.parts) > 1:
-            if expanded.exists() and expanded.is_file() and os.access(expanded, os.X_OK):
-                return _health_row("Runtime backend", "ok", f"{backend}: {expanded}")
+            script = backend == "zcode" and expanded.suffix.lower() in {".cjs", ".js", ".mjs"}
+            if (
+                expanded.exists()
+                and expanded.is_file()
+                and (os.access(expanded, os.R_OK) if script else os.access(expanded, os.X_OK))
+            ):
+                if backend == "zcode":
+                    try:
+                        resolve_zcode_command_prefix(expanded)
+                    except RuntimeError as exc:
+                        return _health_row("Runtime backend", "error", str(exc))
+                return _runtime_backend_health_row(backend, f"{backend}: {expanded}")
             continue
         resolved = shutil.which(candidate)
         if resolved:
-            return _health_row("Runtime backend", "ok", f"{backend}: {resolved}")
+            if backend == "zcode":
+                try:
+                    resolve_zcode_command_prefix(resolved)
+                except RuntimeError as exc:
+                    return _health_row("Runtime backend", "error", str(exc))
+            return _runtime_backend_health_row(backend, f"{backend}: {resolved}")
 
     expected = candidates[0] if candidates else (capability.cli_name if capability else backend)
     return _health_row("Runtime backend", "error", f"{backend} CLI not found: {expected}")
+
+
+def _runtime_backend_health_row(backend: str, detail: str) -> dict[str, str]:
+    """Augment the zcode runtime row with the CLI's own model readiness.
+
+    Finding the zcode executable is necessary but not sufficient: every
+    headless invocation also needs ``model.main`` in ``~/.zcode/cli/config.json``
+    or the vendor CLI exits with ``Model config is missing`` after Ouroboros
+    has already launched it.
+    """
+
+    if backend != "zcode":
+        return _health_row("Runtime backend", "ok", detail)
+    zcode_model = inspect_zcode_model_config()
+    if not zcode_model.ok:
+        return _health_row(
+            "Runtime backend",
+            "warning",
+            f"{detail}; model config: {zcode_model.detail}",
+        )
+    return _health_row("Runtime backend", "ok", detail)
 
 
 def _credential_provider_for_backend(backend: str) -> str | None:
@@ -745,6 +854,19 @@ def _check_credentials(data: dict, config_path: Path) -> dict[str, str]:
 
     provider = _credential_provider_for_backend(canonical_backend)
     if provider is None:
+        if canonical_backend == "zcode":
+            zcode_model = inspect_zcode_model_config()
+            if not zcode_model.ok:
+                return _health_row(
+                    "Credentials",
+                    "warning",
+                    f"zcode model config: {zcode_model.detail}",
+                )
+            return _health_row(
+                "Credentials",
+                "ok",
+                f"zcode uses local CLI authentication; {zcode_model.detail}",
+            )
         return _health_row(
             "Credentials", "ok", f"{canonical_backend} uses local CLI authentication"
         )
@@ -828,13 +950,19 @@ def health() -> None:
                     checks.append(_health_row("Database", "error", f"not readable: {exc}"))
                 else:
                     try:
-                        asyncio.run(_validate_event_store(db_path))
+                        event_count = asyncio.run(_persisted_event_count(db_path))
                     except Exception as exc:
                         checks.append(
                             _health_row("Database", "error", f"invalid event store: {exc}")
                         )
                     else:
-                        checks.append(_health_row("Database", "ok", db_detail))
+                        checks.append(
+                            _health_row(
+                                "Database",
+                                "ok",
+                                f"{db_detail} ({event_count} events persisted)",
+                            )
+                        )
         except Exception as exc:
             checks.append(_health_row("Database", "error", str(exc)))
 

@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
-import contextlib
 from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import structlog
 import yaml
@@ -21,20 +19,22 @@ from ouroboros.core.requirement_candidate import RequirementDistillation
 from ouroboros.core.seed import Seed, ac_texts
 from ouroboros.mcp.errors import MCPServerError
 from ouroboros.mcp.job_manager import JobManager, JobStatus
+from ouroboros.mcp.tools.advisory_dispatch import (
+    directive_was_appended,
+    split_appended_dispatch,
+)
 from ouroboros.mcp.tools.authoring_handlers import (
     REQUIRED_CLIENT_GATES,
     GenerateSeedHandler,
     InterviewHandler,
 )
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
-from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
+from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 from ouroboros.mcp.types import MCPToolResult
 from ouroboros.orchestrator.runtime_evidence import HeadlessRunProbe, RuntimeEvidence
-from ouroboros.orchestrator.session import SessionRepository, SessionStatus
-from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 from ouroboros.resilience.lateral import ThinkingPersona
 
@@ -261,6 +261,10 @@ class HandlerRunStarter:
             "use_worktree": self.use_worktree,
             "efficiency_mode": self.efficiency_mode,
         }
+        # No successor override is ever sent: Auto stops at COMPLETE as soon as
+        # the run has a durable handle, so the run job's own
+        # run → evaluate → ralph chain is the only owner. ``execution.auto_evaluate``
+        # / ``execution.auto_evolve`` govern it, exactly as for a direct ``ooo run``.
         if self.frugality_assurance_explicit:
             arguments["frugality_assurance"] = self.frugality_assurance
         if idempotency_key:
@@ -281,123 +285,6 @@ class HandlerRunStarter:
         if isinstance(meta.get("_subagent"), dict):
             run_meta["_subagent"] = meta["_subagent"]
         return run_meta
-
-
-class HandlerSynchronousRunStarter:
-    """Callable run starter backed by inline ``ouroboros_execute_seed`` execution."""
-
-    synchronous_execution = True
-
-    def __init__(
-        self,
-        handler: ExecuteSeedHandler,
-        *,
-        cwd: str,
-        skip_qa: bool = True,
-        terminal_poll_interval_seconds: float = 2.0,
-    ) -> None:
-        self.handler = handler
-        self.cwd = cwd
-        self.skip_qa = skip_qa
-        self.terminal_poll_interval_seconds = terminal_poll_interval_seconds
-        self._latest_run_meta: dict[str, object] | None = None
-
-    async def __call__(self, seed: Seed, *, idempotency_key: str = "") -> dict[str, object]:  # noqa: ARG002
-        seed_yaml = yaml.dump(
-            seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
-        )
-        session_id = f"orch_{uuid4().hex[:12]}"
-        execution_id = f"exec_{uuid4().hex[:12]}"
-        self._latest_run_meta = {
-            "job_id": None,
-            "session_id": session_id,
-            "execution_id": execution_id,
-            "status": "running",
-        }
-        task = asyncio.create_task(
-            self.handler.handle(
-                {"seed_content": seed_yaml, "cwd": self.cwd, "skip_qa": self.skip_qa},
-                execution_id=execution_id,
-                session_id_override=session_id,
-                synchronous=True,
-            )
-        )
-        task.add_done_callback(_consume_background_result)
-        try:
-            while True:
-                done, _pending = await asyncio.wait(
-                    {task},
-                    timeout=max(0.1, self.terminal_poll_interval_seconds),
-                )
-                if done:
-                    result = _unwrap(await task, tool_name="ouroboros_execute_seed")
-                    break
-                recovered = await self.recover_timed_out_run()
-                if recovered is not None:
-                    return recovered
-        except asyncio.CancelledError:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-            if self._latest_run_meta is not None:
-                self._latest_run_meta = {
-                    **self._latest_run_meta,
-                    "status": "cancelled",
-                    "success": False,
-                }
-            raise
-        meta = result.meta or {}
-        run_meta: dict[str, object] = {
-            "job_id": None,
-            "session_id": _optional_str(meta.get("session_id")),
-            "execution_id": _optional_str(meta.get("execution_id")),
-            "status": _optional_str(meta.get("status")),
-        }
-        if isinstance(meta.get("success"), bool):
-            run_meta["success"] = meta["success"]
-        if isinstance(meta.get("_subagent"), dict):
-            run_meta["_subagent"] = meta["_subagent"]
-        self._latest_run_meta = dict(run_meta)
-        return run_meta
-
-    async def recover_timed_out_run(self) -> dict[str, object] | None:
-        """Recover terminal metadata if inline execution finished during handler teardown."""
-        latest = self._latest_run_meta
-        if not latest:
-            return None
-        session_id = _optional_str(latest.get("session_id"))
-        execution_id = _optional_str(latest.get("execution_id"))
-        if not session_id:
-            return None
-
-        event_store = EventStore()
-        try:
-            await event_store.initialize()
-            result = await SessionRepository(event_store).reconstruct_session(session_id)
-        finally:
-            close_result = event_store.close()
-            if asyncio.iscoroutine(close_result):
-                await close_result
-        if result.is_err:
-            return None
-
-        tracker = result.value
-        if tracker.status == SessionStatus.RUNNING:
-            return None
-        status = tracker.status.value
-        recovered: dict[str, object] = {
-            "job_id": None,
-            "session_id": tracker.session_id,
-            "execution_id": execution_id or tracker.execution_id,
-            "status": status,
-            "_allow_deadline_completion_grace": True,
-        }
-        if tracker.status == SessionStatus.COMPLETED:
-            recovered["success"] = True
-        elif tracker.status in (SessionStatus.FAILED, SessionStatus.CANCELLED):
-            recovered["success"] = False
-        self._latest_run_meta = dict(recovered)
-        return recovered
 
 
 def _consume_background_result(task: asyncio.Task[Any]) -> None:
@@ -1218,7 +1105,11 @@ def _turn_from_result(
     else:
         ambiguity_score = None
     return InterviewTurn(
-        question=_extract_interview_question(text, session_id=session_id),
+        question=_extract_interview_question(
+            text,
+            session_id=session_id,
+            dispatch_appended=directive_was_appended(meta),
+        ),
         session_id=session_id,
         seed_ready=bool(meta.get("seed_ready")),
         completed=bool(meta.get("completed")),
@@ -1226,8 +1117,26 @@ def _turn_from_result(
     )
 
 
-def _extract_interview_question(text: str, *, session_id: str) -> str:
-    """Strip this session's human-readable interview envelope from handler text."""
+def _extract_interview_question(
+    text: str, *, session_id: str, dispatch_appended: bool = False
+) -> str:
+    """Strip this session's human-readable interview envelope from handler text.
+
+    The advisory fan-out directive is addressed to a host *model* that spawns
+    subagents; auto is a programmatic driver that does not, so the directive is
+    cut rather than answered as part of the question.
+
+    ``dispatch_appended`` says whether the server appended one, read through
+    ``directive_was_appended`` so the gate and the renderer share one condition.
+    Cutting on shape alone truncated
+    a question that quoted the sentinel whenever no directive was there to
+    find — on ``PLUGIN_PASSIVE``, where the response is deliberately left
+    unchanged, that is every turn. Auto would then answer, and persist, a
+    question the server never asked. The producer knows whether it appended;
+    asking it is cheaper and surer than inferring from the text.
+    """
+    if dispatch_appended:
+        text = split_appended_dispatch(text)
     stripped = text.strip()
     if not stripped:
         return ""

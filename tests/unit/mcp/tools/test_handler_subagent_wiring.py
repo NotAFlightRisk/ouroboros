@@ -309,6 +309,37 @@ class TestEvaluateHandlerSubagentDispatch:
         assert ctx["seed_content"] == "goal: test"
         assert ctx["trigger_consensus"] is True
 
+    async def test_plugin_payload_hides_harness_contract(self, handler) -> None:
+        result = await handler.handle(
+            {
+                "session_id": "sess-hidden",
+                "artifact": "partial artifact HIDDEN_SENTINEL",
+                "seed_content": (
+                    "goal: Judge the artifact\n"
+                    "acceptance_criteria:\n"
+                    "  - description: Produce output.json without HIDDEN_SENTINEL\n"
+                    "    expected_artifacts: [output.json]\n"
+                    "    verify_command: python secret_check.py --token TOP_SECRET\n"
+                    "    output_assertion: HIDDEN_SENTINEL\n"
+                    "ontology_schema:\n"
+                    "  name: HiddenContractArtifact\n"
+                    "  description: Artifact with parent-owned verification\n"
+                    "metadata:\n"
+                    "  ambiguity_score: 0.0\n"
+                ),
+            }
+        )
+
+        assert result.is_ok
+        payload = result.value.meta["_subagent"]
+        visible = payload["prompt"] + str(payload["context"])
+        assert "Produce output.json" in visible
+        assert "output.json" in visible
+        assert "TOP_SECRET" not in visible
+        assert "HIDDEN_SENTINEL" not in visible
+        assert "verify_command" not in visible
+        assert "output_assertion" not in visible
+
 
 # ---------------------------------------------------------------------------
 # ExecuteSeedHandler
@@ -386,6 +417,53 @@ class TestExecuteSeedHandlerSubagentDispatch:
         assert "ouroboros_start_evaluate" in prompt
         assert "formal 3-stage evaluation" in prompt
 
+    async def test_direct_plugin_payload_hides_seed_path_and_preserves_chain_contract(
+        self, tmp_path: Path
+    ) -> None:
+        from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        seed_path = tmp_path / "seed_with_hidden_contract.yaml"
+        seed_path.write_text(
+            """goal: Build the artifact
+acceptance_criteria:
+  - description: Produce output.json
+    artifacts: [output.json]
+    verify_command: python secret_check.py --token TOP_SECRET
+    output_assertion:
+      contains: HIDDEN_SENTINEL
+""",
+            encoding="utf-8",
+        )
+        registry = SeedHandoffRegistry()
+        direct_handler = ExecuteSeedHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            seed_handoff_registry=registry,
+        )
+
+        result = await direct_handler.handle(
+            {
+                "seed_path": str(seed_path),
+                "cwd": str(tmp_path),
+                "auto_evolve": False,
+            }
+        )
+
+        assert result.is_ok
+        payload = result.value.meta["_subagent"]
+        visible = payload["prompt"] + str(payload["context"])
+        assert str(seed_path) not in visible
+        assert "TOP_SECRET" not in visible
+        assert "HIDDEN_SENTINEL" not in visible
+        assert "verify_command" not in visible
+        assert "output_assertion" not in visible
+        assert payload["context"]["seed_path"] is None
+        assert payload["context"]["auto_evolve"] is False
+        handoff_id = payload["context"]["seed_handoff_id"]
+        assert handoff_id.startswith("seed_handoff_")
+        assert registry.resolve(handoff_id, session_id=result.value.meta["session_id"]) is not None
+
     async def test_plugin_path_surfaces_worker_cap_config_error(self, handler) -> None:
         """Plugin dispatch must fail clearly on invalid worker-cap config (#489)."""
         from unittest.mock import patch
@@ -416,6 +494,7 @@ class TestStartExecuteSeedHandlerSubagentDispatch:
     async def handler(self):
         from ouroboros.mcp.job_manager import JobManager
         from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
         from ouroboros.persistence.event_store import EventStore
 
         store = EventStore("sqlite+aiosqlite:///:memory:")
@@ -427,6 +506,7 @@ class TestStartExecuteSeedHandlerSubagentDispatch:
             job_manager=jm,
             agent_runtime_backend="opencode",
             opencode_mode="plugin",
+            seed_handoff_registry=SeedHandoffRegistry(),
         )
         yield handler
         await store.close()
@@ -472,6 +552,39 @@ class TestStartExecuteSeedHandlerSubagentDispatch:
         )
         assert result.value.meta["manual_retry_next_step"].startswith("ooo evaluate orch_")
         assert result.value.meta["_subagent"]["context"]["auto_evaluate"] is True
+
+    async def test_plugin_payload_hides_harness_contract_and_preserves_opt_out(
+        self, handler
+    ) -> None:
+        seed = """goal: Build the artifact
+constraints:
+  - Never print python secret_check.py --token TOP_SECRET
+  - Never print HIDDEN_SENTINEL
+acceptance_criteria:
+  - description: Produce output.json
+    expected_artifacts: [output.json]
+    verify_command: python secret_check.py --token TOP_SECRET
+    output_assertion: HIDDEN_SENTINEL
+ontology_schema:
+  name: HiddenContractArtifact
+  description: Artifact with parent-owned verification
+metadata:
+  ambiguity_score: 0.0
+"""
+        result = await handler.handle({"seed_content": seed, "auto_evolve": False})
+
+        payload = result.value.meta["_subagent"]
+        visible = payload["prompt"] + str(payload["context"])
+        assert "TOP_SECRET" not in visible
+        assert "HIDDEN_SENTINEL" not in visible
+        assert "verify_command" not in visible
+        assert "output_assertion" not in visible
+        assert "Produce output.json" in visible
+        assert "output.json" in visible
+        assert payload["context"]["auto_evolve"] is False
+        assert payload["context"]["seed_handoff_id"].startswith("seed_handoff_")
+        assert "auto_evolve: false" in payload["prompt"]
+        assert "including unsuccessful AC execution" in payload["prompt"]
 
     async def test_plugin_mode_auto_evaluate_false_keeps_legacy_manual_path(self, handler) -> None:
         result = await handler.handle({"seed_content": "goal: test", "auto_evaluate": False})
@@ -570,10 +683,14 @@ class TestPMInterviewHandlerSubagentDispatch:
         assert payload["tool_name"] == "ouroboros_pm_interview"
 
     async def test_resume_with_answer_returns_subagent(self, handler) -> None:
+        # Every answer names its question, on every runtime: a turn persists
+        # nothing when it asks (RFC #2222 revision 4), so there is no stored
+        # question for the server to file an unnamed answer under.
         result = await handler.handle(
             {
                 "session_id": "sess-123",
                 "answer": "React + Node.js",
+                "last_question": "What stack?",
             }
         )
         assert result.is_ok
@@ -627,6 +744,147 @@ class TestPMInterviewHandlerSubagentDispatch:
         prompt = generated.value.meta["_subagent"]["prompt"]
         assert observed not in prompt
         assert "observation withheld" in prompt
+
+    async def test_generate_rejects_an_incomplete_observation_only_session(
+        self, handler, monkeypatch
+    ) -> None:
+        """Regression (#1941): a forwarded finding cannot authorise generation.
+
+        A confirmed lane finding occupies a round while being a fact the user
+        adopted, and ``generate`` withholds its content three lines later.
+        Counting it as interview evidence would let a session where the user
+        decided nothing produce a PM seed from an empty transcript, under a
+        prompt telling the child the interview is complete.
+        """
+
+        async def _load_observation_only(
+            state_dir: Path, session_id: str
+        ) -> Result[InterviewState, str]:
+            del state_dir
+            state = InterviewState(
+                interview_id=session_id,
+                initial_context="test context",
+                status=InterviewStatus.IN_PROGRESS,
+            )
+            state.record_answer("What retry policy exists?", "[from-code] three retries")
+            return Result.ok(state)
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _load_observation_only)
+
+        result = await handler.handle({"session_id": "sess-obs-only", "action": "generate"})
+
+        assert result.is_err
+        assert "Continue the interview" in str(result.error)
+
+    async def test_generate_accepts_one_user_decision_beside_an_observation(
+        self, handler, monkeypatch
+    ) -> None:
+        """The gate counts decisions, not provenance-blind rounds.
+
+        The mirror of the case above: once the user has decided once, the
+        session is generatable even though an observation shares the
+        transcript. The gate must not have become a blanket rejection of
+        sessions that carry findings.
+        """
+
+        async def _load_mixed(state_dir: Path, session_id: str) -> Result[InterviewState, str]:
+            del state_dir
+            state = InterviewState(
+                interview_id=session_id,
+                initial_context="test context",
+                status=InterviewStatus.IN_PROGRESS,
+            )
+            state.record_answer("What retry policy exists?", "[from-code] three retries")
+            state.record_answer("What should it be?", "Five retries, capped at 30s")
+            return Result.ok(state)
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _load_mixed)
+
+        result = await handler.handle({"session_id": "sess-mixed", "action": "generate"})
+
+        assert result.is_ok
+        assert result.value.meta["_subagent"]["tool_name"] == "ouroboros_pm_interview"
+
+    async def test_plugin_path_records_a_confirmed_finding_like_any_answer(
+        self, handler, monkeypatch
+    ) -> None:
+        """Regression (#1941): one entrance, so the two runtimes cannot drift.
+
+        This runtime used to be handed a second field it never read, and a
+        lane's finding silently failed to reach the child that writes the next
+        question. There is no second field now: a confirmed finding arrives as
+        the answer, ``record_answer`` settles it as an observation, and the
+        transcript carries it forward with no branch of its own here.
+
+        Revert the parameter and this still passes — which is why the *absence*
+        is pinned separately, in ``test_pm_question_advisory.py``.
+        """
+        saved: list[InterviewState] = []
+
+        async def _capture_save(state_dir: Path, state: InterviewState) -> Result[Path, str]:
+            saved.append(state)
+            return await _noop_save(state_dir, state)
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_save_state", _capture_save)
+
+        result = await handler.handle(
+            {
+                "session_id": "sess-ev",
+                "answer": "[from-code] billing-api: period end",
+                "last_question": "Q?",
+            }
+        )
+
+        assert result.is_ok
+        assert "billing-api: period end" in result.value.meta["_subagent"]["prompt"]
+        assert [(r.question, r.user_response, r.provenance) for r in saved[-1].rounds] == [
+            ("Q?", "[from-code] billing-api: period end", "observation")
+        ]
+
+    async def test_plugin_path_opens_the_round_a_finding_lands_on(
+        self, handler, monkeypatch
+    ) -> None:
+        """The other plugin entry: nothing persisted, so the answer opens it.
+
+        Each plugin dispatch is a new child session, so a resumed interview can
+        reach here with no round to fill. One round appears, not two.
+        """
+        saved: list[InterviewState] = []
+
+        async def _load_empty(state_dir: Path, session_id: str) -> Result[InterviewState, str]:
+            del state_dir
+            return Result.ok(
+                InterviewState(interview_id=session_id, initial_context="test context")
+            )
+
+        async def _capture_save(state_dir: Path, state: InterviewState) -> Result[Path, str]:
+            saved.append(state)
+            return await _noop_save(state_dir, state)
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _load_empty)
+        monkeypatch.setattr(ah, "_plugin_save_state", _capture_save)
+
+        result = await handler.handle(
+            {
+                "session_id": "sess-ev-fresh",
+                "answer": "[from-data] 12,480 cancellations",
+                "last_question": "When does the slot reopen?",
+            }
+        )
+
+        assert result.is_ok
+        assert "12,480 cancellations" in result.value.meta["_subagent"]["prompt"]
+        assert [(r.question, r.provenance) for r in saved[-1].rounds] == [
+            ("When does the slot reopen?", "observation")
+        ]
 
     async def test_context_preserves_selected_repos(self, handler) -> None:
         result = await handler.handle(

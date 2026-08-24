@@ -15,7 +15,7 @@ import inspect
 import json
 import os
 import re
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -39,6 +39,10 @@ from ouroboros.mcp.tools.auto_handler import (
     _reconcile_execution_job_snapshot,
 )
 from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobStatusHandler, JobWaitHandler
+from ouroboros.mcp.tools.job_observer import (
+    JOB_OBSERVER_INLINE_OPEN,
+    extract_job_observer_inline_handoff,
+)
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.persistence.event_store import EventStore
 
@@ -86,6 +90,17 @@ If `ouroboros_auto` is unavailable or interpreted as normal text, stop and repor
 
 _AUTO_ID_RE = re.compile(r"auto_[0-9a-f]+")
 _UUID_HEX_RE = re.compile(r"\b[0-9a-f]{32}\b")
+_JOB_ID_RE = re.compile(r"job_(?:auto_)?[0-9a-f]+")
+
+
+def _linux_owner_identity(pid: int, *, start_ticks: int = 111) -> dict[str, object]:
+    return {
+        "version": 1,
+        "platform": "linux",
+        "pid": pid,
+        "boot_id": "11111111-2222-3333-4444-555555555555",
+        "start_ticks": start_ticks,
+    }
 
 
 def _managed_workspace(tmp_path) -> TaskWorkspace:
@@ -108,6 +123,19 @@ def _normalize_detached_auto_response(value):
     if isinstance(value, (list, tuple)):
         return [_normalize_detached_auto_response(item) for item in value]
     if isinstance(value, str):
+        if JOB_OBSERVER_INLINE_OPEN in value:
+            visible = value[: value.rfind(JOB_OBSERVER_INLINE_OPEN)].rstrip()
+            job_id_line = next(line for line in visible.splitlines() if line.startswith("job_id: "))
+            observer = extract_job_observer_inline_handoff(
+                value,
+                expected_job_id=job_id_line.removeprefix("job_id: "),
+            )
+            assert observer is not None
+            return {
+                "visible_text": _normalize_detached_auto_response(visible),
+                "job_observer": _normalize_detached_auto_response(observer),
+            }
+        value = _JOB_ID_RE.sub("job_<id>", value)
         value = _AUTO_ID_RE.sub("auto_<id>", value)
         value = _UUID_HEX_RE.sub("<uuid>", value)
         return value
@@ -138,7 +166,14 @@ def _assert_detached_start_text_has_guidance_with_handles(
     auto_session_id: str,
 ) -> None:
     text = result.text_content
-    assert text == (
+    observer = extract_job_observer_inline_handoff(
+        text,
+        expected_job_id=job_id,
+        expected_session_id=auto_session_id,
+    )
+    assert observer == result.meta["job_observer"]
+    visible_text = text[: text.rfind(JOB_OBSERVER_INLINE_OPEN)].rstrip()
+    assert visible_text == (
         "Started background auto session.\n\n"
         "Status: queued\n"
         f"job_id: {job_id}\n"
@@ -512,12 +547,73 @@ class TestBackgroundJobPath:
             "job_id",
             "ralph_job_id",
             "chained_evaluate_job_id",
+            "chained_ralph_job_id",
         ]
         assert captured["links"].session_id == auto_session_id
         assert store.path_for(auto_session_id).exists()
         # The inner AutoHandler must NOT have run synchronously — the runner is
         # enqueued on the JobManager only.
         fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fresh_start_applies_configured_default_policy(
+        self, event_store, fake_inner_auto, tmp_path
+    ) -> None:
+        """#1733: a configured quality_first default reaches a fresh Auto
+        start when the host omits both preference arguments."""
+        job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_policy"
+
+        async def _start_job(*, runner, **_):
+            if inspect.iscoroutine(runner):
+                runner.close()
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        store = AutoStore(tmp_path)
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        h._inner_auto = fake_inner_auto
+
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.default_execution_efficiency_mode",
+            return_value="quality_first",
+        ):
+            result = await h.handle({"goal": "build a CLI"})
+
+        assert result.is_ok
+        assert result.value.meta["efficiency_mode"] == "quality_first"
+        assert result.value.meta["frugality_assurance"] == "off"
+
+    @pytest.mark.asyncio
+    async def test_fresh_start_explicit_argument_beats_configured_default(
+        self, event_store, fake_inner_auto, tmp_path
+    ) -> None:
+        job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_policy2"
+
+        async def _start_job(*, runner, **_):
+            if inspect.iscoroutine(runner):
+                runner.close()
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        store = AutoStore(tmp_path)
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        h._inner_auto = fake_inner_auto
+
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.default_execution_efficiency_mode",
+            return_value="quality_first",
+        ):
+            result = await h.handle({"goal": "build a CLI", "efficiency_mode": "adaptive"})
+
+        assert result.is_ok
+        assert result.value.meta["efficiency_mode"] == "adaptive"
+        assert result.value.meta["frugality_assurance"] == "observe"
 
     @pytest.mark.asyncio
     async def test_now_binds_durable_job_scoped_cancel_key(
@@ -772,9 +868,10 @@ class TestBackgroundJobPath:
             assert started.is_ok
             job_id = started.value.meta["job_id"]
             auto_session_id = started.value.meta["auto_session_id"]
-            await asyncio.wait_for(inner_started.wait(), timeout=1.0)
+            await asyncio.wait_for(inner_started.wait(), timeout=10.0)
 
-            deadline = asyncio.get_running_loop().time() + 1.0
+            # EventStore commits can be delayed by xdist and coverage on a loaded CI runner.
+            deadline = asyncio.get_running_loop().time() + 10.0
             snapshot = await job_manager.get_snapshot(job_id)
             while snapshot.status is not JobStatus.RUNNING:
                 if asyncio.get_running_loop().time() >= deadline:
@@ -814,7 +911,7 @@ class TestBackgroundJobPath:
             release_inner.set()
             if started.is_ok:
                 job_id = started.value.meta["job_id"]
-                deadline = asyncio.get_running_loop().time() + 1.0
+                deadline = asyncio.get_running_loop().time() + 10.0
                 snapshot = await job_manager.get_snapshot(job_id)
                 while snapshot.status is not JobStatus.COMPLETED:
                     if asyncio.get_running_loop().time() >= deadline:
@@ -858,9 +955,10 @@ class TestBackgroundJobPath:
             assert started.is_ok
             job_id = started.value.meta["job_id"]
             auto_session_id = started.value.meta["auto_session_id"]
-            await asyncio.wait_for(inner_started.wait(), timeout=1.0)
+            await asyncio.wait_for(inner_started.wait(), timeout=10.0)
 
-            deadline = asyncio.get_running_loop().time() + 1.0
+            # Match the established loaded-runner dispatch budget used below.
+            deadline = asyncio.get_running_loop().time() + 10.0
             snapshot = await job_manager.get_snapshot(job_id)
             while snapshot.status is not JobStatus.RUNNING:
                 if asyncio.get_running_loop().time() >= deadline:
@@ -903,7 +1001,7 @@ class TestBackgroundJobPath:
         finally:
             release_inner.set()
             if started.is_ok:
-                deadline = asyncio.get_running_loop().time() + 1.0
+                deadline = asyncio.get_running_loop().time() + 10.0
                 snapshot = await job_manager.get_snapshot(started.value.meta["job_id"])
                 while snapshot.status is not JobStatus.COMPLETED:
                     if asyncio.get_running_loop().time() >= deadline:
@@ -1383,32 +1481,6 @@ class TestBackgroundJobPath:
         assert state.worktree_policy is AutoWorktreePolicy.ALWAYS
 
     @pytest.mark.asyncio
-    async def test_complete_product_with_short_timeout_fails_fast(
-        self, event_store, tmp_path, fake_inner_auto
-    ) -> None:
-        job_manager = MagicMock()
-        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
-        store = AutoStore(tmp_path / "store")
-        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
-        h._inner_auto = fake_inner_auto
-
-        result = await h.handle(
-            {
-                "goal": "build a product",
-                "cwd": str(tmp_path),
-                "complete_product": True,
-                "pipeline_timeout_seconds": 100,
-            }
-        )
-
-        assert result.is_err
-        assert "complete_product=true requires pipeline_timeout_seconds >= 1800" in str(
-            result.error
-        )
-        job_manager.start_job.assert_not_called()
-        fake_inner_auto.handle.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_fresh_structured_goal_runner_resumes_without_preference_override(
         self, event_store, tmp_path
     ) -> None:
@@ -1501,7 +1573,40 @@ class TestBackgroundJobPath:
         kwargs = captured["pipeline_kwargs"]
         assert kwargs["seed_qa_evaluator"] is not None
         assert kwargs["seed_qa_evaluator"].qa_handler is qa_handler
-        assert kwargs["evaluator"] is None
+        # The pipeline no longer takes an `evaluator`: the run job's chain owns
+        # the post-run verdict.
+        assert "evaluator" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_auto_never_suppresses_the_run_job_successors(
+        self, event_store, tmp_path
+    ) -> None:
+        """Auto has no post-run phase left, so the run job's chain is the only owner.
+
+        The suppression flag existed for complete-product Auto, which drove
+        RALPH_HANDOFF -> EVALUATE itself. With that path retired there is no
+        second owner to protect against, and an override would leave the
+        finished run ungraded.
+        """
+        captured: dict[str, object] = {}
+
+        class FakeAutoPipeline:
+            def __init__(self, *_args, **kwargs):
+                captured["pipeline_kwargs"] = kwargs
+
+            async def run(self, state):
+                return AutoPipelineResult(
+                    status="blocked",
+                    auto_session_id=state.auto_session_id,
+                    phase=str(state.phase.value),
+                )
+
+        with patch("ouroboros.mcp.tools.auto_handler.AutoPipeline", FakeAutoPipeline):
+            h = AutoHandler(store=AutoStore(tmp_path), event_store=event_store)
+            await h._run({"goal": "build a CLI"})
+
+        run_starter = captured["pipeline_kwargs"]["run_starter"]
+        assert not hasattr(run_starter, "owns_successors")
 
     @pytest.mark.asyncio
     async def test_plugin_mode_returns_subagent_without_enqueue(
@@ -1893,6 +1998,7 @@ class TestBackgroundJobPath:
                     "updated_at": datetime.now(UTC).isoformat(),
                     "owner_pid": os.getpid(),
                     "owner_start_time": 0.0,
+                    "owner_identity": _linux_owner_identity(os.getpid()),
                 }
             ),
             encoding="utf-8",
@@ -1937,7 +2043,11 @@ class TestBackgroundJobPath:
         )
         h._inner_auto = fake_inner_auto
 
-        result = await h.handle({"resume": state.auto_session_id})
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.persisted_process_owner_alive",
+            return_value=False,
+        ):
+            result = await h.handle({"resume": state.auto_session_id})
 
         assert result.is_ok
         assert result.value.meta["job_id"] == "job_new"
@@ -2134,6 +2244,7 @@ class TestBackgroundJobPath:
                     "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
                     "owner_pid": os.getpid(),
                     "owner_start_time": 0.0,
+                    "owner_identity": _linux_owner_identity(os.getpid()),
                 }
             ),
             encoding="utf-8",
@@ -2151,11 +2262,165 @@ class TestBackgroundJobPath:
         )
         h._inner_auto = fake_inner_auto
 
-        result = await h.handle({"resume": state.auto_session_id})
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.persisted_process_owner_alive",
+            return_value=False,
+        ):
+            result = await h.handle({"resume": state.auto_session_id})
 
         assert result.is_ok
         assert result.value.meta["status"] == "delegated_to_plugin"
         job_manager.start_job.assert_not_called()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_live_versioned_owner_survives_legacy_epoch_drift(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        """The stable Linux contract, not the drifting epoch, owns release authority."""
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        lease_path = store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json")
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "token": "lease_live",
+                    "mode": "plugin_dispatched",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                    "owner_pid": os.getpid(),
+                    "owner_start_time": 0.0,
+                    "owner_identity": _linux_owner_identity(os.getpid()),
+                }
+            ),
+            encoding="utf-8",
+        )
+        job_manager = MagicMock()
+        job_manager.find_active_job_by_session = AsyncMock(return_value=None)
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.persisted_process_owner_alive",
+            return_value=True,
+        ):
+            result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_err
+        assert "active plugin dispatch" in result.error.message
+        assert lease_path.exists()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_legacy_linux_owner_is_fail_closed_until_lease_expiry(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        """An unversioned epoch record cannot authorize cross-process release."""
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        lease_path = store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json")
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "token": "legacy_live_or_unknown",
+                    "mode": "plugin_dispatched",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                    "owner_pid": os.getpid(),
+                    "owner_start_time": 0.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        job_manager = MagicMock()
+        job_manager.find_active_job_by_session = AsyncMock(return_value=None)
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.persisted_process_owner_alive",
+            return_value=None,
+        ):
+            result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_err
+        assert lease_path.exists()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "owner_identity",
+        [
+            {
+                **_linux_owner_identity(os.getpid() + 1),
+            },
+            {
+                **_linux_owner_identity(os.getpid()),
+                "boot_id": "corrupt-not-a-linux-boot-uuid",
+            },
+        ],
+        ids=("owner-pid-disagreement", "malformed-boot-id"),
+    )
+    @pytest.mark.asyncio
+    async def test_corrupt_linux_owner_cannot_release_plugin_lease(
+        self,
+        event_store,
+        tmp_path,
+        fake_inner_auto,
+        owner_identity: dict[str, object],
+    ) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        lease_path = store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json")
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "token": "corrupt_owner",
+                    "mode": "plugin_dispatched",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                    "owner_pid": os.getpid(),
+                    "owner_start_time": 0.0,
+                    "owner_identity": owner_identity,
+                }
+            ),
+            encoding="utf-8",
+        )
+        job_manager = MagicMock()
+        job_manager.find_active_job_by_session = AsyncMock(return_value=None)
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        with patch(
+            "ouroboros.orchestrator.persisted_process_identity.platform.system",
+            return_value="Linux",
+        ):
+            result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_err
+        assert "active plugin dispatch" in result.error.message
+        assert lease_path.exists()
+        assert json.loads(lease_path.read_text(encoding="utf-8"))["token"] == "corrupt_owner"
         fake_inner_auto.handle.assert_not_called()
 
     @pytest.mark.asyncio
@@ -2172,7 +2437,16 @@ class TestBackgroundJobPath:
         )
         h._inner_auto = fake_inner_auto
 
-        result = await h.handle({"goal": "build a CLI", "pipeline_timeout_seconds": 900})
+        owner_identity = _linux_owner_identity(os.getpid())
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.current_persisted_process_owner",
+            return_value={
+                "owner_pid": os.getpid(),
+                "owner_start_time": 1.0,
+                "owner_identity": owner_identity,
+            },
+        ):
+            result = await h.handle({"goal": "build a CLI", "pipeline_timeout_seconds": 900})
 
         assert result.is_ok
         auto_session_id = result.value.meta["auto_session_id"]
@@ -2185,6 +2459,7 @@ class TestBackgroundJobPath:
             lease["updated_at"]
         )
         assert lease["mode"] == "plugin_dispatched"
+        assert lease["owner_identity"] == owner_identity
         assert lease_window <= timedelta(seconds=_START_AUTO_PENDING_LEASE_SECONDS + 1)
 
     @pytest.mark.asyncio
@@ -2583,6 +2858,7 @@ class TestAutoHandlerLeaseRelease:
                     "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
                     "owner_pid": os.getpid(),
                     "owner_start_time": 0.0,
+                    "owner_identity": _linux_owner_identity(os.getpid()),
                 }
             ),
             encoding="utf-8",
@@ -2601,7 +2877,72 @@ class TestAutoHandlerLeaseRelease:
                 )
 
         h = StubAutoHandler(store=store)
-        result = await h.handle({"resume": state.auto_session_id})
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.persisted_process_owner_alive",
+            return_value=False,
+        ):
+            result = await h.handle({"resume": state.auto_session_id})
 
         assert result.is_ok
         assert not lease_path.exists()
+
+
+class TestAutoRunSuccessorWiring:
+    """Auto-created run handlers must be able to enqueue the chain they delegate to.
+
+    #2120 turned the successor chain back on for default Auto, but Auto builds
+    its own ``StartExecuteSeedHandler``. Without the successor stack that
+    delegation silently degrades to
+    ``evaluation_status="enqueue_failed"`` — the run finishes and nothing
+    grades it, which is the exact failure the delegation was meant to remove.
+    """
+
+    def test_mcp_execution_start_handler_can_enqueue_successors(self) -> None:
+        from ouroboros.mcp.tools.auto_handler import _execution_start_handler
+
+        handler = _execution_start_handler(
+            None,
+            llm_backend=None,
+            agent_runtime_backend="claude",
+            opencode_mode=None,
+            mcp_manager=None,
+            mcp_tool_prefix="",
+        )
+
+        start_evaluate = handler.start_evaluate_handler
+        assert start_evaluate is not None
+        # ...and the link below it, or a rejected verdict cannot start Ralph.
+        start_ralph = start_evaluate.start_ralph_handler
+        assert start_ralph is not None
+        # A Ralph handler assembled by hand enqueues a job that then dies on its
+        # first generation with "EvolutionaryLoop not configured", so a non-null
+        # handler is not evidence the chain completes.
+        assert start_ralph._evolve_handler.evolutionary_loop is not None
+
+    def test_rebuild_preserves_an_injected_successor_stack(self) -> None:
+        """Rebuilding for another runtime must not drop the server's wiring."""
+        from ouroboros.mcp.tools.auto_handler import _execution_start_handler
+        from ouroboros.mcp.tools.execution_handlers import (
+            ExecuteSeedHandler,
+            StartExecuteSeedHandler,
+        )
+        from ouroboros.mcp.tools.run_successors import build_run_successor_handler
+
+        injected = build_run_successor_handler(agent_runtime_backend="claude")
+        original = StartExecuteSeedHandler(
+            execute_handler=ExecuteSeedHandler(agent_runtime_backend="claude"),
+            agent_runtime_backend="claude",
+            start_evaluate_handler=injected,
+        )
+
+        rebuilt = _execution_start_handler(
+            original,
+            llm_backend=None,
+            agent_runtime_backend="codex",
+            opencode_mode=None,
+            mcp_manager=None,
+            mcp_tool_prefix="",
+        )
+
+        assert rebuilt is not original
+        assert rebuilt.start_evaluate_handler is injected

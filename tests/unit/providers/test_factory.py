@@ -194,6 +194,21 @@ class TestCreateLLMAdapter:
         adapter = create_llm_adapter(backend="litellm")
         assert isinstance(adapter, LiteLLMAdapter)
 
+    def test_litellm_frugality_proof_is_task_local(self) -> None:
+        """Proof construction must not change ordinary LiteLLM policies."""
+        if LiteLLMAdapter is None:
+            pytest.skip("litellm not installed")
+
+        ordinary = create_llm_adapter(backend="litellm")
+        proof = create_llm_adapter(backend="litellm", frugality_proof=True)
+
+        assert isinstance(ordinary, LiteLLMAdapter)
+        assert ordinary._max_retries == 3
+        assert ordinary._timeout is None
+        assert isinstance(proof, LiteLLMAdapter)
+        assert proof._max_retries == 1
+        assert proof._timeout == 60.0
+
     def test_forwards_io_recorder_to_litellm_adapter(self) -> None:
         """LiteLLM factory path preserves explicit recorder wiring."""
         if LiteLLMAdapter is None:
@@ -262,6 +277,33 @@ class TestCreateLLMAdapter:
         adapter = create_llm_adapter(backend="codex", cwd="/tmp/project")
         assert isinstance(adapter, CodexCliLLMAdapter)
         assert adapter._cwd == "/tmp/project"
+
+    def test_codex_explicit_strict_mcp_config_is_forwarded(self) -> None:
+        """Nested MCP handlers can seal the Codex LLM-only child."""
+        adapter = create_llm_adapter(
+            backend="codex",
+            cli_path="codex",
+            use_case="interview",
+            allowed_tools=[],
+            strict_mcp_config=True,
+        )
+
+        assert isinstance(adapter, CodexCliLLMAdapter)
+        assert adapter._strict_mcp_config is True
+
+    def test_codex_interview_use_case_does_not_auto_enable_strict_mcp_config(
+        self,
+    ) -> None:
+        """Only nested MCP handlers opt in; ordinary Codex interviews do not."""
+        adapter = create_llm_adapter(
+            backend="codex",
+            cli_path="codex",
+            use_case="interview",
+            allowed_tools=[],
+        )
+
+        assert isinstance(adapter, CodexCliLLMAdapter)
+        assert adapter._strict_mcp_config is False
 
     def test_creates_codex_adapter_propagates_runtime_profile(
         self, monkeypatch: pytest.MonkeyPatch

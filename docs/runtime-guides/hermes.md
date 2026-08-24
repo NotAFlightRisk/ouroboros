@@ -1,5 +1,7 @@
 # Ouroboros Runtime Guide: Hermes Agent
 
+> 한국어: [hermes.ko.md](./hermes.ko.md)
+
 This guide covers how to use Ouroboros with the [Hermes Agent](https://github.com/NousResearch/hermes-agent) as an execution runtime.
 
 ## Installation
@@ -38,7 +40,7 @@ With `uvx`, the generated host entry is:
 mcp_servers:
   ouroboros:
     command: uvx
-    args: [--from, "ouroboros-ai[mcp]", ouroboros, mcp, serve]
+    args: [--isolated, --python, ">=3.12", --from, "ouroboros-ai[mcp]", ouroboros, mcp, serve]
     enabled: true
 ```
 

@@ -7,9 +7,11 @@ Contains handlers for evolutionary loop operations:
 - StartEvolveStepHandler: Start an evolve_step asynchronously (background job)
 """
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import time
 from typing import Any
 
 import structlog
@@ -20,6 +22,7 @@ from ouroboros.auto.state import AutoCommitPolicy, AutoPipelineState
 from ouroboros.config import get_runtime_controls_config
 from ouroboros.core.conductor import (
     ConductorDirective,
+    stable_payload_digest,
     validate_conductor_successor_authorization,
 )
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
@@ -35,11 +38,27 @@ from ouroboros.core.worktree import (
 )
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 from ouroboros.events.conductor import create_conductor_directive_attached_event
+from ouroboros.evolution import loop_support
+from ouroboros.evolution.frugality import (
+    PROOF_EVENT,
+    EvolutionFrugalityProof,
+    capture_project_baseline,
+)
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
-from ouroboros.mcp.tools.background import start_background_tool_job
+from ouroboros.mcp.tools.background import (
+    BackgroundJobAcceptanceState,
+    start_background_tool_job,
+)
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
-from ouroboros.mcp.tools.job_observer import build_job_observer_contract
+from ouroboros.mcp.tools.evolve_start_claim import (
+    PreparedEvolveClaim,
+    evolve_lineage_busy_error,
+)
+from ouroboros.mcp.tools.job_observer import (
+    append_job_observer_inline_handoff,
+    build_job_observer_contract,
+)
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     DELEGATED_TO_SUBAGENT,
@@ -58,6 +77,103 @@ from ouroboros.mcp.types import (
 from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
+
+_EVOLVE_HANDLER_DEFAULTS: dict[str, object] = {
+    "seed_content": None,
+    "execute": True,
+    "benchmark_control": False,
+    "parallel": True,
+    "skip_qa": False,
+    "project_dir": None,
+    "commit_policy": None,
+    "auto_session_id": None,
+    "execution_id": None,
+    "checkpoint_commits": [],
+    "checkpoint_attempted_ac_ids": [],
+    "conductor_decision_id": None,
+    "predecessor_execution_id": None,
+    "conductor_directive": None,
+    "recover_expired_claim": False,
+}
+
+
+async def _benchmark_control_error(
+    arguments: dict[str, Any],
+    *,
+    event_store: EventStore,
+    lineage_id: str,
+) -> str | None:
+    """Fail closed unless an explicit Gen 2+ control has a clean Git baseline."""
+    requested = arguments.get("benchmark_control", False)
+    if type(requested) is not bool:
+        return "benchmark_control must be a boolean"
+    if not requested:
+        return None
+    if arguments.get("execute", True) is not True:
+        return "benchmark_control requires execute=true"
+    if arguments.get("seed_content") not in (None, ""):
+        return "benchmark_control is Gen 2+ only; omit seed_content"
+    project_dir = arguments.get("project_dir")
+    if not isinstance(project_dir, str) or not project_dir.strip():
+        return "benchmark_control requires an explicit project_dir"
+    await event_store.initialize()
+    events = await event_store.replay_lineage(lineage_id)
+    if not any(
+        event.type == "lineage.generation.completed"
+        and isinstance(event.data.get("generation_number"), int)
+        and event.data["generation_number"] >= 1
+        for event in events
+    ):
+        return "benchmark_control requires an existing completed generation (Gen 2+)"
+    baseline = capture_project_baseline(project_dir)
+    if baseline.git_commit is None or baseline.workspace_path is None:
+        return "benchmark_control requires project_dir to be an explicit Git project/worktree"
+    if not baseline.clean:
+        return "benchmark_control requires a clean Git baseline"
+    return None
+
+
+def _evolve_handler_request_key(
+    arguments: dict[str, Any],
+    *,
+    configured_project_dir: str | None,
+    fallback_cwd: Path,
+    execution_policy: dict[str, Any] | None = None,
+) -> str:
+    """Canonicalize semantically equivalent public retries before hashing."""
+    normalized = dict(arguments)
+    for name, default in _EVOLVE_HANDLER_DEFAULTS.items():
+        normalized.setdefault(name, default)
+    # Recovery authorizes takeover of an expired owner; it does not change the
+    # generation operation whose durable request identity must still match.
+    normalized["recover_expired_claim"] = False
+    seed_content = normalized["seed_content"]
+    if isinstance(seed_content, str) and seed_content:
+        try:
+            normalized["seed_content"] = Seed.from_dict(yaml.safe_load(seed_content)).to_dict()
+        except Exception:
+            pass
+    elif not seed_content:
+        normalized["seed_content"] = None
+    project_dir = normalized["project_dir"]
+    resolved_project_dir = (
+        resolve_path_against_base(project_dir, stable_base=fallback_cwd)
+        if isinstance(project_dir, str) and project_dir
+        else None
+    )
+    configured = (
+        resolve_path_against_base(configured_project_dir, stable_base=fallback_cwd)
+        if configured_project_dir
+        else None
+    )
+    effective_project_dir = resolved_project_dir or configured or fallback_cwd
+    normalized["project_dir"] = str(effective_project_dir)
+    return stable_payload_digest(
+        {
+            "arguments": normalized,
+            "execution_policy": execution_policy,
+        }
+    )
 
 
 async def _resolve_conductor_directive(
@@ -259,7 +375,9 @@ class EvolveStepHandler(BridgeAwareMixin):
                 "For Gen 1: provide lineage_id and seed_content (YAML). "
                 "For Gen 2+: provide lineage_id only (state reconstructed from events). "
                 "Returns generation result, convergence signal, and next action "
-                "(continue/converged/stagnated/exhausted/failed)."
+                "(continue/converged/ontology_stable/stagnated/exhausted/failed). "
+                "ontology_stable is a non-success handoff; rerun the same lineage "
+                "with execute=true to perform Execute→Evaluate."
             ),
             parameters=(
                 MCPToolParameter(
@@ -293,6 +411,17 @@ class EvolveStepHandler(BridgeAwareMixin):
                     default=True,
                 ),
                 MCPToolParameter(
+                    name="benchmark_control",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "Run a deliberate full-graph frugality control. Default: false. "
+                        "Requires execute=true, Gen 2+, an explicit Git project_dir, "
+                        "and a clean baseline; unavailable through plugin delegation."
+                    ),
+                    required=False,
+                    default=False,
+                ),
+                MCPToolParameter(
                     name="parallel",
                     type=ToolInputType.BOOLEAN,
                     description=(
@@ -307,6 +436,16 @@ class EvolveStepHandler(BridgeAwareMixin):
                     name="skip_qa",
                     type=ToolInputType.BOOLEAN,
                     description="Skip post-execution QA evaluation. Default: false",
+                    required=False,
+                    default=False,
+                ),
+                MCPToolParameter(
+                    name="recover_expired_claim",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "Explicitly recover an expired lineage writer claim after confirming "
+                        "the prior owner process is dead. Default: false"
+                    ),
                     required=False,
                     default=False,
                 ),
@@ -373,8 +512,10 @@ class EvolveStepHandler(BridgeAwareMixin):
     async def handle(
         self,
         arguments: dict[str, Any],
+        *,
+        on_generation_claimed: Callable[[int], Awaitable[None]] | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Handle an evolve_step request."""
+        """Coalesce the complete public request before workspace acquisition."""
         lineage_id = arguments.get("lineage_id")
         if not lineage_id:
             return Result.err(
@@ -383,6 +524,201 @@ class EvolveStepHandler(BridgeAwareMixin):
                     tool_name="ouroboros_evolve_step",
                 )
             )
+        event_store = self.event_store or getattr(self.evolutionary_loop, "event_store", None)
+        benchmark_control = arguments.get("benchmark_control", False)
+        if not isinstance(event_store, EventStore):
+            if benchmark_control is not False:
+                return Result.err(
+                    MCPToolError(
+                        "benchmark_control requires a durable EventStore",
+                        tool_name="ouroboros_evolve_step",
+                    )
+                )
+            return await self._handle_once(dict(arguments))
+        benchmark_error = await _benchmark_control_error(
+            arguments,
+            event_store=event_store,
+            lineage_id=str(lineage_id),
+        )
+        if benchmark_error is not None:
+            return Result.err(MCPToolError(benchmark_error, tool_name="ouroboros_evolve_step"))
+        if benchmark_control is True and should_dispatch_via_plugin(
+            self.agent_runtime_backend,
+            self.opencode_mode,
+        ):
+            return Result.err(
+                MCPToolError(
+                    "benchmark_control requires the in-process evolve runtime",
+                    tool_name="ouroboros_evolve_step",
+                )
+            )
+        configured_project_dir = (
+            self.evolutionary_loop.get_project_dir()
+            if self.evolutionary_loop is not None
+            and callable(getattr(self.evolutionary_loop, "get_project_dir", None))
+            else None
+        )
+        request_key = _evolve_handler_request_key(
+            arguments,
+            configured_project_dir=configured_project_dir,
+            fallback_cwd=Path.cwd().resolve(),
+            execution_policy=loop_support.evolution_execution_policy(
+                getattr(self.evolutionary_loop, "config", None),
+                benchmark_control=benchmark_control is True,
+            ),
+        )
+        recovered_generation: int | None = None
+        recovered_evolve_result: Any | None = None
+        if arguments.get("recover_expired_claim") is True:
+            from ouroboros.evolution.step_receipt import decode_step_result
+            from ouroboros.persistence import lineage_claims
+
+            await event_store.initialize()
+            stale_handler = await lineage_claims.observe(
+                event_store,
+                scope="evolve-handler",
+                lineage_id=str(lineage_id),
+            )
+            if (
+                stale_handler is not None
+                and not stale_handler.completed
+                and stale_handler.lease_expires_at_ms <= int(time.time() * 1000)
+            ):
+                if stale_handler.request_key != request_key:
+                    return Result.err(
+                        MCPToolError(
+                            "Expired evolve handler must be recovered with its original request",
+                            tool_name="ouroboros_evolve_step",
+                        )
+                    )
+                recovered_generation = stale_handler.generation_number
+                core_receipt = await lineage_claims.observe(
+                    event_store,
+                    scope="evolve-core",
+                    lineage_id=str(lineage_id),
+                )
+                if (
+                    core_receipt is not None
+                    and core_receipt.completed
+                    and core_receipt.generation_number != recovered_generation
+                ):
+                    return Result.err(
+                        MCPToolError(
+                            "Expired evolve handler disagrees with the durable core generation",
+                            tool_name="ouroboros_evolve_step",
+                        )
+                    )
+                if (
+                    core_receipt is not None
+                    and core_receipt.completed
+                    and core_receipt.generation_number == recovered_generation
+                ):
+                    if core_receipt.result_payload is None:
+                        return Result.err(
+                            MCPToolError(
+                                "Expired evolve handler has no durable core result to recover",
+                                tool_name="ouroboros_evolve_step",
+                            )
+                        )
+                    try:
+                        recovered_evolve_result = await decode_step_result(
+                            event_store,
+                            core_receipt.result_payload,
+                        )
+                    except (KeyError, TypeError, ValueError) as exc:
+                        return Result.err(
+                            MCPToolError(
+                                f"Failed to recover durable evolve result: {exc}",
+                                tool_name="ouroboros_evolve_step",
+                            )
+                        )
+            for scope in ("evolve-handler", "evolve-core"):
+                await lineage_claims.recover_expired(
+                    event_store,
+                    scope=scope,
+                    lineage_id=str(lineage_id),
+                )
+        durable_public_result = not should_dispatch_via_plugin(
+            self.agent_runtime_backend,
+            self.opencode_mode,
+        )
+
+        async def run_public_request() -> Result[MCPToolResult, MCPServerError]:
+            if not durable_public_result:
+                return await self._handle_once(dict(arguments))
+            from ouroboros.mcp.tools.evolve_handler_receipt import (
+                decode_evolve_handler_result,
+                encode_evolve_handler_result,
+            )
+
+            async def run_bounded_handler(
+                claimed_callback: Callable[[int], Awaitable[None]] | None,
+            ) -> Result[MCPToolResult, MCPServerError]:
+                if recovered_evolve_result is not None and claimed_callback is not None:
+                    assert recovered_generation is not None
+                    await claimed_callback(recovered_generation)
+                    claimed_callback = None
+                raw_result = await self._handle_once(
+                    dict(arguments),
+                    recovered_evolve_result=recovered_evolve_result,
+                    on_generation_claimed=claimed_callback,
+                )
+                return decode_evolve_handler_result(encode_evolve_handler_result(raw_result))
+
+            async def run_bound_handler_claim(
+                _projected_generation: int,
+                rebind_generation: Callable[[int], Awaitable[None]],
+            ) -> Result[MCPToolResult, MCPServerError]:
+                async def publish_authoritative_generation(generation_number: int) -> None:
+                    await rebind_generation(generation_number)
+                    if on_generation_claimed is not None:
+                        await on_generation_claimed(generation_number)
+
+                return await run_bounded_handler(publish_authoritative_generation)
+
+            while True:
+                generation_number = recovered_generation
+                if generation_number is None:
+                    generation_number = await loop_support.planned_evolve_generation(
+                        event_store,
+                        str(lineage_id),
+                        execute=bool(arguments.get("execute", True)),
+                    )
+                try:
+                    return await loop_support.run_durable_lineage_single_flight(
+                        event_store,
+                        str(lineage_id),
+                        request_key,
+                        lambda: run_bounded_handler(on_generation_claimed),
+                        generation_number=generation_number,
+                        encode=encode_evolve_handler_result,
+                        decode=decode_evolve_handler_result,
+                        scope="evolve-handler",
+                        operation_with_claim=run_bound_handler_claim,
+                    )
+                except loop_support.LineageWinnerAdvanced:
+                    continue
+
+        if on_generation_claimed is not None:
+            return await run_public_request()
+        return await loop_support.run_lineage_single_flight(
+            event_store,
+            str(lineage_id),
+            request_key,
+            run_public_request,
+            scope="evolve-handler",
+        )
+
+    async def _handle_once(
+        self,
+        arguments: dict[str, Any],
+        *,
+        recovered_evolve_result: Any | None = None,
+        on_generation_claimed: Callable[[int], Awaitable[None]] | None = None,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Run one complete evolve handler request under public ownership."""
+        lineage_id = arguments.get("lineage_id")
+        assert lineage_id
 
         directive_result = await _resolve_conductor_directive(
             arguments=arguments,
@@ -450,17 +786,28 @@ class EvolveStepHandler(BridgeAwareMixin):
 
         execute = arguments.get("execute", True)
         parallel = arguments.get("parallel", True)
+        benchmark_control = arguments.get("benchmark_control", False) is True
         project_dir = arguments.get("project_dir")
         normalized_project_dir = (
             project_dir if isinstance(project_dir, str) and project_dir else None
         )
+        configured_project_dir = self.evolutionary_loop.get_project_dir()
+        normalized_configured_project_dir = (
+            configured_project_dir
+            if isinstance(configured_project_dir, str) and configured_project_dir
+            else None
+        )
+        effective_source_project_dir = normalized_project_dir or normalized_configured_project_dir
         workspace: TaskWorkspace | None = None
-        if execute and (normalized_project_dir is None or is_git_repo(normalized_project_dir)):
+        if execute and (
+            effective_source_project_dir is None or is_git_repo(effective_source_project_dir)
+        ):
             try:
                 workspace = maybe_restore_task_workspace(
                     lineage_id,
                     persisted=None,
-                    fallback_source_cwd=normalized_project_dir or os.getcwd(),
+                    fallback_source_cwd=effective_source_project_dir or os.getcwd(),
+                    allow_untracked_evidence=True,
                 )
             except WorktreeError as e:
                 return Result.err(
@@ -470,31 +817,59 @@ class EvolveStepHandler(BridgeAwareMixin):
                     )
                 )
 
+        if benchmark_control:
+            effective_baseline = capture_project_baseline(
+                workspace.effective_cwd if workspace else effective_source_project_dir
+            )
+            if (
+                effective_baseline.git_commit is None
+                or effective_baseline.workspace_path is None
+                or not effective_baseline.clean
+            ):
+                if workspace is not None:
+                    release_lock(workspace.lock_path)
+                return Result.err(
+                    MCPToolError(
+                        "benchmark_control effective worktree must have a clean Git baseline",
+                        tool_name="ouroboros_evolve_step",
+                    )
+                )
+
         project_dir_token = self.evolutionary_loop.set_project_dir(
-            workspace.effective_cwd if workspace else normalized_project_dir
+            workspace.effective_cwd if workspace else effective_source_project_dir
         )
         resolved_verification_working_dir = Path.cwd()
+        workspace_evidence_pending = False
 
         try:
             # Ensure event store is initialized before evolve_step accesses it
             # (evolve_step calls replay_lineage/append before executor/evaluator)
             await self.evolutionary_loop.event_store.initialize()
             evolve_kwargs: dict[str, Any] = {"execute": execute, "parallel": parallel}
+            if benchmark_control:
+                evolve_kwargs["benchmark_control"] = True
             if conductor_directive is not None:
                 evolve_kwargs["conductor_directive"] = conductor_directive
-            result = await self.evolutionary_loop.evolve_step(
-                lineage_id,
-                initial_seed,
-                **evolve_kwargs,
-            )
+            result = recovered_evolve_result
+            if result is None:
+                result = await self.evolutionary_loop.evolve_step(
+                    lineage_id,
+                    initial_seed,
+                    **evolve_kwargs,
+                    on_generation_claimed=on_generation_claimed,
+                )
             if result.is_ok:
                 step = result.value
-                resolved_verification_working_dir = _resolve_evolve_verification_working_dir(
-                    normalized_project_dir,
-                    self.evolutionary_loop.get_project_dir(),
-                    getattr(step.generation_result, "seed", None),
-                    initial_seed,
+                resolved_verification_working_dir = _resolve_checkpoint_working_dir(
+                    workspace,
+                    _resolve_evolve_verification_working_dir(
+                        normalized_project_dir,
+                        normalized_configured_project_dir,
+                        getattr(step.generation_result, "seed", None),
+                        initial_seed,
+                    ),
                 )
+                workspace_evidence_pending = True
         except Exception as e:
             log.error("mcp.tool.evolve_step.error", error=str(e))
             return Result.err(
@@ -505,7 +880,7 @@ class EvolveStepHandler(BridgeAwareMixin):
             )
         finally:
             self.evolutionary_loop.reset_project_dir(project_dir_token)
-            if workspace is not None:
+            if workspace is not None and not workspace_evidence_pending:
                 release_lock(workspace.lock_path)
 
         if result.is_err:
@@ -517,6 +892,19 @@ class EvolveStepHandler(BridgeAwareMixin):
             )
 
         step = result.value
+        (
+            checkpoint_commits,
+            checkpoint_attempted_ac_ids,
+            qa_attempted,
+            artifact,
+            reference,
+        ) = await _materialize_locked_evolve_evidence(
+            arguments=arguments,
+            step=step,
+            execute=execute,
+            workspace=workspace,
+            verification_working_dir=resolved_verification_working_dir,
+        )
         gen = step.generation_result
         sig = step.convergence_signal
 
@@ -536,6 +924,28 @@ class EvolveStepHandler(BridgeAwareMixin):
             f"**Lineage**: {step.lineage.lineage_id} ({step.lineage.current_generation} generations)",
             f"**Next generation**: {step.next_generation}",
         ]
+        if gen.frozen_ac_indices:
+            active_labels = ", ".join(str(index + 1) for index in gen.active_ac_indices) or "none"
+            frozen_labels = ", ".join(str(index + 1) for index in gen.frozen_ac_indices)
+            text_lines.extend(
+                [
+                    f"**Active evolve nodes**: {active_labels}",
+                    f"**Frozen nodes**: {frozen_labels}",
+                    (
+                        "**Working set**: "
+                        f"{len(gen.active_ac_indices)} active / "
+                        f"{len(gen.frozen_ac_indices)} frozen"
+                    ),
+                ]
+            )
+        if gen.frugality_evidence is not None:
+            proof = gen.frugality_evidence.proof
+            text_lines.extend(
+                [
+                    f"**Frugality proof**: {proof.status.value}",
+                    f"**Frugality evidence**: {proof.reason}",
+                ]
+            )
         if workspace is not None:
             text_lines.extend(
                 [
@@ -547,7 +957,11 @@ class EvolveStepHandler(BridgeAwareMixin):
         if gen.execution_output:
             text_lines.append("")
             text_lines.append("### Execution output")
-            output_preview = truncate_head_tail(gen.execution_output)
+            output_preview = truncate_head_tail(
+                gen.execution_output,
+                head=150 if gen.frozen_ac_indices else 500,
+                tail=650 if gen.frozen_ac_indices else 2000,
+            )
             text_lines.append(output_preview)
 
         if gen.evaluation_summary:
@@ -562,15 +976,25 @@ class EvolveStepHandler(BridgeAwareMixin):
             if es.ac_results:
                 text_lines.append("")
                 text_lines.append("#### Per-AC Results")
-                for ac in es.ac_results:
-                    status = "PASS" if ac.passed else "FAIL"
+                active = set(gen.active_ac_indices)
+                visible_results = [
+                    ac
+                    for ac in es.ac_results
+                    if not gen.frozen_ac_indices or ac.ac_index in active or ac.unresolved
+                ]
+                for ac in visible_results:
+                    status = ac.authority_state.upper()
                     text_lines.append(f"- AC {ac.ac_index + 1}: [{status}] {ac.ac_content[:80]}")
+                frozen_passes = sum(
+                    1
+                    for ac in es.ac_results
+                    if ac.ac_index in gen.frozen_ac_indices and ac.authoritative_pass
+                )
+                if frozen_passes:
+                    text_lines.append(
+                        f"- {frozen_passes} frozen node(s): [PASS] boundary reverified"
+                    )
 
-        checkpoint_commits, checkpoint_attempted_ac_ids = _checkpoint_passed_generation_acs(
-            arguments,
-            gen.evaluation_summary,
-            _resolve_checkpoint_working_dir(workspace, resolved_verification_working_dir),
-        )
         if checkpoint_commits:
             text_lines.append("")
             text_lines.append("### Checkpoint commits")
@@ -602,37 +1026,27 @@ class EvolveStepHandler(BridgeAwareMixin):
 
         # Post-execution QA
         qa_meta = None
-        skip_qa = arguments.get("skip_qa", False)
-        if step.action.value in ("continue", "converged") and execute and not skip_qa:
+        if qa_attempted:
             from ouroboros.mcp.tools.qa import QAHandler
 
+            assert artifact is not None
+            assert reference is not None
             qa_handler = QAHandler()
-            quality_bar = "Generation must improve upon previous generation."
-            if initial_seed:
-                ac_lines = [f"- {ac}" for ac in ac_texts(initial_seed.acceptance_criteria)]
-                quality_bar = "The execution must satisfy all acceptance criteria:\n" + "\n".join(
-                    ac_lines
-                )
+            ac_lines = [f"- {ac}" for ac in ac_texts(gen.seed.acceptance_criteria)]
+            quality_bar = "The execution must satisfy all acceptance criteria:\n" + "\n".join(
+                ac_lines
+            )
+            canonical_seed_content = yaml.safe_dump(
+                gen.seed.to_dict(), sort_keys=False, allow_unicode=True
+            )
 
-            execution_artifact = gen.execution_output or "\n".join(text_lines)
-            try:
-                verification = await build_verification_artifacts(
-                    f"{step.lineage.lineage_id}-gen-{gen.generation_number}",
-                    execution_artifact,
-                    resolved_verification_working_dir,
-                )
-                artifact = verification.artifact
-                reference = verification.reference
-            except Exception as e:
-                artifact = execution_artifact
-                reference = f"Verification artifact generation failed: {e}"
             qa_result = await qa_handler.handle(
                 {
                     "artifact": artifact,
                     "artifact_type": "test_output",
                     "quality_bar": quality_bar,
                     "reference": reference,
-                    "seed_content": seed_content or "",
+                    "seed_content": canonical_seed_content,
                     "pass_threshold": 0.80,
                 }
             )
@@ -647,10 +1061,15 @@ class EvolveStepHandler(BridgeAwareMixin):
             "generation": gen.generation_number,
             "action": step.action.value,
             "similarity": sig.ontology_similarity,
-            "converged": sig.converged,
             "next_generation": step.next_generation,
             "executed": execute,
+            "benchmark_control": benchmark_control,
+            "qa_attempted": qa_attempted,
             "has_execution_output": gen.execution_output is not None,
+            "active_ac_indices": list(gen.active_ac_indices),
+            "frozen_ac_indices": list(gen.frozen_ac_indices),
+            "active_node_count": len(gen.active_ac_indices),
+            "frozen_node_count": len(gen.frozen_ac_indices),
             "checkpoint_commits": checkpoint_commits,
             "checkpoint_attempted_ac_ids": checkpoint_attempted_ac_ids,
         }
@@ -659,6 +1078,15 @@ class EvolveStepHandler(BridgeAwareMixin):
             meta["worktree_branch"] = workspace.branch
         if qa_meta:
             meta["qa"] = qa_meta
+        if gen.frugality_evidence is not None:
+            meta["frugality"] = {
+                "observation": gen.frugality_evidence.observation.model_dump(mode="json"),
+                "proof": gen.frugality_evidence.proof.model_dump(mode="json"),
+            }
+
+        from ouroboros.evolution.loop import StepAction
+
+        meta["converged"] = step.action is StepAction.CONVERGED
 
         return Result.ok(
             MCPToolResult(
@@ -667,6 +1095,67 @@ class EvolveStepHandler(BridgeAwareMixin):
                 meta=meta,
             )
         )
+
+
+async def _materialize_locked_evolve_evidence(
+    *,
+    arguments: dict[str, Any],
+    step: Any,
+    execute: bool,
+    workspace: TaskWorkspace | None,
+    verification_working_dir: Path,
+) -> tuple[list[dict[str, Any]], list[str], bool, str | None, str | None]:
+    """Materialize every filesystem-dependent receipt before releasing the workspace.
+
+    The generation Seed and its verification artifact must describe one filesystem
+    epoch.  A managed task worktree can be reused by the next generation as soon as
+    its durable lock is released, so checkpointing and mechanical verification run
+    while that lock is still held.  QA runs later from the returned strings and does
+    not need to retain the lock across provider latency.
+    """
+    try:
+        gen = step.generation_result
+        checkpoint_commits, checkpoint_attempted_ac_ids = _checkpoint_passed_generation_acs(
+            arguments,
+            gen.evaluation_summary,
+            verification_working_dir,
+        )
+        skip_qa = arguments.get("skip_qa", False)
+        qa_attempted = step.action.value in ("continue", "converged") and execute and not skip_qa
+        if not qa_attempted:
+            return (
+                checkpoint_commits,
+                checkpoint_attempted_ac_ids,
+                False,
+                None,
+                None,
+            )
+
+        execution_artifact = gen.execution_output or (
+            f"Generation {gen.generation_number}: action={step.action.value}; "
+            f"reason={step.convergence_signal.reason}"
+        )
+        try:
+            verification = await build_verification_artifacts(
+                f"{step.lineage.lineage_id}-gen-{gen.generation_number}",
+                execution_artifact,
+                verification_working_dir,
+            )
+            artifact = verification.artifact
+            reference = verification.reference
+        except Exception as exc:
+            artifact = execution_artifact
+            reference = f"Verification artifact generation failed: {exc}"
+        return (
+            checkpoint_commits,
+            checkpoint_attempted_ac_ids,
+            True,
+            artifact,
+            reference,
+        )
+    finally:
+        if workspace is not None:
+            release_lock(workspace.lock_path)
 
 
 def _checkpoint_passed_generation_acs(
@@ -702,7 +1191,7 @@ def _checkpoint_passed_generation_acs(
     state.checkpoint_commits = list(existing)
     state.checkpoint_attempted_ac_ids = list(attempted)
     for ac in evaluation_summary.ac_results:
-        if not getattr(ac, "passed", False):
+        if not bool(getattr(ac, "authoritative_pass", False)):
             continue
         ac_id = f"AC-{int(getattr(ac, 'ac_index', 0)) + 1}"
         ac_text = str(getattr(ac, "ac_content", ac_id))
@@ -982,6 +1471,25 @@ class LineageStatusHandler:
             f"**Generations**: {lineage.current_generation}",
             f"**Created**: {lineage.created_at.isoformat()}",
         ]
+        latest_frugality = next(
+            (event for event in reversed(events) if event.type == PROOF_EVENT),
+            None,
+        )
+        frugality_proof = None
+        if latest_frugality is not None:
+            try:
+                frugality_proof = EvolutionFrugalityProof.model_validate(
+                    latest_frugality.data.get("proof")
+                )
+            except (TypeError, ValueError):
+                frugality_proof = None
+        if frugality_proof is not None:
+            text_lines.extend(
+                [
+                    f"**Frugality proof**: {frugality_proof.status.value}",
+                    f"**Frugality evidence**: {frugality_proof.reason}",
+                ]
+            )
 
         # Ontology summary
         if lineage.current_ontology:
@@ -1041,6 +1549,11 @@ class LineageStatusHandler:
                     "status": lineage.status.value,
                     "generations": lineage.current_generation,
                     "goal": lineage.goal,
+                    "frugality": (
+                        frugality_proof.model_dump(mode="json")
+                        if frugality_proof is not None
+                        else None
+                    ),
                 },
             )
         )
@@ -1084,6 +1597,24 @@ class StartEvolveStepHandler:
             return Result.err(
                 MCPToolError(
                     "lineage_id is required",
+                    tool_name="ouroboros_start_evolve_step",
+                )
+            )
+        benchmark_control = arguments.get("benchmark_control", False)
+        if type(benchmark_control) is not bool:
+            return Result.err(
+                MCPToolError(
+                    "benchmark_control must be a boolean",
+                    tool_name="ouroboros_start_evolve_step",
+                )
+            )
+        if benchmark_control and should_dispatch_via_plugin(
+            self.agent_runtime_backend,
+            self.opencode_mode,
+        ):
+            return Result.err(
+                MCPToolError(
+                    "benchmark_control requires the in-process evolve runtime",
                     tool_name="ouroboros_start_evolve_step",
                 )
             )
@@ -1135,43 +1666,103 @@ class StartEvolveStepHandler:
 
         # Fall-through: real background job path. The shared pipeline owns the
         # ``should_cancel()`` pre-work guard, so the runner only does the work.
+        await self._event_store.initialize()
+        if isinstance(self._event_store, EventStore):
+            from ouroboros.persistence import lineage_claims
+
+            existing_claim = await lineage_claims.observe(
+                self._event_store,
+                scope="evolve-handler",
+                lineage_id=str(lineage_id),
+            )
+            if (
+                existing_claim is not None
+                and not existing_claim.completed
+                and existing_claim.lease_expires_at_ms > int(time.time() * 1000)
+            ):
+                return Result.err(evolve_lineage_busy_error(str(lineage_id)))
+        supports_claimed_handoff = (
+            isinstance(self._event_store, EventStore)
+            and getattr(self._evolve_handler, "evolutionary_loop", None) is not None
+        )
+        prepared_claim = PreparedEvolveClaim(
+            self._evolve_handler,
+            arguments,
+            str(lineage_id),
+        )
+
+        execution_id = None
+        if not supports_claimed_handoff:
+            replay_lineage = getattr(self._event_store, "replay_lineage", None)
+            generation_number = (
+                await loop_support.planned_evolve_generation(
+                    self._event_store,
+                    str(lineage_id),
+                    execute=bool(arguments.get("execute", True)),
+                )
+                if callable(replay_lineage)
+                else 1
+            )
+            execution_id = loop_support.generation_execution_id(
+                str(lineage_id),
+                generation_number,
+            )
+
         async def _runner(_handle) -> MCPToolResult:
             result = await self._evolve_handler.handle(arguments)
             if result.is_err:
                 raise RuntimeError(str(result.error))
             return result.value
 
-        snapshot = await start_background_tool_job(
-            job_manager=self._job_manager,
-            event_store=self._event_store,
-            job_type="evolve_step",
-            intent="evolve_step",
-            process_scope=f"evolve_step:{lineage_id}",
-            initial_message=f"Queued evolve_step for {lineage_id}",
-            links=JobLinks(lineage_id=lineage_id),
-            work_fn=_runner,
-            cancelled_text="evolve_step cancelled before restart work began.",
-            detached_tool_name="ouroboros_start_evolve_step",
-            detached_arguments=arguments,
-            runtime_backend=self.agent_runtime_backend,
-            opencode_mode=self.opencode_mode,
-        )
+        background_acceptance = BackgroundJobAcceptanceState()
 
+        async def _abort_unaccepted_claim(error: BaseException) -> None:
+            if not background_acceptance.may_have_accepted(error):
+                await prepared_claim.abort_on_failure(error)
+
+        try:
+            snapshot = await start_background_tool_job(
+                job_manager=self._job_manager,
+                event_store=self._event_store,
+                job_type="evolve_step",
+                intent="evolve_step",
+                process_scope=f"evolve_step:{lineage_id}",
+                initial_message=f"Queued evolve_step for {lineage_id}",
+                links=JobLinks(lineage_id=lineage_id, execution_id=execution_id),
+                work_fn=_runner,
+                cancelled_text="evolve_step cancelled before restart work began.",
+                detached_tool_name="ouroboros_start_evolve_step",
+                detached_arguments=arguments,
+                runtime_backend=self.agent_runtime_backend,
+                opencode_mode=self.opencode_mode,
+                prepare_inline=prepared_claim.prepare if supports_claimed_handoff else None,
+                on_cancel_before_work=prepared_claim.abort if supports_claimed_handoff else None,
+                on_enqueue_failure=(_abort_unaccepted_claim if supports_claimed_handoff else None),
+                acceptance_state=background_acceptance,
+            )
+        except MCPToolError as exc:
+            return Result.err(exc)
+
+        observer = build_job_observer_contract(
+            job_id=snapshot.job_id,
+            cursor=snapshot.cursor,
+            execution_id=snapshot.links.execution_id,
+        )
         text = (
             f"Started background evolve_step.\n\n"
             f"Job ID: {snapshot.job_id}\n"
-            f"Lineage ID: {lineage_id}\n\n"
+            f"Lineage ID: {lineage_id}\n"
+            f"Execution ID: {snapshot.links.execution_id}\n\n"
             "Use ouroboros_job_status, ouroboros_job_wait, or ouroboros_job_result to monitor it."
         )
+        text = append_job_observer_inline_handoff(text, observer)
         meta = {
             "job_id": snapshot.job_id,
             "lineage_id": lineage_id,
+            "execution_id": snapshot.links.execution_id,
             "status": snapshot.status.value,
             "cursor": snapshot.cursor,
-            "job_observer": build_job_observer_contract(
-                job_id=snapshot.job_id,
-                cursor=snapshot.cursor,
-            ),
+            "job_observer": observer,
         }
         return Result.ok(
             MCPToolResult(

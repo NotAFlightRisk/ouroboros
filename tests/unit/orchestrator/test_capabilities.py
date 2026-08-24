@@ -74,6 +74,7 @@ _EXPECTED_OUROBOROS_TOOL_EXECUTION_MODES = {
     "ouroboros_evolve_rewind": "blocking",
     "ouroboros_evolve_step": "blocking",
     "ouroboros_execute_seed": "blocking",
+    "ouroboros_fetch_artifact": "status",
     "ouroboros_generate_seed": "blocking",
     "ouroboros_interview": "subagent_orchestration",
     "ouroboros_job_result": "status",
@@ -83,6 +84,7 @@ _EXPECTED_OUROBOROS_TOOL_EXECUTION_MODES = {
     "ouroboros_lineage_status": "status",
     "ouroboros_measure_drift": "blocking",
     "ouroboros_pm_interview": "subagent_orchestration",
+    "ouroboros_project_status": "status",
     "ouroboros_qa": "blocking",
     "ouroboros_query_events": "status",
     "ouroboros_query_projection": "status",
@@ -93,7 +95,7 @@ _EXPECTED_OUROBOROS_TOOL_EXECUTION_MODES = {
     "ouroboros_start_evolve_step": "background",
     "ouroboros_start_execute_seed": "background",
     "ouroboros_start_ralph": "background",
-    "ouroboros_submit_fanout_results": "status",
+    "ouroboros_submit_fanout_results": "blocking",
 }
 
 _VALID_OUROBOROS_TOOL_EXECUTION_MODES = frozenset(
@@ -161,13 +163,7 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
     "ouroboros_cancel_execution": ("execution_id",),
     "ouroboros_cancel_job": ("job_id",),
     "ouroboros_checklist_verify": ("session_id", "seed_content", "artifact"),
-    "ouroboros_evaluate": (
-        "session_id",
-        "artifact",
-        "seed_content",
-        "acceptance_criterion",
-        "working_dir",
-    ),
+    "ouroboros_evaluate": ("session_id", "artifact"),
     "ouroboros_evolve_rewind": ("lineage_id", "to_generation"),
     "ouroboros_evolve_step": ("lineage_id",),
     "ouroboros_execute_seed": ("seed_path", "cwd"),
@@ -192,7 +188,19 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
     ),
     "ouroboros_lineage_status": ("lineage_id",),
     "ouroboros_measure_drift": ("session_id", "current_output", "seed_content"),
-    "ouroboros_pm_interview": ("initial_context", "cwd", "session_id"),
+    # No ``evidence``: a confirmed lane finding arrives on ``answer`` like any
+    # other adopted fact, which is the one entrance the sibling tool has too.
+    # ``last_question`` names the question an answer belongs to, which the
+    # passive-plugin runtime cannot recover on its own -- it is interview-state
+    # context like the rest of this row, not a transport detail.
+    "ouroboros_pm_interview": (
+        "initial_context",
+        "cwd",
+        "session_id",
+        "last_question",
+        "answer",
+    ),
+    "ouroboros_project_status": (),
     "ouroboros_qa": (
         "artifact",
         "quality_bar",
@@ -212,12 +220,18 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
         "max_interview_rounds",
         "max_repair_rounds",
         "skip_run",
-        "complete_product",
         "pipeline_timeout_seconds",
         "efficiency_mode",
         "frugality_assurance",
     ),
-    "ouroboros_start_evaluate": ("session_id", "artifact"),
+    "ouroboros_start_evaluate": (
+        "session_id",
+        "artifact",
+        "seed_content",
+        "acceptance_criterion",
+        "working_dir",
+        "auto_evolve",
+    ),
     "ouroboros_start_evolve_step": ("lineage_id",),
     "ouroboros_start_execute_seed": (
         "seed_content",
@@ -226,12 +240,18 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
         "session_id",
     ),
     "ouroboros_start_ralph": ("lineage_id",),
+    # Empty because neither parameter is required on its own: a `contract_id`
+    # reads one artifact, a `lane_id` alone lists what a lane published here
+    # recently, and an MCP schema cannot say "one of these". The handler is
+    # where the pair is judged, and it refuses a request carrying neither.
+    "ouroboros_fetch_artifact": (),
     "ouroboros_submit_fanout_results": ("fanout_id", "results"),
 }
 
 _EXPECTED_OUROBOROS_TOOL_COMPANIONS = {
     "ouroboros_ac_tree_hud": (
         "ouroboros_session_status",
+        "ouroboros_project_status",
         "ouroboros_query_events",
         "ouroboros_query_projection",
     ),
@@ -357,6 +377,12 @@ _EXPECTED_OUROBOROS_TOOL_COMPANIONS = {
         "ouroboros_generate_seed",
         "ouroboros_brownfield",
     ),
+    "ouroboros_project_status": (
+        "ouroboros_session_status",
+        "ouroboros_query_events",
+        "ouroboros_query_projection",
+        "ouroboros_ac_tree_hud",
+    ),
     "ouroboros_qa": (
         "ouroboros_evaluate",
         "ouroboros_start_evaluate",
@@ -365,11 +391,13 @@ _EXPECTED_OUROBOROS_TOOL_COMPANIONS = {
     ),
     "ouroboros_query_events": (
         "ouroboros_session_status",
+        "ouroboros_project_status",
         "ouroboros_query_projection",
         "ouroboros_ac_tree_hud",
     ),
     "ouroboros_query_projection": (
         "ouroboros_session_status",
+        "ouroboros_project_status",
         "ouroboros_query_events",
         "ouroboros_ac_tree_hud",
     ),
@@ -385,6 +413,7 @@ _EXPECTED_OUROBOROS_TOOL_COMPANIONS = {
         "ouroboros_cancel_job",
     ),
     "ouroboros_session_status": (
+        "ouroboros_project_status",
         "ouroboros_query_events",
         "ouroboros_query_projection",
         "ouroboros_ac_tree_hud",
@@ -449,7 +478,9 @@ _EXPECTED_OUROBOROS_TOOL_COMPANIONS = {
     "ouroboros_submit_fanout_results": (
         "ouroboros_interview",
         "ouroboros_lateral_think",
+        "ouroboros_fetch_artifact",
     ),
+    "ouroboros_fetch_artifact": ("ouroboros_submit_fanout_results",),
 }
 
 _EXPECTED_OUROBOROS_TOOL_SIDE_EFFECTS = {
@@ -472,6 +503,7 @@ _EXPECTED_OUROBOROS_TOOL_SIDE_EFFECTS = {
     "ouroboros_evolve_rewind": ("session_state_write",),
     "ouroboros_evolve_step": ("workspace_write", "event_store_write"),
     "ouroboros_execute_seed": ("workspace_write", "event_store_write"),
+    "ouroboros_fetch_artifact": (),
     "ouroboros_generate_seed": ("workspace_write", "event_store_write"),
     "ouroboros_interview": ("subagent_dispatch", "session_state_write"),
     "ouroboros_job_result": (),
@@ -481,6 +513,7 @@ _EXPECTED_OUROBOROS_TOOL_SIDE_EFFECTS = {
     "ouroboros_lineage_status": (),
     "ouroboros_measure_drift": ("session_state_write",),
     "ouroboros_pm_interview": ("subagent_dispatch", "session_state_write"),
+    "ouroboros_project_status": (),
     "ouroboros_qa": ("session_state_write",),
     "ouroboros_query_events": (),
     "ouroboros_query_projection": (),
@@ -491,7 +524,7 @@ _EXPECTED_OUROBOROS_TOOL_SIDE_EFFECTS = {
     "ouroboros_start_evolve_step": ("workspace_write", "event_store_write"),
     "ouroboros_start_execute_seed": ("workspace_write", "event_store_write"),
     "ouroboros_start_ralph": ("workspace_write", "event_store_write"),
-    "ouroboros_submit_fanout_results": (),
+    "ouroboros_submit_fanout_results": ("workspace_write", "event_store_write"),
 }
 
 _EXPECTED_MUTATION_TARGETS_BY_SIDE_EFFECT = {
@@ -792,14 +825,15 @@ _EXPECTED_OUROBOROS_TOOL_MUTATION_TARGETS = {
 
 _EXPECTED_READ_ONLY_OUROBOROS_TOOLS = {
     "ouroboros_ac_tree_hud",
+    "ouroboros_fetch_artifact",
     "ouroboros_job_result",
     "ouroboros_job_status",
     "ouroboros_job_wait",
     "ouroboros_lineage_status",
+    "ouroboros_project_status",
     "ouroboros_query_events",
     "ouroboros_query_projection",
     "ouroboros_session_status",
-    "ouroboros_submit_fanout_results",
 }
 
 _EXPECTED_OUROBOROS_TOOL_RETRY = {
@@ -813,6 +847,7 @@ _EXPECTED_OUROBOROS_TOOL_RETRY = {
     "ouroboros_evolve_rewind": {"supported": True, "mode": "handler_owned"},
     "ouroboros_evolve_step": {"supported": True, "mode": "handler_owned"},
     "ouroboros_execute_seed": {"supported": True, "mode": "handler_owned"},
+    "ouroboros_fetch_artifact": {"supported": True, "mode": "handler_owned"},
     "ouroboros_generate_seed": {"supported": True, "mode": "handler_owned"},
     "ouroboros_interview": {"supported": True, "mode": "handler_owned"},
     "ouroboros_job_result": {"supported": True, "mode": "handler_owned"},
@@ -822,6 +857,7 @@ _EXPECTED_OUROBOROS_TOOL_RETRY = {
     "ouroboros_lineage_status": {"supported": True, "mode": "handler_owned"},
     "ouroboros_measure_drift": {"supported": True, "mode": "handler_owned"},
     "ouroboros_pm_interview": {"supported": True, "mode": "handler_owned"},
+    "ouroboros_project_status": {"supported": True, "mode": "handler_owned"},
     "ouroboros_qa": {"supported": True, "mode": "handler_owned"},
     "ouroboros_query_events": {"supported": True, "mode": "handler_owned"},
     "ouroboros_query_projection": {"supported": True, "mode": "handler_owned"},
@@ -904,6 +940,7 @@ _EXPECTED_OUROBOROS_TOOL_INTERRUPT = {
     "ouroboros_evolve_rewind": _blocking_interrupt(),
     "ouroboros_evolve_step": _blocking_interrupt("ouroboros_start_evolve_step"),
     "ouroboros_execute_seed": _blocking_interrupt("ouroboros_start_execute_seed"),
+    "ouroboros_fetch_artifact": _READ_ONLY_INTERRUPT,
     "ouroboros_generate_seed": _blocking_interrupt(),
     "ouroboros_interview": {"supported": True, "mode": "soft"},
     "ouroboros_job_result": _READ_ONLY_INTERRUPT,
@@ -913,6 +950,7 @@ _EXPECTED_OUROBOROS_TOOL_INTERRUPT = {
     "ouroboros_lineage_status": _READ_ONLY_INTERRUPT,
     "ouroboros_measure_drift": _blocking_interrupt(),
     "ouroboros_pm_interview": {"supported": True, "mode": "soft"},
+    "ouroboros_project_status": _READ_ONLY_INTERRUPT,
     "ouroboros_qa": _blocking_interrupt(),
     "ouroboros_query_events": _READ_ONLY_INTERRUPT,
     "ouroboros_query_projection": _READ_ONLY_INTERRUPT,
@@ -923,7 +961,7 @@ _EXPECTED_OUROBOROS_TOOL_INTERRUPT = {
     "ouroboros_start_evolve_step": _BACKGROUND_INTERRUPT,
     "ouroboros_start_execute_seed": _BACKGROUND_INTERRUPT,
     "ouroboros_start_ralph": _BACKGROUND_INTERRUPT,
-    "ouroboros_submit_fanout_results": _READ_ONLY_INTERRUPT,
+    "ouroboros_submit_fanout_results": _blocking_interrupt(),
 }
 
 _UNSUPPORTED_CANCEL = {
@@ -975,6 +1013,7 @@ _EXPECTED_OUROBOROS_TOOL_CANCEL = {
     "ouroboros_evolve_rewind": _UNSUPPORTED_CANCEL,
     "ouroboros_evolve_step": _UNSUPPORTED_CANCEL,
     "ouroboros_execute_seed": _EXECUTION_SESSION_CANCEL,
+    "ouroboros_fetch_artifact": _UNSUPPORTED_CANCEL,
     "ouroboros_generate_seed": _UNSUPPORTED_CANCEL,
     "ouroboros_interview": _UNSUPPORTED_CANCEL,
     "ouroboros_job_result": _UNSUPPORTED_CANCEL,
@@ -984,6 +1023,7 @@ _EXPECTED_OUROBOROS_TOOL_CANCEL = {
     "ouroboros_lineage_status": _UNSUPPORTED_CANCEL,
     "ouroboros_measure_drift": _UNSUPPORTED_CANCEL,
     "ouroboros_pm_interview": _UNSUPPORTED_CANCEL,
+    "ouroboros_project_status": _UNSUPPORTED_CANCEL,
     "ouroboros_qa": _UNSUPPORTED_CANCEL,
     "ouroboros_query_events": _UNSUPPORTED_CANCEL,
     "ouroboros_query_projection": _UNSUPPORTED_CANCEL,
@@ -1246,6 +1286,26 @@ def test_owned_tool_registry_input_schemas_are_extracted_from_definitions() -> N
         assert registry[name].input_schema == schema
         assert registry[name].input_schema == definition.to_input_schema()
         Draft202012Validator.check_schema(registry[name].input_schema)
+
+
+def test_pm_answer_forms_are_mutually_exclusive_in_capability_registry() -> None:
+    definitions = {handler.definition.name: handler.definition for handler in get_ouroboros_tools()}
+    definition_schema = definitions["ouroboros_pm_interview"].to_input_schema()
+    registry_schema = ouroboros_tool_capability_registry()["ouroboros_pm_interview"].input_schema
+    singular = {"session_id": "pm-session", "answer": "One answer."}
+    batch = {
+        "session_id": "pm-session",
+        "answers": [{"question": "Which workflow?", "answer": "Review."}],
+    }
+    conflicting = {**singular, **batch}
+
+    assert registry_schema == definition_schema
+    assert registry_schema["not"] == {"required": ["answer", "answers"]}
+    for schema in (definition_schema, registry_schema):
+        validator = Draft202012Validator(schema)
+        assert validator.is_valid(singular)
+        assert validator.is_valid(batch)
+        assert not validator.is_valid(conflicting)
 
 
 @pytest.mark.parametrize(
@@ -2825,14 +2885,15 @@ def test_read_only_query_status_projection_tools_have_non_mutating_interrupt_met
     descriptors = {descriptor.name: descriptor for descriptor in graph.capabilities}
     expected_query_status_projection_tools = {
         "ouroboros_ac_tree_hud",
+        "ouroboros_fetch_artifact",
         "ouroboros_job_result",
         "ouroboros_job_status",
         "ouroboros_job_wait",
         "ouroboros_lineage_status",
+        "ouroboros_project_status",
         "ouroboros_query_events",
         "ouroboros_query_projection",
         "ouroboros_session_status",
-        "ouroboros_submit_fanout_results",
     }
 
     assert expected_query_status_projection_tools == _EXPECTED_READ_ONLY_OUROBOROS_TOOLS
@@ -3004,6 +3065,7 @@ def test_blocking_ouroboros_tools_have_synchronous_interrupt_metadata() -> None:
         "ouroboros_evolve_rewind",
         "ouroboros_evolve_step",
         "ouroboros_execute_seed",
+        "ouroboros_submit_fanout_results",
         "ouroboros_generate_seed",
         "ouroboros_measure_drift",
         "ouroboros_qa",
@@ -3251,6 +3313,7 @@ def test_non_cancel_ouroboros_owned_tools_explicitly_do_not_expose_cancel_semant
         "ouroboros_evaluate",
         "ouroboros_evolve_rewind",
         "ouroboros_evolve_step",
+        "ouroboros_fetch_artifact",
         "ouroboros_generate_seed",
         "ouroboros_interview",
         "ouroboros_job_result",
@@ -3260,6 +3323,7 @@ def test_non_cancel_ouroboros_owned_tools_explicitly_do_not_expose_cancel_semant
         "ouroboros_lineage_status",
         "ouroboros_measure_drift",
         "ouroboros_pm_interview",
+        "ouroboros_project_status",
         "ouroboros_qa",
         "ouroboros_query_events",
         "ouroboros_query_projection",
@@ -4607,7 +4671,7 @@ def test_lateral_persona_panel_metadata_is_structured_without_prose_parsing() ->
     panel = lateral.metadata.orchestration["lateral_panel"]
     assert panel["panel_id"] == "lateral_persona_panel.v1"
     assert panel["mcp_tool"] == "ouroboros_lateral_think"
-    assert panel["dispatch_modes"] == ["plugin", "sequential"]
+    assert panel["dispatch_modes"] == ["plugin", "host_driven", "host_decides", "sequential"]
     assert panel["legacy_dispatch_modes"] == ["inline_fallback"]
     assert panel["parallel_preference"] == "parallel_when_runtime_supports_subagents"
     assert panel["sequential_fallback"] == {
@@ -4948,12 +5012,16 @@ def test_interview_metadata_includes_question_advisory_fanout_contract() -> None
     assert set(lane_by_id) == {
         "code_context",
         "web_context",
+        "data_context",
         "ambiguity_contrarian",
         "answer_simplifier",
         "architecture_implications",
     }
     assert lane_by_id["code_context"]["capability"] == "inspect_code"
     assert lane_by_id["web_context"]["capability"] == "web_research"
+    assert lane_by_id["data_context"]["capability"] == "read_data"
+    # Required because its no-op answer always exists; see #1754.
+    assert lane_by_id["data_context"]["required"] is True
     assert lane_by_id["ambiguity_contrarian"]["persona"] == "contrarian"
     assert lane_by_id["answer_simplifier"]["persona"] == "simplifier"
     assert lane_by_id["architecture_implications"]["persona"] == "architect"

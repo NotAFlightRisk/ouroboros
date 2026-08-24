@@ -106,9 +106,7 @@ def test_pm_build_system_prompt_accepts_language_calibration_kwarg() -> None:
     # The monkey-patched _build_system_prompt should accept language_calibration
     sig = inspect.signature(engine.inner._build_system_prompt)
     # Must have **kwargs or explicit language_calibration parameter
-    has_var_keyword = any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    )
+    has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
     has_explicit = "language_calibration" in sig.parameters
     assert has_var_keyword or has_explicit, (
         f"PM _build_system_prompt must accept language_calibration; params: {list(sig.parameters)}"
@@ -177,7 +175,9 @@ async def test_calibration_turn_rephrase_failure_is_truthful() -> None:
 
     # Create a fake state with a pending question
     mock_state = AsyncMock()
-    mock_state.rounds = [AsyncMock(question="What idempotency guarantee is required?", user_response=None)]
+    mock_state.rounds = [
+        AsyncMock(question="What idempotency guarantee is required?", user_response=None)
+    ]
     mock_state.interview_id = "test-session"
 
     mock_engine = AsyncMock()
@@ -214,7 +214,9 @@ async def test_calibration_turn_rephrase_success_shows_plainer() -> None:
     handler._owns_event_store = False
 
     mock_state = AsyncMock()
-    mock_state.rounds = [AsyncMock(question="What idempotency guarantee is required?", user_response=None)]
+    mock_state.rounds = [
+        AsyncMock(question="What idempotency guarantee is required?", user_response=None)
+    ]
     mock_state.interview_id = "test-session"
 
     mock_engine = AsyncMock()

@@ -28,6 +28,7 @@ from typing import Annotated
 
 import typer
 
+from ouroboros.cli.commands import plugin_cache
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_error,
@@ -1300,6 +1301,9 @@ def _shallow_clone(repo_url: str, dest: Path) -> str:
         check=True,
         capture_output=True,
         text=True,
+        timeout=plugin_cache.GIT_CLONE_TIMEOUT_SECONDS,
+        stdin=subprocess.DEVNULL,
+        env=plugin_cache.git_noninteractive_env(),
     )
     sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -1307,6 +1311,9 @@ def _shallow_clone(repo_url: str, dest: Path) -> str:
         check=True,
         capture_output=True,
         text=True,
+        timeout=plugin_cache.GIT_REV_PARSE_TIMEOUT_SECONDS,
+        stdin=subprocess.DEVNULL,
+        env=plugin_cache.git_noninteractive_env(),
     ).stdout.strip()
     return sha
 
@@ -1864,22 +1871,15 @@ def add_command(
     trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
 
     if _looks_like_url(target):
-        # Shallow clone into cache_root/<sanitized-host-path>.
-        sanitized = (
-            target.replace("https://", "")
-            .replace("http://", "")
-            .replace("git@", "")
-            .replace(":", "_")
-            .replace("/", "_")
-            .strip("_")
-        )
-        clone_dest = cache_root / sanitized
-        if clone_dest.exists():
-            shutil.rmtree(clone_dest)
+        # Staged shallow clone into cache_root/<sanitized-host-path>; a
+        # failed refresh preserves the last-known-good cache (#1826).
+        clone_dest = plugin_cache.url_cache_destination(cache_root, target)
         try:
-            git_sha = _shallow_clone(target, clone_dest)
-        except subprocess.CalledProcessError as exc:
-            print_error(f"git clone failed: {exc.stderr.strip() if exc.stderr else exc}")
+            git_sha = plugin_cache.stage_url_cache_refresh(
+                lambda staging: _shallow_clone(target, staging), clone_dest
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            print_error(plugin_cache.url_cache_refresh_error(exc, clone_dest))
             raise typer.Exit(code=1) from exc
         repo_root = clone_dest
         source_kind = "git"
@@ -2464,21 +2464,13 @@ def _install_named_from_url(
 ) -> None:
     """`install <name> --from <repo-url>` qualified form for plugin_home sources."""
     _reject_subdirectory_form(repo_url)
-    sanitized = (
-        repo_url.replace("https://", "")
-        .replace("http://", "")
-        .replace("git@", "")
-        .replace(":", "_")
-        .replace("/", "_")
-        .strip("_")
-    )
-    clone_dest = cache_root / sanitized
-    if clone_dest.exists():
-        shutil.rmtree(clone_dest)
+    clone_dest = plugin_cache.url_cache_destination(cache_root, repo_url)
     try:
-        git_sha = _shallow_clone(repo_url, clone_dest)
-    except subprocess.CalledProcessError as exc:
-        print_error(f"git clone failed: {exc.stderr.strip() if exc.stderr else exc}")
+        git_sha = plugin_cache.stage_url_cache_refresh(
+            lambda staging: _shallow_clone(repo_url, staging), clone_dest
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        print_error(plugin_cache.url_cache_refresh_error(exc, clone_dest))
         raise typer.Exit(code=1) from exc
 
     catalog = _enumerate_catalog(clone_dest)

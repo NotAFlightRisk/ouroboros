@@ -130,6 +130,11 @@ def _run_git_process(args: list[str], cwd: Path) -> subprocess.CompletedProcess[
             cwd=cwd,
             capture_output=True,
             text=True,
+            # Git for Windows emits repository paths as UTF-8. Relying on the
+            # process ANSI code page (commonly cp949 on Korean Windows) can
+            # make subprocess' reader thread fail and leave stdout as None.
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             check=False,
         )
@@ -145,6 +150,29 @@ def _run_git(args: list[str], cwd: Path) -> str:
             details={"stdout": result.stdout.strip(), "stderr": result.stderr.strip()},
         )
     return result.stdout.strip()
+
+
+def _run_git_bytes(args: list[str], cwd: Path) -> bytes:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=False,
+            timeout=30,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        raise WorktreeError(f"Git command failed: {' '.join(args)}", details={"error": str(exc)})
+    if result.returncode != 0:
+        raise WorktreeError(
+            f"Git command failed: {' '.join(args)}",
+            details={
+                "stdout": os.fsdecode(result.stdout).strip(),
+                "stderr": os.fsdecode(result.stderr).strip(),
+            },
+        )
+    return result.stdout
 
 
 def _resolve_repo_root(start_path: Path) -> Path:
@@ -194,6 +222,26 @@ def _relative_subdir(repo_root: Path, cwd: Path) -> Path:
 def _ensure_clean_checkout(repo_root: Path) -> None:
     status = _run_git(["status", "--porcelain"], repo_root)
     if status:
+        raise WorktreeError(
+            "Cannot start task worktree from a dirty checkout",
+            details={"repo_root": str(repo_root)},
+        )
+
+
+def _ensure_only_untracked_evidence(repo_root: Path) -> None:
+    status = _run_git(["status", "--porcelain", "--untracked-files=no"], repo_root)
+    if status:
+        raise WorktreeError(
+            "Cannot start task worktree from a dirty checkout",
+            details={"repo_root": str(repo_root)},
+        )
+    untracked = _run_git_bytes(["ls-files", "--others", "--exclude-standard", "-z"], repo_root)
+    if any(
+        len(path.parts) < 2 or path.parts[0] != "evidence"
+        for value in untracked.split(b"\0")
+        if value
+        for path in (Path(os.fsdecode(value)),)
+    ):
         raise WorktreeError(
             "Cannot start task worktree from a dirty checkout",
             details={"repo_root": str(repo_root)},
@@ -592,18 +640,21 @@ def prepare_task_workspace(
     durable_id: str,
     *,
     allow_dirty: bool = False,
+    allow_untracked_evidence: bool = False,
 ) -> TaskWorkspace:
-    """Create or reuse a task worktree and acquire its active lock."""
+    """Create or reuse a clean task worktree without touching caller changes."""
     source_path = Path(source_cwd).expanduser().resolve()
     repo_root = _resolve_repo_root(source_path)
-    if not allow_dirty:
-        _ensure_clean_checkout(repo_root)
+    if allow_untracked_evidence and not allow_dirty:
+        _ensure_only_untracked_evidence(repo_root)
 
     repo_name = repo_root.name
     branch = _managed_branch_name(repo_root, durable_id)
     worktree_path = _worktree_root() / repo_name / durable_id
     effective_cwd = worktree_path / _relative_subdir(repo_root, source_path)
     _ensure_worktree(repo_root, worktree_path, branch)
+    if not allow_dirty:
+        _ensure_clean_checkout(worktree_path)
 
     workspace = TaskWorkspace(
         durable_id=durable_id,
@@ -635,6 +686,7 @@ def restore_task_workspace(
     *,
     fallback_source_cwd: str | Path | None = None,
     allow_dirty: bool = False,
+    allow_untracked_evidence: bool = False,
 ) -> TaskWorkspace:
     """Restore an existing task worktree or bootstrap it from fallback cwd."""
     if persisted is not None:
@@ -714,6 +766,13 @@ def restore_task_workspace(
             lock_owner=owner,
         )
 
+    if allow_untracked_evidence:
+        return prepare_task_workspace(
+            fallback_source_cwd,
+            durable_id,
+            allow_dirty=allow_dirty,
+            allow_untracked_evidence=True,
+        )
     return prepare_task_workspace(fallback_source_cwd, durable_id, allow_dirty=allow_dirty)
 
 
@@ -722,6 +781,7 @@ def maybe_prepare_task_workspace(
     durable_id: str,
     *,
     allow_dirty: bool = False,
+    allow_untracked_evidence: bool = False,
 ) -> TaskWorkspace | None:
     """Provision a task workspace only when worktrees are enabled."""
     if not _worktrees_enabled():
@@ -729,6 +789,13 @@ def maybe_prepare_task_workspace(
     repo_root = _try_resolve_repo_root(source_cwd)
     if repo_root is None:
         return None
+    if allow_untracked_evidence:
+        return prepare_task_workspace(
+            source_cwd,
+            durable_id,
+            allow_dirty=allow_dirty,
+            allow_untracked_evidence=True,
+        )
     return prepare_task_workspace(source_cwd, durable_id, allow_dirty=allow_dirty)
 
 
@@ -738,6 +805,7 @@ def maybe_restore_task_workspace(
     *,
     fallback_source_cwd: str | Path | None = None,
     allow_dirty: bool = False,
+    allow_untracked_evidence: bool = False,
 ) -> TaskWorkspace | None:
     """Restore or bootstrap a task workspace when worktrees are enabled."""
     if persisted is None and not _worktrees_enabled():
@@ -747,6 +815,14 @@ def maybe_restore_task_workspace(
             return None
         if _try_resolve_repo_root(fallback_source_cwd) is None:
             return None
+    if allow_untracked_evidence:
+        return restore_task_workspace(
+            durable_id,
+            persisted,
+            fallback_source_cwd=fallback_source_cwd,
+            allow_dirty=allow_dirty,
+            allow_untracked_evidence=True,
+        )
     return restore_task_workspace(
         durable_id,
         persisted,

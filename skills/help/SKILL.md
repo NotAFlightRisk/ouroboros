@@ -1,9 +1,9 @@
 ---
-name: help
+name: ouroboros-help
 description: "Full reference guide for Ouroboros commands and agents"
 ---
 
-# /ouroboros:help
+# /ouroboros:ouroboros-help
 
 Full reference guide for Ouroboros power users.
 
@@ -11,7 +11,7 @@ Full reference guide for Ouroboros power users.
 
 ```
 ooo help
-/ouroboros:help
+/ouroboros:ouroboros-help
 ```
 
 ## What Is Ouroboros?
@@ -103,14 +103,15 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `/ouroboros:interview` | Socratic requirement clarification | Plugin |
 | `/ouroboros:idk` | Calibrate interview explanations to your topic knowledge | Plugin |
 | `/ouroboros:seed` | Generate validated seed spec | Plugin |
-| `/ouroboros:run` | Execute seed workflow | MCP |
+| `/ouroboros:ouroboros-run` | Execute seed workflow | MCP |
 | `/ouroboros:evaluate` | 3-stage verification | MCP |
 | `/ouroboros:unstuck` | 5 lateral thinking personas | Plugin |
-| `/ouroboros:status` | Session status + drift check | MCP |
+| `/ouroboros:ouroboros-status` | Session status + drift check | MCP |
 | `/ouroboros:resume-session` | List in-flight sessions and re-attach commands | CLI |
 | `/ouroboros:setup` | Installation wizard | Plugin |
 | `/ouroboros:tutorial` | Interactive hands-on learning | Plugin |
-| `/ouroboros:help` | This guide | Plugin |
+| `/ouroboros:ouroboros-config` | Settings GUI | Plugin |
+| `/ouroboros:ouroboros-help` | This guide | Plugin |
 | `/ouroboros:pm` | PM-focused interview + PRD generation | MCP |
 | `/ouroboros:qa` | General-purpose QA verdict for any artifact | Plugin |
 | `/ouroboros:cancel` | Cancel stuck or orphaned executions | CLI |

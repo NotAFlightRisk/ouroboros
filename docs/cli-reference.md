@@ -48,10 +48,25 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | `cleanup` | Prune leftover auto-session worktrees, branches, locks, and state files |
 | `config` | Manage Ouroboros configuration (show, switch backend, set values) |
 | `uninstall` | Cleanly remove all Ouroboros configuration from your system |
+| `update` | Update Ouroboros to the latest version (package + runtime integration) |
 | `status` | Check Ouroboros system status |
 | `tui` | Interactive TUI monitor for real-time workflow monitoring |
 | `monitor` | Shorthand for `tui monitor` |
 | `mcp` | MCP server commands for Claude Desktop and other MCP clients |
+| `plugin` | Manage UserLevel plugins (install, list, remove) |
+| `pm` | Product Management interview for requirements gathering |
+| `doctor` | Diagnose configuration and runtime health |
+| `detect` | Detect available runtime backends |
+| `artifacts` | Manage and inspect execution artifacts |
+| `harness` | Manage runtime harness configurations |
+| `codex` | Codex-specific setup and configuration |
+| `seed` | Generate or inspect seed specifications |
+| `workflow-ir` | Inspect workflow intermediate representation |
+| `zcode` | Convenience wrapper for Zcode (bundles `start`, `qa`, `run` with Zcode pre-selected; for global config use `setup --runtime zcode`) |
+
+> **Shorthand entry points:** `ooo` and `ouroboros` both launch the main CLI.
+> `ozo` is a standalone shorthand that launches only the Zcode convenience commands
+> (equivalent to `ouroboros zcode ...`).
 
 ---
 
@@ -244,10 +259,10 @@ ouroboros setup [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`. Auto-detected if omitted |
+| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `claude-sdk`, `claude-cli`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`. Auto-detected if omitted |
 | `--opencode-mode TEXT` | OpenCode integration mode: `plugin` (default, recommended — bridge plugin for interactive sessions) or `subprocess` (headless/CI). Mutually exclusive — see [OpenCode runtime guide](runtime-guides/opencode.md#configuration) |
 | `--non-interactive` | Skip interactive prompts (for scripted installs) |
-| `--mcp-mode TEXT` | Codex MCP config mode: `auto` (default), `preserve`, or `stdio` |
+| `--mcp-mode TEXT` | Codex MCP config mode: `auto` (default), `preserve`, `stdio`, or native-Windows-only explicit `http` |
 
 For Pi, setup also installs `~/.pi/agent/extensions/ouroboros-ooo-bridge.ts`.
 Restart Pi or run `/reload` and interactive Pi/roach-pi sessions can dispatch
@@ -285,11 +300,12 @@ ouroboros setup --non-interactive
 - Detects configured paths and PATH entries for the shipped runtimes, including `zcode` and the macOS ZCode app-bundle script
 - Prompts you to select a runtime if multiple are found (or auto-selects if only one)
 - Writes `orchestrator.runtime_backend` to `~/.ouroboros/config.yaml`
-- For standalone Claude SDK setup: configures runtime/LLM settings and leaves `~/.claude/mcp.json` untouched because that profile requires MCP 1.x
+- For Claude CLI setup: configures the dependency-free `claude_mcp` runtime and leaves `~/.claude/mcp.json` ownership to the host/plugin
+- For explicit `--runtime claude-sdk`: preserves the SDK runtime, rejects an MCP 2 environment, and leaves `~/.claude/mcp.json` untouched
 - For Codex CLI: sets `orchestrator.codex_cli_path` and `llm.backend: codex` in `~/.ouroboros/config.yaml`
 - For Codex CLI: installs managed Ouroboros rules into `~/.codex/rules/`
 - For Codex CLI: installs managed Ouroboros skills into `~/.codex/skills/`
-- For Codex CLI: registers the Ouroboros MCP/env block in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom blocks by default
+- For Codex CLI: registers or refreshes setup-managed stdio blocks on supported hosts and preserves user-managed URL/custom blocks by default. A legacy PATH-selected `ouroboros mcp serve` entry with the canonical Codex environment is migrated to the isolated managed launcher; custom executable paths and extra process controls remain untouched. Native Windows `auto` creates no MCP child, `stdio` is refused, and explicit `http` writes the loopback URL only after resolving a launchable MCP command; the operator owns that visible server process.
 - For Codex CLI: adds missing Ouroboros task profiles whose per-role reasoning effort is passed to each `codex exec` invocation; it retires only untouched legacy generated profile anchors and preserves user-created Codex profiles
 - For OpenCode: registers the Ouroboros MCP server in OpenCode's configuration
 - For OpenCode (plugin mode): installs the bridge plugin into `<opencode_config_dir>/plugins/ouroboros-bridge/`
@@ -302,6 +318,22 @@ ouroboros setup --non-interactive
 - For GJC: sets `orchestrator.gjc_cli_path` and `llm.backend: gjc` in `~/.ouroboros/config.yaml`
 - For GJC: installs the `ooo` bridge extension into `<agent-dir>/extensions` and the renderer-generated skill capability guide into `<agent-dir>/rules/ouroboros-skill-capability-guide.md`
 - For Zcode: sets `orchestrator.runtime_backend: zcode` and `orchestrator.zcode_cli_path` while leaving the completion-only `llm.backend` unchanged
+
+Claude runtime activation publishes a newly needed `credentials.yaml` before
+publishing `config.yaml`, which is the transaction commit point. If activation
+fails before that commit, setup removes the live credential name with a guarded
+atomic move. It does not truncate, overwrite, or unlink the inode: portable
+filesystems cannot prove that a same-UID process did not create a hardlink at
+the final mutation boundary. The generated bytes therefore remain in an
+owner-only hidden `.retired` recovery artifact for explicit operator inspection
+and disposal. Any concurrent hardlink alias keeps its original bytes. If the
+guarded move itself cannot be proven, setup preserves the pathname, recovery
+journal, and every observed generation for human handoff.
+
+Symlinked POSIX home directories and junction-backed Windows home directories
+are supported: setup resolves and pins the selected physical home generation
+before mutation. The `.ouroboros` directory itself must still be a regular,
+non-symlink/non-reparse directory and is identity-checked throughout activation.
 
 > **Codex config split:** use `ouroboros config` or `ouroboros config --web` to choose **Use Codex default model** (Codex's current default) or **Enter another model ID…** to pin a model for each pipeline stage, including Execute. The web view is the same settings UI as the terminal TUI. `~/.codex/config.toml` remains the Codex MCP/env hookup file; user-created Codex `--profile` settings remain supported. If you run a long-lived URL-based Ouroboros MCP server, setup preserves that user-managed entry in the default `--mcp-mode auto`; use `--mcp-mode stdio` only when you intentionally want setup to replace it.
 
@@ -350,7 +382,7 @@ ouroboros init [start] [OPTIONS] [CONTEXT]
 | `--state-dir DIRECTORY` | Custom directory for interview state files |
 | `-o, --orchestrator` | Use Claude Code for the interview/seed flow; combine with `--runtime` to choose the workflow handoff backend |
 | `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`. Custom adapters registered in `runtime_factory.py` are also accepted. |
-| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `gjc`) |
+| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `zcode`, `dsh`). `dsh` needs two more settings — see [the DeepSeek Harness guide](guides/deepseek-harness.md). |
 | `-d, --debug` | Show verbose logs including debug messages |
 
 **Examples:**
@@ -807,11 +839,82 @@ See [UNINSTALL.md](../UNINSTALL.md) for the full guide.
 
 ---
 
+## `ouroboros update`
+
+Update Ouroboros to the latest version. Native counterpart of the `ooo update` skill — works in any shell, with no AI session required.
+
+```bash
+ouroboros update [OPTIONS]
+```
+
+**Options:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--check` | flag | off | Only report installed vs latest version — change nothing |
+| `-y, --yes` | flag | off | Skip confirmation prompt (for scripts) |
+| `--dry-run` | flag | off | Show the commands that would run without executing them |
+| `--prerelease / --no-prerelease` | flag | auto | Include pre-releases (default: only when a pre-release is installed) |
+| `-r, --runtime` | text | `auto` | Runtime integration to refresh after upgrading. `all` refreshes Claude and Codex without changing the configured backend; `auto` preserves the configured backend; `none` skips refresh |
+
+**Examples:**
+
+```bash
+# Version check only
+ouroboros update --check
+
+# Interactive update
+ouroboros update
+
+# Non-interactive (scripts, CI)
+ouroboros update -y
+
+# Preview the commands without running them
+ouroboros update --dry-run
+
+# Refresh both Claude Code and Codex integrations
+ouroboros update --runtime all -y
+
+# Upgrade the package but skip runtime integration refresh
+ouroboros update --runtime none -y
+```
+
+**What it does:**
+
+1. Compares the installed version against the latest on PyPI (pre-release aware)
+2. Reads the running environment's local `uv` or `pipx` receipt and replays it
+   through that manager, preserving the exact environment and recorded
+   extras/additional requirements
+3. Verifies that the same environment's console reports at least the target
+   version before changing any runtime integration
+4. Refreshes the selected host plugin integration
+5. Re-runs `ouroboros setup --runtime <rt> --non-interactive` for a single selected
+   runtime, or `ouroboros setup refresh` for `--runtime all`
+
+With `--runtime auto` (the default), an existing configured backend is preserved. Only an unconfigured installation probes for the `claude` CLI first and then `codex`; when neither is found the runtime refresh is skipped with a notice and the package upgrade still completes. Existing OpenCode integrations also preserve their mutually exclusive `plugin` or `subprocess` mode. Runtime executable selection preserves the supported environment override before the persisted `orchestrator.*_cli_path`, then PATH; the exact validated executable is reused for plugin and setup refresh so a stale PATH binary cannot replace it. Runtime setup and the post-update version check always use the console script inside the same proven package environment, including `.exe`/`PATHEXT` launcher resolution on native Windows.
+
+With `--runtime all`, the updater refreshes the Claude plugin, the Codex
+Ouroboros marketplace, and all previously installed runtime artifacts through
+`ouroboros setup refresh`. This path does not rewrite the configured execution
+backend. Claude can apply the new plugin with `/reload-plugins` or a restart;
+active Codex sessions must restart because Codex does not currently retain an
+in-use plugin generation during marketplace cache rotation.
+
+> **Installation identity:** the updater does not guess from global tool lists,
+> PATH order, directory names, or the selected runtime. If the receipt is
+> missing or ambiguous, the owning manager is unavailable, or a direct `pip`
+> install cannot prove its requested extras, it exits without changing
+> anything and asks you to reinstall with the exact original profile.
+>
+> The `[claude]` extra is never combined with or substituted for `[mcp]` — the Claude Agent SDK embeds MCP 1.x while the protocol server requires MCP 2. MCP hosts launch their own isolated `ouroboros-ai[mcp]` process via `uvx`/`pipx run`.
+
+---
+
 ## `ouroboros status`
 
 Check Ouroboros system status.
 
-> **Current state:** all status subcommands are read-only. `status executions` and `status execution` read the configured EventStore when it exists, falling back to the default runtime store at `~/.ouroboros/ouroboros.db`; `status run` provides the richer Run/Stage/Step projection.
+> **Current state:** all status subcommands are read-only. `status executions` and `status execution` read the configured EventStore when it exists, falling back to the default runtime store at `~/.ouroboros/ouroboros.db`; `status run` provides the richer Run/Stage/Step projection, and `status project` rebuilds complete cross-run Project Map status.
 
 ### `status auto`
 
@@ -863,6 +966,27 @@ ouroboros status run [RUN_ID] [--session-id TEXT] [--execution-id TEXT] [OPTIONS
 | `1` | Generic projection failure surfaced by the MCP handler |
 | `2` | Unknown run anchor — no events match the requested `RUN_ID` / selectors |
 | `64` | Malformed input — missing selectors or conflicting `RUN_ID` / option combination |
+
+### `status project`
+
+Rebuild complete run status for the project containing `PROJECT_DIR` (or the
+current directory when omitted). This command and the read-only
+`ouroboros_project_status` MCP tool use the same handler. `--json` therefore
+emits the exact MCP `structuredContent` ProjectRecord.
+
+```bash
+ouroboros status project [PROJECT_DIR] [--workspace PATH] [--limit N] [--json]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--workspace PATH` | Filter to one canonical project-relative workspace after validating all project identity candidates |
+| `--limit N` | Complete-run safety cap (default `100`); an undersized limit fails instead of truncating |
+| `--json` | Emit deterministic ProjectRecord JSON identical to the MCP structured result |
+
+The command performs no writes or schema creation. Identity conflicts,
+projection failures, and undersized limits return exit code `1` with no partial
+record; malformed CLI limits or workspace values return exit code `64`.
 
 ### `status health`
 
@@ -958,6 +1082,11 @@ Interactive TUI monitor for real-time workflow monitoring.
 
 Launch the interactive TUI monitor to observe workflow execution in real-time.
 
+<p align="center">
+  <img src="./images/ooo-tui-monitor.gif" width="760" alt="Terminal recording of ooo tui monitor: a session list with goals and statuses, selecting a session to show its AC execution tree with three failed criteria, then the event log listing received execution events">
+  <br/><sub>Session list &rarr; AC execution tree for one session &rarr; event log (<code>execution.plan.created</code>, <code>execution.ac.capsule.compiled</code>, &hellip;)</sub>
+</p>
+
 ```bash
 ouroboros tui [monitor] [OPTIONS]
 ```
@@ -1006,9 +1135,14 @@ ouroboros tui monitor --backend slt
 | `s` | Session Selector |
 | `e` | Lineage view |
 | `q` | Quit |
-| `p` | Pause execution |
-| `r` | Resume execution |
+| `p` | Pause execution — hidden in `tui monitor` |
+| `r` | Resume execution — hidden in `tui monitor` |
 | Up/Down | Scroll |
+
+> **Note**: `ouroboros tui monitor` observes the event store and does not own
+> the running execution, so the pause/resume bindings are hidden there.
+> Use `ouroboros cancel execution` to stop a run. See
+> [TUI Usage](./guides/tui-usage.md#keyboard-shortcuts) for details.
 
 ---
 
@@ -1031,32 +1165,67 @@ ouroboros mcp serve [OPTIONS]
 | `-h, --host TEXT` | Host to bind to (default: localhost) |
 | `-p, --port INTEGER` | Port to bind to (default: 8080) |
 | `-t, --transport TEXT` | Transport type: `stdio`, `sse`, or `streamable-http` (default: stdio). Note: `http` is only a client config alias for outbound MCP connections and is NOT a valid serve transport. |
+| `--auth-token TEXT` | Shared secret clients present as `Authorization: Bearer <token>`. Required for a network transport on a non-loopback host. Prefer the `OUROBOROS_MCP_AUTH_TOKEN` environment variable — a token on the command line is visible to every process on the machine through `ps`. |
+| `--allow-remote` | Acknowledges that a non-loopback bind exposes seed execution beyond this machine. Required alongside `--auth-token` to serve on a routable address. |
+| `--allowed-host TEXT` | `Host` header value clients will use, e.g. `ouroboros.internal:8080`. Repeatable. Required for wildcard binds (`--host 0.0.0.0`), whose reachable name cannot be inferred. A `:*` suffix allows any port. |
+| `--allowed-origin TEXT` | `Origin` header value to permit. Repeatable. Empty by default, which rejects every browser-originated request. |
+| `--workspace-root TEXT` | Confines seed execution to directories under this path. Repeatable. Strongly recommended for network binds; unset means a caller may name any existing directory on the machine as an agent working tree. |
 | `--db TEXT` | Path to the EventStore database file |
-| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`). Affects which tool variants are instantiated |
-| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `gjc`). Affects which tool variants are instantiated |
+| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `claude-sdk`, `claude-cli`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`). The MCP 2 server rejects SDK-backed `claude`/`claude-sdk`; use `claude-cli` for its out-of-process Claude worker. |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `zcode`, `dsh`). Affects which tool variants are instantiated |
 
 **Examples:**
 
 ```bash
 # Start with stdio transport (for Claude Desktop)
-ouroboros mcp serve
+ouroboros mcp serve --runtime claude-cli
 
 # Start with SSE transport on custom port
-ouroboros mcp serve --transport sse --port 9000
+ouroboros mcp serve --runtime claude-cli --transport sse --port 9000
 
 # Start with streamable HTTP transport on custom port
-ouroboros mcp serve --transport streamable-http --port 9000
+ouroboros mcp serve --runtime claude-cli --transport streamable-http --port 9000
 
 # Start with Codex-backed orchestrator tools
 ouroboros mcp serve --runtime codex --llm-backend codex
 
-# Start on specific host
-ouroboros mcp serve --host 0.0.0.0 --port 8080 --transport sse
+# Serve to other machines. Every flag below is required, not optional:
+# the bind is refused without them.
+export OUROBOROS_MCP_AUTH_TOKEN="$(openssl rand -hex 32)"
+ouroboros mcp serve --runtime claude-cli \
+  --transport streamable-http --host 0.0.0.0 --port 8080 \
+  --allow-remote \
+  --allowed-host ouroboros.internal:8080 \
+  --workspace-root /srv/ouroboros/projects
 ```
 
 For serving with streamable HTTP, use `streamable-http`, not `http`. `http` is accepted only in MCP client configuration as a compatibility alias for dialing another server's streamable HTTP endpoint; `mcp serve` uses the precise protocol name so users do not confuse it with a generic HTTP API. Streamable HTTP clients should connect to `http://<host>:<port>/mcp`.
 
-MCP SDK server caveats: Network serving uses the SDK v2 `MCPServer` API. The streamable HTTP path is `/mcp`. Authentication and rate limiting configured on `MCPServerAdapter` are rejected for SDK-managed transports because the handler boundary does not expose credentials or stable client identity; protect `0.0.0.0` binds with normal network controls.
+When `--runtime` is omitted, `mcp serve` inherits the configured runtime and
+ultimately the default `[claude]` Agent SDK profile. Because the server process
+uses MCP 2, it fails closed before startup if that effective runtime is
+SDK-backed. Pass an explicit MCP-2-compatible runtime or persist one with
+`ouroboros setup`.
+
+MCP SDK server caveats: Network serving uses the SDK v2 `MCPServer` API. The streamable HTTP path is `/mcp`.
+
+**Network exposure:**
+
+Reaching an Ouroboros MCP port is enough to call `ouroboros_execute_seed`, which runs caller-supplied seed YAML through a real agent runtime with that runtime's full file and shell authority. The port is therefore as privileged as a shell on the host, and `mcp serve` treats it that way.
+
+The default bind — `stdio`, or `localhost` for a network transport — needs no credentials: the client already owns the process, and Ouroboros supplies explicit DNS-rebinding protection settings for loopback binds (keeping an empty Origin policy fail-closed rather than inheriting the SDK's permissive browser-origin defaults).
+
+A bind that other machines can reach is refused unless all of the following are supplied:
+
+- `--auth-token` (or `OUROBOROS_MCP_AUTH_TOKEN`), enforced by the SDK's bearer-auth middleware. Requests without a valid token get `401` before any tool dispatch.
+- `--allow-remote`, an explicit acknowledgement of the exposure.
+- `--allowed-host` for wildcard binds, which pins the `Host` allowlist that blocks DNS rebinding. A forged `Host` gets `421`.
+
+`--workspace-root` is not required but should be treated as such for any shared deployment: without it a caller may name any existing directory on the host as an agent's working tree.
+
+Rate limiting (`RateLimitConfig`) is available once an auth method is configured, because the token supplies the per-client identity it buckets by. Without authentication it is refused rather than silently sharing one bucket across all callers.
+
+Scoped IPv6 addresses (those with a zone identifier such as `fe80::1%eth0`) cannot be used as network bind addresses when authentication is configured. The MCP SDK's Pydantic URL parser does not accept zone identifiers in URL authorities — neither raw nor percent-encoded — so authentication metadata (issuer and resource server URLs) cannot be constructed. Ouroboros rejects scoped IPv6 binds at startup with a clear error. This applies both to non-loopback scoped addresses (where auth is mandatory) and to scoped loopback addresses (e.g. `::1%lo`) when an auth token is explicitly passed or inherited from environment configuration. Unauthenticated scoped loopback addresses remain usable since they do not require AuthSettings construction. To resolve: use the address without a zone ID (e.g. `::1` instead of `::1%lo`), bind to a non-link-local address, or remove the auth token for loopback use.
 
 **Startup behavior:**
 
@@ -1064,17 +1233,18 @@ On startup, `mcp serve` automatically cancels any sessions left in `RUNNING` or 
 
 **MCP host integration:**
 
-`ouroboros setup --runtime claude` configures the standalone Claude SDK profile
-and deliberately leaves `~/.claude/mcp.json` untouched. Its MCP 1.x dependency
-cannot share the Ouroboros MCP 2 process. Supported CLI-backed host setup writes
-an isolated launcher equivalent to:
+`ouroboros setup --runtime claude` configures the default Agent SDK profile
+(`runtime_backend: claude`) on MCP 1.x. `claude-sdk` is an explicit alias;
+`ouroboros setup --runtime claude-cli` selects the dependency-free worker used
+inside an MCP 2 server environment. Setup leaves `~/.claude/mcp.json` untouched;
+the marketplace plugin launches an isolated server equivalent to:
 
 ```json
 {
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
+      "args": ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve", "--runtime", "claude-cli", "--llm-backend", "claude_code"]
     }
   }
 }
@@ -1087,7 +1257,7 @@ If `uvx` is unavailable, use the package-isolated pipx runner:
   "mcpServers": {
     "ouroboros": {
       "command": "pipx",
-      "args": ["run", "--spec", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
+      "args": ["run", "--spec", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve", "--runtime", "claude-cli", "--llm-backend", "claude_code"]
     }
   }
 }
@@ -1097,7 +1267,7 @@ If `uvx` is unavailable, use the package-isolated pipx runner:
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # or "codex", "opencode", "hermes", "gemini", "copilot", "goose", "kiro", "pi", or "gjc"
+  runtime_backend: claude   # SDK default; isolated MCP 2 launchers use "claude_mcp"
 ```
 
 Override per-session with the `OUROBOROS_AGENT_RUNTIME` environment variable if needed.
@@ -1115,7 +1285,7 @@ ouroboros mcp info [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`). Affects which tool variants are instantiated |
-| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `gjc`). Affects which tool variants are instantiated |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `zcode`, `dsh`). Affects which tool variants are instantiated |
 
 **Available Tools:**
 
@@ -1123,6 +1293,7 @@ ouroboros mcp info [OPTIONS]
 |------|-------------|
 | `ouroboros_execute_seed` | Execute a seed specification |
 | `ouroboros_session_status` | Get the status of a session |
+| `ouroboros_project_status` | Rebuild complete read-only cross-run project status |
 | `ouroboros_query_events` | Query event history |
 
 ---
@@ -1153,7 +1324,7 @@ The table below covers the most commonly used variables. For the full list — i
 | `ANTHROPIC_API_KEY` | — | Anthropic API key for Claude models |
 | `OPENAI_API_KEY` | — | OpenAI API key for LiteLLM / Codex CLI |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key for consensus and LiteLLM |
-| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`) |
+| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude_mcp` for Claude CLI, `claude` for the isolated SDK runtime, or another supported runtime) |
 | `OUROBOROS_RUNTIME` | `orchestrator.runtime_backend` (fallback) | Shortcut env var honored by both `orchestrator.runtime_backend` and `llm.backend` resolution when their dedicated env vars are unset |
 | `OUROBOROS_KIRO_CLI_PATH` | `orchestrator.kiro_cli_path` | Explicit path to `kiro-cli` binary when it is not on `PATH` |
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Stored runtime preference; runner-driven seed execution forces the native `bypassPermissions` equivalent for fresh and resumed dispatches wherever the backend exposes an approval surface. OpenCode maps it to `--dangerously-skip-permissions`; Pi and GJC have no separate approval flag and already run headlessly without an approval dialogue |
