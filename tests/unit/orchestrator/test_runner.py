@@ -219,9 +219,30 @@ def _attach_test_execution_authority(adapter: Any) -> None:
 
     def acquire_execution(**kwargs: Any) -> RuntimeExecution:
         controller = RuntimeExecutionController(str(adapter.runtime_backend))
+        latest_handle: RuntimeHandle | None = None
+
+        async def owned_stream() -> AsyncIterator[AgentMessage]:
+            nonlocal latest_handle
+            completed = False
+            try:
+                async for message in adapter.execute_task(**kwargs):
+                    if message.resume_handle is not None:
+                        latest_handle = message.resume_handle
+                    yield message
+                completed = True
+            finally:
+                if completed:
+                    controller.mark_reaped()
+
+        async def force_provider() -> bool:
+            if latest_handle is None or not latest_handle.can_terminate:
+                return True
+            return await latest_handle.terminate()
+
+        controller.bind_process(force_provider)
         return RuntimeExecution(
             backend=str(adapter.runtime_backend),
-            stream=adapter.execute_task(**kwargs),
+            stream=owned_stream(),
             controller=controller,
         )
 
@@ -404,6 +425,97 @@ async def test_direct_exhaustion_force_closes_nonreturning_finalizer() -> None:
     assert execution.termination_receipt is not None
     assert execution.termination_receipt.verified is True
     event_store.append.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_runtime_controller_reaps_process_spawned_during_cancellation() -> None:
+    """A cancelled spawn lease reaps a child before exposing its process handle."""
+
+    spawn_started = asyncio.Event()
+
+    class _Process:
+        returncode: int | None = None
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+        async def wait(self) -> int:
+            self.returncode = -9
+            return self.returncode
+
+    process = _Process()
+
+    async def spawn() -> _Process:
+        spawn_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return process
+
+    async def terminate(candidate: _Process) -> bool:
+        candidate.kill()
+        await candidate.wait()
+        return candidate.returncode is not None
+
+    controller = RuntimeExecutionController("opencode", shutdown_timeout_seconds=0.01)
+    acquisition = asyncio.create_task(controller.acquire_process(spawn(), terminate))
+    await spawn_started.wait()
+    acquisition.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(acquisition, timeout=0.1)
+
+    assert process.killed is True
+    assert process.returncode == -9
+    assert controller.process_reaped is True
+
+
+@pytest.mark.asyncio
+async def test_direct_wall_clock_exhaustion_closes_nonreturning_first_read() -> None:
+    """The first provider entry cannot outlive an exhausted direct attempt."""
+
+    entered = asyncio.Event()
+    finalized = asyncio.Event()
+    force_called = asyncio.Event()
+
+    async def provider() -> AsyncIterator[AgentMessage]:
+        try:
+            entered.set()
+            await asyncio.Event().wait()
+            if False:
+                yield AgentMessage(type="assistant", content="unreachable")
+        finally:
+            finalized.set()
+
+    controller = RuntimeExecutionController("opencode")
+
+    async def force_provider() -> bool:
+        force_called.set()
+        return True
+
+    controller.bind_process(force_provider)
+    execution = RuntimeExecution(
+        backend="opencode",
+        stream=provider(),
+        controller=controller,
+        cooperative_shutdown_seconds=0.01,
+    )
+    budget = DirectAttemptBudget(max_agentic_steps=10, timeout_seconds=0.01, root_ac_count=1)
+    stream = budget.wrap(execution)
+
+    async with stream.lifetime(), shielded_aclosing(stream):
+        async for _message in stream:
+            pass
+
+    assert entered.is_set()
+    assert force_called.is_set()
+    assert finalized.is_set()
+    assert stream.exhaustion is not None
+    assert stream.exhaustion.kind is AttemptBudgetKind.WALL_CLOCK
+    assert stream.closure_confirmed is True
+    assert execution.termination_receipt is not None
+    assert execution.termination_receipt.verified is True
 
 
 @pytest.mark.asyncio
@@ -1403,11 +1515,11 @@ class TestOrchestratorRunner:
         if provider_close_fails:
             assert result.is_err
             assert "verified termination receipt" in str(result.error)
-            assert terminate_calls == 0
+            assert terminate_calls == 1
             return
         assert result.is_ok and result.value.success is False
         assert produced == 4  # 3 root ACs x 1 admitted step, then the boundary turn
-        assert terminate_calls == 0
+        assert terminate_calls == 1
         assert "agentic_steps limit=3" in result.value.final_message
         budget_event = next(
             call.args[0]

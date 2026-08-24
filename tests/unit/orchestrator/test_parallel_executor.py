@@ -3419,7 +3419,40 @@ def _make_executor(
     return executor
 
 
-class _CooldownDriftRuntime:
+class _OwnedTestRuntime:
+    """Test-only authority mirroring the production provider lifecycle."""
+
+    def acquire_execution(self, **kwargs: Any) -> RuntimeExecution:
+        backend = str(getattr(self, "runtime_backend", "test_runtime"))
+        controller = RuntimeExecutionController(backend)
+        latest_handle: RuntimeHandle | None = None
+
+        async def owned_stream() -> AsyncIterator[AgentMessage]:
+            nonlocal latest_handle
+            completed = False
+            try:
+                async for message in self.execute_task(**kwargs):
+                    if message.resume_handle is not None:
+                        latest_handle = message.resume_handle
+                    yield message
+                completed = True
+            finally:
+                if completed:
+                    controller.mark_reaped()
+
+        async def force_provider() -> bool:
+            if latest_handle is None or not latest_handle.can_terminate:
+                return True
+            return await latest_handle.terminate()
+
+        controller.bind_process(force_provider)
+        return RuntimeExecution(
+            backend=backend,
+            stream=owned_stream(),
+            controller=controller,
+        )
+
+class _CooldownDriftRuntime(_OwnedTestRuntime):
     """Runtime seam whose declared capabilities can drift during admission."""
 
     runtime_backend = "opencode"
@@ -4729,16 +4762,6 @@ def test_bounded_dispatch_rejects_unowned_runtime_before_provider_entry() -> Non
     assert runtime.entered is False
 
 
-class _OwnedTestRuntime:
-    """Test-only no-process authority for deterministic in-memory streams."""
-
-    def acquire_execution(self, **kwargs: Any) -> RuntimeExecution:
-        controller = RuntimeExecutionController(self.runtime_backend)
-        return RuntimeExecution(
-            backend=self.runtime_backend,
-            stream=self.execute_task(**kwargs),
-            controller=controller,
-        )
 
 
 class _FinalMessageRuntime(_OwnedTestRuntime):
@@ -5240,6 +5263,65 @@ async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity(
         if call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
     ]
     assert len(budget_events) == 1
+
+@pytest.mark.asyncio
+async def test_atomic_wall_clock_exhaustion_closes_nonreturning_first_read() -> None:
+    """Parallel exhaustion settles provider entry before any message or handle exists."""
+
+    class _FirstReadRuntime(_OwnedTestRuntime):
+        runtime_backend = "opencode"
+        working_directory = "/tmp/project"
+        permission_mode = "acceptEdits"
+
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+            self.finalized = asyncio.Event()
+
+        async def execute_task(self, **_kwargs: Any):
+            try:
+                self.entered.set()
+                await asyncio.Event().wait()
+                if False:
+                    yield AgentMessage(type="assistant", content="unreachable")
+            finally:
+                self.finalized.set()
+
+    runtime = _FirstReadRuntime()
+    event_store = AsyncMock()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=event_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        max_iterations_per_ac=10,
+        ac_attempt_timeout_seconds=0.01,
+    )
+
+    result = await asyncio.wait_for(
+        executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Provider never yields its first message",
+            session_id="sess_budget_first_read",
+            execution_id="exec_budget_first_read",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Bound provider entry",
+            depth=0,
+            start_time=datetime.now(UTC),
+        ),
+        timeout=0.25,
+    )
+
+    assert result.success is False
+    assert result.attempt_budget_exhaustion is not None
+    assert result.attempt_budget_exhaustion.kind is AttemptBudgetKind.WALL_CLOCK
+    assert runtime.entered.is_set()
+    assert runtime.finalized.is_set()
+    assert any(
+        call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
+        for call in event_store.append.await_args_list
+    )
+
 
 
 @pytest.mark.asyncio
@@ -7127,7 +7209,7 @@ class TestProfileAwareDecompositionAudit:
 class TestProfileAwareContextGovernance:
     @pytest.mark.asyncio
     async def test_profile_backed_atomic_dispatch_uses_context_governor(self) -> None:
-        class _StubRuntime:
+        class _StubRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -7251,7 +7333,7 @@ class TestProfileAwareContextGovernance:
 
     @pytest.mark.asyncio
     async def test_legacy_atomic_dispatch_keeps_existing_context_prompt_shape(self) -> None:
-        class _StubRuntime:
+        class _StubRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -7340,7 +7422,7 @@ class TestProfileAwareContextGovernance:
     async def test_profile_context_governor_budget_error_falls_back_without_failing_ac(
         self,
     ) -> None:
-        class _StubRuntime:
+        class _StubRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -8039,7 +8121,7 @@ class TestParallelACExecutor:
     async def test_deep_sub_ac_runtime_identity_does_not_require_legacy_indices(self) -> None:
         """Grandchild Sub-AC execution should not crash while building runtime identity."""
 
-        class _StubRuntime:
+        class _StubRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -8325,7 +8407,7 @@ class TestParallelACExecutor:
             sleeps.append(seconds)
             clock["now"] += seconds
 
-        class _SequencedRuntime:
+        class _SequencedRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls = 0
                 self._runtime_handle_backend = "opencode"
@@ -8420,7 +8502,7 @@ class TestParallelACExecutor:
     async def test_atomic_ac_uses_ac_scoped_runtime_handle(self) -> None:
         """Atomic AC execution should seed a fresh AC-scoped runtime handle."""
 
-        class _StubImplementationRuntime:
+        class _StubImplementationRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -8561,7 +8643,7 @@ class TestParallelACExecutor:
             terminate_calls += 1
             return True
 
-        class _StubImplementationRuntime:
+        class _StubImplementationRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self._runtime_handle_backend = "opencode"
                 self._cwd = "/tmp/project"
@@ -8637,7 +8719,7 @@ class TestParallelACExecutor:
     async def test_atomic_ac_observes_profile_typed_evidence_without_changing_success(self) -> None:
         """Profile-backed atomic completion records typed evidence observe-only."""
 
-        class _StubImplementationRuntime:
+        class _StubImplementationRuntime(_OwnedTestRuntime):
             _runtime_handle_backend = "opencode"
             _cwd = "/tmp/project"
             _permission_mode = "acceptEdits"
@@ -8741,7 +8823,7 @@ class TestParallelACExecutor:
     async def test_atomic_ac_records_typed_evidence_error_without_default_flip(self) -> None:
         """Malformed typed evidence is observed but does not change legacy success."""
 
-        class _StubImplementationRuntime:
+        class _StubImplementationRuntime(_OwnedTestRuntime):
             _runtime_handle_backend = "opencode"
             _cwd = "/tmp/project"
             _permission_mode = "acceptEdits"
@@ -12506,7 +12588,7 @@ class TestParallelACExecutor:
         # drop the waiting.
         monkeypatch.setattr("ouroboros.orchestrator.parallel_executor.anyio.sleep", AsyncMock())
 
-        class _StubImplementationRuntime:
+        class _StubImplementationRuntime(_OwnedTestRuntime):
             _runtime_handle_backend = "opencode"
             _cwd = "/tmp/project"
             _permission_mode = "acceptEdits"
@@ -12593,7 +12675,7 @@ class TestParallelACExecutor:
     async def test_atomic_ac_profile_evidence_config_error_remains_loud(self) -> None:
         """Profile-authored evidence-schema bugs must not be downgraded to telemetry."""
 
-        class _StubImplementationRuntime:
+        class _StubImplementationRuntime(_OwnedTestRuntime):
             _runtime_handle_backend = "opencode"
             _cwd = "/tmp/project"
             _permission_mode = "acceptEdits"
@@ -12720,7 +12802,7 @@ class TestParallelACExecutor:
     async def test_completed_ac_attempt_does_not_reuse_cached_runtime_handle(self) -> None:
         """Terminal AC attempts should drop the cached session before the next invocation."""
 
-        class _StubResumeRuntime:
+        class _StubResumeRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -12826,7 +12908,7 @@ class TestParallelACExecutor:
     async def test_atomic_ac_skips_memory_gate_for_mocked_backend_runtime(self) -> None:
         """Mocked runtimes should not block on low-memory gating without explicit opt-in."""
 
-        class _StubRuntime:
+        class _StubRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self._runtime_handle_backend = "opencode"
                 self._cwd = "/tmp/project"
@@ -12906,7 +12988,7 @@ class TestParallelACExecutor:
     async def test_try_decompose_ac_times_out_and_falls_back_to_atomic(self) -> None:
         """A hung decomposition child should time out and fall back to atomic execution."""
 
-        class _HangingRuntime:
+        class _HangingRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.cancelled = False
 
@@ -12965,7 +13047,7 @@ class TestParallelACExecutor:
             sleeps.append(seconds)
             clock["now"] += seconds
 
-        class _PolicyRuntime:
+        class _PolicyRuntime(_OwnedTestRuntime):
             runtime_backend = "opencode"
             working_directory = "/tmp/project"
             permission_mode = "acceptEdits"
@@ -13883,7 +13965,7 @@ class TestParallelACExecutor:
     async def test_runtime_handle_cache_isolated_between_acceptance_criteria(self) -> None:
         """Completing one AC must not seed a different AC with its prior runtime session."""
 
-        class _StubCrossACRuntime:
+        class _StubCrossACRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -13991,7 +14073,7 @@ class TestParallelACExecutor:
     ) -> None:
         """A persisted runtime handle must not resume when its metadata belongs to another AC."""
 
-        class _StubFreshRuntime:
+        class _StubFreshRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -14119,7 +14201,7 @@ class TestParallelACExecutor:
     async def test_cached_runtime_handle_from_another_ac_is_not_reused(self) -> None:
         """An in-memory runtime-handle cache entry must not leak a foreign AC session."""
 
-        class _StubFreshRuntime:
+        class _StubFreshRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -14232,7 +14314,7 @@ class TestParallelACExecutor:
     async def test_atomic_ac_persists_reconnectable_handle_before_native_session_id(self) -> None:
         """OpenCode AC lifecycle should persist once the runtime exposes a resumable handle."""
 
-        class _StubReconnectableRuntime:
+        class _StubReconnectableRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self._runtime_handle_backend = "opencode"
                 self._cwd = "/tmp/project"
@@ -14387,7 +14469,7 @@ class TestParallelACExecutor:
     async def test_restarted_executor_loads_persisted_runtime_handle_for_same_attempt(self) -> None:
         """A fresh executor should rehydrate the same-attempt runtime handle from events."""
 
-        class _StubPersistedResumeRuntime:
+        class _StubPersistedResumeRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -14506,7 +14588,7 @@ class TestParallelACExecutor:
     ) -> None:
         """Malformed persisted runtime payloads should be skipped in favor of a fresh handle."""
 
-        class _StubInvalidPersistedHandleRuntime:
+        class _StubInvalidPersistedHandleRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -14624,7 +14706,7 @@ class TestParallelACExecutor:
     ) -> None:
         """Resume should hydrate from the newest active lifecycle event for the same attempt."""
 
-        class _StubResumedHandleRuntime:
+        class _StubResumedHandleRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -14770,7 +14852,7 @@ class TestParallelACExecutor:
     ) -> None:
         """Persisted AC handles must stay bound to the parent execution/session context."""
 
-        class _StubFreshRuntime:
+        class _StubFreshRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -14860,7 +14942,7 @@ class TestParallelACExecutor:
     ) -> None:
         """Persisted terminal events should not revive a completed AC attempt."""
 
-        class _StubTerminalAwareRuntime:
+        class _StubTerminalAwareRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -14992,7 +15074,7 @@ class TestParallelACExecutor:
     async def test_retry_reopens_failed_ac_with_same_scope_and_new_attempt_audit(self) -> None:
         """Retry attempts should start a fresh session while emitting a new attempt identity."""
 
-        class _StubRetryRuntime:
+        class _StubRetryRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -15139,7 +15221,7 @@ class TestParallelACExecutor:
     async def test_retry_executes_on_reconciled_workspace_context(self) -> None:
         """Retry prompts should include prior reconciled workspace context."""
 
-        class _StubContextRuntime:
+        class _StubContextRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -15246,7 +15328,7 @@ class TestParallelACExecutor:
     async def test_atomic_ac_prompt_uses_adapter_working_directory(self) -> None:
         """Prompt workspace context should come from the runtime adapter, not the server cwd."""
 
-        class _StubPromptRuntime:
+        class _StubPromptRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -16589,7 +16671,7 @@ class TestParallelACExecutor:
     async def test_atomic_ac_events_include_retry_attempt_metadata(self) -> None:
         """AC-scoped runtime events should preserve AC id while recording retry attempts."""
 
-        class StubRuntime:
+        class StubRuntime(_OwnedTestRuntime):
             _runtime_handle_backend = "opencode"
 
             @property
@@ -16683,7 +16765,7 @@ class TestParallelACExecutor:
             normalize_runtime_tool_result,
         )
 
-        class StubRuntime:
+        class StubRuntime(_OwnedTestRuntime):
             _runtime_handle_backend = "opencode"
             _cwd = "/tmp/project"
             _permission_mode = "acceptEdits"
@@ -16784,7 +16866,7 @@ class TestParallelACExecutor:
     async def test_atomic_ac_projects_codex_completion_receipt_to_journal(self) -> None:
         from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 
-        class StubRuntime:
+        class StubRuntime(_OwnedTestRuntime):
             _runtime_handle_backend = "codex_cli"
             _cwd = "/tmp/project"
             _permission_mode = "acceptEdits"
@@ -16862,7 +16944,7 @@ class TestParallelACExecutor:
     async def test_atomic_ac_projects_gemini_tool_result_to_completed_journal(self) -> None:
         from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
 
-        class StubRuntime:
+        class StubRuntime(_OwnedTestRuntime):
             _runtime_handle_backend = "gemini_cli"
             _cwd = "/tmp/project"
             _permission_mode = "acceptEdits"
@@ -17019,7 +17101,7 @@ class TestParallelACExecutor:
         """Tool-result projection should preserve completion text even when message content is empty."""
         from ouroboros.orchestrator.mcp_tools import normalize_runtime_tool_result
 
-        class StubRuntime:
+        class StubRuntime(_OwnedTestRuntime):
             _runtime_handle_backend = "opencode"
             _cwd = "/tmp/project"
             _permission_mode = "acceptEdits"
@@ -17095,7 +17177,7 @@ class TestParallelACExecutor:
     ) -> None:
         """When an invalid persisted event precedes a valid one, resume from the valid event."""
 
-        class _StubResumeAfterInvalidRuntime:
+        class _StubResumeAfterInvalidRuntime(_OwnedTestRuntime):
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -17229,7 +17311,7 @@ class TestParallelACExecutor:
 async def test_try_decompose_ac_replaces_goose_chunks_with_final_result() -> None:
     """Goose can emit deltas plus a final full answer; decomposition should not duplicate."""
 
-    class _GooseChunkAndFinalRuntime:
+    class _GooseChunkAndFinalRuntime(_OwnedTestRuntime):
         runtime_backend = "goose"
 
         async def execute_task(
@@ -17270,7 +17352,7 @@ async def test_decomposition_policy_usage_is_included_in_generation_total(
     from ouroboros.evolution import provider_usage as provider_usage_module
     from ouroboros.evolution.provider_usage import capture_generation_provider_usage
 
-    class _MeasuredRuntime:
+    class _MeasuredRuntime(_OwnedTestRuntime):
         runtime_backend = "goose"
         llm_backend = "test-provider"
         _model = "test-model"
@@ -17332,7 +17414,7 @@ async def test_decomposition_policy_usage_is_included_in_generation_total(
 async def test_try_decompose_ac_accumulates_goose_stream_chunks() -> None:
     """Goose stream-json emits token chunks; decomposition must parse accumulated output."""
 
-    class _GooseChunkRuntime:
+    class _GooseChunkRuntime(_OwnedTestRuntime):
         runtime_backend = "goose"
 
         async def execute_task(
@@ -17373,7 +17455,7 @@ async def test_try_decompose_ac_accumulates_goose_stream_chunks() -> None:
 
 @pytest.mark.asyncio
 async def test_try_decompose_ac_announces_same_empty_tools_allowlist_it_dispatches() -> None:
-    class _CapturingRuntime:
+    class _CapturingRuntime(_OwnedTestRuntime):
         runtime_backend = "codex_cli"
         capabilities = RuntimeCapabilities(
             skill_dispatch=True,

@@ -12,9 +12,15 @@ from ouroboros.orchestrator.adapter import AgentMessage
 async def force_reap_process(
     process: Any,
     graceful_terminate: Callable[[Any], Awaitable[None]],
+    *,
+    timeout_seconds: float = 0.1,
 ) -> bool:
-    """Terminate, force-kill if necessary, and wait for an owned subprocess."""
-    await graceful_terminate(process)
+    """Terminate, force-kill if necessary, and finitely wait for an owned subprocess."""
+    await _run_operation_bounded(
+        graceful_terminate(process),
+        timeout_seconds=timeout_seconds,
+        label="owned process graceful termination",
+    )
     if getattr(process, "returncode", None) is None:
         kill = getattr(process, "kill", None)
         if not callable(kill):
@@ -23,7 +29,17 @@ async def force_reap_process(
             kill()
         except ProcessLookupError:
             pass
-        await process.wait()
+    if getattr(process, "returncode", None) is None:
+        wait = getattr(process, "wait", None)
+        if not callable(wait):
+            return False
+        _, wait_error = await _run_operation_bounded(
+            wait(),
+            timeout_seconds=timeout_seconds,
+            label="owned process reap",
+        )
+        if wait_error is not None:
+            return False
     return getattr(process, "returncode", None) is not None
 
 
@@ -121,8 +137,9 @@ async def _run_operation_bounded[T](
 class RuntimeExecutionController:
     """Mutable process authority created before a provider can have effects."""
 
-    def __init__(self, backend: str) -> None:
+    def __init__(self, backend: str, *, shutdown_timeout_seconds: float = 0.1) -> None:
         self.backend = backend
+        self._shutdown_timeout_seconds = shutdown_timeout_seconds
         self._force_terminate: Callable[[], Awaitable[bool]] | None = None
         self._provider_started = False
         self._process_reaped = True
@@ -134,27 +151,51 @@ class RuntimeExecutionController:
         self._provider_started = True
         self._process_reaped = False
         self._force_terminate = force_terminate
+
     async def acquire_process(
         self,
         spawn: Awaitable[Any],
         terminate_process: Callable[[Any], Awaitable[bool]],
     ) -> Any:
         """Bind kill authority before starting an interruptible process spawn."""
-        spawn_task = asyncio.ensure_future(spawn)
+        spawn_task = asyncio.create_task(_await_operation(spawn))
 
         async def _force_spawned_process() -> bool:
-            try:
-                process = await asyncio.shield(spawn_task)
-            except BaseException:
+            """Settle a stuck spawn before trying to reap a yielded process."""
+            _, spawn_error = await _settle_task_boundary(
+                spawn_task,
+                timeout_seconds=self._shutdown_timeout_seconds,
+                operation=f"{self.backend} process spawn",
+                cancel_first=True,
+            )
+            if not spawn_task.done():
+                return False
+            if spawn_task.cancelled():
+                self.mark_reaped()
+                return spawn_error is None
+            if spawn_error is not None:
                 self.mark_reaped()
                 return True
-            return await terminate_process(process)
+            process = spawn_task.result()
+            terminated = await _run_operation_bounded(
+                terminate_process(process),
+                timeout_seconds=self._shutdown_timeout_seconds,
+                label=f"{self.backend} spawned process termination",
+            )
+            if terminated[1] is not None:
+                return False
+            return bool(terminated[0])
 
         self.bind_process(_force_spawned_process)
         try:
             return await asyncio.shield(spawn_task)
         except asyncio.CancelledError:
-            await _force_spawned_process()
+            stopped = await _force_spawned_process()
+            if not stopped:
+                raise RuntimeExecutionUnavailable(
+                    f"{self.backend} process spawn could not be force-terminated"
+                )
+            self.mark_reaped()
             raise
         except BaseException:
             self.mark_reaped()
