@@ -3023,6 +3023,9 @@ def test_resolve_verify_cwd_uses_sole_node_manifest_directory(tmp_path: Any) -> 
         "env --unset=HOME yarn test",
         "env -- npx playwright test",
         "env -S 'CI=1 pnpm test'",
+        "env --default-signal npm test",
+        "env --ignore-signal=PIPE yarn test",
+        "env --block-signal=PIPE pnpm test",
     ],
 )
 def test_resolve_verify_cwd_parses_environment_prefixed_node_command(
@@ -3060,6 +3063,7 @@ def test_resolve_verify_cwd_parses_shell_wrapped_node_command(
 
     assert error is None
     assert Path(resolved) == (tmp_path / "app").resolve()
+
 
 @pytest.mark.parametrize(
     "command",
