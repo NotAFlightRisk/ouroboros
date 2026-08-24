@@ -27,6 +27,7 @@ import {
   id,
   isRalphOwnedSession,
   isNestedRalphDispatch,
+  mergeDispatchSources,
   markRalphChild,
   notify,
   num,
@@ -518,6 +519,50 @@ describe("parseMetadata", () => {
 
     expect(out.subs.length).toBe(1)
     expect(out.subs[0].tool).toBe("ouroboros_interview")
+  })
+})
+
+describe("mergeDispatchSources", () => {
+  test("plugin interview child and factual metadata lanes dispatch together", () => {
+    const primary = parse(JSON.stringify({
+      session_id: "sess-1",
+      _subagent: {
+        tool_name: "ouroboros_interview",
+        title: "Interview: start",
+        prompt: "Ask the first question",
+      },
+    }))
+    const factual = parseMetadata({
+      question_advisory_preserve_content: true,
+      question_advisory_subagents: [
+        { tool_name: "ouroboros_interview", title: "Code", prompt: "inspect" },
+        { tool_name: "ouroboros_interview", title: "Web", prompt: "search" },
+      ],
+    })
+
+    const merged = mergeDispatchSources(primary, factual)
+
+    expect(merged.subs.map((sub) => sub.title)).toEqual([
+      "Interview: start",
+      "Code",
+      "Web",
+    ])
+    expect(merged.responseShape).toEqual({ session_id: "sess-1" })
+    expect(merged.preserveContent).toBe(false)
+  })
+
+  test("combined dispatch remains bounded by MAX_FANOUT", () => {
+    const primary = parse(JSON.stringify({
+      _subagent: { tool_name: "ouroboros_interview", prompt: "interview" },
+    }))
+    const factual = parseMetadata({
+      question_advisory_subagents: Array.from(
+        { length: MAX_FANOUT },
+        (_, index) => ({ tool_name: "ouroboros_interview", prompt: `lane-${index}` }),
+      ),
+    })
+
+    expect(mergeDispatchSources(primary, factual).subs).toHaveLength(MAX_FANOUT)
   })
 })
 

@@ -678,6 +678,39 @@ def test_schema_valid_web_references_without_host_evidence_are_rejected(tmp_path
         "source_evidence/output is not a JSON object"
     ]
 
+def test_every_submitted_web_query_requires_parent_result_evidence(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-web-query-coverage"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(
+        registry, session_id
+    )
+    outputs = _advisory_lane_outputs(meta, lane_keys)
+    web = outputs["web_context"]
+    web["search_queries"] = ["official billing API", "billing security standard"]
+    evidence = _web_source_evidence(web)
+    evidence["search_results"] = [
+        {"query": web["search_queries"][0], "url": reference["url"]}
+        for reference in web["references"]
+    ]
+
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {"key": "code_context", "content": outputs["code_context"]},
+            {"key": "web_context", "content": web, "source_evidence": evidence},
+        ],
+    )
+
+    assert outcome["status"] == "partial"
+    assert outcome["missing_required_keys"] == ["web_context"]
+    assert outcome["contract_violations"]["web_context"] == [
+        "source_evidence/search_results: no result attests query "
+        "'billing security standard'"
+    ]
+
 
 @pytest.mark.asyncio
 async def test_start_fanout_artifact_reduces_follow_up_to_delta_lanes(tmp_path: Any) -> None:

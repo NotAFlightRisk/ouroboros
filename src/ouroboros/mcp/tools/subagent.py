@@ -1168,6 +1168,7 @@ def build_interview_subagent(
     transcript: str = "",
     turn_context: Any | None = None,
     adapter_question: str | None = None,
+    question_advisory: Mapping[str, Any] | None = None,
 ) -> SubagentPayload:
     """Build subagent payload for Socratic interview.
 
@@ -1182,6 +1183,29 @@ def build_interview_subagent(
 
     system_prompt = load_agent_prompt("socratic-interviewer")
     seed_closer_summary = _load_seed_closer_summary()
+
+    plugin_question_advisory_contract = ""
+    if question_advisory:
+        visible_advisory = {
+            key: question_advisory[key]
+            for key in (
+                "question_advisory_request",
+                "question_advisory_fanout_id",
+                "question_advisory_result_correlation_key",
+                "question_advisory_cached_lanes",
+            )
+            if key in question_advisory
+        }
+        if visible_advisory:
+            plugin_question_advisory_contract = (
+                "\n## Server-authored Factual Snapshot Contract\n"
+                "The parent bridge owns the stamped factual lane dispatch and result "
+                "submission. Do not invent, replace, or self-attest lane output. Treat "
+                "cached artifact references as evidence only after the parent fetches them.\n"
+                "```json\n"
+                + json.dumps(visible_advisory, ensure_ascii=False, sort_keys=True)
+                + "\n```\n"
+            )
     plugin_question_advisory = """
 ## Factual Research Snapshot
 1. Show the interview question first.
@@ -1233,6 +1257,7 @@ Start a Socratic interview to clarify requirements for the following project ide
 Ask probing questions to reduce ambiguity. Score ambiguity after each exchange.
 {seed_ready_guard}
 {plugin_question_advisory}
+{plugin_question_advisory_contract}
 
 ## Initial Context
 {bounded_initial_context}
@@ -1254,6 +1279,7 @@ Analyze their answer, update your understanding, score current ambiguity,
 and ask the next clarifying question or declare ready only after the Seed-ready Guard passes.
 {seed_ready_guard}
 {plugin_question_advisory}
+{plugin_question_advisory_contract}
 
 ## Session ID
 {session_id}
@@ -1278,6 +1304,7 @@ Review the conversation history and continue from where we left off.
 {research_subject_section}
 {seed_ready_guard}
 {plugin_question_advisory}
+{plugin_question_advisory_contract}
 {adapter_section}
 
 ## Action: {action}
@@ -1297,6 +1324,7 @@ Continue the interview."""
         ),
         "adapter_question": adapter_question,
         "question_advisory_strategy": "plugin_child_factual_snapshot",
+        "question_advisory": dict(question_advisory or {}),
     }
 
     return build_subagent_payload(

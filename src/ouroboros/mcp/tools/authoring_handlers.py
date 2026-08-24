@@ -2269,6 +2269,36 @@ class InterviewHandler:
                         MCPToolError(str(save_result.error), tool_name="ouroboros_interview")
                     )
 
+        research_subject = (
+            plugin_state.initial_context if plugin_state is not None else str(initial_context or "")
+        )
+        factual_question = str(last_question or "").strip()
+        if not factual_question and plugin_state is not None and plugin_state.rounds:
+            factual_question = plugin_state.rounds[-1].question
+        if not factual_question:
+            factual_question = research_subject
+        plugin_advisory_meta: dict[str, Any] = {}
+        _attach_question_assist_requests(
+            plugin_advisory_meta,
+            session_id=str(real_session_id or "new"),
+            question=factual_question,
+            phase="resume_pending" if action == "resume" else action,
+            score=(
+                _load_state_ambiguity_score(plugin_state)
+                if plugin_state is not None
+                else None
+            ),
+            last_question=(str(last_question) if last_question else None),
+            research_subject=research_subject,
+            dispatch_mode=resolve_request_subagent_dispatch(
+                self.agent_runtime_backend, self.opencode_mode
+            ),
+            runtime_backend=self.agent_runtime_backend,
+            opencode_mode=self.opencode_mode,
+            fanout_registry=self._resolved_fanout_registry(),
+            findings_store=self.findings_store,
+        )
+
         payload = build_interview_subagent(
             session_id=real_session_id or "new",
             action=action,
@@ -2280,6 +2310,7 @@ class InterviewHandler:
             transcript=transcript,
             turn_context=turn_context,
             adapter_question=adapter_question,
+            question_advisory=plugin_advisory_meta,
         )
         return await dispatch_plugin_terminal(
             self.event_store,
@@ -2291,7 +2322,7 @@ class InterviewHandler:
                 "status": DELEGATED_TO_SUBAGENT,
                 "dispatch_mode": "plugin",
                 "question_advisory_strategy": "plugin_child_factual_snapshot",
-                "question_advisory_recommended": True,
+                **plugin_advisory_meta,
                 **_interview_reasoning_meta(
                     state=plugin_state,
                     session_id=real_session_id,

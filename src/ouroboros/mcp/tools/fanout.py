@@ -1123,6 +1123,13 @@ def _web_source_evidence_violations(
         if isinstance(item, Mapping) and item.get("url")
     }
     query_set = set(queries) if isinstance(queries, list) else set()
+    represented_queries = {
+        item.get("query")
+        for item in search_results
+        if isinstance(item, Mapping) and item.get("query") in query_set
+    }
+    for query in sorted(query_set - represented_queries):
+        errors.append(f"source_evidence/search_results: no result attests query {query!r}")
     for index, item in enumerate(search_results):
         if isinstance(item, Mapping) and item.get("query") not in query_set:
             errors.append(f"source_evidence/search_results/{index}/query: was not submitted")
