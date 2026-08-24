@@ -28,6 +28,19 @@ _GJC_STORAGE_ONLY_HELP_MARKERS = (
 )
 
 
+def install_gjc_skills_projection() -> bool:
+    """Project packaged Ouroboros skills into GJC's native user registry."""
+    from ouroboros.gjc import install_gjc_skills
+
+    try:
+        result = install_gjc_skills(agent_dir=gjc_agent_dir(), prune=True)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        print_warning(f"Could not install GJC Ouroboros skills: {exc}")
+        return False
+    print_success(f"Installed {len(result.skill_paths)} Ouroboros skills → {result.target_root}")
+    return True
+
+
 def gjc_supports_standalone_mcp_autoload(
     gjc_path: str,
     *,
@@ -389,6 +402,8 @@ def setup_gjc_runtime(
     )
     registration_state: dict[str, bool] = {}
     snapshots: tuple[tuple[Path, Any], ...] = ()
+    if not gjc_supports_standalone_mcp_autoload(gjc_path, run_command=subprocess.run):
+        return False
     try:
         snapshots = tuple((path, snapshot_path(path, follow_links=False)) for path in paths)
         if config_path.exists():

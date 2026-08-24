@@ -37,6 +37,7 @@ import typer
 import yaml
 
 from ouroboros.bigbang.brownfield import scan_and_register, set_default_repo
+from ouroboros.cli import gjc_setup as _gjc_setup
 from ouroboros.cli.commands.claude_setup import (
     setup_claude as _setup_claude,
 )
@@ -93,6 +94,16 @@ from ouroboros.package_profiles import (
     has_unsupported_claude_sdk_mcp_mix,
 )
 from ouroboros.persistence.brownfield import BrownfieldStore
+
+_gjc_mcp_bridge_config_path = _gjc_setup.gjc_mcp_bridge_config_path
+_is_setup_managed_gjc_mcp_bridge_config = _gjc_setup.is_setup_managed_gjc_mcp_bridge_config
+_is_setup_managed_gjc_mcp_entry = _gjc_setup.is_setup_managed_gjc_mcp_entry
+_install_gjc_skills = _gjc_setup.install_gjc_skills_projection
+_remove_legacy_gjc_bridge = _gjc_setup.remove_legacy_gjc_bridge
+
+
+def _install_gjc_mcp_bridge_config() -> bool:
+    return _gjc_setup.install_gjc_mcp_bridge_config(_atomic_write_text)
 
 
 class _SetupCodexCliLogger:
@@ -3717,73 +3728,19 @@ def _install_pi_ooo_bridge() -> bool:
     return True
 
 
-def _install_gjc_skills() -> bool:
-    """Project packaged Ouroboros skills into GJC's native user registry."""
-    from ouroboros.gjc import install_gjc_skills
-    from ouroboros.runtime_instruction_artifacts import gjc_agent_dir
-
-    try:
-        result = install_gjc_skills(agent_dir=gjc_agent_dir(), prune=True)
-    except (FileNotFoundError, OSError, ValueError) as exc:
-        print_warning(f"Could not install GJC Ouroboros skills: {exc}")
-        return False
-    print_success(f"Installed {len(result.skill_paths)} Ouroboros skills → {result.target_root}")
-    return True
-
-
-def _gjc_mcp_bridge_config_path() -> Path:
-    from ouroboros.cli.gjc_setup import gjc_mcp_bridge_config_path
-
-    return gjc_mcp_bridge_config_path()
-
-
-def _install_gjc_mcp_bridge_config() -> bool:
-    from ouroboros.cli.gjc_setup import install_gjc_mcp_bridge_config
-
-    return install_gjc_mcp_bridge_config(_atomic_write_text)
-
-
-def _is_setup_managed_gjc_mcp_bridge_config(path: Path) -> bool:
-    from ouroboros.cli.gjc_setup import is_setup_managed_gjc_mcp_bridge_config
-
-    return is_setup_managed_gjc_mcp_bridge_config(path)
-
-
-def _is_setup_managed_gjc_mcp_entry(entry: object) -> bool:
-    from ouroboros.cli.gjc_setup import is_setup_managed_gjc_mcp_entry
-
-    return is_setup_managed_gjc_mcp_entry(entry)
-
-
-def _verify_gjc_standalone_mcp_autoload(gjc_path: str) -> bool:
-    from ouroboros.cli.gjc_setup import gjc_supports_standalone_mcp_autoload
-
-    return gjc_supports_standalone_mcp_autoload(gjc_path, run_command=subprocess.run)
-
-
 def _register_gjc_mcp_server(
     gjc_path: str,
     *,
     detected: dict[str, object] | None = None,
     registration_state: dict[str, bool] | None = None,
-    autoload_verified: bool = False,
 ) -> bool:
-    from ouroboros.cli.gjc_setup import register_gjc_mcp_server
-
-    return register_gjc_mcp_server(
+    return _gjc_setup.register_gjc_mcp_server(
         gjc_path,
         detect_mcp_entry=_detect_mcp_entry,
         run_command=subprocess.run,
         detected=detected,
         registration_state=registration_state,
-        autoload_verified=autoload_verified,
     )
-
-
-def _remove_legacy_gjc_bridge() -> bool:
-    from ouroboros.cli.gjc_setup import remove_legacy_gjc_bridge
-
-    return remove_legacy_gjc_bridge()
 
 
 def _install_gjc_runtime_artifacts(
@@ -3799,23 +3756,17 @@ def _install_gjc_runtime_artifacts(
     paths = (
         gjc_skills_root(gjc_agent_dir()),
         gjc_instruction_path().parent,
-        _gjc_mcp_bridge_config_path().parent,
+        _gjc_setup.gjc_mcp_bridge_config_path().parent,
         gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge",
     )
     try:
-        if not _verify_gjc_standalone_mcp_autoload(gjc_path):
-            return False
         snapshots = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
         succeeded = (
-            _install_gjc_mcp_bridge_config()
-            and _install_gjc_skills()
+            _gjc_setup.install_gjc_mcp_bridge_config(_atomic_write_text)
+            and _gjc_setup.install_gjc_skills_projection()
             and _install_runtime_instruction_artifact("gjc")
-            and _register_gjc_mcp_server(
-                gjc_path,
-                registration_state=state,
-                autoload_verified=True,
-            )
-            and _remove_legacy_gjc_bridge()
+            and _register_gjc_mcp_server(gjc_path, registration_state=state)
+            and _gjc_setup.remove_legacy_gjc_bridge()
         )
     except OSError as exc:
         print_warning(f"Could not install GJC runtime artifacts: {exc}")
@@ -3842,13 +3793,13 @@ def _refresh_gjc_runtime_artifacts() -> bool:
     paths = (
         gjc_skills_root(gjc_agent_dir()),
         gjc_instruction_path().parent,
-        _gjc_mcp_bridge_config_path().parent,
+        _gjc_setup.gjc_mcp_bridge_config_path().parent,
     )
     try:
         snapshots = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
         succeeded = (
-            _install_gjc_mcp_bridge_config()
-            and _install_gjc_skills()
+            _gjc_setup.install_gjc_mcp_bridge_config(_atomic_write_text)
+            and _gjc_setup.install_gjc_skills_projection()
             and _install_runtime_instruction_artifact("gjc")
         )
     except OSError as exc:
