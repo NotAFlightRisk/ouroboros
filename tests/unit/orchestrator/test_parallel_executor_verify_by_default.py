@@ -3018,6 +3018,11 @@ def test_resolve_verify_cwd_uses_sole_node_manifest_directory(tmp_path: Any) -> 
     [
         "CI=1 npm test",
         "env CI=1 npx playwright test",
+        "CI=1 env -i npx playwright test",
+        "env -u HOME npm test",
+        "env --unset=HOME yarn test",
+        "env -- npx playwright test",
+        "env -S 'CI=1 pnpm test'",
     ],
 )
 def test_resolve_verify_cwd_parses_environment_prefixed_node_command(
@@ -3064,6 +3069,9 @@ def test_resolve_verify_cwd_parses_shell_wrapped_node_command(
         "CI=1 bash -lc 'yarn test'",
         "CI=1 sh -c 'npm test'",
         "env CI=1 /bin/bash -lc 'pnpm test'",
+        "env -i CI=1 bash -lc 'npm test'",
+        "env -u HOME sh -c 'npx playwright test'",
+        "env -S 'CI=1 bash -lc \"yarn test\"'",
     ],
 )
 def test_resolve_verify_cwd_parses_environment_prefixed_shell_wrapped_node_command(
