@@ -171,6 +171,7 @@ def test_explicit_task_type_resets_governors_at_punctuation_boundary() -> None:
         == "document"
     )
 
+
 def test_explicit_task_type_scopes_colon_delimited_negative_prefix() -> None:
     for goal in (
         "Do not change source files: use task_type: document.",
@@ -183,7 +184,6 @@ def test_explicit_task_type_scopes_colon_delimited_negative_prefix() -> None:
         "If approved: use task_type: document.",
     ):
         assert explicit_task_type_from_goal(goal) is None
-
 
 
 def test_explicit_task_type_accepts_ordinary_positive_wording() -> None:

@@ -325,9 +325,7 @@ _EXPLICIT_TASK_TYPE_BINDING_PATTERN = re.compile(
 
 def _negative_constraint_colon(text: str, start: int) -> int:
     """Return a colon separating an earlier negative constraint, if present."""
-    hard_boundary = max(
-        text.rfind(token, 0, start) for token in (";", ".", "!", "?", "\n")
-    )
+    hard_boundary = max(text.rfind(token, 0, start) for token in (";", ".", "!", "?", "\n"))
     colon = text.rfind(":", hard_boundary + 1, start)
     if colon < 0:
         return -1
@@ -356,9 +354,7 @@ def _candidate_segment(text: str, start: int, end: int) -> tuple[int, int]:
 
 def _governor_scope_start(text: str, start: int) -> int:
     """Return the nearest hard clause boundary before a contract."""
-    boundary = max(
-        text.rfind(token, 0, start) for token in (";", ".", "!", "?", "\n")
-    )
+    boundary = max(text.rfind(token, 0, start) for token in (";", ".", "!", "?", "\n"))
     colon = _negative_constraint_colon(text, start)
     return max(boundary, colon) + 1
 
