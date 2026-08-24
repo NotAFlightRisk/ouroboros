@@ -1096,7 +1096,7 @@ def _web_source_evidence_violations(
     evidence: Any,
     contract: Mapping[str, Any],
 ) -> list[str]:
-    """Require host-attested search, result correlation, and successful fetches."""
+    """Require host-attested search attempts, result correlation, and successful fetches."""
     schema = contract.get("source_evidence_schema")
     if not isinstance(schema, Mapping):
         return ["source_evidence/<contract>: schema is missing or is not an object"]
@@ -1115,24 +1115,44 @@ def _web_source_evidence_violations(
     if queries != attested_queries:
         errors.append("source_evidence/search_queries: does not match child output")
 
-    raw_results = evidence.get("search_results")
-    search_results = raw_results if isinstance(raw_results, list) else []
-    result_urls = {
-        str(item.get("url"))
-        for item in search_results
-        if isinstance(item, Mapping) and item.get("url")
-    }
+    raw_attempts = evidence.get("search_attempts")
+    search_attempts = raw_attempts if isinstance(raw_attempts, list) else []
     query_set = set(queries) if isinstance(queries, list) else set()
-    represented_queries = {
-        item.get("query")
-        for item in search_results
-        if isinstance(item, Mapping) and item.get("query") in query_set
-    }
-    for query in sorted(query_set - represented_queries):
-        errors.append(f"source_evidence/search_results: no result attests query {query!r}")
-    for index, item in enumerate(search_results):
-        if isinstance(item, Mapping) and item.get("query") not in query_set:
-            errors.append(f"source_evidence/search_results/{index}/query: was not submitted")
+    attempts_by_query: dict[str, Mapping[str, Any]] = {}
+    result_urls: set[str] = set()
+    for index, item in enumerate(search_attempts):
+        if not isinstance(item, Mapping):
+            continue
+        query = item.get("query")
+        if query not in query_set:
+            errors.append(f"source_evidence/search_attempts/{index}/query: was not submitted")
+            continue
+        query_key = str(query)
+        if query_key in attempts_by_query:
+            errors.append(
+                f"source_evidence/search_attempts/{index}/query: duplicate attempt for {query_key!r}"
+            )
+            continue
+        attempts_by_query[query_key] = item
+        urls = item.get("result_urls")
+        if isinstance(urls, list):
+            result_urls.update(str(url) for url in urls if url)
+    for query in sorted(query_set - attempts_by_query.keys()):
+        errors.append(f"source_evidence/search_attempts: no attempt attests query {query!r}")
+
+    if output.get("status") == "no_reliable_reference":
+        expected_outcome = {
+            "no_relevant_results": "no_results",
+            "only_low_quality_results": "results_found",
+            "search_failed_after_attempts": "search_failed",
+        }.get(output.get("failure_reason"))
+        if expected_outcome is not None:
+            for query, attempt in attempts_by_query.items():
+                if attempt.get("outcome") != expected_outcome:
+                    errors.append(
+                        "source_evidence/search_attempts: "
+                        f"query {query!r} does not attest {output.get('failure_reason')!r}"
+                    )
 
     raw_fetched = evidence.get("fetched_sources")
     fetched = raw_fetched if isinstance(raw_fetched, list) else []

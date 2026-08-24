@@ -102,12 +102,13 @@ class SubmitFanoutResultsHandler:
                 "`fanout_id` and a `result_correlation_key`), call this tool with "
                 "one {key, content} per child output — `key` is the value of the "
                 "correlation field for that child. A `web_context` result must also "
-                "carry parent-runtime `source_evidence` proving the submitted queries "
-                "were searched and every reference was fetched successfully. A child "
-                "you could not spawn at all is exactly {key, undispatched: true}; never "
-                "invent output. Missing required keys return `status=partial`; retry "
-                "with EVERY lane. A complete submission returns a bounded disposable "
-                "artifact envelope; fetch its body with `ouroboros_fetch_artifact`."
+                "carry parent-runtime `source_evidence` with one attested search "
+                "attempt per submitted query and successful fetch evidence for every "
+                "returned reference. A child you could not spawn at all is exactly "
+                "{key, undispatched: true}; never invent output. Missing required keys "
+                "return `status=partial`; retry with EVERY lane. A complete submission "
+                "returns a bounded disposable artifact envelope; fetch its body with "
+                "`ouroboros_fetch_artifact`."
             ),
             parameters=(
                 MCPToolParameter(
@@ -138,8 +139,9 @@ class SubmitFanoutResultsHandler:
                         "Correlated child outputs: objects with a 'key' (the "
                         "correlation value) and a 'content' (the child result). "
                         "web_context additionally requires parent-runtime "
-                        "'source_evidence' with searched queries/results and fetched "
-                        "source status. Use 'undispatched': true when the child never ran."
+                        "'source_evidence' with per-query search attempts (including "
+                        "zero-result or failed attempts) and fetched source status. Use "
+                        "'undispatched': true when the child never ran."
                     ),
                     required=True,
                 ),

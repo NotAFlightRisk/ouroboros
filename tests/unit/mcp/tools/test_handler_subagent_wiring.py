@@ -304,6 +304,7 @@ class TestInterviewHandlerSubagentDispatch:
             for lane in ("code_context", "web_context")
         }
         monkeypatch.setattr(advisory, "interview_baseline_by_lane", lambda *_a, **_k: cached)
+        monkeypatch.setattr(advisory, "recent_findings_by_lane", lambda *_a, **_k: {})
         handler.findings_store = object()
 
         result = await handler.handle(arguments)
@@ -338,6 +339,7 @@ class TestInterviewHandlerSubagentDispatch:
             }
         }
         monkeypatch.setattr(advisory, "interview_baseline_by_lane", lambda *_a, **_k: cached)
+        monkeypatch.setattr(advisory, "recent_findings_by_lane", lambda *_a, **_k: {})
         handler.findings_store = object()
 
         result = await handler.handle(arguments)

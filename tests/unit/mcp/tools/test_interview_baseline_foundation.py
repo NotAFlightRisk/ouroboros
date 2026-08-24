@@ -75,9 +75,13 @@ async def test_start_fanout_publishes_server_provenance_and_is_reusable(tmp_path
     source_evidence = {
         "attested_by": "parent_runtime",
         "search_queries": list(web["search_queries"]),
-        "search_results": [
-            {"query": web["search_queries"][0], "url": reference["url"]}
-            for reference in web["references"]
+        "search_attempts": [
+            {
+                "query": query,
+                "outcome": "results_found",
+                "result_urls": [reference["url"] for reference in web["references"]],
+            }
+            for query in web["search_queries"]
         ],
         "fetched_sources": [
             {
@@ -174,9 +178,16 @@ async def test_answer_repair_joins_start_snapshot_and_is_reusable(tmp_path: Any)
             result_entry["source_evidence"] = {
                 "attested_by": "parent_runtime",
                 "search_queries": [query],
-                "search_results": [
-                    {"query": query, "url": reference["url"]}
-                    for reference in result_entry["content"]["references"]
+                "search_attempts": [
+                    {
+                        "query": query,
+                        "outcome": "results_found",
+                        "result_urls": [
+                            reference["url"]
+                            for reference in result_entry["content"]["references"]
+                        ],
+                    }
+                    for query in [query]
                 ],
                 "fetched_sources": [
                     {

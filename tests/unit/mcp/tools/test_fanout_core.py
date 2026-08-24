@@ -545,8 +545,13 @@ def _web_source_evidence(output: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "attested_by": "parent_runtime",
         "search_queries": queries,
-        "search_results": [
-            {"query": queries[0], "url": reference["url"]} for reference in references
+        "search_attempts": [
+            {
+                "query": query,
+                "outcome": "results_found",
+                "result_urls": [reference["url"] for reference in references],
+            }
+            for query in queries
         ],
         "fetched_sources": [
             {
@@ -652,10 +657,97 @@ def test_generic_web_noop_is_rejected_by_reference_contract(tmp_path: Any) -> No
             {"key": "web_context", "content": "external research is unnecessary"},
         ],
     )
-
     assert outcome["status"] == "partial"
     assert outcome["missing_required_keys"] == ["web_context"]
     assert "web_context" in outcome["contract_violations"]
+
+
+@pytest.mark.parametrize(
+    ("failure_reason", "attempt_outcome"),
+    [
+        ("no_relevant_results", "no_results"),
+        ("search_failed_after_attempts", "search_failed"),
+    ],
+)
+def test_authoritative_negative_search_completes_web_lane(
+    tmp_path: Any, failure_reason: str, attempt_outcome: str
+) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = f"sess-web-{attempt_outcome}"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    assert lane_keys == ["code_context", "web_context"]
+    question_identity = str(meta["question_advisory_request"]["question_identity"])
+    query = "official billing API"
+    web = {
+        "question_identity": question_identity,
+        "lane_id": "web_context",
+        "status": "no_reliable_reference",
+        "search_queries": [query],
+        "failure_reason": failure_reason,
+    }
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {"key": "code_context", "content": "code facts"},
+            {
+                "key": "web_context",
+                "content": web,
+                "source_evidence": {
+                    "attested_by": "parent_runtime",
+                    "search_queries": [query],
+                    "search_attempts": [
+                        {"query": query, "outcome": attempt_outcome, "result_urls": []}
+                    ],
+                    "fetched_sources": [],
+                },
+            },
+        ],
+    )
+
+    assert outcome["status"] == "complete"
+    assert outcome["contract_violations"] == {}
+
+
+def test_negative_web_lane_rejects_unattested_query_failure(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-web-failed-search"
+    fanout_id, correlation_key, _lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    question_identity = str(meta["question_advisory_request"]["question_identity"])
+    query = "official billing API"
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {"key": "code_context", "content": "code facts"},
+            {
+                "key": "web_context",
+                "content": {
+                    "question_identity": question_identity,
+                    "lane_id": "web_context",
+                    "status": "no_reliable_reference",
+                    "search_queries": [query],
+                    "failure_reason": "search_failed_after_attempts",
+                },
+                "source_evidence": {
+                    "attested_by": "parent_runtime",
+                    "search_queries": [query],
+                    "search_attempts": [
+                        {"query": query, "outcome": "no_results", "result_urls": []}
+                    ],
+                    "fetched_sources": [],
+                },
+            },
+        ],
+    )
+
+    assert outcome["status"] == "partial"
+    assert "web_context" in outcome["contract_violations"]
+
 
 
 def test_schema_valid_web_references_without_host_evidence_are_rejected(tmp_path: Any) -> None:
@@ -688,9 +780,12 @@ def test_every_submitted_web_query_requires_parent_result_evidence(tmp_path: Any
     web = outputs["web_context"]
     web["search_queries"] = ["official billing API", "billing security standard"]
     evidence = _web_source_evidence(web)
-    evidence["search_results"] = [
-        {"query": web["search_queries"][0], "url": reference["url"]}
-        for reference in web["references"]
+    evidence["search_attempts"] = [
+        {
+            "query": web["search_queries"][0],
+            "outcome": "results_found",
+            "result_urls": [reference["url"] for reference in web["references"]],
+        }
     ]
 
     outcome = submit_fanout_results(
@@ -707,7 +802,7 @@ def test_every_submitted_web_query_requires_parent_result_evidence(tmp_path: Any
     assert outcome["status"] == "partial"
     assert outcome["missing_required_keys"] == ["web_context"]
     assert outcome["contract_violations"]["web_context"] == [
-        "source_evidence/search_results: no result attests query "
+        "source_evidence/search_attempts: no attempt attests query "
         "'billing security standard'"
     ]
 

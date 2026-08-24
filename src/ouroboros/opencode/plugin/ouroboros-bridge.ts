@@ -291,7 +291,7 @@ export function mergeDispatchSources(
   }
   return {
     subs: [...parsedText.subs, ...parsedMeta.subs].slice(0, MAX_FANOUT),
-    responseShape: parsedText.responseShape,
+    responseShape: { ...parsedText.responseShape, ...parsedMeta.responseShape },
     preserveContent: false,
   }
 }

@@ -493,23 +493,51 @@ def _interview_web_reference_answer_contract() -> dict[str, Any]:
         "required": [
             "attested_by",
             "search_queries",
-            "search_results",
+            "search_attempts",
             "fetched_sources",
         ],
         "properties": {
             "attested_by": {"const": "parent_runtime"},
             "search_queries": shared["search_queries"],
-            "search_results": {
+            "search_attempts": {
                 "type": "array",
-                "maxItems": 25,
+                "minItems": 1,
+                "maxItems": 5,
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["query", "url"],
+                    "required": ["query", "outcome", "result_urls"],
                     "properties": {
                         "query": {"type": "string", "minLength": 1, "maxLength": 500},
-                        "url": {"type": "string", "pattern": r"^https?://", "maxLength": 2048},
+                        "outcome": {
+                            "type": "string",
+                            "enum": ["results_found", "no_results", "search_failed"],
+                        },
+                        "result_urls": {
+                            "type": "array",
+                            "maxItems": 25,
+                            "uniqueItems": True,
+                            "items": {
+                                "type": "string",
+                                "pattern": r"^https?://",
+                                "maxLength": 2048,
+                            },
+                        },
                     },
+                    "allOf": [
+                        {
+                            "if": {"properties": {"outcome": {"const": "results_found"}}},
+                            "then": {"properties": {"result_urls": {"minItems": 1}}},
+                        },
+                        {
+                            "if": {
+                                "properties": {
+                                    "outcome": {"enum": ["no_results", "search_failed"]}
+                                }
+                            },
+                            "then": {"properties": {"result_urls": {"maxItems": 0}}},
+                        },
+                    ],
                 },
             },
             "fetched_sources": {
@@ -543,11 +571,13 @@ def _interview_web_reference_answer_contract() -> dict[str, Any]:
             "Issue at least one real web search for the research_subject. Prefer primary "
             "and official sources, fetch promising results when available, and return two "
             "to five URL-bearing references with relevance and verification time. The parent "
-            "runtime must independently search the submitted queries, fetch every submitted "
-            "reference, and attach source_evidence when submitting this lane; child-authored "
-            "claims are not provenance. If reliable references remain absent after searching, "
-            "return the exact queries and a closed failure reason. If web tools are unavailable, "
-            "do not fabricate queries or references; the host must submit this lane as undispatched."
+            "runtime must independently search the submitted queries, record one "
+            "search_attempts entry per query (including zero-result and failed searches), "
+            "fetch every submitted reference, and attach source_evidence when submitting "
+            "this lane; child-authored claims are not provenance. If reliable references "
+            "remain absent after searching, return the exact queries and a closed failure "
+            "reason. If web tools are unavailable, do not fabricate queries or references; "
+            "the host must submit this lane as undispatched."
         ),
     }
 

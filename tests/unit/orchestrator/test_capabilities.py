@@ -5040,9 +5040,13 @@ def test_interview_metadata_includes_question_advisory_fanout_contract() -> None
     valid_source_evidence = {
         "attested_by": "parent_runtime",
         "search_queries": list(valid["search_queries"]),
-        "search_results": [
-            {"query": valid["search_queries"][0], "url": reference["url"]}
-            for reference in valid["references"]
+        "search_attempts": [
+            {
+                "query": query,
+                "outcome": "results_found",
+                "result_urls": [reference["url"] for reference in valid["references"]],
+            }
+            for query in valid["search_queries"]
         ],
         "fetched_sources": [
             {
