@@ -5255,10 +5255,15 @@ async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity(
     )
 
     assert result.success is False
-    assert result.attempt_budget_exhaustion is not None
-    assert result.attempt_budget_exhaustion.kind is AttemptBudgetKind.WALL_CLOCK
-    assert result.attempt_budget_exhaustion.limit == pytest.approx(0.02)
-    assert result.attempt_budget_exhaustion.observed >= 0.02
+    if provider_close_fails:
+        assert result.attempt_budget_exhaustion is None
+        assert result.outcome is ACExecutionOutcome.BLOCKED
+        assert "provider closure is confirmed" in (result.error or "")
+    else:
+        assert result.attempt_budget_exhaustion is not None
+        assert result.attempt_budget_exhaustion.kind is AttemptBudgetKind.WALL_CLOCK
+        assert result.attempt_budget_exhaustion.limit == pytest.approx(0.02)
+        assert result.attempt_budget_exhaustion.observed >= 0.02
     assert runtime.closed is True
     assert retry_hints.is_retryable_failure(result) is False
     budget_events = [
@@ -5266,7 +5271,7 @@ async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity(
         for call in event_store.append.await_args_list
         if call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
     ]
-    assert len(budget_events) == 1
+    assert len(budget_events) == (0 if provider_close_fails else 1)
 
 
 @pytest.mark.asyncio

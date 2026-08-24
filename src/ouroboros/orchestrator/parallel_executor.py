@@ -9407,12 +9407,6 @@ Respond with either ATOMIC or the structured JSON object only.
             raise
 
         except Exception as e:
-            if (
-                isinstance(e, ProviderStreamCloseTimeout)
-                and dispatch_state.attempt_budget_exhaustion is not None
-            ):
-                clear_cached_runtime_handle = True
-                return await attempt_terminalizer.attempt_budget(active_dispatch_id)
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
             await _seal_dispatch(
