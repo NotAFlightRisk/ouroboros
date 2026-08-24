@@ -570,14 +570,15 @@ def _interview_web_reference_answer_contract() -> dict[str, Any]:
         "runtime_instruction": (
             "Issue at least one real web search for the research_subject. Prefer primary "
             "and official sources, fetch promising results when available, and return two "
-            "to five URL-bearing references with relevance and verification time. The parent "
-            "runtime must independently search the submitted queries, record one "
-            "search_attempts entry per query (including zero-result and failed searches), "
-            "fetch every submitted reference, and attach source_evidence when submitting "
-            "this lane; child-authored claims are not provenance. If reliable references "
-            "remain absent after searching, return the exact queries and a closed failure "
-            "reason. If web tools are unavailable, do not fabricate queries or references; "
-            "the host must submit this lane as undispatched."
+            "to five URL-bearing references with relevance and verification time. Verification "
+            "timestamps must describe the current search/fetch, be no more than seven days old, "
+            "and not be future-dated relative to submission. The parent runtime must independently "
+            "search the submitted queries, record one search_attempts entry per query (including "
+            "zero-result and failed searches), fetch every submitted reference, and attach "
+            "source_evidence when submitting this lane; child-authored claims are not provenance. "
+            "If reliable references remain absent after searching, return the exact queries and a "
+            "closed failure reason. If web tools are unavailable, do not fabricate queries or "
+            "references; the host must submit this lane as undispatched."
         ),
     }
 

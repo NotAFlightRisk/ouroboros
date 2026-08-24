@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -28,6 +29,10 @@ def _payload(lane_id: str, *, question_identity: str):
     )
 
 
+def _current_verified_at() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 @pytest.mark.asyncio
 async def test_start_fanout_publishes_server_provenance_and_is_reusable(tmp_path: Any) -> None:
     workspace = tmp_path / "workspace"
@@ -50,6 +55,7 @@ async def test_start_fanout_publishes_server_provenance_and_is_reusable(tmp_path
         phase="start",
     )
     assert fanout_id is not None
+    verified_at = _current_verified_at()
     web = {
         "question_identity": question_identity,
         "lane_id": "web_context",
@@ -61,14 +67,14 @@ async def test_start_fanout_publishes_server_provenance_and_is_reusable(tmp_path
                 "url": "https://docs.stripe.com/billing",
                 "source_type": "official",
                 "relevance": "Primary billing lifecycle reference.",
-                "verified_at": "2026-08-24T00:00:00Z",
+                "verified_at": verified_at,
             },
             {
                 "title": "W3C Web Payments",
                 "url": "https://www.w3.org/Payments/WG/",
                 "source_type": "standard",
                 "relevance": "Standards context for web payments.",
-                "verified_at": "2026-08-24T00:00:00Z",
+                "verified_at": verified_at,
             },
         ],
     }
@@ -151,7 +157,7 @@ async def test_answer_repair_joins_start_snapshot_and_is_reusable(tmp_path: Any)
         }
         if lane_id == "web_context":
             url = "https://example.com/reference"
-            verified_at = "2026-08-24T00:00:00Z"
+            verified_at = _current_verified_at()
             query = "official reference"
             result_entry["content"] = {
                 "question_identity": question_identity,

@@ -47,6 +47,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import re
 from typing import TYPE_CHECKING, Any
@@ -1091,6 +1092,31 @@ def _contract_violations(
     return violations
 
 
+_WEB_VERIFICATION_MAX_AGE = timedelta(days=7)
+
+
+def _verification_timestamp_violations(
+    value: Any,
+    path: str,
+    now: datetime,
+) -> list[str]:
+    """Reject source checks that are stale or dated after this submission."""
+    if not isinstance(value, str):
+        return []
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return []
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return []
+    verified_at = parsed.astimezone(UTC)
+    if verified_at > now:
+        return [f"{path}: is future-dated relative to submission"]
+    if now - verified_at > _WEB_VERIFICATION_MAX_AGE:
+        return [f"{path}: is older than {_WEB_VERIFICATION_MAX_AGE.days} days"]
+    return []
+
+
 def _web_source_evidence_violations(
     output: Any,
     evidence: Any,
@@ -1109,6 +1135,29 @@ def _web_source_evidence_violations(
     ]
     if errors or not isinstance(output, Mapping) or not isinstance(evidence, Mapping):
         return errors
+    verification_now = datetime.now(UTC)
+    references = output.get("references")
+    if isinstance(references, list):
+        for index, reference in enumerate(references):
+            if isinstance(reference, Mapping):
+                errors.extend(
+                    _verification_timestamp_violations(
+                        reference.get("verified_at"),
+                        f"references/{index}/verified_at",
+                        verification_now,
+                    )
+                )
+    fetched_sources = evidence.get("fetched_sources")
+    if isinstance(fetched_sources, list):
+        for index, source in enumerate(fetched_sources):
+            if isinstance(source, Mapping):
+                errors.extend(
+                    _verification_timestamp_violations(
+                        source.get("verified_at"),
+                        f"source_evidence/fetched_sources/{index}/verified_at",
+                        verification_now,
+                    )
+                )
 
     queries = output.get("search_queries")
     attested_queries = evidence.get("search_queries")
@@ -1141,17 +1190,30 @@ def _web_source_evidence_violations(
         errors.append(f"source_evidence/search_attempts: no attempt attests query {query!r}")
 
     if output.get("status") == "no_reliable_reference":
+        failure_reason = output.get("failure_reason")
         expected_outcome = {
             "no_relevant_results": "no_results",
-            "only_low_quality_results": "results_found",
             "search_failed_after_attempts": "search_failed",
-        }.get(output.get("failure_reason"))
-        if expected_outcome is not None:
+        }.get(failure_reason)
+        if failure_reason == "only_low_quality_results":
+            outcomes = {attempt.get("outcome") for attempt in attempts_by_query.values()}
+            if "results_found" not in outcomes:
+                errors.append(
+                    "source_evidence/search_attempts: only_low_quality_results requires "
+                    "at least one result-bearing search attempt"
+                )
+            unexpected = outcomes - {"results_found", "no_results"}
+            if unexpected:
+                errors.append(
+                    "source_evidence/search_attempts: only_low_quality_results cannot "
+                    f"contain outcomes {sorted(unexpected)!r}"
+                )
+        elif expected_outcome is not None:
             for query, attempt in attempts_by_query.items():
                 if attempt.get("outcome") != expected_outcome:
                     errors.append(
                         "source_evidence/search_attempts: "
-                        f"query {query!r} does not attest {output.get('failure_reason')!r}"
+                        f"query {query!r} does not attest {failure_reason!r}"
                     )
 
     raw_fetched = evidence.get("fetched_sources")

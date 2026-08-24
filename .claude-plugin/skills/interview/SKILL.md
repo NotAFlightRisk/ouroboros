@@ -187,12 +187,37 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    using the declared parallel/sequential host action. For `web_context`, the
    child output is only a candidate reference list: independently run its exact
    `search_queries`, fetch every submitted reference URL, and submit a sibling
-   `source_evidence` object with:
-   - `attested_by: "parent_runtime"`
-   - the exact `search_queries`
-   - `search_results` entries containing each query and result URL
-   - `fetched_sources` entries containing each fetched URL, successful HTTP
-     status, confirmed source type, and UTC verification timestamp
+   `source_evidence` object. Its exact public-schema shape is:
+
+   ```json
+   {
+     "attested_by": "parent_runtime",
+     "search_queries": ["official billing API"],
+     "search_attempts": [
+       {
+         "query": "official billing API",
+         "outcome": "results_found",
+         "result_urls": ["https://example.com/official-billing-api"]
+       }
+     ],
+     "fetched_sources": [
+       {
+         "url": "https://example.com/official-billing-api",
+         "http_status": 200,
+         "source_type": "official",
+         "verified_at": "2026-08-24T06:00:00Z"
+       }
+     ]
+   }
+   ```
+
+   Record one `search_attempts` entry per exact submitted query. Use outcome
+   `results_found` with its result URLs, `no_results` with an empty URL list, or
+   `search_failed` with an empty URL list. An aggregate
+   `only_low_quality_results` response may mix `results_found` and `no_results`
+   attempts but must include at least one result-bearing attempt. Every fetched
+   source records its URL, successful HTTP status, confirmed source type, and
+   actual UTC verification timestamp.
 
    Do not copy child claims into `source_evidence`. If the runtime cannot search
    and fetch independently, submit `web_context` as `undispatched`; schema-valid

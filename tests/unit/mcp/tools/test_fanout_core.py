@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,7 @@ from ouroboros.mcp.tools.subagent import (
     submit_fanout_results,
 )
 from ouroboros.orchestrator.capabilities import (
+    interview_web_reference_answer_contract,
     stable_code_investigation_question_identity,
 )
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
@@ -508,11 +510,16 @@ def _emitted_advisory_contract(
     return fanout_id, correlation_key, lane_keys, meta
 
 
+def _current_verified_at() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 def _advisory_lane_outputs(meta: Mapping[str, Any], lane_keys: list[str]) -> dict[str, Any]:
     """Return one contract-satisfying factual output per emitted lane."""
     identity = str(meta["question_advisory_request"]["question_identity"])
     outputs: dict[str, Any] = {key: f"{key}-facts" for key in lane_keys}
     if "web_context" in outputs:
+        verified_at = _current_verified_at()
         outputs["web_context"] = {
             "question_identity": identity,
             "lane_id": "web_context",
@@ -524,14 +531,14 @@ def _advisory_lane_outputs(meta: Mapping[str, Any], lane_keys: list[str]) -> dic
                     "url": "https://docs.stripe.com/billing",
                     "source_type": "official",
                     "relevance": "Primary implementation and lifecycle reference.",
-                    "verified_at": "2026-08-24T00:00:00Z",
+                    "verified_at": verified_at,
                 },
                 {
                     "title": "W3C Web Payments overview",
                     "url": "https://www.w3.org/Payments/WG/",
                     "source_type": "standard",
                     "relevance": "Standards context for web payment experiences.",
-                    "verified_at": "2026-08-24T00:00:00Z",
+                    "verified_at": verified_at,
                 },
             ],
         }
@@ -709,6 +716,155 @@ def test_authoritative_negative_search_completes_web_lane(
 
     assert outcome["status"] == "complete"
     assert outcome["contract_violations"] == {}
+
+
+def test_low_quality_web_result_accepts_mixed_search_outcomes(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-web-low-quality-mixed"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(
+        registry, session_id
+    )
+    assert lane_keys == ["code_context", "web_context"]
+    question_identity = str(meta["question_advisory_request"]["question_identity"])
+    queries = ["official billing API", "billing API discussion"]
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {"key": "code_context", "content": "code facts"},
+            {
+                "key": "web_context",
+                "content": {
+                    "question_identity": question_identity,
+                    "lane_id": "web_context",
+                    "status": "no_reliable_reference",
+                    "search_queries": queries,
+                    "failure_reason": "only_low_quality_results",
+                },
+                "source_evidence": {
+                    "attested_by": "parent_runtime",
+                    "search_queries": queries,
+                    "search_attempts": [
+                        {"query": queries[0], "outcome": "no_results", "result_urls": []},
+                        {
+                            "query": queries[1],
+                            "outcome": "results_found",
+                            "result_urls": ["https://example.com/unreliable-discussion"],
+                        },
+                    ],
+                    "fetched_sources": [],
+                },
+            },
+        ],
+    )
+
+    assert outcome["status"] == "complete"
+    assert outcome["contract_violations"] == {}
+
+
+def test_low_quality_web_result_requires_result_bearing_attempt(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-web-low-quality-empty"
+    fanout_id, correlation_key, _lane_keys, meta = _emitted_advisory_contract(
+        registry, session_id
+    )
+    question_identity = str(meta["question_advisory_request"]["question_identity"])
+    query = "official billing API"
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {"key": "code_context", "content": "code facts"},
+            {
+                "key": "web_context",
+                "content": {
+                    "question_identity": question_identity,
+                    "lane_id": "web_context",
+                    "status": "no_reliable_reference",
+                    "search_queries": [query],
+                    "failure_reason": "only_low_quality_results",
+                },
+                "source_evidence": {
+                    "attested_by": "parent_runtime",
+                    "search_queries": [query],
+                    "search_attempts": [
+                        {"query": query, "outcome": "no_results", "result_urls": []}
+                    ],
+                    "fetched_sources": [],
+                },
+            },
+        ],
+    )
+
+    assert outcome["status"] == "partial"
+    assert outcome["contract_violations"]["web_context"] == [
+        "source_evidence/search_attempts: only_low_quality_results requires "
+        "at least one result-bearing search attempt"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("verified_at", "expected_fragment"),
+    [
+        (
+            lambda: (datetime.now(UTC) - timedelta(days=8))
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "is older than 7 days",
+        ),
+        (
+            lambda: (datetime.now(UTC) + timedelta(minutes=5))
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "is future-dated relative to submission",
+        ),
+    ],
+)
+def test_web_references_reject_implausible_verification_times(
+    tmp_path: Any,
+    verified_at: Any,
+    expected_fragment: str,
+) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = f"sess-web-time-{expected_fragment}"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(
+        registry, session_id
+    )
+    outputs = _advisory_lane_outputs(meta, lane_keys)
+    timestamp = verified_at()
+    for reference in outputs["web_context"]["references"]:
+        reference["verified_at"] = timestamp
+    evidence = _web_source_evidence(outputs["web_context"])
+
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {"key": "code_context", "content": outputs["code_context"]},
+            {
+                "key": "web_context",
+                "content": outputs["web_context"],
+                "source_evidence": evidence,
+            },
+        ],
+    )
+
+    assert outcome["status"] == "partial"
+    violations = outcome["contract_violations"]["web_context"]
+    assert any(expected_fragment in violation for violation in violations)
+    assert any(violation.startswith("references/0/verified_at") for violation in violations)
+    assert any(
+        violation.startswith("source_evidence/fetched_sources/0/verified_at")
+        for violation in violations
+    )
 
 
 def test_negative_web_lane_rejects_unattested_query_failure(tmp_path: Any) -> None:
@@ -1008,6 +1164,19 @@ def test_interview_skill_surfaces_match_on_snapshot_contract() -> None:
         stop = skill.index(end, start)
         sections.append(skill[start:stop])
     assert sections[0] == sections[1]
+
+
+def test_documented_interview_source_evidence_matches_public_schema() -> None:
+    skill = Path("skills/interview/SKILL.md").read_text(encoding="utf-8")
+    json_start = skill.index("   ```json", skill.index("**Factual research snapshot**"))
+    json_body_start = skill.index("\n", json_start) + 1
+    json_end = skill.index("\n   ```", json_body_start)
+    documented = json.loads(skill[json_body_start:json_end])
+    schema = interview_web_reference_answer_contract()["source_evidence_schema"]
+
+    assert list(fanout_module._validate_against_contract(documented, {"response_model_schema": schema})) == []
+    assert "search_results" not in documented
+    assert documented["search_attempts"][0]["outcome"] == "results_found"
 
 
 @pytest.mark.asyncio
