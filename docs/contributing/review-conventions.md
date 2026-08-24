@@ -152,6 +152,104 @@ Writing that reasoning into the PR description is not ceremony. The bot reads
 it, and a stated, justified scope boundary is treated differently from a
 requirement that is simply unmet.
 
+## When the review will not converge
+
+Most PRs settle in one to three rounds. Some do not, and the failure looks the
+same every time: you fix what the round asked for, push, and the next round
+returns a finding of the same *kind* somewhere else. Nothing is wrong with your
+diligence. The shape of the change is wrong, and no amount of patching will
+close it.
+
+Learn to recognize this early. The cost of not recognizing it is real:
+
+| PR | Approach | Rounds | Outcome |
+|---|---|---|---|
+| #1926 | "**bind** regex evidence to acceptance input" — make the classifier correct | 30 | **closed, never merged** |
+| #2065 | "**refuse** unbound regex evidence as grounds to overturn an agent FAIL" — remove the classifier's authority | 3 | merged |
+
+Same underlying defect, opposite shape, ten times the cost. The second PR did
+not out-argue the reviewer. It removed the thing the reviewer kept finding
+holes in.
+
+### Signature 1 — you are enumerating an unbounded surface
+
+You are hand-maintaining an allowlist, option grammar, or keyword table that
+mirrors something you do not own — another tool's CLI, a model's output format,
+a third-party schema. Each round the reviewer names a case your table misses,
+because the table can never be complete.
+
+PR #2212 ("recognize option-bearing uv test runs") spent 10 rounds here:
+
+> R2: "The new allowlist does not cover the complete supported `uv run` option grammar"
+> R3: "The hand-maintained option grammar is still incomplete for valid current `uv run` commands."
+> R5: "The enumerated option schema omits valid current `uv run` flags"
+
+**The escape:** stop enumerating what is allowed; parse, and reject anything you
+did not positively understand. #2212 converged when it became operand-aware and
+started rejecting malformed operands, non-executing modes, and compound
+commands outright — an unbounded allowlist became a bounded, fail-closed parser.
+Delegating to the authoritative source beats both; the reviewer had already
+suggested exactly that, as a non-blocking note in round 5:
+
+> "Consider sharing one authoritative `uv run` option schema/parser with
+> `src/ouroboros/evaluation/detector.py` rather than maintaining parallel
+> option tables that can drift independently."
+
+Read the non-blocking suggestions. They are often where the structural fix is.
+
+### Signature 2 — you kept two paths alive
+
+You added a new path and left the old one in place, and now both must behave
+identically. Every round finds another place they diverge. This is
+combinatorial: the reviewer will keep finding pairs.
+
+PR #2193 ("fuse scoring question and routing") spent 7 rounds here — the
+legacy branch not running completion logic, the atomic branch losing an answer
+on failure, `completion` assigned only in one branch, `[decide_later]` meaning
+different things per path, then the legacy branch still calling the old helper.
+
+**The escape:** delete one path, or funnel both through one implementation. Two
+paths that must agree are two paths that will not.
+
+### Signature 3 — the component's authority is the problem, not its accuracy
+
+The reviewer keeps defeating your check with a new input class. You narrow it;
+next round it is defeated again. The question to ask is not "how do I classify
+correctly?" but "**why is this component allowed to make this decision at
+all?**"
+
+That is #1926 versus #2065 above. Thirty rounds went into making a regex-based
+evidence classifier correct enough to overturn an agent's FAIL verdict. It was
+never going to be correct enough. The merged fix let it stop overturning
+verdicts.
+
+### How to tell you are in one
+
+- The same finding reappears at a **different line number** each round. You are
+  moving the failure, not removing it.
+- Each fix **adds surface** — another branch, another special case, another
+  entry in a table.
+- The blocker count is **not trending down** after three rounds.
+- You are arguing about which inputs are legitimate rather than about what the
+  code does.
+
+### What to do
+
+Stop pushing. Another round costs you and proves nothing.
+
+1. Write down the property the reviewer keeps attacking, in one sentence.
+2. Ask whether that property can be made unnecessary — by deleting the
+   component, by inverting the default to fail closed, or by delegating to
+   whatever actually owns the truth.
+3. Say this in the PR, explicitly: the current shape cannot close, here is the
+   shape that can. A stated structural argument gets engaged with.
+4. Be willing to close the PR and open a differently-shaped one. #2065 is not a
+   failure story — it is the correct ending to #1926.
+
+None of this is a reason to dismiss a finding you simply do not want to fix. The
+signature is a repeating *kind* of finding across rounds, not a single finding
+you disagree with.
+
 ## Mechanics
 
 - **Re-review is triggered by a comment.** Push your fix, then post a comment
