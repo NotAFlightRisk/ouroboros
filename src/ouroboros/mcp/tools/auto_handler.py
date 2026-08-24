@@ -19,6 +19,7 @@ import structlog
 from ouroboros.auto.adapters import (
     HandlerInterviewBackend,
     HandlerLateralThinker,
+    HandlerRalphPoller,
     HandlerRunStarter,
     HandlerSeedGenerator,
     HandlerSeedQAEvaluator,
@@ -50,6 +51,7 @@ from ouroboros.auto.policies import apply_domain_policy_defaults
 from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.resume_render import render_resume_lines
 from ouroboros.auto.runtime_routing import (
+    AutoStageRuntimePlan,
     demote_plugin_opencode_mode,
     resolve_auto_stage_runtime_plan,
 )
@@ -79,6 +81,7 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools._dashboard import resolve_dashboard_base_url
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.auto_runtime import initialized_runtime_event_store
 from ouroboros.mcp.tools.auto_start_lease_store import (
     CORRUPT_START_LEASE,
 )
@@ -88,7 +91,10 @@ from ouroboros.mcp.tools.auto_start_lease_store import (
 from ouroboros.mcp.tools.auto_start_lease_store import (
     write_start_lease_locked as _write_start_lease_locked,
 )
-from ouroboros.mcp.tools.background import start_background_tool_job
+from ouroboros.mcp.tools.background import (
+    _runtime_requires_in_process_job,
+    start_background_tool_job,
+)
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.mcp.tools.job_observer import (
@@ -544,6 +550,7 @@ class AutoHandler:
             )
             lateral_thinker = HandlerLateralThinker(lateral_handler)
 
+        runtime_event_store = await initialized_runtime_event_store(self.event_store)
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=state.cwd),
             store=store,
@@ -554,6 +561,7 @@ class AutoHandler:
             # AI answer refiner: concrete goal-specific answers so interview
             # ambiguity converges. Best-effort; None falls back to deterministic.
             answer_refiner=build_answer_refiner(),
+            event_store=runtime_event_store,
         )
         # RFC #809 Phase 2.1 — wire Seed QA on every MCP auto surface before
         # RUN/skip-run transitions. For OpenCode plugin sessions, use the same
@@ -573,12 +581,18 @@ class AutoHandler:
             opencode_mode=authoring_opencode_mode,
         )
         seed_qa_evaluator = HandlerSeedQAEvaluator(seed_qa_handler)
-        watchdog_event_store = self.event_store or EventStore()
-        await watchdog_event_store.initialize()
         watchdog = Watchdog(
             controls=load_runtime_controls(None),
-            event_appender=watchdog_event_store,
+            event_appender=runtime_event_store,
         )
+        ralph_resumer = None
+        if state.ralph_job_id is not None and self.ralph_handler_factory is not None:
+            ralph_resumer = HandlerRalphPoller(
+                self.ralph_handler_factory(
+                    runtime_plan.execute.runtime_backend,
+                    runtime_plan.execute.opencode_mode,
+                )
+            )
         pipeline = AutoPipeline(
             driver,
             HandlerSeedGenerator(generate_seed_handler),
@@ -601,6 +615,7 @@ class AutoHandler:
             attach_source=attach_source,
             reconcile_run=reconcile_run,
             reconcile_source=reconcile_source,
+            ralph_resumer=ralph_resumer,
             seed_qa_evaluator=seed_qa_evaluator,
             lateral_thinker=lateral_thinker,
             watchdog=watchdog,
@@ -615,7 +630,7 @@ class AutoHandler:
                 cleanup=auto_worktree_cleanup_eligible(result),
             )
             if self.event_store is None:
-                await watchdog_event_store.close()
+                await runtime_event_store.close()
 
 
 @dataclass
@@ -791,6 +806,19 @@ class StartAutoHandler:
             fallback_runtime_backend=self.agent_runtime_backend,
             fallback_opencode_mode=self.opencode_mode,
         )
+        # The detach decision below sees only ``self.agent_runtime_backend``
+        # (auto's reflect-stage default): a mixed runtime_profile can put
+        # `stages.execute: host` behind an executable reflect/default runtime,
+        # so ask explicitly whether the resolved EXECUTE stage — the one that
+        # actually parks a host dispatch — needs this process to stay put.
+        execute_runtime_plan = _state_runtime_plan(
+            state,
+            fallback_runtime_backend=self.agent_runtime_backend,
+            fallback_opencode_mode=self.opencode_mode,
+        )
+        execute_requires_in_process = (not state.skip_run) and _runtime_requires_in_process_job(
+            execute_runtime_plan.execute.runtime_backend
+        )
         lease_token, lease_error = _reserve_start_lease(
             self._store,
             auto_session_id,
@@ -913,6 +941,7 @@ class StartAutoHandler:
                 on_detaching=_on_detaching,
                 on_started=_on_started,
                 on_enqueue_failure=_on_enqueue_failure,
+                requires_in_process_job=execute_requires_in_process,
             )
         except MCPToolError as exc:
             return Result.err(exc)
@@ -1196,12 +1225,18 @@ def _auto_session_id_from_arguments(arguments: dict[str, Any]) -> str | None:
     return None
 
 
-def _state_dispatches_via_plugin(
+def _state_runtime_plan(
     state: AutoPipelineState,
     *,
     fallback_runtime_backend: str | None,
     fallback_opencode_mode: str | None,
-) -> bool:
+) -> AutoStageRuntimePlan:
+    """Resolve the same per-stage runtime plan ``AutoHandler._run`` will use.
+
+    Shared by ``_state_dispatches_via_plugin`` and ``StartAutoHandler`` so
+    both ask "what will actually run this stage" the identical way instead of
+    each hand-rolling the ``state.runtime_backend`` fallback chain.
+    """
     runtime_backend = state.runtime_backend or fallback_runtime_backend
     if runtime_backend is None and state.opencode_mode is not None:
         runtime_backend = "opencode"
@@ -1210,10 +1245,23 @@ def _state_dispatches_via_plugin(
         runtime_backend,
         state.opencode_mode or fallback_opencode_mode,
     )
-    runtime_plan = resolve_auto_stage_runtime_plan(
+    return resolve_auto_stage_runtime_plan(
         runtime_override=None,
         fallback_runtime_backend=runtime_backend,
         fallback_opencode_mode=opencode_mode,
+    )
+
+
+def _state_dispatches_via_plugin(
+    state: AutoPipelineState,
+    *,
+    fallback_runtime_backend: str | None,
+    fallback_opencode_mode: str | None,
+) -> bool:
+    runtime_plan = _state_runtime_plan(
+        state,
+        fallback_runtime_backend=fallback_runtime_backend,
+        fallback_opencode_mode=fallback_opencode_mode,
     )
     interview_dispatch = should_dispatch_via_plugin(
         runtime_plan.interview.runtime_backend,
@@ -2260,10 +2308,11 @@ def _authoring_seed_handler(
 def _handler_matches_runtime(
     handler: object, agent_runtime_backend: str | None, opencode_mode: str | None
 ) -> bool:
-    return (
-        getattr(handler, "agent_runtime_backend", None) == agent_runtime_backend
-        and getattr(handler, "opencode_mode", None) == opencode_mode
-    )
+    handler_runtime = getattr(handler, "agent_runtime_backend", None)
+    return handler_runtime == agent_runtime_backend and _resolved_opencode_mode(
+        handler_runtime,
+        getattr(handler, "opencode_mode", None),
+    ) == _resolved_opencode_mode(agent_runtime_backend, opencode_mode)
 
 
 def _execution_start_handler(
@@ -2299,6 +2348,9 @@ def _execution_start_handler(
         opencode_mode=opencode_mode,
         mcp_manager=mcp_manager,
         mcp_tool_prefix=mcp_tool_prefix,
+        session_signal_hub=getattr(original_execute, "session_signal_hub", None),
+        host_dispatch_bridge=getattr(original_execute, "host_dispatch_bridge", None),
+        seed_handoff_registry=getattr(original_execute, "seed_handoff_registry", None),
     )
     # Without the successor stack the run cannot enqueue the evaluation it
     # delegates to and finishes with ``evaluation_status="enqueue_failed"``.
