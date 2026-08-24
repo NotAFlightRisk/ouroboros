@@ -54,6 +54,8 @@ def normalized_seed_qa_feedback(
     repairs: list[str] = []
     if task_type is not None:
         repairs.append(f"Seed task_type must be {task_type}.")
+    if seed is not None and (parent_seed_id := inherited_parent_seed_id(seed)) is not None:
+        repairs.append(f"Seed metadata parent_seed_id must be {parent_seed_id}.")
     if requests_seed_qa_ambiguity_repair(qa_result):
         repairs.append("Seed metadata must satisfy the readiness gate: ambiguity_score <= 0.20.")
     if "non_goals" in lowered or "non-goals" in lowered or "runtime_context" in lowered:
