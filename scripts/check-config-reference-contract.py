@@ -1265,9 +1265,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             if self._syntactically_mentions_tracked_config(candidate):
                 return True
 
-            containing_class = (
-                candidate if isinstance(candidate, ast.ClassDef) else root_class
-            )
+            containing_class = candidate if isinstance(candidate, ast.ClassDef) else root_class
             for child in ast.walk(candidate):
                 if not isinstance(child, ast.Call):
                     continue
@@ -1279,10 +1277,40 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         target = decorator.func if isinstance(decorator, ast.Call) else decorator
         return _callable_name(target)
 
+    def _is_unshadowed_functools_wraps(self, node: ast.AST, decorator: ast.expr) -> bool:
+        if not (
+            isinstance(decorator, ast.Call)
+            and isinstance(decorator.func, ast.Name)
+            and decorator.func.id == "wraps"
+        ):
+            return False
+        bound_to_functools = False
+        node_line = getattr(node, "lineno", 0)
+        for statement in self._module.tree.body:
+            if getattr(statement, "lineno", 0) >= node_line:
+                break
+            if isinstance(statement, ast.ImportFrom) and statement.module == "functools":
+                if any(
+                    alias.name == "wraps" and (alias.asname or alias.name) == "wraps"
+                    for alias in statement.names
+                ):
+                    bound_to_functools = True
+                    continue
+            if any(
+                isinstance(candidate, ast.Name)
+                and candidate.id == "wraps"
+                and isinstance(candidate.ctx, (ast.Store, ast.Del))
+                for candidate in ast.walk(statement)
+            ):
+                bound_to_functools = False
+        return bound_to_functools
+
     def _record_unresolved_decorator(self, node: ast.AST, decorator: ast.expr) -> None:
+        name = self._decorator_name(decorator) or ast.unparse(decorator)
+        if self._is_unshadowed_functools_wraps(node, decorator):
+            return
         if not self._has_transitive_callable_relevance(node):
             return
-        name = self._decorator_name(decorator) or ast.unparse(decorator)
         self.unresolved_semantics.add(
             f"{self._module.name}:{getattr(node, 'lineno', 0)}: unresolved decorator {name!r}"
         )
@@ -3631,10 +3659,17 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             return
         for scope in self._states:
             visible.update(scope)
+        closure_origins = TRACKED_SECTIONS | {
+            _CONFIG_ROOT,
+            _WRAPS_FACTORY,
+            _UPDATE_WRAPPER,
+            _IDENTITY_DECORATOR,
+            _PRESERVING_DECORATOR_ORIGIN,
+        }
         visible = {
             name: value
             for name, value in visible.items()
-            if _contained_origins(value) & (TRACKED_SECTIONS | {_CONFIG_ROOT})
+            if _contained_origins(value) & closure_origins
         }
         if not visible:
             return
@@ -5589,6 +5624,17 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         value = original
         for decorator in reversed(node.decorator_list):
             decorator_value = self._expression_value(decorator)
+            decorator_callable_value = (
+                self._expression_value(decorator.func)
+                if isinstance(decorator, ast.Call)
+                else decorator_value
+            )
+            if _WRAPS_FACTORY in decorator_callable_value.origins or (
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Name)
+                and _WRAPS_FACTORY in self._name_value(decorator.func.id).origins
+            ):
+                continue
             if decorator_value.origins & (
                 _CONTEXTMANAGER_DECORATORS
                 | {

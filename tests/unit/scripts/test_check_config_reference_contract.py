@@ -6775,14 +6775,14 @@ def test_unresolved_decorator_follows_callable_alias_relevance(contract, tmp_pat
         """
 from external_package import preserve_or_replace
 
-def helper(config):
+def _helper(config):
     return config.evaluation.stage1_enabled
 
-alias = helper
+_alias = _helper
 
 @preserve_or_replace
 def process(config):
-    return alias(config)
+    return _alias(config)
 """,
         encoding="utf-8",
     )
@@ -6793,8 +6793,7 @@ def process(config):
 
     assert reads == frozenset()
     assert any(
-        "unresolved decorator 'preserve_or_replace'" in violation
-        for violation in report.violations
+        "unresolved decorator 'preserve_or_replace'" in violation for violation in report.violations
     )
 
 
@@ -6805,17 +6804,17 @@ def test_unresolved_decorator_resolves_method_receiver_before_relevance(
         """
 from external_package import preserve_or_replace
 
-class ConfigReader:
+class _ConfigReader:
     def read(self, config):
         return config.evaluation.stage1_enabled
 
-class Harmless:
+class _Harmless:
     def read(self):
         return 42
 
 @preserve_or_replace
 def process():
-    return Harmless().read()
+    return _Harmless().read()
 """,
         encoding="utf-8",
     )
@@ -6833,13 +6832,13 @@ def test_unresolved_decorator_follows_proven_method_receiver(contract, tmp_path:
         """
 from external_package import preserve_or_replace
 
-class Reader:
+class _Reader:
     def read(self, config):
         return config.evaluation.stage1_enabled
 
 @preserve_or_replace
 def process(config):
-    return Reader().read(config)
+    return _Reader().read(config)
 """,
         encoding="utf-8",
     )
@@ -6850,8 +6849,7 @@ def process(config):
 
     assert reads == frozenset()
     assert any(
-        "unresolved decorator 'preserve_or_replace'" in violation
-        for violation in report.violations
+        "unresolved decorator 'preserve_or_replace'" in violation for violation in report.violations
     )
 
 
