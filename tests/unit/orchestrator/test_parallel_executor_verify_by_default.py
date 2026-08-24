@@ -3028,6 +3028,7 @@ def test_resolve_verify_cwd_uses_sole_node_manifest_directory(tmp_path: Any) -> 
         "env --default-signal npm test",
         "env --ignore-signal=PIPE yarn test",
         "env --block-signal=PIPE pnpm test",
+        "env --list-signal-handling npm test",
     ],
 )
 def test_resolve_verify_cwd_parses_environment_prefixed_node_command(
