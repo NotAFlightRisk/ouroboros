@@ -10022,6 +10022,8 @@ class TestGjcSetup:
             "name": "ouroboros",
             "runtimeStatus": "autoload",
             "config": {
+                "timeout": 30000,
+                "sharing": "per-session",
                 "type": "stdio",
                 "command": "uvx",
                 "args": [
@@ -10036,6 +10038,9 @@ class TestGjcSetup:
                     "--runtime",
                     "gjc",
                 ],
+                "env": {
+                    "OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())
+                },
             },
         }
         validated = subprocess.CompletedProcess(
@@ -10044,10 +10049,15 @@ class TestGjcSetup:
             stdout=json.dumps({"servers": [managed_entry]}),
             stderr="",
         )
-        with patch(
-            "ouroboros.cli.commands.setup.subprocess.run",
-            side_effect=[self._gjc_autoload_help(), listed, added, validated],
-        ) as run:
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.subprocess.run",
+                side_effect=[self._gjc_autoload_help(), listed, added, validated],
+            ) as run,
+            patch(
+                "ouroboros.cli.gjc_setup.verify_gjc_mcp_endpoint", return_value=True
+            ) as verify,
+        ):
             assert setup_cmd._register_gjc_mcp_server(
                 "/opt/bin/gjc",
                 detected={
@@ -10069,6 +10079,7 @@ class TestGjcSetup:
         expected_bridge_config = setup_cmd._gjc_mcp_bridge_config_path()
         assert f"--env=OUROBOROS_MCP_CONFIG={expected_bridge_config}" in add_args
         assert "--sharing" not in add_args
+        verify.assert_called_once_with("uvx", managed_entry["config"]["args"])
 
     def test_gjc_mcp_add_argv_is_accepted_by_installed_cli(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -10215,6 +10226,8 @@ class TestGjcSetup:
             "name": "ouroboros",
             "runtimeStatus": runtime_status,
             "config": {
+                "timeout": 30000,
+                "sharing": "per-session",
                 "type": "stdio",
                 "command": "uvx",
                 "args": [
@@ -10229,6 +10242,9 @@ class TestGjcSetup:
                     "--runtime",
                     "gjc",
                 ],
+                "env": {
+                    "OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())
+                },
             },
         }
         listed = subprocess.CompletedProcess(
@@ -10258,6 +10274,83 @@ class TestGjcSetup:
         }
 
         assert not setup_cmd._is_setup_managed_gjc_mcp_entry(entry)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("timeout", 60000),
+            ("cwd", "/operator/worktree"),
+            ("env", {"OUROBOROS_MCP_CONFIG": "<redacted>", "CUSTOM": "<redacted>"}),
+        ],
+    )
+    def test_mcp_ownership_rejects_operator_modified_schema_fields(
+        self, field: str, value: object
+    ) -> None:
+        config: dict[str, object] = {
+            "timeout": 30000,
+            "sharing": "per-session",
+            "type": "stdio",
+            "command": "uvx",
+            "args": [
+                "--isolated",
+                "--python",
+                ">=3.12",
+                "--from",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+                "--runtime",
+                "gjc",
+            ],
+            "env": {"OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())},
+        }
+        config[field] = value
+
+        assert not setup_cmd._is_setup_managed_gjc_mcp_entry(
+            {"name": "ouroboros", "config": config}
+        )
+
+    def test_existing_managed_mcp_must_execute_health_check(self) -> None:
+        config = {
+            "timeout": 30000,
+            "sharing": "per-session",
+            "type": "stdio",
+            "command": "uvx",
+            "args": [
+                "--isolated",
+                "--python",
+                ">=3.12",
+                "--from",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+                "--runtime",
+                "gjc",
+            ],
+            "env": {"OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())},
+        }
+        listed = subprocess.CompletedProcess(
+            ["gjc", "mcp", "list", "--json"],
+            0,
+            stdout=json.dumps(
+                {"servers": [{"name": "ouroboros", "runtimeStatus": "autoload", "config": config}]}
+            ),
+            stderr="",
+        )
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.subprocess.run",
+                side_effect=[self._gjc_autoload_help(), listed],
+            ),
+            patch(
+                "ouroboros.cli.gjc_setup.verify_gjc_mcp_endpoint", return_value=False
+            ) as verify,
+        ):
+            assert not setup_cmd._register_gjc_mcp_server("/opt/bin/gjc")
+
+        verify.assert_called_once_with("uvx", config["args"])
 
     def test_setup_gjc_registration_failure_rolls_back_and_exits_nonzero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

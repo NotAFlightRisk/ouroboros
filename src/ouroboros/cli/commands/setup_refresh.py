@@ -88,31 +88,33 @@ def refresh_runtime_artifacts() -> None:
         else:
             failed.append("pi")
 
-    gjc_expected = False
-    gjc_succeeded = True
     gjc_root = gjc_agent_dir()
     gjc_skills = gjc_root / "skills"
     gjc_bridge = gjc_root / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
-    if gjc_bridge.exists():
-        gjc_expected = True
-        from ouroboros.config import get_gjc_cli_path
+    gjc_bridge_config = gjc_root / "ouroboros" / "mcp-bridge.yaml"
+    gjc_expected = (
+        (
+            gjc_skills.is_dir()
+            and any(path.name.startswith("ouroboros-") for path in gjc_skills.iterdir())
+        )
+        or gjc_instruction_path().exists()
+        or gjc_bridge_config.exists()
+        or gjc_bridge.exists()
+    )
+    from ouroboros.config import get_gjc_cli_path
 
-        gjc_path = get_gjc_cli_path() or shutil.which("gjc")
+    gjc_path = get_gjc_cli_path() or shutil.which("gjc")
+    if not gjc_expected and gjc_path is not None:
+        from ouroboros.cli.gjc_setup import inspect_gjc_mcp_server
+
+        listed_ok, entry = inspect_gjc_mcp_server(gjc_path)
+        gjc_expected = listed_ok and setup._is_setup_managed_gjc_mcp_entry(entry)
+    if gjc_expected:
         if gjc_path is None:
-            setup.print_warning("Could not migrate the legacy GJC bridge: GJC CLI was not found.")
+            setup.print_warning("Could not refresh the GJC projection: GJC CLI was not found.")
             gjc_succeeded = False
         else:
             gjc_succeeded = setup._install_gjc_runtime_artifacts(gjc_path)
-    else:
-        if gjc_skills.is_dir() and any(
-            path.name.startswith("ouroboros-") for path in gjc_skills.iterdir()
-        ):
-            gjc_expected = True
-        if gjc_instruction_path().exists():
-            gjc_expected = True
-        if gjc_expected:
-            gjc_succeeded = setup._refresh_gjc_runtime_artifacts()
-    if gjc_expected:
         (refreshed if gjc_succeeded else failed).append("gjc")
 
     if refreshed:

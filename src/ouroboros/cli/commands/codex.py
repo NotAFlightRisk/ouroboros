@@ -920,11 +920,48 @@ async def _list_stdio_mcp_tool_names(
     setup must not first require the current ``ouroboros codex doctor``
     interpreter to have installed the optional local ``mcp`` extra.
     """
+    return await _probe_stdio_mcp(command, args, env)
+
+
+async def probe_stdio_mcp_tool(
+    command: str,
+    args: tuple[str, ...],
+    env: dict[str, str],
+    *,
+    tool_name: str,
+    tool_arguments: dict[str, object],
+) -> frozenset[str]:
+    """Initialize a stdio MCP server, list tools, and call one health-check tool."""
+    return await _probe_stdio_mcp(
+        command,
+        args,
+        env,
+        tool_call=(tool_name, tool_arguments),
+    )
+
+
+async def _probe_stdio_mcp(
+    command: str,
+    args: tuple[str, ...],
+    env: dict[str, str],
+    *,
+    tool_call: tuple[str, dict[str, object]] | None = None,
+) -> frozenset[str]:
     try:
-        return await _list_stdio_mcp_tool_names_with_framing(command, args, env, framing="jsonl")
+        return await _list_stdio_mcp_tool_names_with_framing(
+            command,
+            args,
+            env,
+            framing="jsonl",
+            tool_call=tool_call,
+        )
     except _StdioMcpFramingProbeFailed:
         return await _list_stdio_mcp_tool_names_with_framing(
-            command, args, env, framing="content-length"
+            command,
+            args,
+            env,
+            framing="content-length",
+            tool_call=tool_call,
         )
 
 
@@ -934,6 +971,7 @@ async def _list_stdio_mcp_tool_names_with_framing(
     env: dict[str, str],
     *,
     framing: str,
+    tool_call: tuple[str, dict[str, object]] | None = None,
 ) -> frozenset[str]:
     """Launch a stdio MCP server with one wire framing and return tool names."""
     process_env = os.environ.copy()
@@ -1012,11 +1050,38 @@ async def _list_stdio_mcp_tool_names_with_framing(
         tools = result.get("tools")
         if not isinstance(tools, list):
             raise RuntimeError("tools/list response did not contain a tools list")
-        return frozenset(
+        tool_names = frozenset(
             tool["name"]
             for tool in tools
             if isinstance(tool, Mapping) and isinstance(tool.get("name"), str)
         )
+        if tool_call is not None:
+            tool_name, tool_arguments = tool_call
+            if tool_name not in tool_names:
+                raise RuntimeError(f"required health-check tool is unavailable: {tool_name}")
+            await _send_stdio_mcp_message(
+                proc,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": tool_name, "arguments": tool_arguments},
+                },
+                framing=framing,
+            )
+            call_response = await _read_stdio_mcp_response(
+                proc,
+                request_id=3,
+                timeout=30.0,
+                stderr_buffer=stderr_buffer,
+                framing=framing,
+            )
+            call_result = call_response.get("result")
+            if not isinstance(call_result, Mapping):
+                raise RuntimeError("tools/call response did not contain an object result")
+            if call_result.get("isError") is True:
+                raise RuntimeError(f"health-check tool returned an error: {tool_name}")
+        return tool_names
     finally:
         await _terminate_stdio_mcp_process(proc)
         if stderr_task is not None:

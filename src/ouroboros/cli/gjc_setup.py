@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Sequence
 import json
 from pathlib import Path
@@ -145,20 +146,50 @@ def _is_exact_launcher_args(command: str, args: Sequence[object]) -> bool:
     return list(args) == expected
 
 
+def _exact_gjc_mcp_config(entry: dict[str, object]) -> dict[str, object] | None:
+    """Resolve the unredacted stored config advertised by GJC's public listing."""
+    config = entry.get("config")
+    if not isinstance(config, dict):
+        return None
+    env = config.get("env")
+    if not isinstance(env, dict) or "<redacted>" not in env.values():
+        return config
+    storage_path = entry.get("path")
+    if not isinstance(storage_path, str) or not storage_path:
+        return None
+    try:
+        stored = json.loads(Path(storage_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    servers = stored.get("mcpServers") if isinstance(stored, dict) else None
+    exact = servers.get("ouroboros") if isinstance(servers, dict) else None
+    return exact if isinstance(exact, dict) else None
+
+
 def is_setup_managed_gjc_mcp_entry(entry: object) -> bool:
-    """Return whether *entry* exactly matches a setup-owned GJC launcher."""
+    """Return whether *entry* exactly matches every setup-owned GJC field."""
     if not isinstance(entry, dict):
         return False
-    config = entry.get("config")
-    if not isinstance(config, dict) or config.get("type") != "stdio":
+    config = _exact_gjc_mcp_config(entry)
+    if not isinstance(config, dict):
         return False
     command = config.get("command")
     args = config.get("args")
-    return (
+    if not (
         isinstance(command, str)
         and isinstance(args, list)
         and _is_exact_launcher_args(command, args)
-    )
+    ):
+        return False
+    expected = {
+        "timeout": 30000,
+        "sharing": "per-session",
+        "type": "stdio",
+        "command": command,
+        "args": args,
+        "env": {"OUROBOROS_MCP_CONFIG": str(gjc_mcp_bridge_config_path())},
+    }
+    return config == expected
 
 
 def is_runtime_loaded_gjc_mcp_entry(entry: object) -> bool:
@@ -221,14 +252,44 @@ def _listed_gjc_mcp_entry(
     if not isinstance(servers, list):
         print_warning("GJC MCP list returned an invalid server collection.")
         return False, None
-    return True, next(
+    entry = next(
         (
-            entry
-            for entry in servers
-            if isinstance(entry, dict) and entry.get("name") == "ouroboros"
+            item
+            for item in servers
+            if isinstance(item, dict) and item.get("name") == "ouroboros"
         ),
         None,
     )
+    return True, entry
+
+
+def inspect_gjc_mcp_server(
+    gjc_path: str,
+    *,
+    run_command: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> tuple[bool, dict[str, object] | None]:
+    """Expose ownership-safe GJC MCP inspection to refresh and uninstall."""
+    return _listed_gjc_mcp_entry(gjc_path, run_command)
+
+
+def verify_gjc_mcp_endpoint(command: str, args: Sequence[str]) -> bool:
+    """Start the exact endpoint and call a read-only Ouroboros MCP tool."""
+    from ouroboros.cli.commands.codex import probe_stdio_mcp_tool
+
+    try:
+        asyncio.run(
+            probe_stdio_mcp_tool(
+                command,
+                tuple(args),
+                {"OUROBOROS_MCP_CONFIG": str(gjc_mcp_bridge_config_path())},
+                tool_name="ouroboros_query_events",
+                tool_arguments={"limit": 1},
+            )
+        )
+    except Exception as exc:
+        print_warning(f"GJC Ouroboros MCP endpoint health check failed: {exc}")
+        return False
+    return True
 
 
 def remove_gjc_mcp_server(
@@ -261,6 +322,7 @@ def register_gjc_mcp_server(
     *,
     detect_mcp_entry: Callable[..., dict[str, object] | None],
     run_command: Callable[..., subprocess.CompletedProcess[str]],
+    verify_mcp_endpoint: Callable[[str, Sequence[str]], bool],
     detected: dict[str, object] | None = None,
     registration_state: dict[str, bool] | None = None,
     autoload_verified: bool = False,
@@ -297,7 +359,23 @@ def register_gjc_mcp_server(
                 "were preserved."
             )
             return False
-        print_info("Ouroboros MCP server in GJC is already active and up to date.")
+        existing_config = _exact_gjc_mcp_config(existing)
+        if not isinstance(existing_config, dict):
+            return False
+        existing_command = existing_config.get("command")
+        existing_args = existing_config.get("args")
+        if not (
+            isinstance(existing_command, str)
+            and isinstance(existing_args, list)
+            and all(isinstance(arg, str) for arg in existing_args)
+            and verify_mcp_endpoint(existing_command, existing_args)
+        ):
+            print_error(
+                "The registered Ouroboros MCP endpoint could not initialize and execute "
+                "its health-check tool. Preserved the registration and legacy input bridge."
+            )
+            return False
+        print_info("Ouroboros MCP server in GJC is active and execution-validated.")
         return True
     command = detected.get("command")
     raw_args = detected.get("args")
@@ -332,28 +410,41 @@ def register_gjc_mcp_server(
     if registration_state is not None:
         registration_state.update(created=existing is None, changed=True)
     validated_ok, validated = _listed_gjc_mcp_entry(gjc_path, run_command)
-    if not validated_ok or not is_runtime_loaded_gjc_mcp_entry(validated):
+    validated_config = _exact_gjc_mcp_config(validated) if isinstance(validated, dict) else None
+    validated_command = validated_config.get("command") if validated_config else None
+    validated_args = validated_config.get("args") if validated_config else None
+    activation_valid = (
+        validated_ok
+        and is_runtime_loaded_gjc_mcp_entry(validated)
+        and isinstance(validated_command, str)
+        and isinstance(validated_args, list)
+        and all(isinstance(arg, str) for arg in validated_args)
+        and verify_mcp_endpoint(validated_command, validated_args)
+    )
+    if not activation_valid:
         print_warning(
-            "GJC accepted the registration but did not report it as a runtime-loaded "
-            "standalone endpoint."
+            "GJC accepted the registration but the runtime endpoint did not pass "
+            "initialize, tools/list, and tools/call validation."
         )
         if existing is None and remove_gjc_mcp_server(gjc_path, run_command=run_command):
             if registration_state is not None:
                 registration_state.update(created=False, changed=False)
         return False
-    print_success("Registered runtime-loaded Ouroboros MCP server in GJC.")
+    print_success("Registered and execution-validated Ouroboros MCP server in GJC.")
     return True
 
 
-def remove_legacy_gjc_bridge() -> bool:
-    """Remove the obsolete setup-owned input bridge without touching custom files."""
-    bridge = gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+def legacy_gjc_bridge_path() -> Path:
+    """Return the path used by the retired executable GJC input bridge."""
+    return gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+
+
+def is_setup_managed_legacy_gjc_bridge(path: Path | None = None) -> bool:
+    """Recognize only the obsolete bridge implementation shipped by setup."""
+    bridge = path or legacy_gjc_bridge_path()
     try:
         source = bridge.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return True
-    except OSError as exc:
-        print_warning(f"Could not inspect legacy GJC bridge: {exc}")
+    except (FileNotFoundError, OSError):
         return False
     signatures = (
         "const COMMAND_RE = /^\\s*ooo(?:\\s+|$)/i;",
@@ -361,7 +452,15 @@ def remove_legacy_gjc_bridge() -> bool:
         "_OUROBOROS_GJC_BRIDGE_DEPTH",
         "export default function ouroborosBridge",
     )
-    if not all(signature in source for signature in signatures):
+    return all(signature in source for signature in signatures)
+
+
+def remove_legacy_gjc_bridge() -> bool:
+    """Remove the obsolete setup-owned input bridge without touching custom files."""
+    bridge = legacy_gjc_bridge_path()
+    if not bridge.exists():
+        return True
+    if not is_setup_managed_legacy_gjc_bridge(bridge):
         print_info(f"Preserved custom GJC extension at {bridge}")
         return True
     try:

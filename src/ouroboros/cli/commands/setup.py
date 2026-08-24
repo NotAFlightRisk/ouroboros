@@ -3699,6 +3699,7 @@ def _register_gjc_mcp_server(
         gjc_path,
         detect_mcp_entry=_detect_mcp_entry,
         run_command=subprocess.run,
+        verify_mcp_endpoint=_gjc_setup.verify_gjc_mcp_endpoint,
         detected=detected,
         registration_state=registration_state,
     )
@@ -3723,11 +3724,11 @@ def _install_gjc_runtime_artifacts(
     try:
         snapshots = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
         succeeded = (
-            _gjc_setup.install_gjc_mcp_bridge_config(_atomic_write_text)
-            and _gjc_setup.install_gjc_skills_projection()
+            _install_gjc_mcp_bridge_config()
+            and _install_gjc_skills()
             and _install_runtime_instruction_artifact("gjc")
             and _register_gjc_mcp_server(gjc_path, registration_state=state)
-            and _gjc_setup.remove_legacy_gjc_bridge()
+            and _remove_legacy_gjc_bridge()
         )
     except OSError as exc:
         print_warning(f"Could not install GJC runtime artifacts: {exc}")
@@ -3746,36 +3747,6 @@ def _install_gjc_runtime_artifacts(
     return False
 
 
-def _refresh_gjc_runtime_artifacts() -> bool:
-    """Refresh an existing GJC projection atomically without touching MCP state."""
-    from ouroboros.gjc import gjc_skills_root
-    from ouroboros.runtime_instruction_artifacts import gjc_agent_dir, gjc_instruction_path
-
-    paths = (
-        gjc_skills_root(gjc_agent_dir()),
-        gjc_instruction_path().parent,
-        _gjc_setup.gjc_mcp_bridge_config_path().parent,
-    )
-    try:
-        snapshots = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
-        succeeded = (
-            _gjc_setup.install_gjc_mcp_bridge_config(_atomic_write_text)
-            and _gjc_setup.install_gjc_skills_projection()
-            and _install_runtime_instruction_artifact("gjc")
-        )
-    except OSError as exc:
-        print_warning(f"Could not refresh GJC runtime artifacts: {exc}")
-        succeeded = False
-    if succeeded:
-        return True
-    if "snapshots" in locals():
-        from ouroboros.cli.gjc_setup import rollback_gjc_files
-
-        rollback_gjc_files(
-            snapshots,
-            restore_path_snapshot=_restore_path_snapshot,
-        )
-    return False
 
 
 def _setup_gjc(gjc_path: str) -> bool:

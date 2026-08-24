@@ -263,34 +263,11 @@ def _remove_opencode_mcp(dry_run: bool) -> bool:
 
 
 def _gjc_mcp_entry(gjc_path: str) -> dict[str, object] | None:
-    """Return GJC's redacted Ouroboros MCP row, or ``None`` when unavailable."""
-    try:
-        result = subprocess.run(
-            [gjc_path, "mcp", "list", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
-    if result.returncode != 0:
-        return None
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
-    servers = payload.get("servers") if isinstance(payload, dict) else None
-    if not isinstance(servers, list):
-        return None
-    return next(
-        (
-            entry
-            for entry in servers
-            if isinstance(entry, dict) and entry.get("name") == "ouroboros"
-        ),
-        None,
-    )
+    """Return GJC's Ouroboros MCP row, including its exact stored config when readable."""
+    from ouroboros.cli.gjc_setup import inspect_gjc_mcp_server
+
+    listed_ok, entry = inspect_gjc_mcp_server(gjc_path, run_command=subprocess.run)
+    return entry if listed_ok else None
 
 
 def _remove_gjc_artifacts(dry_run: bool) -> bool:
@@ -301,6 +278,10 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
         _is_setup_managed_gjc_mcp_entry,
         _restore_path_snapshot_if_current_matches,
         _snapshot_path,
+    )
+    from ouroboros.cli.gjc_setup import (
+        is_setup_managed_legacy_gjc_bridge,
+        legacy_gjc_bridge_path,
     )
     from ouroboros.config import get_gjc_cli_path
 
@@ -313,10 +294,13 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
     managed_bridge_config = _is_setup_managed_gjc_mcp_bridge_config(bridge_config)
     guide = gjc_instruction_path()
     managed_guide = is_setup_managed_gjc_instruction(guide)
+    legacy_bridge = legacy_gjc_bridge_path()
+    managed_legacy_bridge = is_setup_managed_legacy_gjc_bridge(legacy_bridge)
     owned_paths = (
         *skills,
         *((bridge_config,) if managed_bridge_config else ()),
         *((guide,) if managed_guide else ()),
+        *((legacy_bridge,) if managed_legacy_bridge else ()),
     )
     if not owned_paths and not managed_mcp:
         return False
@@ -329,6 +313,8 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
             print_info(f"[dry-run] Would remove GJC MCP bridge config: {bridge_config}")
         if managed_guide:
             print_info(f"[dry-run] Would remove GJC routing guide: {guide}")
+        if managed_legacy_bridge:
+            print_info(f"[dry-run] Would remove legacy GJC input bridge: {legacy_bridge}")
         return True
 
     snapshots = tuple((path, _snapshot_path(path, follow_links=False)) for path in owned_paths)
@@ -627,6 +613,11 @@ def uninstall(
         path.name.startswith("ouroboros-") for path in gjc_skill_root.iterdir()
     ):
         targets.append(f"GJC Ouroboros skills ({gjc_skill_root}/)")
+    from ouroboros.cli.gjc_setup import (
+        is_setup_managed_gjc_mcp_bridge_config,
+        is_setup_managed_legacy_gjc_bridge,
+        legacy_gjc_bridge_path,
+    )
     from ouroboros.config import get_gjc_cli_path
 
     gjc_path = get_gjc_cli_path() or shutil.which("gjc")
@@ -635,6 +626,12 @@ def uninstall(
 
         if _is_setup_managed_gjc_mcp_entry(_gjc_mcp_entry(gjc_path)):
             targets.append("GJC Ouroboros MCP registration")
+    bridge_config = gjc_agent_dir() / "ouroboros" / "mcp-bridge.yaml"
+    if is_setup_managed_gjc_mcp_bridge_config(bridge_config):
+        targets.append(f"GJC MCP bridge config ({bridge_config})")
+    legacy_bridge = legacy_gjc_bridge_path()
+    if is_setup_managed_legacy_gjc_bridge(legacy_bridge):
+        targets.append(f"Legacy GJC input bridge ({legacy_bridge})")
     guide = gjc_instruction_path()
     if is_setup_managed_gjc_instruction(guide):
         targets.append(f"GJC Ouroboros routing guide ({guide})")

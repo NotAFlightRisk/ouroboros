@@ -241,8 +241,11 @@ rejected by Ouroboros after extraction and validation.
 **`ooo ...` is sent to the wrong GJC workflow**
 Run `gjc mcp --help` first. It must state that ordinary standalone sessions load
 registrations at startup; GJC 0.12.7's storage-only registration is not an
-interactive integration path. After `ouroboros setup --runtime gjc` succeeds,
-restart GJC and verify that `gjc skills discover --source user --json` lists
-`ouroboros-interview` and `gjc mcp list --json` reports `ouroboros` with
+interactive integration path. Before setup retires a managed legacy bridge or
+commits the GJC runtime selection, it launches the exact registered stdio
+endpoint, completes MCP initialize and tools/list, and calls the read-only
+`ouroboros_query_events` health check. After `ouroboros setup --runtime gjc`
+succeeds, restart GJC and verify that `gjc skills discover --source user --json`
+lists `ouroboros-interview` and `gjc mcp list --json` reports `ouroboros` with
 `runtimeStatus: "autoload"` and does not report
 `runtimeLoadedByStandalone: false`.

@@ -1,9 +1,9 @@
 """Unit tests for `ouroboros setup refresh`.
 
-Refresh must rewrite only artifacts a previous setup already installed, and
-must never touch MCP registrations, runtime selection, or config.yaml — so an
-install.sh upgrade cannot resurrect a deliberately removed integration (e.g.
-OpenCode subprocess mode) or silently rewire a runtime the user never set up.
+Refresh rewrites only integrations a previous setup already installed. Most
+runtimes leave MCP registrations untouched; GJC is the exception because its
+skills, routing guide, bridge config, and execution-validated MCP endpoint form
+one atomic projection lifecycle.
 """
 
 from __future__ import annotations
@@ -163,7 +163,7 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         assert result.exit_code == 0
         assert bridge.read_text(encoding="utf-8") != "// stale bridge\n"
 
-    def test_refreshes_existing_gjc_skill_projection_without_touching_mcp(
+    def test_refreshes_existing_gjc_skill_projection_after_execution_validation(
         self, tmp_path: Path
     ) -> None:
         skill = tmp_path / ".gjc" / "agent" / "skills" / "ouroboros-interview"
@@ -172,7 +172,10 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
             "---\nname: ouroboros-interview\ndescription: stale\nouroboros_projection: gjc-v1\n---\n",
             encoding="utf-8",
         )
-        with patch("ouroboros.cli.commands.setup._register_gjc_mcp_server") as register_mcp:
+        with (
+            patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/bin/gjc"),
+            patch("ouroboros.cli.commands.setup._register_gjc_mcp_server") as register_mcp,
+        ):
             result = _invoke_refresh(tmp_path)
 
         assert result.exit_code == 0
@@ -180,7 +183,7 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         assert "explicitly invokes `ooo interview`" in (skill / "SKILL.md").read_text(
             encoding="utf-8"
         )
-        register_mcp.assert_not_called()
+        register_mcp.assert_called_once_with("/opt/bin/gjc", registration_state={})
 
     def test_gjc_refresh_rolls_back_skills_when_guide_is_user_managed(self, tmp_path: Path) -> None:
         skill = tmp_path / ".gjc" / "agent" / "skills" / "ouroboros-interview"
@@ -328,7 +331,7 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         assert "Refreshed runtime artifacts: gemini" not in result.output
 
 
-class TestSetupRefreshDoesNotTouchConfig:
+class TestSetupRefreshDoesNotTouchUnrelatedConfig:
     def test_never_writes_config_or_mcp_files(self, tmp_path: Path) -> None:
         gemini_md = tmp_path / ".gemini" / "GEMINI.md"
         gemini_md.parent.mkdir(parents=True)

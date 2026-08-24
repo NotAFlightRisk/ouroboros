@@ -540,6 +540,8 @@ class TestRemoveGjcArtifacts:
                 return_value={
                     "name": "ouroboros",
                     "config": {
+                        "timeout": 30000,
+                        "sharing": "per-session",
                         "type": "stdio",
                         "command": "uvx",
                         "args": [
@@ -554,6 +556,11 @@ class TestRemoveGjcArtifacts:
                             "--runtime",
                             "gjc",
                         ],
+                        "env": {
+                            "OUROBOROS_MCP_CONFIG": str(
+                                agent_dir / "ouroboros" / "mcp-bridge.yaml"
+                            )
+                        },
                     },
                 },
             ),
@@ -601,6 +608,30 @@ class TestRemoveGjcArtifacts:
             assert not _remove_gjc_artifacts(dry_run=False)
 
         assert guide.read_text(encoding="utf-8") == "my routing rules\n"
+
+    def test_removes_managed_legacy_bridge(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        bridge = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text(
+            "\n".join(
+                [
+                    "const COMMAND_RE = /^\\s*ooo(?:\\s+|$)/i;",
+                    'const args = ["dispatch", "--runtime", "gjc"];',
+                    "const _OUROBOROS_GJC_BRIDGE_DEPTH = 1;",
+                    "export default function ouroborosBridge() {}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        with (
+            patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+            patch("ouroboros.config.get_gjc_cli_path", return_value=None),
+            patch("ouroboros.cli.commands.uninstall.shutil.which", return_value=None),
+        ):
+            assert _remove_gjc_artifacts(dry_run=False)
+
+        assert not bridge.exists()
 
 
 # ── _remove_claude_md_block ──────────────────────────────────────
@@ -759,6 +790,65 @@ class TestUninstallCLI:
         assert result.exit_code == 1
         assert "partially removed" in result.output
         assert "~/.codex/config.toml" in result.output
+
+    def test_discovers_bridge_config_as_only_remaining_gjc_state(self, tmp_path: Path) -> None:
+        home_dir = tmp_path / "home"
+        project_dir = tmp_path / "project"
+        home_dir.mkdir()
+        project_dir.mkdir()
+        agent_dir = home_dir / ".gjc" / "agent"
+        bridge_config = agent_dir / "ouroboros" / "mcp-bridge.yaml"
+        bridge_config.parent.mkdir(parents=True)
+        bridge_config.write_text(
+            "# Managed by ouroboros setup --runtime gjc\nmcp_servers: []\n",
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=home_dir),
+            patch("pathlib.Path.cwd", return_value=project_dir),
+            patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+            patch("ouroboros.config.get_gjc_cli_path", return_value=None),
+            patch("ouroboros.cli.commands.uninstall.shutil.which", return_value=None),
+        ):
+            result = runner.invoke(app, ["-y"])
+
+        assert result.exit_code == 0
+        assert "GJC MCP bridge config" in result.output
+        assert not bridge_config.exists()
+
+    def test_discovers_legacy_bridge_as_only_remaining_gjc_state(self, tmp_path: Path) -> None:
+        home_dir = tmp_path / "home"
+        project_dir = tmp_path / "project"
+        home_dir.mkdir()
+        project_dir.mkdir()
+        agent_dir = home_dir / ".gjc" / "agent"
+        bridge = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text(
+            "\n".join(
+                [
+                    "const COMMAND_RE = /^\\s*ooo(?:\\s+|$)/i;",
+                    'const args = ["dispatch", "--runtime", "gjc"];',
+                    "const _OUROBOROS_GJC_BRIDGE_DEPTH = 1;",
+                    "export default function ouroborosBridge() {}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=home_dir),
+            patch("pathlib.Path.cwd", return_value=project_dir),
+            patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+            patch("ouroboros.config.get_gjc_cli_path", return_value=None),
+            patch("ouroboros.cli.commands.uninstall.shutil.which", return_value=None),
+        ):
+            result = runner.invoke(app, ["-y"])
+
+        assert result.exit_code == 0
+        assert "Legacy GJC input bridge" in result.output
+        assert not bridge.exists()
 
 
 # ── _remove_opencode_bridge_plugin ──────────────────────────────
