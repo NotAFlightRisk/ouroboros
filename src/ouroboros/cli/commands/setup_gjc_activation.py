@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+import subprocess
 from typing import Any
 
 
@@ -43,7 +44,7 @@ def install_gjc_runtime_artifacts(
     )
     try:
         snapshots = tuple((path, snapshot_path(path, follow_links=False)) for path in paths)
-        native_support = gjc_native_mcp_autoload_support(gjc_path)
+        native_support = gjc_native_mcp_autoload_support(gjc_path, run_command=subprocess.run)
         if native_support is None:
             succeeded = False
             expected = snapshots
