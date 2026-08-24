@@ -149,6 +149,15 @@ def _callable_name(node: ast.AST) -> str | None:
 
 _FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
 
+@dataclass(frozen=True)
+class _UnresolvedCallable:
+    """A decorated callable whose replacement semantics are not statically known."""
+
+    function: _FunctionNode
+    decorator_name: str
+    module_name: str
+    line: int
+
 
 def _is_generator_function(node: _FunctionNode) -> bool:
     if isinstance(node, ast.Lambda):
@@ -197,6 +206,7 @@ class _AbstractValue:
     callables: tuple[_CallableTarget, ...] = ()
     serialized_sections: frozenset[str] = frozenset()
     accessed_attributes: frozenset[str] = frozenset()
+    unresolved_callables: tuple[_UnresolvedCallable, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -327,6 +337,9 @@ _IDENTITY_DECORATOR = "<identity-decorator>"
 # These decorators are guaranteed to preserve the decorated callable's semantics
 # (they wrap without replacing the core callable identity).
 _PRESERVING_DECORATOR_ORIGIN = "<preserving-external-decorator>"
+_TYPER_FACTORY = "<typer-factory>"
+_TYPER_APP = "<typer-app>"
+_TYPER_MODULE = "<typer-module>"
 # Mapping of (module_prefix, name) pairs that receive preserving-decorator trust.
 _PRESERVING_DECORATOR_IMPORTS: frozenset[tuple[str, str]] = frozenset(
     {
@@ -637,6 +650,7 @@ def _conservative_value(value: _AbstractValue) -> _AbstractValue:
         serialized_sections=value.serialized_sections,
         accessed_attributes=value.accessed_attributes,
         string_values=value.string_values,
+        unresolved_callables=value.unresolved_callables,
     )
 
 
@@ -726,6 +740,9 @@ def _join_values(*values: _AbstractValue) -> _AbstractValue:
         callables=tuple(callables),
         serialized_sections=frozenset().union(*(value.serialized_sections for value in values)),
         accessed_attributes=frozenset().union(*(value.accessed_attributes for value in values)),
+        unresolved_callables=tuple(
+            target for value in values for target in value.unresolved_callables
+        ),
     )
 
 
@@ -1033,18 +1050,59 @@ class _SourceIndex:
         return None
 
     def methods(self, classes: Iterable[ast.ClassDef], name: str) -> _FunctionSet:
-        """Resolve the first known implementation along each exact class lineage."""
+        """Resolve the final reachable binding along each exact class lineage."""
+
+        def local_binding(class_node: ast.ClassDef) -> tuple[bool, _FunctionSet]:
+            bindings: dict[str, _FunctionSet | None] = {}
+            for statement in class_node.body:
+                if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    bindings[statement.name] = frozenset({statement})
+                    continue
+                if isinstance(statement, ast.ClassDef):
+                    bindings[statement.name] = None
+                    continue
+                if isinstance(statement, (ast.Import, ast.ImportFrom)):
+                    for alias in statement.names:
+                        if alias.name == "*":
+                            continue
+                        bound = alias.asname or alias.name.partition(".")[0]
+                        bindings[bound] = None
+                    continue
+                if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                    expression = statement.value
+                    if expression is None:
+                        continue
+                    value = (
+                        frozenset({expression})
+                        if isinstance(expression, ast.Lambda)
+                        else bindings.get(expression.id)
+                        if isinstance(expression, ast.Name)
+                        else None
+                    )
+                    targets = statement.targets if isinstance(statement, ast.Assign) else (
+                        statement.target,
+                    )
+                    for target in targets:
+                        for assigned in self._assigned_names(target):
+                            bindings[assigned] = value
+                    continue
+                if isinstance(statement, ast.AugAssign):
+                    for assigned in self._assigned_names(statement.target):
+                        bindings[assigned] = None
+                    continue
+                if isinstance(statement, ast.Delete):
+                    for target in statement.targets:
+                        for deleted in self._assigned_names(target):
+                            bindings.pop(deleted, None)
+            if name not in bindings:
+                return False, frozenset()
+            return True, bindings[name] or frozenset()
 
         def inherited(class_node: ast.ClassDef, seen: frozenset[int]) -> _FunctionSet:
             if id(class_node) in seen:
                 return frozenset()
-            direct = frozenset(
-                statement
-                for statement in class_node.body
-                if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and statement.name == name
-            )
-            if direct:
+            bound, direct = local_binding(class_node)
+            if bound:
                 return direct
             for base in self._class_bases.get(id(class_node), ()):
                 resolved = inherited(base, seen | {id(class_node)})
@@ -1052,7 +1110,9 @@ class _SourceIndex:
                     return resolved
             return frozenset()
 
-        return frozenset().union(*(inherited(class_node, frozenset()) for class_node in classes))
+        return frozenset().union(
+            *(inherited(class_node, frozenset()) for class_node in classes)
+        )
 
     def is_strict_subclass(self, child: ast.ClassDef, parent: ast.ClassDef) -> bool:
         """Return whether an indexed class is a strict descendant of another."""
@@ -1233,6 +1293,48 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self.unresolved_semantics.add(
             f"{self._module.name}:{getattr(node, 'lineno', 0)}: unresolved decorator {name!r}"
         )
+
+    def _unresolved_callable_value(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        decorator: ast.expr,
+    ) -> _AbstractValue:
+        name = self._decorator_name(decorator) or ast.unparse(decorator)
+        return _AbstractValue(
+            unresolved_callables=(
+                _UnresolvedCallable(node, name, self._module.name, getattr(node, "lineno", 0)),
+            )
+        )
+
+    def _record_unresolved_callsite(
+        self,
+        call: ast.Call,
+        unresolved: tuple[_UnresolvedCallable, ...],
+    ) -> None:
+        field_names = {
+            section: frozenset(
+                field.name for field in self._fields if field.section == section
+            )
+            for section in TRACKED_SECTIONS
+        }
+        for target in unresolved:
+            scoped = self._bound_call_arguments(call, target.function)
+            for candidate in ast.walk(target.function):
+                if not isinstance(candidate, ast.Attribute) or not isinstance(
+                    candidate.value, ast.Name
+                ):
+                    continue
+                value = scoped.get(candidate.value.id, _UNKNOWN_VALUE)
+                if any(
+                    candidate.attr in field_names[section]
+                    for section in value.origins & TRACKED_SECTIONS
+                ):
+                    self.unresolved_semantics.add(
+                        f"{target.module_name}:{target.line}: unresolved decorator "
+                        f"{target.decorator_name!r}"
+                    )
+                    break
+
 
     def _name_value(self, name: str) -> _AbstractValue:
         for scope in reversed(self._states):
@@ -2145,6 +2247,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_ENTER_CONTEXT_CONSUMER)
             if node.attr == "deque" and "collections" in owner.modules:
                 return _origin_value("<external-consumer:collections.deque>")
+            if _TYPER_MODULE in owner.origins and node.attr == "Typer":
+                return _origin_value(_TYPER_FACTORY)
+            if _TYPER_APP in owner.origins and node.attr in {"command", "callback"}:
+                return _origin_value(_PRESERVING_DECORATOR_ORIGIN)
             sections = owner.origins & TRACKED_SECTIONS
             if _CONFIG_ROOT in owner.origins:
                 sections = TRACKED_SECTIONS
@@ -2261,6 +2367,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 return _origin_value(_IDENTITY_DECORATOR)
             if _PRESERVING_DECORATOR_ORIGIN in function_value.origins:
                 return _origin_value(_PRESERVING_DECORATOR_ORIGIN)
+            if _TYPER_FACTORY in function_value.origins:
+                return _origin_value(_TYPER_APP)
             if function_value.origins & _LAZY_BUILTIN_CONSUMER_ORIGINS:
                 iterable_arguments = (
                     node.args[1:] if _callable_name(node.func) in {"filter", "map"} else node.args
@@ -2965,6 +3073,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         before = self._binding_snapshot()
         accessor = self._expression_value(node.func)
+        self._record_unresolved_callsite(node, accessor.unresolved_callables)
         exact_builtins = {
             origin[len(_PROTOCOL_BUILTIN_PREFIX) : -1]
             for origin in accessor.origins
@@ -4645,6 +4754,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if alias.name == "asyncio"
                     else _origin_value(_CONTEXTLIB_MODULE)
                     if alias.name == "contextlib"
+                    else _origin_value(_TYPER_MODULE)
+                    if alias.name == "typer"
                     else _AbstractValue(modules=frozenset({"collections"}))
                     if alias.name == "collections"
                     else _AbstractValue(
@@ -4755,6 +4866,8 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     if node.module == "contextlib" and alias.name in {"closing", "aclosing"}
                     else _origin_value(_EXITSTACK_FACTORY)
                     if node.module == "contextlib" and alias.name == "ExitStack"
+                    else _origin_value(_TYPER_FACTORY)
+                    if node.module == "typer" and alias.name == "Typer"
                     else _origin_value("<external-consumer:collections.deque>")
                     if node.module == "collections" and alias.name == "deque"
                     else _origin_value(_PRESERVING_DECORATOR_ORIGIN)
@@ -5500,12 +5613,11 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                 continue
             targets = self._call_targets(decorator)
             if not targets:
-                # No syntax shape proves that an unresolved decorator preserves
-                # the original callable. Attribute-style factories can replace
-                # functions just as bare-name decorators can, so fail closed for
-                # every decorated node with transitive config relevance.
+                # Preserve the unresolved callable as a provenance carrier so a
+                # later call can make decorator relevance depend on its actual
+                # tracked arguments instead of only names inside the definition.
                 self._record_unresolved_decorator(node, decorator)
-                return _UNKNOWN_VALUE
+                return self._unresolved_callable_value(node, decorator)
             replacements = [
                 self._local_direct_call_value(
                     function,
@@ -5515,13 +5627,13 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             ]
             if not replacements:
                 self._record_unresolved_decorator(node, decorator)
-                return _UNKNOWN_VALUE
+                return self._unresolved_callable_value(node, decorator)
             replacement = _join_values(*replacements)
             if not replacement.callables and not replacement.instance_classes:
                 if replacement != _UNKNOWN_VALUE:
                     return replacement
                 self._record_unresolved_decorator(node, decorator)
-                return _UNKNOWN_VALUE
+                return self._unresolved_callable_value(node, decorator)
             value = replacement
         return value
 

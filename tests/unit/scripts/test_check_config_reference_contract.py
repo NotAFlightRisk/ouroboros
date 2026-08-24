@@ -3225,6 +3225,70 @@ ExternalReader().read(config.consensus)
     assert contract.runtime_reads(tmp_path, fields) == frozenset()
 
 
+def test_runtime_scan_resolves_final_class_method_binding(contract, tmp_path: Path) -> None:
+    (tmp_path / "overwritten_method.py").write_text(
+        """
+class Reader:
+    def read(self, section):
+        return section.stage1_enabled
+
+    read = lambda self, section: None
+
+Reader().read(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset()
+    assert _audit_as_documented_inert(contract, field, reads).violations == ()
+
+
+def test_runtime_scan_keeps_final_duplicate_method_definition(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "duplicate_method.py").write_text(
+        """
+class Reader:
+    def read(self, section):
+        return None
+
+    def read(self, section):
+        return section.stage1_enabled
+
+Reader().read(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+def test_runtime_scan_falls_back_to_base_after_deleted_method(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "deleted_method.py").write_text(
+        """
+class BaseReader:
+    def read(self, section):
+        return section.stage1_enabled
+
+class Reader(BaseReader):
+    def read(self, section):
+        return section.stage1_enabled
+    del read
+
+Reader().read(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    assert contract.runtime_reads(tmp_path, frozenset({field})) == frozenset({field})
+
+
 def test_runtime_scan_joins_callable_bindings_across_compound_statement_paths(
     contract, tmp_path: Path
 ) -> None:
@@ -6656,6 +6720,57 @@ process(config)
         f"Expected unresolved decorator violation for indirect method call, "
         f"got: {report.violations}"
     )
+
+
+def test_unresolved_decorator_uses_callsite_section_provenance(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "decorated_section_reader.py").write_text(
+        """
+from external_package import preserve_or_replace
+
+@preserve_or_replace
+def read_stage(section):
+    return section.stage1_enabled
+
+read_stage(config.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    report = _audit_as_documented_inert(contract, field, reads)
+
+    assert reads == frozenset()
+    assert any(
+        "unresolved decorator 'preserve_or_replace'" in violation
+        for violation in report.violations
+    )
+
+
+def test_unresolved_decorator_ignores_untracked_callsite_arguments(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "decorated_plain_reader.py").write_text(
+        """
+from external_package import preserve_or_replace
+
+@preserve_or_replace
+def read_stage(section):
+    return section.stage1_enabled
+
+read_stage(report.evaluation)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    report = _audit_as_documented_inert(contract, field, reads)
+
+    assert reads == frozenset()
+    assert not any("unresolved decorator" in violation for violation in report.violations)
 
 
 # --- Blocker 2 regression: no basename-only semantics-preserving trust ---
