@@ -224,6 +224,11 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    URLs without this evidence are rejected before publication. Submit and fetch
    the synthesis through `ouroboros_submit_fanout_results` and
    `ouroboros_fetch_artifact`.
+   A complete set returns a bounded artifact envelope. Call
+   `ouroboros_fetch_artifact` with its `contract_id` before synthesizing the
+   next interview turn.
+   Use the correlated synthesis in the fetched `body`, not the envelope metadata.
+   Continue the interview from the fetched synthesis.
 
    On later turns, `meta.question_advisory_cached_lanes` carries scoped
    `{contract_id, lane_id, published_at}` references. Fetch each reference with
