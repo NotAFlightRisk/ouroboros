@@ -106,13 +106,15 @@ def inherited_parent_seed_id(seed: Seed) -> str | None:
     patterns = (
         re.compile(
             rf"\b(?:inherit(?:ing)?(?:\s+from)?|derive(?:d)?\s+from|"
-            rf"(?:set\s+)?parent(?:_seed_id|\s+seed)?\s*(?:is|=|:|to))\s+{seed_id}"
+            rf"(?:set\s+(?:the\s+)?)?(?:the\s+)?parent"
+            rf"(?:_seed_id|\s+seed)?\s*"
+            rf"(?:is|=|:|to|should\s+be|must\s+be))\s+{seed_id}"
             rf"(?!{_SEED_ID_CONTINUATION_PATTERN})",
             re.IGNORECASE,
         ),
         re.compile(
-            rf"\buse\s+{seed_id}(?!{_SEED_ID_CONTINUATION_PATTERN})"
-            rf"\s+as\s+(?:the\s+)?parent(?:_seed|\s+seed)\b",
+            rf"\b(?:use|make)\s+{seed_id}(?!{_SEED_ID_CONTINUATION_PATTERN})"
+            rf"\s+(?:as\s+)?(?:the\s+)?parent(?:_seed|\s+seed)\b",
             re.IGNORECASE,
         ),
         re.compile(

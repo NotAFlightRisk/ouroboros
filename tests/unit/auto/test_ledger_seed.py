@@ -103,6 +103,9 @@ class TestSynthesizeSeedFromLedgerUnchanged:
             "Create a document Seed.",
             "Please make the task type document.",
             "Choose document for this Seed.",
+            "Write the requested plan as a document.",
+            "Produce the architecture review as a document.",
+            "The deliverable is a document; do not change source code.",
         ):
             ledger = _populate_complete_ledger(goal)
 
@@ -159,6 +162,9 @@ class TestPartialSeedFromEvidence:
             "Create a document Seed.",
             "Please make the task type document.",
             "Choose document for this Seed.",
+            "Write the requested plan as a document.",
+            "Produce the architecture review as a document.",
+            "The deliverable is a document; do not change source code.",
         ):
             ledger = SeedDraftLedger.from_goal(goal)
 

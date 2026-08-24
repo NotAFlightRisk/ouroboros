@@ -77,6 +77,17 @@ _TASK_TYPE_CONTRACT_PATTERNS = (
         rf"\b(?:choose|select)\s+{_TASK_TYPE_PATTERN}\s+for\s+(?:this|the)\s+seed\b",
         re.IGNORECASE,
     ),
+    re.compile(
+        rf"\b(?:write|produce|prepare|provide|deliver|return|render|present)\s+"
+        rf"[^,;.!?\n]{{1,160}}?\s+as\s+(?:an?\s+)?{_TASK_TYPE_PATTERN}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:the\s+)?(?:final\s+)?deliverable\s+"
+        rf"(?:is|must\s+be|should\s+be|will\s+be|needs?\s+to\s+be)\s+"
+        rf"(?:an?\s+)?{_TASK_TYPE_PATTERN}\b",
+        re.IGNORECASE,
+    ),
 )
 
 _NON_BINDING_CONTRACT_PATTERN = re.compile(
@@ -206,8 +217,12 @@ _STANDALONE_RETRACTION_PATTERN = re.compile(
 
 _PARENT_CONTRACT_PATTERN = re.compile(
     r"\b(?:inherit(?:ing)?(?:\s+from)?|derive(?:d)?\s+from|"
-    r"(?:set\s+)?parent(?:_seed_id|\s+seed)?\s*(?:is|=|:|to))\s+"
+    r"(?:set\s+(?:the\s+)?)?(?:the\s+)?parent(?:_seed_id|\s+seed)?\s*"
+    r"(?:is|=|:|to|should\s+be|must\s+be))\s+"
     rf"{_SEED_ID_PATTERN}(?!{_SEED_ID_CONTINUATION_PATTERN})"
+    rf"|\b(?:use|make)\s+{_SEED_ID_PATTERN}"
+    rf"(?!{_SEED_ID_CONTINUATION_PATTERN})\s+(?:as\s+)?(?:the\s+)?"
+    r"parent(?:_seed|\s+seed)\b"
     rf"|(?<!\S){_SEED_ID_PATTERN}"
     rf"(?!{_SEED_ID_CONTINUATION_PATTERN})"
     r"(?:을|를)?\s*(?:계승|상속)(?!하지)",

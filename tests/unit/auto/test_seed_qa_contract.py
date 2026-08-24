@@ -179,6 +179,9 @@ def test_parent_seed_accepts_ordinary_positive_wording() -> None:
         "Set parent_seed_id to seed_parent.",
         "Use seed_parent as the parent seed.",
         "Inherit seed_parent for the final proposal.",
+        "Set the parent Seed to seed_parent.",
+        "The parent Seed should be seed_parent.",
+        "Make seed_parent the parent Seed.",
     ):
         assert inherited_parent_seed_id(_seed(goal)) == "seed_parent"
 
