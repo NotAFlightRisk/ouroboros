@@ -492,7 +492,7 @@ def setup_gjc_runtime(
         return False
     try:
         before = tuple((path, snapshot_path(path, follow_links=False)) for path in paths)
-        expected = {path: snapshot for path, snapshot in before}
+        expected = dict(before)
         if config_path.exists():
             config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         else:

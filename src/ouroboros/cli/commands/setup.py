@@ -2534,7 +2534,9 @@ def _collect_concurrent_snapshot_changes(
         changes: list[tuple[Path, _PathSnapshot]] = []
         conflict = False
         missing = _PathSnapshot(kind="missing")
-        for name in sorted(before_children.keys() | expected_children.keys() | current_children.keys()):
+        for name in sorted(
+            before_children.keys() | expected_children.keys() | current_children.keys()
+        ):
             child_changes, child_conflict = _collect_concurrent_snapshot_changes(
                 before_children.get(name, missing),
                 expected_children.get(name, missing),
@@ -3787,7 +3789,7 @@ def _install_gjc_runtime_artifacts(
     legacy_bridge_path = gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge"
     paths = (skills_path, rules_path, bridge_config_path, legacy_bridge_path)
     before = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
-    expected = {path: snapshot for path, snapshot in before}
+    expected = dict(before)
 
     def capture_expected_generation(path: Path) -> None:
         expected[path] = _snapshot_path(path, follow_links=False)

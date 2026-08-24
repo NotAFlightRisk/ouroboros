@@ -75,7 +75,6 @@ class TestSetupRefreshPresenceGating:
         assert result.exit_code == 0
         assert gemini_md.read_text(encoding="utf-8") == "my own notes\n"
 
-
     def test_user_owned_namespaced_gjc_skill_does_not_activate_projection(
         self, tmp_path: Path
     ) -> None:
@@ -92,9 +91,12 @@ class TestSetupRefreshPresenceGating:
         assert result.exit_code == 0
         assert "No installed runtime artifacts found to refresh." in result.output
         install.assert_not_called()
-        assert skill.joinpath("SKILL.md").read_text(encoding="utf-8").endswith(
-            "description: user owned\n---\n"
+        assert (
+            skill.joinpath("SKILL.md")
+            .read_text(encoding="utf-8")
+            .endswith("description: user owned\n---\n")
         )
+
 
 class TestSetupRefreshUpdatesInstalledArtifacts:
     def test_refreshes_managed_gemini_section(self, tmp_path: Path) -> None:
@@ -227,7 +229,13 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
     def test_legacy_gjc_bridge_registers_mcp_before_removal(self, tmp_path: Path) -> None:
         bridge = tmp_path / ".gjc" / "agent" / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
         bridge.parent.mkdir(parents=True)
-        bridge.write_text("legacy bridge", encoding="utf-8")
+        bridge.write_text(
+            "const COMMAND_RE = /^\\s*ooo(?:\\s+|$)/i;\n"
+            '"dispatch", "--runtime", "gjc";\n'
+            'const depth = "_OUROBOROS_GJC_BRIDGE_DEPTH";\n'
+            "export default function ouroborosBridge() {}\n",
+            encoding="utf-8",
+        )
         calls: list[str] = []
 
         with (
@@ -261,7 +269,13 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
     def test_legacy_gjc_bridge_survives_failed_mcp_registration(self, tmp_path: Path) -> None:
         bridge = tmp_path / ".gjc" / "agent" / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
         bridge.parent.mkdir(parents=True)
-        bridge.write_text("legacy bridge", encoding="utf-8")
+        managed_bridge = (
+            "const COMMAND_RE = /^\\s*ooo(?:\\s+|$)/i;\n"
+            '"dispatch", "--runtime", "gjc";\n'
+            'const depth = "_OUROBOROS_GJC_BRIDGE_DEPTH";\n'
+            "export default function ouroborosBridge() {}\n"
+        )
+        bridge.write_text(managed_bridge, encoding="utf-8")
 
         with (
             patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/bin/gjc"),
@@ -271,7 +285,7 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
             result = _invoke_refresh(tmp_path)
 
         assert result.exit_code == 1
-        assert bridge.read_text(encoding="utf-8") == "legacy bridge"
+        assert bridge.read_text(encoding="utf-8") == managed_bridge
         remove_legacy.assert_not_called()
 
     def test_codex_refreshes_when_codex_dir_exists(self, tmp_path: Path) -> None:
