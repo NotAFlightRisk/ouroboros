@@ -1206,7 +1206,7 @@ def _web_source_evidence_violations(
             if unexpected:
                 errors.append(
                     "source_evidence/search_attempts: only_low_quality_results cannot "
-                    f"contain outcomes {sorted(unexpected)!r}"
+                    f"contain outcomes {sorted(str(item) for item in unexpected)!r}"
                 )
         elif expected_outcome is not None:
             for query, attempt in attempts_by_query.items():

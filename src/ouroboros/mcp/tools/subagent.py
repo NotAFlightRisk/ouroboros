@@ -1170,73 +1170,38 @@ def build_interview_subagent(
     adapter_question: str | None = None,
     question_advisory: Mapping[str, Any] | None = None,
 ) -> SubagentPayload:
-    """Build subagent payload for Socratic interview.
-
-    Supports start (with initial_context), answer (with user answer),
-    and resume (session_id only) actions.
-
-    Args:
-        transcript: Full conversation history (Q&A pairs) for context
-            continuity across subagent invocations.
-    """
     from ouroboros.agents.loader import load_agent_prompt
 
     system_prompt = bounded_system_prompt(load_agent_prompt("socratic-interviewer"))
     seed_closer_summary = _load_seed_closer_summary()
 
-    plugin_question_advisory_contract = ""
-    if question_advisory:
-        visible_advisory = {
-            key: question_advisory[key]
-            for key in (
-                "question_advisory_request",
-                "question_advisory_fanout_id",
-                "question_advisory_result_correlation_key",
-                "question_advisory_cached_lanes",
-            )
-            if key in question_advisory
-        }
-        if visible_advisory:
-            plugin_question_advisory_contract = (
-                "\n## Server-authored Factual Snapshot Contract\n"
-                "The parent bridge owns the stamped factual lane dispatch and result "
-                "submission. Do not invent, replace, or self-attest lane output. Treat "
-                "cached artifact references as evidence only after the parent fetches them.\n"
-                "```json\n"
-                + json.dumps(visible_advisory, ensure_ascii=False, sort_keys=True)
-                + "\n```\n"
-            )
-    plugin_question_advisory = """
-## Factual Research Snapshot
-1. Show the interview question first.
-2. On start, build code_context and source-backed web_context once.
-3. Reuse scoped artifacts on later turns; emit no ordinary per-question reasoning panel.
-4. Milestone lateral review and closure checks remain separate fresh gates."""
+    from ouroboros.mcp.tools.interview_subagent_context import (
+        FACTUAL_RESEARCH_SNAPSHOT,
+        render_adapter_section,
+        render_interview_subagent_context,
+    )
+
+    bounded_initial_context = _truncate_head(
+        initial_context,
+        _INTERVIEW_SUBAGENT_MAX_CONTEXT_CHARS,
+    )
+    plugin_question_advisory_contract, research_subject_section = render_interview_subagent_context(
+        action=action,
+        initial_context=bounded_initial_context,
+        question_advisory=question_advisory,
+    )
+    plugin_question_advisory = FACTUAL_RESEARCH_SNAPSHOT
 
     transcript_section = ""
     if transcript:
         bounded_transcript = _compact_interview_transcript(transcript)
         transcript_section = f"\n## Conversation History\n{bounded_transcript}\n"
 
-    adapter_section = ""
-    if action != "start" and adapter_question:
-        adapter_section = (
-            "\n## Required Reference/Glossary Adapter Turn\n"
-            "Ask the following question exactly before any general Socratic question. "
-            "Treat glossary/reference material as vocabulary or contrast only, never "
-            "as a requirement or acceptance criterion.\n\n"
-            f"{adapter_question}\n"
-        )
+    adapter_section = render_adapter_section(
+        action=action,
+        adapter_question=adapter_question,
+    )
 
-    bounded_initial_context = _truncate_head(
-        initial_context,
-        _INTERVIEW_SUBAGENT_MAX_CONTEXT_CHARS,
-    )
-    research_subject_section = (
-        f"\n## Original Research Subject\n{bounded_initial_context}\n"
-        if action != "start" and bounded_initial_context
-        else ""
-    )
     bounded_answer = _truncate_tail(answer, _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS)
 
     seed_ready_guard = f"""
