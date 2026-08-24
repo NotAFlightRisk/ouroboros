@@ -46,9 +46,11 @@ def gjc_supports_standalone_mcp_autoload(
         print_error(f"Could not verify GJC standalone MCP support: {exc}")
         return False
     help_text = f"{completed.stdout}\n{completed.stderr}".lower()
-    if completed.returncode == 0 and not any(
-        marker in help_text for marker in _GJC_STORAGE_ONLY_HELP_MARKERS
-    ) and any(marker in help_text for marker in _GJC_AUTOLOAD_HELP_MARKERS):
+    if (
+        completed.returncode == 0
+        and not any(marker in help_text for marker in _GJC_STORAGE_ONLY_HELP_MARKERS)
+        and any(marker in help_text for marker in _GJC_AUTOLOAD_HELP_MARKERS)
+    ):
         return True
     if any(marker in help_text for marker in _GJC_STORAGE_ONLY_HELP_MARKERS):
         print_error(

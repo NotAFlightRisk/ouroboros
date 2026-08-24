@@ -9846,9 +9846,7 @@ class TestGjcSetup:
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup.subprocess.run", return_value=storage_only_help),
         ):
-            result = CliRunner().invoke(
-                setup_cmd.app, ["--runtime", "gjc", "--non-interactive"]
-            )
+            result = CliRunner().invoke(setup_cmd.app, ["--runtime", "gjc", "--non-interactive"])
 
         assert result.exit_code == 1
         assert "stores MCP registrations but does not load them" in result.output
@@ -9971,9 +9969,7 @@ class TestGjcSetup:
             assert added.returncode == 0, added.stderr
             assert listed.returncode == 0, listed.stderr
             entry = next(
-                item
-                for item in json.loads(listed.stdout)["servers"]
-                if item["name"] == "ouroboros"
+                item for item in json.loads(listed.stdout)["servers"] if item["name"] == "ouroboros"
             )
             if supports_autoload:
                 assert entry["runtimeStatus"] == "autoload"
