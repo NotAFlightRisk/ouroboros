@@ -306,7 +306,11 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
 
     all_ok = True
     if skills:
-        removed = remove_gjc_skills(agent_dir=agent_dir)
+        try:
+            removed = remove_gjc_skills(agent_dir=agent_dir)
+        except OSError as exc:
+            print_warning(f"Could not remove GJC Ouroboros skills: {exc}")
+            removed = ()
         all_ok = len(removed) == len(skills)
         if all_ok:
             print_success(f"Removed {len(removed)} GJC Ouroboros skills")
@@ -572,10 +576,15 @@ def uninstall(
     from ouroboros.cli.commands.setup import _is_setup_managed_gjc_mcp_entry
     from ouroboros.cli.gjc_setup import (
         gjc_bridge_path,
+        gjc_mcp_bridge_config_path,
         is_setup_managed_gjc_bridge,
+        is_setup_managed_gjc_mcp_bridge_config,
         persisted_gjc_mcp_entry,
     )
 
+    bridge_config = gjc_mcp_bridge_config_path()
+    if is_setup_managed_gjc_mcp_bridge_config(bridge_config):
+        targets.append(f"GJC MCP bridge config ({bridge_config})")
     if _is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry()):
         targets.append("GJC Ouroboros MCP registration")
     compatibility_bridge = gjc_bridge_path()
