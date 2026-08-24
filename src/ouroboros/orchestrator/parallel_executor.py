@@ -1804,6 +1804,21 @@ def _sole_node_manifest_directory(root: Path) -> Path | None:
             return None
     return candidates[0] if candidates else None
 
+def _verify_command_executable(command: str) -> str:
+    """Return the effective executable after supported shell wrappers."""
+    inner_command = _single_command_after_safe_shell_preamble(command)
+    candidate = inner_command or command
+    try:
+        parts = _strip_env_prefix(shlex.split(candidate))
+    except ValueError:
+        return ""
+    if parts and Path(parts[0]).name in {"command", "exec"}:
+        parts = parts[1:]
+        if parts and parts[0] == "--":
+            parts = parts[1:]
+        parts = _strip_env_prefix(parts)
+    return Path(parts[0]).name if parts else ""
+
 
 def _resolve_verify_command_cwd(
     root_cwd: str, spec: AcceptanceCriterionSpec
@@ -1823,11 +1838,7 @@ def _resolve_verify_command_cwd(
         return str(target), None
 
     command = spec.verify_command or ""
-    try:
-        command_parts = _strip_env_prefix(shlex.split(command))
-    except ValueError:
-        command_parts = []
-    executable = Path(command_parts[0]).name if command_parts else ""
+    executable = _verify_command_executable(command)
     if executable in _NODE_PACKAGE_RUNNERS:
         try:
             manifest_dir = _sole_node_manifest_directory(root)

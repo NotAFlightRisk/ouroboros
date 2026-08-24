@@ -3033,6 +3033,28 @@ def test_resolve_verify_cwd_parses_environment_prefixed_node_command(
     assert error is None
     assert Path(resolved) == (tmp_path / "app").resolve()
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -lc 'npm test'",
+        "sh -c 'npx playwright test'",
+        "/bin/bash -lc 'pnpm test'",
+        "command npm test",
+    ],
+)
+def test_resolve_verify_cwd_parses_shell_wrapped_node_command(
+    tmp_path: Any,
+    command: str,
+) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "package.json").write_text("{}", encoding="utf-8")
+    spec = AcceptanceCriterionSpec(description="ac", verify_command=command)
+
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), spec)
+
+    assert error is None
+    assert Path(resolved) == (tmp_path / "app").resolve()
+
 
 def test_resolve_verify_cwd_never_guesses_between_manifests(tmp_path: Any) -> None:
     for name in ("app", "site"):
