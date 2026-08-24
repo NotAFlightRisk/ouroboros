@@ -50,13 +50,15 @@ client spawns the binary for you), install the local package with its isolated
 MCP 2 dependency profile:
 
 ```bash
-uv tool install --force --with mcp --from . ouroboros-ai --python '>=3.12'
+uv tool install --force --with 'mcp==2.0.0' --from . ouroboros-ai --python '>=3.12'
 ```
 
-The `--with mcp` supplies the separate MCP 2 SDK. Do not add the MCP 1.x
-`[claude]`, `[claude-sdk]`, or `[all]` profiles to this environment. Re-run
-the command after edits because a tool install is a snapshot; use `uv run`
-below when you want every invocation to reflect the current working tree.
+The exact `--with 'mcp==2.0.0'` pin supplies the separate MCP 2 SDK without
+bypassing the repository's reviewed version. Keep it synchronized with the
+`mcp` optional dependency and `mcp-test` group in `pyproject.toml`. Do not add
+the MCP 1.x `[claude]`, `[claude-sdk]`, or `[all]` profiles to this
+environment. Re-run the command after edits because a tool install is a
+snapshot; use `uv run` below when every invocation should reflect the working tree.
 
 The `--python '>=3.12'` matters. `uvx`/`uv tool` otherwise resolve against the
 machine's default interpreter, and on a 3.11 box the MCP server dies before it
@@ -152,7 +154,7 @@ assuming the config loader is broken.
 |---|---|---|
 | Config | `~/.ouroboros/config.yaml` | Ouroboros config directory |
 | Event database | Generated config: `~/.ouroboros/data/ouroboros.db`; legacy fallback: `~/.ouroboros/ouroboros.db` | `persistence.database_path`, relative to the config directory unless absolute |
-| Logs | `~/.ouroboros/logs/ouroboros.log` | `logging.log_path`, relative to the config directory unless absolute |
+| Logs | `~/.ouroboros/logs/ouroboros.log` | No config-file path override; `logging.log_path` is persisted but is not consumed by the runtime logger |
 | Worktrees created by runs | `~/.ouroboros/worktrees/` | `orchestrator.worktree_root` |
 
 Event-store resolution is implemented by `resolve_event_store_path()` and
@@ -160,8 +162,9 @@ Event-store resolution is implemented by `resolve_event_store_path()` and
 [`src/ouroboros/config/models.py`](../../src/ouroboros/config/models.py).
 Managed worktrees resolve through `managed_worktree_root()` in
 [`src/ouroboros/core/worktree.py`](../../src/ouroboros/core/worktree.py).
-Treat the table as defaults and compatibility fallbacks, not invariant paths;
-check `config.yaml` before inspecting or cleaning state.
+The event database and managed-worktree entries are defaults and compatibility
+fallbacks, not invariant paths; check `config.yaml` before inspecting or cleaning
+those resources. The runtime log destination is the fixed path shown above.
 
 This state accumulates and it is not small — the event DB and its WAL grow
 across runs, and abandoned run worktrees are the usual cause of a full disk.
@@ -181,7 +184,7 @@ Never delete the configured worktree root by hand — a live run may hold one.
 |---|---|---|
 | Pure Python (no MCP surface) | `uv run pytest tests/unit/<area>` | no |
 | CLI command or flag | `uv run ooo <command>` | no |
-| MCP tool handler | point the client at local source, then call the tool | **yes** |
+| MCP tool handler | `uv run --group mcp-test pytest tests/unit/mcp -q`, then point the client at local source and call the tool | **yes** |
 | `SKILL.md` / markdown | depends on dev-mode vs installed-plugin resolution | usually yes |
 
 Scope your test runs while iterating:
@@ -190,18 +193,20 @@ Scope your test runs while iterating:
 uv run pytest tests/unit/<area> -q
 ```
 
-The full suite runs in parallel — a large win, and not enabled by default:
+For a broad local run, keep external MCP integration and end-to-end coverage
+separate while retaining the hermetic MCP unit suite:
 
 ```bash
-uv run pytest tests/ --ignore=tests/unit/mcp --ignore=tests/integration/mcp \
+uv run --group mcp-test pytest tests/ --ignore=tests/integration/mcp \
   --ignore=tests/e2e -n auto --dist worksteal
 ```
 
-`tests/unit/mcp` is excluded there deliberately. That suite has leaked to real
-state — writing to the real event DB and creating real worktrees. CI runs it
-in a clean container, which is where it belongs; running it repeatedly against
-your own `$HOME` inside a shared checkout is how people lose work. See
-[Testing Guide](./testing-guide.md).
+`tests/conftest.py` redirects `$HOME` before collection and gives every test a
+separate home, so `tests/unit/mcp` cannot write to your real config, event DB,
+logs, or worktrees. Run that suite while changing MCP handlers; reserve the
+external integration and end-to-end suites for environments that provide their
+required services. See [Testing Guide](./testing-guide.md).
+
 
 ## Before you open the PR
 

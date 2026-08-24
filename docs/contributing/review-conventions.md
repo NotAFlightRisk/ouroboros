@@ -20,16 +20,25 @@ took thirty and was closed unmerged.
 
 ## What the review actually contains
 
-The bot posts a fixed structure:
+The exact headings evolve with the review contract, but every review reports
+the same stable concepts:
 
-1. **Verdict** — `APPROVE` or `REQUEST_CHANGES`, with the exact HEAD commit it
-   checked. If you pushed after it started, the verdict describes the older commit.
-2. **What Improved** — what the PR does well.
-3. **Issue Requirements** — a table grading your PR against **the linked
-   issue's** requirements, each marked *Met*, *Partially met*, or *Not met*.
-4. **Prior Findings Status** — every finding from earlier rounds, and whether
-   you resolved it. Unaddressed findings carry forward.
-5. **Blockers** — a table of `File:Line`, severity, and the finding.
+1. **Verdict and exact HEAD** — `APPROVE` or `REQUEST_CHANGES`, tied to the
+   commit the bot checked. If you pushed after it started, the verdict describes
+   the older commit.
+2. **Progress against the issue** — what improved, how each linked-issue
+   requirement grades (*Met*, *Partially met*, or *Not met*), and the status of
+   findings carried from earlier rounds.
+3. **Findings by disposition** — merge-blocking findings, follow-up warnings,
+   and non-blocking suggestions are separated rather than blended together.
+4. **Verification and design assessment** — test coverage, architectural and
+   directional notes, and the design/roadmap gate explain the evidence and the
+   shape of the change.
+5. **Merge recommendation** — the final action follows from those findings.
+
+Treat these as concepts, not an exhaustive heading template; the authoritative
+contract may add or rename sections without changing how contributors should
+interpret the review.
 
 Two consequences worth internalizing:
 
