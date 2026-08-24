@@ -239,7 +239,11 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
         "session_id",
     ),
     "ouroboros_start_ralph": ("lineage_id",),
-    "ouroboros_fetch_artifact": ("contract_id",),
+    # Empty because neither parameter is required on its own: a `contract_id`
+    # reads one artifact, a `lane_id` alone lists what a lane published here
+    # recently, and an MCP schema cannot say "one of these". The handler is
+    # where the pair is judged, and it refuses a request carrying neither.
+    "ouroboros_fetch_artifact": (),
     "ouroboros_submit_fanout_results": ("fanout_id", "results"),
 }
 
@@ -1281,6 +1285,26 @@ def test_owned_tool_registry_input_schemas_are_extracted_from_definitions() -> N
         assert registry[name].input_schema == schema
         assert registry[name].input_schema == definition.to_input_schema()
         Draft202012Validator.check_schema(registry[name].input_schema)
+
+
+def test_pm_answer_forms_are_mutually_exclusive_in_capability_registry() -> None:
+    definitions = {handler.definition.name: handler.definition for handler in get_ouroboros_tools()}
+    definition_schema = definitions["ouroboros_pm_interview"].to_input_schema()
+    registry_schema = ouroboros_tool_capability_registry()["ouroboros_pm_interview"].input_schema
+    singular = {"session_id": "pm-session", "answer": "One answer."}
+    batch = {
+        "session_id": "pm-session",
+        "answers": [{"question": "Which workflow?", "answer": "Review."}],
+    }
+    conflicting = {**singular, **batch}
+
+    assert registry_schema == definition_schema
+    assert registry_schema["not"] == {"required": ["answer", "answers"]}
+    for schema in (definition_schema, registry_schema):
+        validator = Draft202012Validator(schema)
+        assert validator.is_valid(singular)
+        assert validator.is_valid(batch)
+        assert not validator.is_valid(conflicting)
 
 
 @pytest.mark.parametrize(

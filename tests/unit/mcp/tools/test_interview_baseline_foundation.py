@@ -189,8 +189,7 @@ async def test_answer_repair_joins_start_snapshot_and_is_reusable(tmp_path: Any)
                         "query": query,
                         "outcome": "results_found",
                         "result_urls": [
-                            reference["url"]
-                            for reference in result_entry["content"]["references"]
+                            reference["url"] for reference in result_entry["content"]["references"]
                         ],
                     }
                     for query in [query]

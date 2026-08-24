@@ -243,12 +243,12 @@ class TestInterviewHandlerSubagentDispatch:
         assert result.value.meta["question_advisory_strategy"] == "plugin_child_factual_snapshot"
         assert result.value.meta["question_advisory_request"]["phase"] == "start"
         assert [
-            item["context"]["lane_id"]
-            for item in result.value.meta["question_advisory_subagents"]
+            item["context"]["lane_id"] for item in result.value.meta["question_advisory_subagents"]
         ] == ["code_context", "web_context"]
         assert result.value.meta["question_advisory_fanout_id"].startswith("fanout_")
-        assert payload["context"]["question_advisory"]["question_advisory_fanout_id"] == (
-            result.value.meta["question_advisory_fanout_id"]
+        assert (
+            payload["context"]["question_advisory"]["question_advisory_fanout_id"]
+            == (result.value.meta["question_advisory_fanout_id"])
         )
 
     async def test_answer_returns_subagent(self, handler) -> None:
@@ -348,8 +348,7 @@ class TestInterviewHandlerSubagentDispatch:
         assert result.value.meta["question_advisory_request"]["phase"] == expected_phase
         assert result.value.meta["question_advisory_cached_lanes"] == cached
         assert [
-            item["context"]["lane_id"]
-            for item in result.value.meta["question_advisory_subagents"]
+            item["context"]["lane_id"] for item in result.value.meta["question_advisory_subagents"]
         ] == ["web_context"]
         assert result.value.meta["question_advisory_fanout_id"].startswith("fanout_")
 
@@ -775,10 +774,14 @@ class TestPMInterviewHandlerSubagentDispatch:
         assert payload["tool_name"] == "ouroboros_pm_interview"
 
     async def test_resume_with_answer_returns_subagent(self, handler) -> None:
+        # Every answer names its question, on every runtime: a turn persists
+        # nothing when it asks (RFC #2222 revision 4), so there is no stored
+        # question for the server to file an unnamed answer under.
         result = await handler.handle(
             {
                 "session_id": "sess-123",
                 "answer": "React + Node.js",
+                "last_question": "What stack?",
             }
         )
         assert result.is_ok

@@ -824,6 +824,10 @@ def test_low_quality_web_result_requires_result_bearing_attempt(tmp_path: Any) -
             ),
             "is future-dated relative to submission",
         ),
+        (
+            lambda: "2026-99-99T99:99:99Z",
+            "is not a valid ISO 8601 timestamp",
+        ),
     ],
 )
 def test_web_references_reject_implausible_verification_times(

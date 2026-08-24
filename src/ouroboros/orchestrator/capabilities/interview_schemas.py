@@ -531,9 +531,7 @@ def _interview_web_reference_answer_contract() -> dict[str, Any]:
                         },
                         {
                             "if": {
-                                "properties": {
-                                    "outcome": {"enum": ["no_results", "search_failed"]}
-                                }
+                                "properties": {"outcome": {"enum": ["no_results", "search_failed"]}}
                             },
                             "then": {"properties": {"result_urls": {"maxItems": 0}}},
                         },

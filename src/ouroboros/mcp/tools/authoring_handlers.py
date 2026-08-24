@@ -1308,12 +1308,18 @@ class GenerateSeedHandler:
             from ouroboros.core.requirement_candidate import evaluate_promotion
 
             promotion = evaluate_promotion(distillation)
-            if promotion.blockers:
-                details = seed_readiness_details(promotion)
+            reference_aware = is_reference_aware_distillation(distillation)
+            details = seed_readiness_details(
+                promotion,
+                require_promoted_acceptance_criteria=reference_aware,
+            )
+            if details["blockers"]:
                 return Result.err(
                     MCPToolError(
-                        f"Interview must be reopened before Seed generation: {details}",
+                        "Interview must be reopened before Seed generation",
                         tool_name="ouroboros_generate_seed",
+                        error_code="interview_reopen_required",
+                        details=details,
                     )
                 )
             interview_state.requirement_distillation = distillation
@@ -1325,7 +1331,7 @@ class GenerateSeedHandler:
                     error=str(cache_save_result.error),
                 )
 
-            if is_reference_aware_distillation(distillation):
+            if reference_aware:
                 reference_seed = build_promoted_reference_seed(
                     interview_state,
                     distillation,
@@ -1471,10 +1477,21 @@ class GenerateSeedHandler:
             if seed_result.is_err:
                 error = seed_result.error
                 if isinstance(error, ValidationError):
+                    readiness_code = error.details.get("code")
                     return Result.err(
                         MCPToolError(
                             f"Validation error: {error}",
                             tool_name="ouroboros_generate_seed",
+                            error_code=(
+                                readiness_code
+                                if readiness_code == "interview_reopen_required"
+                                else None
+                            ),
+                            details=(
+                                error.details
+                                if readiness_code == "interview_reopen_required"
+                                else None
+                            ),
                         )
                     )
                 return Result.err(
@@ -2283,11 +2300,7 @@ class InterviewHandler:
             session_id=str(real_session_id or "new"),
             question=factual_question,
             phase="resume_pending" if action == "resume" else action,
-            score=(
-                _load_state_ambiguity_score(plugin_state)
-                if plugin_state is not None
-                else None
-            ),
+            score=(_load_state_ambiguity_score(plugin_state) if plugin_state is not None else None),
             last_question=(str(last_question) if last_question else None),
             research_subject=research_subject,
             dispatch_mode=resolve_request_subagent_dispatch(

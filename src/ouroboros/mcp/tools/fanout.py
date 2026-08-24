@@ -1106,7 +1106,7 @@ def _verification_timestamp_violations(
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        return []
+        return [f"{path}: is not a valid ISO 8601 timestamp"]
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return []
     verified_at = parsed.astimezone(UTC)

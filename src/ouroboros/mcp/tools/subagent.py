@@ -50,7 +50,6 @@ from ouroboros.backends.capabilities import (
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.core.types import Result
 
-# Advisory prompt text moved to ``mcp.tools.advisory_prompts`` in #1754;
 # re-exported for importers that already reach for these names here.
 from ouroboros.mcp.tools.advisory_prompts import (  # noqa: F401
     _GENERIC_ADVISORY_OUTPUT_SECTION,
@@ -76,6 +75,7 @@ from ouroboros.mcp.tools.fanout import (  # noqa: F401
     stamp_question_advisory_fanout,
     submit_fanout_results,
 )
+from ouroboros.mcp.tools.interview_prompt import bounded_system_prompt
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -1181,7 +1181,7 @@ def build_interview_subagent(
     """
     from ouroboros.agents.loader import load_agent_prompt
 
-    system_prompt = load_agent_prompt("socratic-interviewer")
+    system_prompt = bounded_system_prompt(load_agent_prompt("socratic-interviewer"))
     seed_closer_summary = _load_seed_closer_summary()
 
     plugin_question_advisory_contract = ""
@@ -1741,6 +1741,10 @@ def build_pm_interview_subagent(
     if transcript:
         transcript_section = f"\n## Conversation History\n{transcript}\n"
 
+    # A turn's answers arrive under ``answers``, leaving the singular
+    # ``answer`` empty for exactly the turns carrying the most history. The
+    # history is the transcript; ``answer`` only adds one round beneath it.
+    answer_section = f"\n## User's Latest Answer\n{answer}\n" if answer else ""
     if action == "start" and initial_context:
         prompt = f"""{system_prompt}
 
@@ -1760,7 +1764,7 @@ constraints.
 
 Begin the PM interview. Ask your first question about product requirements."""
 
-    elif (action == "answer" or action == "resume") and answer:
+    elif (action == "answer" or action == "resume") and (answer or transcript):
         prompt = f"""{system_prompt}
 
 ---
@@ -1772,10 +1776,7 @@ Analyze their answer, classify requirements, and ask the next question.
 
 ## Session ID
 {session_id}
-{transcript_section}
-## User's Latest Answer
-{answer}
-{repos_section}
+{transcript_section}{answer_section}{repos_section}
 Continue the PM interview."""
 
     elif action == "generate":
