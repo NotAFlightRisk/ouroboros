@@ -128,6 +128,7 @@ def _manager_for_events(events: list[BaseEvent], *, nonce: str = "nonce-a"):
         process_local_resume_nonce=nonce,
     )
 
+
 def _legacy_v2_fingerprint(capsule) -> str:
     """Reproduce the persisted capsule-v2 identity independently of production code."""
     legacy_contract = {
@@ -150,6 +151,7 @@ def _legacy_v2_fingerprint(capsule) -> str:
     )
     return "sha256:" + hashlib.sha256(canonical_manifest.encode()).hexdigest()
 
+
 def test_capsule_round_trips_and_fingerprint_is_stable(tmp_path) -> None:
     capsule = _capsule(tmp_path)
 
@@ -165,6 +167,7 @@ def test_capsule_round_trips_and_fingerprint_is_stable(tmp_path) -> None:
         ACContextReferenceKind.ARTIFACT,
         ACContextReferenceKind.DEPENDENCY,
     ]
+
 
 def test_capsule_v2_manifest_and_paused_authority_survive_upgrade(tmp_path) -> None:
     capsule = _capsule(tmp_path)
@@ -193,6 +196,7 @@ def test_capsule_v2_resume_rejects_new_execution_semantics(tmp_path) -> None:
             ),
             legacy_fingerprint,
         )
+
 
 @pytest.mark.asyncio
 async def test_capsule_v2_runtime_handle_resumes_after_upgrade(tmp_path) -> None:
