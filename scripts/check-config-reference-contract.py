@@ -1207,15 +1207,45 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self.reads: set[ConfigField] = set()
         self.unresolved_semantics: set[str] = set()
 
-    @staticmethod
-    def _syntactically_mentions_tracked_config(node: ast.AST) -> bool:
-        return any(
-            isinstance(candidate, ast.Name)
-            and _looks_like_config_name(candidate.id)
-            or isinstance(candidate, ast.Attribute)
-            and candidate.attr in TRACKED_SECTIONS
-            for candidate in ast.walk(node)
-        )
+    def _syntactically_mentions_tracked_config(self, node: ast.AST) -> bool:
+        """Recognize only tracked-field reads with proven config provenance."""
+
+        field_names = {
+            section: frozenset(field.name for field in self._fields if field.section == section)
+            for section in TRACKED_SECTIONS
+        }
+        scoped_by_function = {
+            id(function): self._scoped_function_arguments(function)
+            for function in ast.walk(node)
+            if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+        }
+
+        def expression_origins(
+            expression: ast.AST, scoped: dict[str, _AbstractValue]
+        ) -> frozenset[str]:
+            if isinstance(expression, ast.Name):
+                return scoped.get(expression.id, self._name_value(expression.id)).origins
+            if not isinstance(expression, ast.Attribute):
+                return frozenset()
+            owner_origins = expression_origins(expression.value, scoped)
+            if _CONFIG_ROOT in owner_origins and expression.attr in TRACKED_SECTIONS:
+                return frozenset({expression.attr})
+            return frozenset()
+
+        for function in ast.walk(node):
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            scoped = scoped_by_function[id(function)]
+            for candidate in ast.walk(function):
+                if not isinstance(candidate, ast.Attribute):
+                    continue
+                owner_origins = expression_origins(candidate.value, scoped)
+                if any(
+                    candidate.attr in field_names[section]
+                    for section in owner_origins & TRACKED_SECTIONS
+                ):
+                    return True
+        return False
 
     def _relevance_call_targets(
         self,
@@ -4973,7 +5003,10 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                     statement.targets if isinstance(statement, ast.Assign) else [statement.target]
                 )
                 value = statement.value
-                if not isinstance(value, ast.Name) or value.id not in parameters:
+                if not isinstance(value, ast.Name):
+                    continue
+                assigned = self._value_in_scope(value, parameters)
+                if assigned == _UNKNOWN_VALUE:
                     continue
                 for target in targets:
                     if (
@@ -4981,7 +5014,7 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
                         and isinstance(target.value, ast.Name)
                         and target.value.id == receiver_name
                     ):
-                        attributes[target.attr] = parameters[value.id]
+                        attributes[target.attr] = assigned
         return self._attribute_replacement(owner, tuple(sorted(attributes.items())))
 
     def _bind_partialmethod_descriptors(self, owner: _AbstractValue) -> _AbstractValue:
@@ -5157,9 +5190,12 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
         self._visit_with(node)
 
     def _argument_value(self, argument: ast.arg) -> _AbstractValue:
+        annotation = self._annotation_value(argument.annotation)
+        if argument.annotation is not None:
+            return annotation
         if _looks_like_config_name(argument.arg):
             return _origin_value(_CONFIG_ROOT)
-        return self._annotation_value(argument.annotation)
+        return _UNKNOWN_VALUE
 
     def _scoped_arguments(self, arguments: ast.arguments) -> dict[str, _AbstractValue]:
         scoped = {

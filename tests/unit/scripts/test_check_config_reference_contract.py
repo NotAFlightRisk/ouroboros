@@ -7185,3 +7185,71 @@ totally_unrelated()
         f"Irrelevant decorated function should not produce unresolved violations: "
         f"{report.violations}"
     )
+
+
+def test_runtime_scan_does_not_infer_root_from_foreign_config_annotation(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "foreign_annotation.py").write_text(
+        """
+class ForeignConfig:
+    pass
+
+def inspect(config: ForeignConfig):
+    return config.evaluation.stage1_enabled
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset()
+
+
+def test_runtime_scan_preserves_constructor_assigned_callable_provenance(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "constructor_callback.py").write_text(
+        """
+def helper(value):
+    return value.evaluation.stage1_enabled
+
+class Reader:
+    def __init__(self):
+        self.callback = helper
+
+    def run(self, value):
+        return self.callback(value)
+
+Reader().run(settings)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+
+    assert reads == frozenset({field})
+
+
+def test_unresolved_decorator_ignores_unproven_section_attribute(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "unrelated_decorated_domain.py").write_text(
+        """
+from external_package import decorate
+
+@decorate
+def render(report):
+    return report.evaluation
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    report = _audit_as_documented_inert(contract, field, reads)
+
+    assert reads == frozenset()
+    assert not any("unresolved decorator" in violation for violation in report.violations)
