@@ -419,6 +419,7 @@ from ouroboros.orchestrator.verifier import (
     verifier_operational_failure_verdict,
 )
 from ouroboros.orchestrator.verify_command_runner import run_with_shell
+from ouroboros.orchestrator.verify_cwd import resolve_verify_command_cwd
 from ouroboros.orchestrator.verify_gate_outcome import (
     _VERIFY_OUTPUT_TAIL_CHARS,
     _deserialize_verify_gate_outcome,
@@ -1783,81 +1784,6 @@ _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES = frozenset(
     }
 )
 _WORKSPACE_FINGERPRINT_IGNORED_REGULAR_FILE_SUFFIXES = frozenset({".pyc", ".pyo"})
-# Package-runner commands whose config manifest anchors the directory they
-# must run from. Used only by the deterministic verify-cwd resolution below.
-_NODE_PACKAGE_RUNNERS = frozenset({"npm", "npx", "yarn", "pnpm"})
-
-
-def _sole_node_manifest_directory(root: Path) -> Path | None:
-    """Return the sole non-ignored package.json directory, if unambiguous."""
-    if (root / "package.json").is_file():
-        return None
-    candidates: list[Path] = []
-    for manifest in root.rglob("package.json"):
-        relative_parts = manifest.relative_to(root).parts
-        if any(part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES for part in relative_parts):
-            continue
-        if not manifest.is_file():
-            continue
-        candidates.append(manifest.parent)
-        if len(candidates) > 1:
-            return None
-    return candidates[0] if candidates else None
-
-
-def _verify_command_executable(command: str) -> str:
-    """Return the effective executable after supported prefixes and wrappers."""
-    try:
-        parts = _strip_env_prefix(shlex.split(command))
-    except ValueError:
-        return ""
-    if parts and Path(parts[0]).name in {"command", "exec"}:
-        parts = parts[1:]
-        if parts and parts[0] == "--":
-            parts = parts[1:]
-        parts = _strip_env_prefix(parts)
-
-    inner_command = _single_command_after_safe_shell_preamble(shlex.join(parts))
-    if inner_command is not None:
-        try:
-            parts = _strip_env_prefix(shlex.split(inner_command))
-        except ValueError:
-            return ""
-        if parts and Path(parts[0]).name in {"command", "exec"}:
-            parts = parts[1:]
-            if parts and parts[0] == "--":
-                parts = parts[1:]
-            parts = _strip_env_prefix(parts)
-    return Path(parts[0]).name if parts else ""
-
-
-def _resolve_verify_command_cwd(
-    root_cwd: str, spec: AcceptanceCriterionSpec
-) -> tuple[str, str | None]:
-    """Resolve verify cwd, preferring explicit workspace-relative ``verify_cwd``.
-
-    Node package runners otherwise use the sole non-ignored package manifest.
-    Artifact checks and digests remain rooted at ``root_cwd``.
-    """
-    root = Path(root_cwd).expanduser().resolve(strict=False)
-    if spec.verify_cwd:
-        target = (root / spec.verify_cwd).resolve(strict=False)
-        if not target.is_relative_to(root):
-            return root_cwd, f"verify_cwd escapes the workspace: {spec.verify_cwd!r}"
-        if not target.is_dir():
-            return root_cwd, f"verify_cwd does not exist in the workspace: {spec.verify_cwd!r}"
-        return str(target), None
-
-    command = spec.verify_command or ""
-    executable = _verify_command_executable(command)
-    if executable in _NODE_PACKAGE_RUNNERS:
-        try:
-            manifest_dir = _sole_node_manifest_directory(root)
-        except OSError:
-            manifest_dir = None
-        if manifest_dir is not None:
-            return str(manifest_dir), None
-    return root_cwd, None
 
 
 _ROUTE_SUCCESS_CONTEXT_CHARS = 200
@@ -9872,7 +9798,7 @@ Respond with either ATOMIC or the structured JSON object only.
         # Where the command runs is a per-AC contract (explicit verify_cwd, or
         # the workspace's sole node manifest directory for package-runner
         # commands); artifact checks and digests above stay rooted at ``cwd``.
-        command_cwd, command_cwd_error = _resolve_verify_command_cwd(cwd, spec)
+        command_cwd, command_cwd_error = resolve_verify_command_cwd(cwd, spec)
         if command_cwd_error is not None:
             return _VerifyGateOutcome(
                 passed=False,

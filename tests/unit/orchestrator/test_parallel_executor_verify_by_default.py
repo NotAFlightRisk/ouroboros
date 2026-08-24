@@ -41,7 +41,6 @@ from ouroboros.orchestrator.parallel_executor import (
     _complete_sibling_acs_from_evidence,
     _deserialize_verify_gate_outcome,
     _missing_expected_artifacts,
-    _resolve_verify_command_cwd,
     _serialize_verify_gate_outcome,
     _VerifyGateOutcome,
     render_parallel_completion_message,
@@ -50,6 +49,9 @@ from ouroboros.orchestrator.parallel_executor import (
 from ouroboros.orchestrator.retry_hints import is_retryable_failure
 from ouroboros.orchestrator.verifier import VerifierVerdict
 from ouroboros.orchestrator.verify_command_runner import VerifyRun
+from ouroboros.orchestrator.verify_cwd import (
+    resolve_verify_command_cwd as _resolve_verify_command_cwd,
+)
 from ouroboros.orchestrator.verify_shell import verify_shell_path_from_identity
 
 
