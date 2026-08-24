@@ -71,10 +71,12 @@ def test_gjc_agent_dir_rejects_config_dir_escape(tmp_path: Path) -> None:
         tmp_path / ".gjc" / "agent"
     )
 
+
 def test_gjc_agent_dir_rejects_backslash_config_dir_escape(tmp_path: Path) -> None:
     assert gjc_agent_dir(home=tmp_path, environ={"GJC_CONFIG_DIR": "..\\outside"}) == (
         tmp_path / ".gjc" / "agent"
     )
+
 
 def test_gjc_agent_dir_falls_back_to_pi_config_dir_name(tmp_path: Path) -> None:
     assert gjc_agent_dir(home=tmp_path, environ={"PI_CONFIG_DIR": "custom-pi"}) == (

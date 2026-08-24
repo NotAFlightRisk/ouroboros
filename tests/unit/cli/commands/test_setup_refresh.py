@@ -163,9 +163,7 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         assert result.exit_code == 0
         assert bridge.read_text(encoding="utf-8") != "// stale bridge\n"
 
-    def test_refreshes_existing_gjc_projection_and_repairs_mcp(
-        self, tmp_path: Path
-    ) -> None:
+    def test_refreshes_existing_gjc_projection_and_repairs_mcp(self, tmp_path: Path) -> None:
         skill = tmp_path / ".gjc" / "agent" / "skills" / "ouroboros-interview"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text(

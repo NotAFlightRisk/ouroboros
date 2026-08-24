@@ -253,6 +253,7 @@ def _remove_opencode_mcp(dry_run: bool) -> bool:
     print_success(f"Removed ouroboros from {config_path}")
     return True
 
+
 def _remove_gjc_artifacts(dry_run: bool) -> bool:
     """Remove setup-owned GJC skills, active route, MCP state, config, and guide."""
     from ouroboros.cli.commands.setup import (
@@ -574,6 +575,7 @@ def uninstall(
         is_setup_managed_gjc_bridge,
         persisted_gjc_mcp_entry,
     )
+
     if _is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry()):
         targets.append("GJC Ouroboros MCP registration")
     compatibility_bridge = gjc_bridge_path()

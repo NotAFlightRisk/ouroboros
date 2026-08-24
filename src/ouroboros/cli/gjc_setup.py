@@ -180,10 +180,7 @@ def gjc_native_mcp_autoload_support(
         print_warning(f"Could not inspect the GJC MCP activation contract: {exc}")
         return None
     if result.returncode != 0:
-        print_warning(
-            "Could not inspect the GJC MCP activation contract: "
-            f"{result.stderr.strip()}"
-        )
+        print_warning(f"Could not inspect the GJC MCP activation contract: {result.stderr.strip()}")
         return None
     help_text = f"{result.stdout}\n{result.stderr}"
     return all(marker in help_text for marker in _GJC_MCP_HELP_MARKERS)
@@ -192,9 +189,7 @@ def gjc_native_mcp_autoload_support(
 def _atomic_replace_json(path: Path, payload: dict[str, object], expected_raw: str) -> None:
     """Publish one JSON generation without following a config symlink."""
     mode = stat.S_IMODE(path.lstat().st_mode)
-    fd, temp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
-    )
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     try:
         if hasattr(os, "fchmod"):
             os.fchmod(fd, mode)
@@ -215,6 +210,7 @@ def _atomic_replace_json(path: Path, payload: dict[str, object], expected_raw: s
         except OSError:
             pass
         raise
+
 
 def remove_persisted_gjc_mcp_server(path: Path | None = None) -> bool:
     """Atomically remove only the setup-owned generation, preserving concurrent state."""
@@ -277,6 +273,7 @@ def _listed_gjc_mcp_entry(
         ),
         None,
     )
+
 
 def register_gjc_mcp_server(
     gjc_path: str,
@@ -423,21 +420,15 @@ def install_gjc_compatibility_bridge(
 ) -> bool:
     """Install the owned bridge when the host cannot autoload native MCP entries."""
     bridge = gjc_bridge_path()
-    if bridge.is_symlink() or (
-        bridge.exists() and not is_setup_managed_gjc_bridge(bridge)
-    ):
-        print_error(
-            f"Preserved custom GJC extension at {bridge}; compatibility activation failed."
-        )
+    if bridge.is_symlink() or (bridge.exists() and not is_setup_managed_gjc_bridge(bridge)):
+        print_error(f"Preserved custom GJC extension at {bridge}; compatibility activation failed.")
         return False
     try:
         atomic_write_text(bridge, content)
     except OSError as exc:
         print_warning(f"Could not install GJC compatibility bridge: {exc}")
         return False
-    print_info(
-        "Installed GJC compatibility bridge; this host does not expose native MCP autoload."
-    )
+    print_info("Installed GJC compatibility bridge; this host does not expose native MCP autoload.")
     return True
 
 
@@ -565,9 +556,7 @@ def _rollback_new_gjc_mcp_registration(registration_state: dict[str, bool]) -> N
     if remove_persisted_gjc_mcp_server():
         registration_state.update(created=False, changed=False)
         return
-    print_warning(
-        "Preserved the GJC MCP registration because it changed after setup created it."
-    )
+    print_warning("Preserved the GJC MCP registration because it changed after setup created it.")
 
 
 def rollback_gjc_activation(
