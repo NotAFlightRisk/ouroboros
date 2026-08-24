@@ -87,6 +87,22 @@ def test_readme_runtime_summary_defers_to_canonical_registry() -> None:
     assert all(backend.casefold() in summary.casefold() for backend in highlighted_backends)
 
 
+def test_repository_inventory_docs_derive_counts_from_the_checkout() -> None:
+    readme_ko = Path("README.ko.md").read_text(encoding="utf-8")
+    backlog = Path("backlog.md").read_text(encoding="utf-8")
+
+    inventory_summary = next(
+        line
+        for line in readme_ko.splitlines()
+        if line.startswith("<summary><strong>") and "Python 3.12+" in line
+    )
+    assert not re.search(r"\d+개 (?:tracked Python )?모듈|\d+개 테스트 파일", inventory_summary)
+    assert "git ls-files ':(glob)src/ouroboros/**/*.py'" in readme_ko
+    assert "git ls-files ':(glob)tests/**/test_*.py'" in readme_ko
+    assert "live tracked-module counts are intentionally omitted" in backlog
+    assert not re.search(r"\d+ tracked Python modules", backlog)
+
+
 def test_cli_reference_documents_recovery_and_inspection_commands() -> None:
     docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
     overview = docs.split("## Commands Overview", 1)[1].split("\n---\n", 1)[0]

@@ -472,7 +472,9 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 ## 내부 구조
 
 <details>
-<summary><strong>596개 tracked Python 모듈 · 684개 테스트 파일 · Python 3.12+</strong></summary>
+<summary><strong>저장소에서 직접 확인하는 소스·테스트 인벤토리 · Python 3.12+</strong></summary>
+
+정확한 파일 수는 현재 체크아웃을 기준으로 `git ls-files ':(glob)src/ouroboros/**/*.py'`와 `git ls-files ':(glob)tests/**/test_*.py'`에서 확인합니다. Hatch-VCS가 빌드할 때 생성하는 `src/ouroboros/_version.py`는 tracked 소스 인벤토리에 포함되지 않습니다.
 
 ```text
 src/ouroboros/
