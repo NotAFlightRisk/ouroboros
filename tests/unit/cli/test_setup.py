@@ -20,6 +20,7 @@ import typer
 from typer.testing import CliRunner
 import yaml
 
+from ouroboros.cli.commands.gjc_bridge import gjc_ooo_bridge_source_text
 import ouroboros.cli.commands.setup as setup_cmd
 from ouroboros.cli.commands.setup import (
     _codex_uses_profile_v2,  # real fn bound at import; bypasses the autouse probe guard
@@ -9936,12 +9937,18 @@ class TestGjcSetup:
             stderr="",
         )
 
-        assert gjc_native_mcp_autoload_support(
-            "/opt/bin/gjc", run_command=lambda *_args, **_kwargs: storage_only
-        ) is False
-        assert gjc_native_mcp_autoload_support(
-            "/opt/bin/gjc", run_command=lambda *_args, **_kwargs: native
-        ) is True
+        assert (
+            gjc_native_mcp_autoload_support(
+                "/opt/bin/gjc", run_command=lambda *_args, **_kwargs: storage_only
+            )
+            is False
+        )
+        assert (
+            gjc_native_mcp_autoload_support(
+                "/opt/bin/gjc", run_command=lambda *_args, **_kwargs: native
+            )
+            is True
+        )
 
     def test_gjc_contract_probe_failure_does_not_replace_existing_route(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -9949,7 +9956,7 @@ class TestGjcSetup:
         agent_dir = tmp_path / "gjc-agent"
         bridge = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
         bridge.parent.mkdir(parents=True)
-        bridge.write_text(setup_cmd._gjc_bridge_source_text(), encoding="utf-8")
+        bridge.write_text(gjc_ooo_bridge_source_text("ouroboros", []), encoding="utf-8")
         monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
 
         with patch(
@@ -9976,7 +9983,6 @@ class TestGjcSetup:
             assert not setup_cmd._install_gjc_runtime_artifacts("/opt/bin/gjc")
 
         assert bridge.read_text(encoding="utf-8") == "operator extension\n"
-
 
     def test_setup_gjc_writes_config_rules_and_namespaced_skills(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -10029,9 +10035,7 @@ class TestGjcSetup:
         added = subprocess.CompletedProcess(
             ["gjc", "mcp", "add"],
             0,
-            stdout=json.dumps(
-                {"action": "add", "status": "created", "name": "ouroboros"}
-            ),
+            stdout=json.dumps({"action": "add", "status": "created", "name": "ouroboros"}),
             stderr="",
         )
         managed_entry = {
@@ -10104,9 +10108,7 @@ class TestGjcSetup:
         added = subprocess.CompletedProcess(
             ["gjc", "mcp", "add"],
             0,
-            stdout=json.dumps(
-                {"action": "add", "status": "created", "name": "ouroboros"}
-            ),
+            stdout=json.dumps({"action": "add", "status": "created", "name": "ouroboros"}),
             stderr="",
         )
         with (

@@ -8,9 +8,9 @@ import tomllib
 from unittest.mock import patch
 
 import pytest
-
 from typer.testing import CliRunner
 
+from ouroboros.cli.commands.gjc_bridge import gjc_ooo_bridge_source_text
 import ouroboros.cli.commands.setup as setup_cmd
 from ouroboros.cli.commands.uninstall import (
     _remove_claude_mcp,
@@ -630,7 +630,7 @@ class TestRemoveGjcArtifacts:
         bridge = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
         bridge.parent.mkdir(parents=True)
         bridge.write_text(
-            setup_cmd._gjc_bridge_source_text(),
+            gjc_ooo_bridge_source_text("ouroboros", []),
             encoding="utf-8",
         )
         with (

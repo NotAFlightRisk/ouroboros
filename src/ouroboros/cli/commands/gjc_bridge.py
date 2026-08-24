@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 
 
-def gjc_ooo_bridge_source_text(*, command: str, args: list[str]) -> str:
+def gjc_ooo_bridge_source_text(command: str, args: list[str]) -> str:
     """Render the owned GJC input bridge for hosts without native MCP autoload."""
     default_command = json.dumps(command)
     default_args = json.dumps(args)
-    return f'''// Managed by `ouroboros setup --runtime gjc`.
+    return f"""// Managed by `ouroboros setup --runtime gjc`.
 import {{ execFile }} from "node:child_process";
 import {{ promisify }} from "node:util";
 
@@ -74,4 +74,4 @@ export default function ouroborosBridge(gjc: ExtensionAPI) {{
     return {{ handled: true, text: `Ouroboros dispatch failed (${{result.code ?? "unknown"}})\\n\\n${{body}}` }};
   }});
 }}
-'''
+"""

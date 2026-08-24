@@ -3679,17 +3679,6 @@ def _install_pi_ooo_bridge() -> bool:
     return True
 
 
-def _detect_gjc_bridge_dispatch_entry() -> tuple[str, list[str]]:
-    """Return the launcher a managed GJC compatibility bridge should use."""
-    return _detect_pi_bridge_dispatch_entry()
-
-
-def _gjc_bridge_source_text() -> str:
-    """Render the compatibility bridge for a GJC without native MCP autoload."""
-    command, args = _detect_gjc_bridge_dispatch_entry()
-    return gjc_ooo_bridge_source_text(command=command, args=args)
-
-
 def _install_gjc_skills() -> bool:
     """Project packaged Ouroboros skills into GJC's native user registry."""
     from ouroboros.gjc import install_gjc_skills
@@ -3775,15 +3764,13 @@ def _install_gjc_runtime_artifacts(
     )
     try:
         snapshots = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
-        native_mcp_support = gjc_native_mcp_autoload_support(
-            gjc_path, run_command=subprocess.run
-        )
+        native_mcp_support = gjc_native_mcp_autoload_support(gjc_path, run_command=subprocess.run)
         if native_mcp_support is None:
             succeeded = False
             expected = snapshots
         elif not native_mcp_support:
             succeeded = install_gjc_compatibility_bridge(
-                _gjc_bridge_source_text(),
+                gjc_ooo_bridge_source_text(*_detect_pi_bridge_dispatch_entry()),
                 _atomic_write_text,
             )
             expected = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
@@ -3800,9 +3787,7 @@ def _install_gjc_runtime_artifacts(
                 succeeded = False
             else:
                 succeeded = _remove_legacy_gjc_bridge()
-                expected = tuple(
-                    (path, _snapshot_path(path, follow_links=False)) for path in paths
-                )
+                expected = tuple((path, _snapshot_path(path, follow_links=False)) for path in paths)
     except OSError as exc:
         print_warning(f"Could not install GJC runtime artifacts: {exc}")
         succeeded = False
