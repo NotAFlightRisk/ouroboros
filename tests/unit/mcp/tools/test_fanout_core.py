@@ -12,8 +12,8 @@ Covers PR-J:
 from __future__ import annotations
 
 from collections.abc import Mapping
-import json
 from datetime import UTC, datetime, timedelta
+import json
 from pathlib import Path
 from typing import Any
 
@@ -721,9 +721,7 @@ def test_authoritative_negative_search_completes_web_lane(
 def test_low_quality_web_result_accepts_mixed_search_outcomes(tmp_path: Any) -> None:
     registry = FanoutRegistry(tmp_path)
     session_id = "sess-web-low-quality-mixed"
-    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(
-        registry, session_id
-    )
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
     assert lane_keys == ["code_context", "web_context"]
     question_identity = str(meta["question_advisory_request"]["question_identity"])
     queries = ["official billing API", "billing API discussion"]
@@ -767,9 +765,7 @@ def test_low_quality_web_result_accepts_mixed_search_outcomes(tmp_path: Any) -> 
 def test_low_quality_web_result_requires_result_bearing_attempt(tmp_path: Any) -> None:
     registry = FanoutRegistry(tmp_path)
     session_id = "sess-web-low-quality-empty"
-    fanout_id, correlation_key, _lane_keys, meta = _emitted_advisory_contract(
-        registry, session_id
-    )
+    fanout_id, correlation_key, _lane_keys, meta = _emitted_advisory_contract(registry, session_id)
     question_identity = str(meta["question_advisory_request"]["question_identity"])
     query = "official billing API"
     outcome = submit_fanout_results(
@@ -811,17 +807,21 @@ def test_low_quality_web_result_requires_result_bearing_attempt(tmp_path: Any) -
     ("verified_at", "expected_fragment"),
     [
         (
-            lambda: (datetime.now(UTC) - timedelta(days=8))
-            .replace(microsecond=0)
-            .isoformat()
-            .replace("+00:00", "Z"),
+            lambda: (
+                (datetime.now(UTC) - timedelta(days=8))
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            ),
             "is older than 7 days",
         ),
         (
-            lambda: (datetime.now(UTC) + timedelta(minutes=5))
-            .replace(microsecond=0)
-            .isoformat()
-            .replace("+00:00", "Z"),
+            lambda: (
+                (datetime.now(UTC) + timedelta(minutes=5))
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            ),
             "is future-dated relative to submission",
         ),
     ],
@@ -833,9 +833,7 @@ def test_web_references_reject_implausible_verification_times(
 ) -> None:
     registry = FanoutRegistry(tmp_path)
     session_id = f"sess-web-time-{expected_fragment}"
-    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(
-        registry, session_id
-    )
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
     outputs = _advisory_lane_outputs(meta, lane_keys)
     timestamp = verified_at()
     for reference in outputs["web_context"]["references"]:
@@ -905,7 +903,6 @@ def test_negative_web_lane_rejects_unattested_query_failure(tmp_path: Any) -> No
     assert "web_context" in outcome["contract_violations"]
 
 
-
 def test_schema_valid_web_references_without_host_evidence_are_rejected(tmp_path: Any) -> None:
     registry = FanoutRegistry(tmp_path)
     session_id = "sess-web-unattested"
@@ -926,12 +923,11 @@ def test_schema_valid_web_references_without_host_evidence_are_rejected(tmp_path
         "source_evidence/output is not a JSON object"
     ]
 
+
 def test_every_submitted_web_query_requires_parent_result_evidence(tmp_path: Any) -> None:
     registry = FanoutRegistry(tmp_path)
     session_id = "sess-web-query-coverage"
-    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(
-        registry, session_id
-    )
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
     outputs = _advisory_lane_outputs(meta, lane_keys)
     web = outputs["web_context"]
     web["search_queries"] = ["official billing API", "billing security standard"]
@@ -958,8 +954,7 @@ def test_every_submitted_web_query_requires_parent_result_evidence(tmp_path: Any
     assert outcome["status"] == "partial"
     assert outcome["missing_required_keys"] == ["web_context"]
     assert outcome["contract_violations"]["web_context"] == [
-        "source_evidence/search_attempts: no attempt attests query "
-        "'billing security standard'"
+        "source_evidence/search_attempts: no attempt attests query 'billing security standard'"
     ]
 
 
@@ -1174,7 +1169,12 @@ def test_documented_interview_source_evidence_matches_public_schema() -> None:
     documented = json.loads(skill[json_body_start:json_end])
     schema = interview_web_reference_answer_contract()["source_evidence_schema"]
 
-    assert list(fanout_module._validate_against_contract(documented, {"response_model_schema": schema})) == []
+    assert (
+        list(
+            fanout_module._validate_against_contract(documented, {"response_model_schema": schema})
+        )
+        == []
+    )
     assert "search_results" not in documented
     assert documented["search_attempts"][0]["outcome"] == "results_found"
 
