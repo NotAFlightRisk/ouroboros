@@ -2441,7 +2441,7 @@ async def test_final_settlement_never_replays_without_explicit_safety(
         'python3 -c "from pathlib import Path; '
         f"counter=Path({str(counter)!r}); "
         "n=int(counter.read_text()) if counter.exists() else 0; "
-        "counter.write_text(str(n+1))\""
+        'counter.write_text(str(n+1))"'
     )
     executor = _make_executor(working_directory=str(tmp_path))
     seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
@@ -3032,6 +3032,7 @@ def test_resolve_verify_cwd_parses_environment_prefixed_node_command(
 
     assert error is None
     assert Path(resolved) == (tmp_path / "app").resolve()
+
 
 @pytest.mark.parametrize(
     "command",

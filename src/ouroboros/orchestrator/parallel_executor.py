@@ -1804,6 +1804,7 @@ def _sole_node_manifest_directory(root: Path) -> Path | None:
             return None
     return candidates[0] if candidates else None
 
+
 def _verify_command_executable(command: str) -> str:
     """Return the effective executable after supported shell wrappers."""
     inner_command = _single_command_after_safe_shell_preamble(command)
