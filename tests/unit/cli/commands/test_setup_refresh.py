@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 from ouroboros.cli.commands.setup import app
 from ouroboros.codex import CodexArtifactInstallResult
 from ouroboros.hermes.artifacts import HERMES_SKILL_CATEGORY, HERMES_SKILL_NAME
+from ouroboros.gjc import install_gjc_skills
 from ouroboros.runtime_instruction_artifacts import (
     _SECTION_END,
     _SECTION_START,
@@ -164,14 +165,18 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         assert result.exit_code == 0
         assert bridge.read_text(encoding="utf-8") != "// stale bridge\n"
 
-    def test_refreshes_existing_gjc_projection_and_repairs_mcp(self, tmp_path: Path) -> None:
-        skill = tmp_path / ".gjc" / "agent" / "skills" / "ouroboros-interview"
-        skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text(
-            "---\nname: ouroboros-interview\ndescription: stale\n"
-            "ouroboros_projection: gjc-v1\n---\n",
+    def test_refreshes_existing_gjc_projection_and_repairs_mcp(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "source"
+        source_skill = source / "interview"
+        source_skill.mkdir(parents=True)
+        (source_skill / "SKILL.md").write_text(
+            "---\nname: interview\ndescription: stale\n---\n",
             encoding="utf-8",
         )
+        agent_dir = tmp_path / ".gjc" / "agent"
+        skill = install_gjc_skills(agent_dir=agent_dir, skills_dir=source).skill_paths[0]
         with (
             patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/bin/gjc"),
             patch(
@@ -190,6 +195,25 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
             encoding="utf-8"
         )
         register_mcp.assert_called_once()
+
+    def test_user_owned_namespaced_skill_does_not_trigger_gjc_refresh(
+        self, tmp_path: Path
+    ) -> None:
+        skill = tmp_path / ".gjc" / "agent" / "skills" / "ouroboros-custom"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: ouroboros-custom\ndescription: user-owned\n---\n",
+            encoding="utf-8",
+        )
+
+        with patch(
+            "ouroboros.cli.commands.setup._install_gjc_runtime_artifacts"
+        ) as install:
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 0
+        assert "No installed runtime artifacts found to refresh." in result.output
+        install.assert_not_called()
 
     def test_refreshes_from_persistent_gjc_mcp_state_only(self, tmp_path: Path) -> None:
         agent_dir = tmp_path / ".gjc" / "agent"

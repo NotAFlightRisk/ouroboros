@@ -91,11 +91,10 @@ def refresh_runtime_artifacts() -> None:
     gjc_expected = False
     gjc_succeeded = True
     gjc_root = gjc_agent_dir()
-    gjc_skills = gjc_root / "skills"
+    from ouroboros.gjc import has_setup_owned_gjc_skills
+
     gjc_bridge = gjc_root / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
-    has_projected_skill = gjc_skills.is_dir() and any(
-        path.name.startswith("ouroboros-") for path in gjc_skills.iterdir()
-    )
+    has_projected_skill = has_setup_owned_gjc_skills(agent_dir=gjc_root)
     from ouroboros.cli.gjc_setup import (
         gjc_mcp_bridge_config_path,
         is_setup_managed_gjc_mcp_bridge_config,

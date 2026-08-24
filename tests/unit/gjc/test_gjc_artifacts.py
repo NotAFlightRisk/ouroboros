@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from ouroboros.gjc import install_gjc_skills, remove_gjc_skills
@@ -26,7 +27,9 @@ def _frontmatter(path: Path) -> dict[str, object]:
     return parsed
 
 
-def test_installs_namespaced_skills_and_rewrites_cross_skill_references(tmp_path: Path) -> None:
+def test_installs_namespaced_skills_and_rewrites_cross_skill_references(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "source"
     agent_dir = tmp_path / "agent"
     _skill(
@@ -54,18 +57,16 @@ def test_installs_namespaced_skills_and_rewrites_cross_skill_references(tmp_path
 def test_refresh_is_idempotent_prunes_only_managed_namespace_and_preserves_user_skills(
     tmp_path: Path,
 ) -> None:
+    old_source = tmp_path / "old-source"
     source = tmp_path / "source"
     agent_dir = tmp_path / "agent"
+    _skill(old_source, "stale")
     _skill(source, "interview")
     user_skill = agent_dir / "skills" / "my-skill"
     user_skill.mkdir(parents=True)
     (user_skill / "SKILL.md").write_text("user", encoding="utf-8")
+    install_gjc_skills(agent_dir=agent_dir, skills_dir=old_source)
     stale = agent_dir / "skills" / "ouroboros-stale"
-    stale.mkdir()
-    (stale / "SKILL.md").write_text(
-        "---\nname: ouroboros-stale\ndescription: stale\nouroboros_projection: gjc-v1\n---\n",
-        encoding="utf-8",
-    )
     custom_namespaced = agent_dir / "skills" / "ouroboros-custom"
     custom_namespaced.mkdir()
     (custom_namespaced / "SKILL.md").write_text(
@@ -82,14 +83,13 @@ def test_refresh_is_idempotent_prunes_only_managed_namespace_and_preserves_user_
     assert custom_namespaced.exists()
 
 
-def test_remove_deletes_only_namespaced_non_symlink_skills(tmp_path: Path) -> None:
+def test_remove_deletes_only_intact_generated_skills(tmp_path: Path) -> None:
+    source = tmp_path / "source"
     agent_dir = tmp_path / "agent"
-    managed = agent_dir / "skills" / "ouroboros-interview"
-    managed.mkdir(parents=True)
-    (managed / "SKILL.md").write_text(
-        "---\nname: ouroboros-interview\ndescription: managed\nouroboros_projection: gjc-v1\n---\n",
-        encoding="utf-8",
-    )
+    _skill(source, "interview")
+    managed = install_gjc_skills(
+        agent_dir=agent_dir, skills_dir=source
+    ).skill_paths[0]
     custom_namespaced = agent_dir / "skills" / "ouroboros-custom"
     custom_namespaced.mkdir()
     (custom_namespaced / "SKILL.md").write_text(
@@ -107,7 +107,27 @@ def test_remove_deletes_only_namespaced_non_symlink_skills(tmp_path: Path) -> No
     assert custom_namespaced.exists()
 
 
-def test_install_refuses_to_replace_user_owned_namespaced_skill(tmp_path: Path) -> None:
+def test_refresh_and_remove_preserve_modified_generated_skill(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    agent_dir = tmp_path / "agent"
+    _skill(source, "interview")
+    projected = install_gjc_skills(
+        agent_dir=agent_dir, skills_dir=source
+    ).skill_paths[0]
+    skill_md = projected / "SKILL.md"
+    modified = skill_md.read_text(encoding="utf-8") + "\nOperator notes.\n"
+    skill_md.write_text(modified, encoding="utf-8")
+
+    with pytest.raises(OSError, match="non-Ouroboros GJC skill"):
+        install_gjc_skills(agent_dir=agent_dir, skills_dir=source)
+
+    assert remove_gjc_skills(agent_dir=agent_dir) == ()
+    assert skill_md.read_text(encoding="utf-8") == modified
+
+
+def test_install_refuses_to_replace_user_owned_namespaced_skill(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "source"
     agent_dir = tmp_path / "agent"
     _skill(source, "interview")

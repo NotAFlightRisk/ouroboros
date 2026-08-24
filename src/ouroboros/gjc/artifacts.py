@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -20,6 +21,8 @@ _SKILL_REFERENCE_PATTERN = re.compile(r"\.\./([a-z0-9_-]+)/SKILL\.md")
 _SLASH_SKILL_PATTERN = re.compile(r"/ouroboros:([a-z0-9_-]+)")
 _MANAGED_FIELD = "ouroboros_projection"
 _MANAGED_VALUE = "gjc-v1"
+_MANAGED_DIGEST_FIELD = "ouroboros_projection_sha256"
+_DIGEST_PLACEHOLDER = "sha256-" + "x" * 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +74,7 @@ def _render_gjc_skill(source_dir: Path) -> str:
     )
     frontmatter["name"] = projected_name
     frontmatter[_MANAGED_FIELD] = _MANAGED_VALUE
+    frontmatter[_MANAGED_DIGEST_FIELD] = _DIGEST_PLACEHOLDER
     frontmatter["description"] = (
         f"{description.rstrip('.')} — {trigger}" if description else trigger
     )
@@ -108,15 +112,61 @@ def _remove_path(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def _normalized_skill_bytes(source: str, expected_digest: str) -> bytes | None:
+    pattern = re.compile(
+        rf"(?m)^{re.escape(_MANAGED_DIGEST_FIELD)}: (sha256-(?:[0-9a-f]{{64}}|x{{64}}))$"
+    )
+    matches = tuple(pattern.finditer(source))
+    if len(matches) != 1 or matches[0].group(1) != expected_digest:
+        return None
+    return pattern.sub(
+        f"{_MANAGED_DIGEST_FIELD}: {_DIGEST_PLACEHOLDER}", source, count=1
+    ).encode("utf-8")
+
+
+def _skill_tree_digest(path: Path, *, expected_digest: str) -> str | None:
+    digest = hashlib.sha256()
+    try:
+        candidates = sorted(
+            path.rglob("*"), key=lambda item: item.relative_to(path).as_posix()
+        )
+        for candidate in candidates:
+            relative = candidate.relative_to(path).as_posix().encode("utf-8")
+            if candidate.is_symlink():
+                return None
+            if candidate.is_dir():
+                digest.update(b"directory\0" + relative + b"\0")
+                continue
+            if not candidate.is_file():
+                return None
+            content = candidate.read_bytes()
+            if relative == b"SKILL.md":
+                normalized = _normalized_skill_bytes(
+                    content.decode("utf-8"), expected_digest
+                )
+                if normalized is None:
+                    return None
+                content = normalized
+            digest.update(b"file\0" + relative + b"\0")
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+    except (OSError, UnicodeDecodeError):
+        return None
+    return f"sha256-{digest.hexdigest()}"
+
+
 def _is_managed_skill(path: Path) -> bool:
     try:
-        frontmatter, _ = _split_skill_document(
-            (path / "SKILL.md").read_text(encoding="utf-8"),
-            path / "SKILL.md",
-        )
+        source = (path / "SKILL.md").read_text(encoding="utf-8")
+        frontmatter, _ = _split_skill_document(source, path / "SKILL.md")
     except (OSError, ValueError, UnicodeDecodeError, yaml.YAMLError):
         return False
-    return frontmatter.get(_MANAGED_FIELD) == _MANAGED_VALUE
+    expected_digest = frontmatter.get(_MANAGED_DIGEST_FIELD)
+    return (
+        frontmatter.get(_MANAGED_FIELD) == _MANAGED_VALUE
+        and isinstance(expected_digest, str)
+        and _skill_tree_digest(path, expected_digest=expected_digest) == expected_digest
+    )
 
 
 def _publish_skill(source_dir: Path, target_path: Path) -> None:
@@ -134,9 +184,23 @@ def _publish_skill(source_dir: Path, target_path: Path) -> None:
     backup: Path | None = None
     try:
         shutil.copytree(source_dir, staging, dirs_exist_ok=True, symlinks=False)
-        (staging / "SKILL.md").write_text(_render_gjc_skill(source_dir), encoding="utf-8")
+        rendered = _render_gjc_skill(source_dir)
+        (staging / "SKILL.md").write_text(rendered, encoding="utf-8")
+        generation_digest = _skill_tree_digest(
+            staging, expected_digest=_DIGEST_PLACEHOLDER
+        )
+        if generation_digest is None:
+            raise OSError(f"Could not fingerprint projected GJC skill: {target_path}")
+        rendered = rendered.replace(
+            f"{_MANAGED_DIGEST_FIELD}: {_DIGEST_PLACEHOLDER}",
+            f"{_MANAGED_DIGEST_FIELD}: {generation_digest}",
+            1,
+        )
+        (staging / "SKILL.md").write_text(rendered, encoding="utf-8")
         if target_path.exists():
-            backup = target_path.with_name(f".{target_path.name}.{os.urandom(8).hex()}.old")
+            backup = target_path.with_name(
+                f".{target_path.name}.{os.urandom(8).hex()}.old"
+            )
             os.replace(target_path, backup)
         os.replace(staging, target_path)
     except BaseException:
@@ -188,6 +252,21 @@ def install_gjc_skills(
     return GjcSkillInstallResult(target_root=target_root, skill_paths=tuple(installed))
 
 
+def has_setup_owned_gjc_skills(*, agent_dir: str | Path) -> bool:
+    """Return whether a GJC profile contains an intact setup-generated skill."""
+    target_root = gjc_skills_root(agent_dir)
+    return (
+        target_root.is_dir()
+        and not target_root.is_symlink()
+        and any(
+            candidate.name.startswith(GJC_SKILL_NAMESPACE)
+            and not candidate.is_symlink()
+            and _is_managed_skill(candidate)
+            for candidate in target_root.iterdir()
+        )
+    )
+
+
 def setup_owned_gjc_skill_paths(
     *, agent_dir: str | Path, skills_dir: str | Path | None = None
 ) -> tuple[Path, ...]:
@@ -232,6 +311,7 @@ __all__ = [
     "GJC_SKILL_NAMESPACE",
     "GjcSkillInstallResult",
     "gjc_skills_root",
+    "has_setup_owned_gjc_skills",
     "install_gjc_skills",
     "remove_gjc_skills",
     "setup_owned_gjc_skill_paths",

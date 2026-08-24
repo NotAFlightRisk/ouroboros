@@ -10,8 +10,8 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
-from ouroboros.cli.commands.gjc_bridge import gjc_ooo_bridge_source_text
 import ouroboros.cli.commands.setup as setup_cmd
+from ouroboros.cli.commands.gjc_bridge import gjc_ooo_bridge_source_text
 from ouroboros.cli.commands.uninstall import (
     _remove_claude_mcp,
     _remove_claude_md_block,
@@ -22,6 +22,7 @@ from ouroboros.cli.commands.uninstall import (
     _remove_opencode_bridge_plugin,
     app,
 )
+from ouroboros.gjc import install_gjc_skills
 
 runner = CliRunner()
 
@@ -488,14 +489,19 @@ class TestRemoveCodexArtifacts:
 
 
 class TestRemoveGjcArtifacts:
-    def test_removes_managed_skills_and_preserves_other_skills(self, tmp_path: Path) -> None:
+    def test_removes_managed_skills_and_preserves_other_skills(
+        self, tmp_path: Path
+    ) -> None:
         agent_dir = tmp_path / "agent"
-        managed = agent_dir / "skills" / "ouroboros-interview"
-        managed.mkdir(parents=True)
-        (managed / "SKILL.md").write_text(
-            "---\nname: ouroboros-interview\ndescription: managed\nouroboros_projection: gjc-v1\n---\n",
+        source = tmp_path / "source" / "interview"
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text(
+            "---\nname: interview\ndescription: managed\n---\n",
             encoding="utf-8",
         )
+        managed = install_gjc_skills(
+            agent_dir=agent_dir, skills_dir=source.parent
+        ).skill_paths[0]
         other = agent_dir / "skills" / "my-skill"
         other.mkdir()
         with (
