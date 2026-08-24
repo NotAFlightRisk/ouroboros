@@ -246,6 +246,15 @@ _AMBIGUOUS_CONTRACT_PATTERN = re.compile(
     r"|\bor\b",
     re.IGNORECASE,
 )
+_NEGATIVE_CONSTRAINT_PATTERN = re.compile(
+    r"\b(?:no|never|avoid(?:ed|ing)?|without|instead\s+of|rather\s+than|"
+    r"do(?:es)?\s+not|did\s+not|have\s+not|has\s+not|had\s+not|"
+    r"don't|doesn't|doesn’t|didn't|didn’t|cannot|can't|can\s+not|"
+    r"must\s+not|should\s+not|may\s+not|will\s+not|would\s+not|"
+    r"won't|wouldn't|shouldn't|mustn't|won’t|wouldn’t|shouldn’t|mustn’t)\b",
+    re.IGNORECASE,
+)
+
 _COMMA_NON_BINDING_GOVERNOR_PATTERN = re.compile(
     r"(?:\b(?:for\s+(?:an?\s+)?example|for\s+reference|as\s+an?\s+reference|"
     r"by\s+way\s+of\s+reference|for\s+illustration|as\s+an?\s+illustration|"
@@ -314,6 +323,18 @@ _EXPLICIT_TASK_TYPE_BINDING_PATTERN = re.compile(
 )
 
 
+def _negative_constraint_colon(text: str, start: int) -> int:
+    """Return a colon separating an earlier negative constraint, if present."""
+    hard_boundary = max(
+        text.rfind(token, 0, start) for token in (";", ".", "!", "?", "\n")
+    )
+    colon = text.rfind(":", hard_boundary + 1, start)
+    if colon < 0:
+        return -1
+    prefix = text[hard_boundary + 1 : colon]
+    return colon if _NEGATIVE_CONSTRAINT_PATTERN.search(prefix) else -1
+
+
 def _candidate_segment(text: str, start: int, end: int) -> tuple[int, int]:
     """Return the punctuation-or-conjunction-bounded candidate clause."""
     segment_start = 0
@@ -325,6 +346,9 @@ def _candidate_segment(text: str, start: int, end: int) -> tuple[int, int]:
         if boundary.group().strip().casefold() in {"without", "despite"}:
             continue
         segment_start = boundary.end()
+    colon = _negative_constraint_colon(text, start)
+    if colon >= 0:
+        segment_start = max(segment_start, colon + 1)
     next_boundary = _CANDIDATE_BOUNDARY_PATTERN.search(text, end)
     segment_end = next_boundary.start() if next_boundary is not None else len(text)
     return segment_start, segment_end
@@ -332,8 +356,11 @@ def _candidate_segment(text: str, start: int, end: int) -> tuple[int, int]:
 
 def _governor_scope_start(text: str, start: int) -> int:
     """Return the nearest hard clause boundary before a contract."""
-    boundary = max(text.rfind(token, 0, start) for token in (";", ".", "!", "?", "\n"))
-    return boundary + 1
+    boundary = max(
+        text.rfind(token, 0, start) for token in (";", ".", "!", "?", "\n")
+    )
+    colon = _negative_constraint_colon(text, start)
+    return max(boundary, colon) + 1
 
 
 def has_affirmative_contract_prefix(prefix: str, *, allow_task_linker: bool = False) -> bool:

@@ -172,6 +172,20 @@ def test_parent_seed_resets_governors_at_punctuation_boundary() -> None:
 
     assert inherited_parent_seed_id(_seed(goal)) == "seed_good"
 
+def test_parent_seed_scopes_colon_delimited_negative_prefix() -> None:
+    for goal in (
+        "Do not copy obsolete state: inherit seed_good.",
+        "Avoid stale lineage: set parent_seed_id to seed_good.",
+        "No parent replacement: use seed_good as the parent seed.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) == "seed_good"
+    for goal in (
+        "For reference: inherit seed_bad.",
+        "If approved: inherit seed_bad.",
+    ):
+        assert inherited_parent_seed_id(_seed(goal)) is None
+
+
 
 def test_parent_seed_accepts_ordinary_positive_wording() -> None:
     for goal in (

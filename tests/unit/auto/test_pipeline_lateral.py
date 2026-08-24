@@ -191,6 +191,9 @@ def test_seed_qa_repairs_preserve_same_clause_task_and_parent_contracts() -> Non
         "Write the requested plan as a document.",
         "Produce the architecture review as a document.",
         "The deliverable is a document; do not change source code.",
+        "Do not change source files: use task_type: document.",
+        "Avoid code generation: create a document Seed.",
+        "No repository edits: the deliverable is a document.",
     ),
 )
 def test_seed_qa_repairs_preserve_direct_document_selections(goal: str) -> None:
@@ -225,6 +228,9 @@ def test_seed_qa_repairs_preserve_direct_document_selections(goal: str) -> None:
         "Set the parent Seed to seed_parent.",
         "The parent Seed should be seed_parent.",
         "Make seed_parent the parent Seed.",
+        "Do not copy obsolete state: inherit seed_parent.",
+        "Avoid stale lineage: set parent_seed_id to seed_parent.",
+        "No parent replacement: use seed_parent as the parent seed.",
     ),
 )
 def test_seed_qa_repairs_preserve_direct_parent_selections(goal: str) -> None:

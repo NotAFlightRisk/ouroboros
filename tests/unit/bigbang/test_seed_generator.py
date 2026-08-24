@@ -360,6 +360,9 @@ class TestSeedGeneratorAmbiguityGating:
         "initial_context",
         (
             "Rather than change source code, write the requested plan; set the task type to document. For reference, task_type: code is an example.",
+            "Do not change source files: use task_type: document.",
+            "Avoid code generation: create a document Seed.",
+            "No repository edits: the deliverable is a document.",
             "Implement this as task_type: document.",
             "Make this a document task.",
             "Create a document Seed.",
