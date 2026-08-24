@@ -1217,69 +1217,61 @@ class _RuntimeReadVisitor(ast.NodeVisitor):
             for candidate in ast.walk(node)
         )
 
-    def _has_transitive_callable_relevance(self, node: ast.AST) -> bool:
-        """Check whether the decorated node or any callable it invokes
-        transitively mentions tracked config names.
+    def _relevance_call_targets(
+        self,
+        call: ast.Call,
+        containing_class: ast.ClassDef | None,
+    ) -> _FunctionSet:
+        """Resolve only call targets proven by the current binding and receiver."""
 
-        Unlike _syntactically_mentions_tracked_config which only checks the
-        node's own AST, this follows call edges to locally-defined functions
-        to detect indirect config reads through helper calls.
-        """
-        if self._syntactically_mentions_tracked_config(node):
-            return True
-        # Collect all called function names within the node's AST.
-        called_names: set[str] = set()
-        for candidate in ast.walk(node):
-            if isinstance(candidate, ast.Call):
-                if isinstance(candidate.func, ast.Name):
-                    called_names.add(candidate.func.id)
-                elif isinstance(candidate.func, ast.Attribute):
-                    called_names.add(candidate.func.attr)
-        if not called_names:
-            return False
-        # Check module-level functions and class methods in the current module
-        # for transitive config relevance.
-        visited: set[str] = set()
-        pending = list(called_names)
+        if isinstance(call.func, ast.Name):
+            return frozenset(function for function, _receiver in self._call_targets(call.func))
+        if not isinstance(call.func, ast.Attribute):
+            return frozenset()
+
+        receiver = call.func.value
+        classes: frozenset[ast.ClassDef] = frozenset()
+        modules: frozenset[str] = frozenset()
+        if isinstance(receiver, ast.Name) and receiver.id in {"self", "cls"}:
+            classes = frozenset({containing_class}) if containing_class is not None else frozenset()
+        elif isinstance(receiver, ast.Name):
+            value = self._name_value(receiver.id)
+            classes = value.instance_classes | value.classes
+            modules = value.modules
+        elif isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Name):
+            value = self._name_value(receiver.func.id)
+            classes = value.classes
+
+        methods = self._source_index.methods(classes, call.func.attr)
+        imported = frozenset(
+            function
+            for module_name in modules
+            if (module := self._source_index.resolve_module(module_name, self._module)) is not None
+            for function in self._source_index.resolve_functions(module, call.func.attr)
+        )
+        return methods | imported
+
+    def _has_transitive_callable_relevance(self, node: ast.AST) -> bool:
+        """Follow only proven callable bindings to config-relevant local code."""
+
+        pending: list[ast.AST] = [node]
+        visited: set[int] = set()
+        root_class = node if isinstance(node, ast.ClassDef) else None
         while pending:
-            name = pending.pop()
-            if name in visited:
+            candidate = pending.pop()
+            if id(candidate) in visited:
                 continue
-            visited.add(name)
-            # Check module-level functions
-            functions = self._module.functions.get(name, frozenset())
-            for func_node in functions:
-                if self._syntactically_mentions_tracked_config(func_node):
-                    return True
-                # Collect transitive calls from this function
-                for inner in ast.walk(func_node):
-                    if isinstance(inner, ast.Call):
-                        if isinstance(inner.func, ast.Name) and inner.func.id not in visited:
-                            pending.append(inner.func.id)
-                        elif (
-                            isinstance(inner.func, ast.Attribute) and inner.func.attr not in visited
-                        ):
-                            pending.append(inner.func.attr)
-            # Check class methods in the same module
-            for class_nodes in self._module.classes.values():
-                for class_node in class_nodes:
-                    for stmt in ast.walk(class_node):
-                        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                            if stmt.name == name:
-                                if self._syntactically_mentions_tracked_config(stmt):
-                                    return True
-                                for inner in ast.walk(stmt):
-                                    if isinstance(inner, ast.Call):
-                                        if (
-                                            isinstance(inner.func, ast.Name)
-                                            and inner.func.id not in visited
-                                        ):
-                                            pending.append(inner.func.id)
-                                        elif (
-                                            isinstance(inner.func, ast.Attribute)
-                                            and inner.func.attr not in visited
-                                        ):
-                                            pending.append(inner.func.attr)
+            visited.add(id(candidate))
+            if self._syntactically_mentions_tracked_config(candidate):
+                return True
+
+            containing_class = (
+                candidate if isinstance(candidate, ast.ClassDef) else root_class
+            )
+            for child in ast.walk(candidate):
+                if not isinstance(child, ast.Call):
+                    continue
+                pending.extend(self._relevance_call_targets(child, containing_class))
         return False
 
     @staticmethod

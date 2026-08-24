@@ -6770,6 +6770,91 @@ read_stage(report.evaluation)
     assert not any("unresolved decorator" in violation for violation in report.violations)
 
 
+def test_unresolved_decorator_follows_callable_alias_relevance(contract, tmp_path: Path) -> None:
+    (tmp_path / "aliased_helper.py").write_text(
+        """
+from external_package import preserve_or_replace
+
+def helper(config):
+    return config.evaluation.stage1_enabled
+
+alias = helper
+
+@preserve_or_replace
+def process(config):
+    return alias(config)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    report = _audit_as_documented_inert(contract, field, reads)
+
+    assert reads == frozenset()
+    assert any(
+        "unresolved decorator 'preserve_or_replace'" in violation
+        for violation in report.violations
+    )
+
+
+def test_unresolved_decorator_resolves_method_receiver_before_relevance(
+    contract, tmp_path: Path
+) -> None:
+    (tmp_path / "same_method_name.py").write_text(
+        """
+from external_package import preserve_or_replace
+
+class ConfigReader:
+    def read(self, config):
+        return config.evaluation.stage1_enabled
+
+class Harmless:
+    def read(self):
+        return 42
+
+@preserve_or_replace
+def process():
+    return Harmless().read()
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    report = _audit_as_documented_inert(contract, field, reads)
+
+    assert reads == frozenset()
+    assert not any("unresolved decorator" in violation for violation in report.violations)
+
+
+def test_unresolved_decorator_follows_proven_method_receiver(contract, tmp_path: Path) -> None:
+    (tmp_path / "relevant_method_receiver.py").write_text(
+        """
+from external_package import preserve_or_replace
+
+class Reader:
+    def read(self, config):
+        return config.evaluation.stage1_enabled
+
+@preserve_or_replace
+def process(config):
+    return Reader().read(config)
+""",
+        encoding="utf-8",
+    )
+    field = contract.ConfigField("evaluation", "stage1_enabled")
+
+    reads = contract.runtime_reads(tmp_path, frozenset({field}))
+    report = _audit_as_documented_inert(contract, field, reads)
+
+    assert reads == frozenset()
+    assert any(
+        "unresolved decorator 'preserve_or_replace'" in violation
+        for violation in report.violations
+    )
+
+
 # --- Blocker 2 regression: no basename-only semantics-preserving trust ---
 
 
