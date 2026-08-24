@@ -9598,6 +9598,8 @@ class TestOrchestratorRunner:
 
         from ouroboros.core.types import Result
 
+        _attach_test_execution_authority(mock_adapter)
+
         async def mock_create_session(*args: Any, **kwargs: Any):
             return Result.ok(
                 SessionTracker.create(

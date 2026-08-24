@@ -3427,29 +3427,27 @@ class _OwnedTestRuntime:
     def acquire_execution(self, **kwargs: Any) -> RuntimeExecution:
         backend = str(getattr(self, "runtime_backend", "test_runtime"))
         controller = RuntimeExecutionController(backend)
-        latest_handle: RuntimeHandle | None = None
+        provider_stream: AsyncIterator[AgentMessage] | None = None
 
         async def owned_stream() -> AsyncIterator[AgentMessage]:
-            nonlocal latest_handle
-            completed = False
+            nonlocal provider_stream
             provider_stream = self.execute_task(**kwargs)
             try:
                 async for message in provider_stream:
-                    if message.resume_handle is not None:
-                        latest_handle = message.resume_handle
                     yield message
-                completed = True
             finally:
                 close = getattr(provider_stream, "aclose", None)
                 if close is not None:
                     await close()
-                if completed:
-                    controller.mark_reaped()
+                controller.mark_reaped()
 
         async def force_provider() -> bool:
-            if latest_handle is None or not latest_handle.can_terminate:
-                return True
-            return await latest_handle.terminate()
+            if provider_stream is not None:
+                close = getattr(provider_stream, "aclose", None)
+                if close is not None:
+                    await close()
+                controller.mark_reaped()
+            return True
 
         controller.bind_process(force_provider)
         return RuntimeExecution(
@@ -8669,8 +8667,8 @@ class TestParallelACExecutor:
         assert result.runtime_handle.native_session_id == "opencode-session-1"
 
     @pytest.mark.asyncio
-    async def test_atomic_ac_terminates_live_runtime_handle_after_completion(self) -> None:
-        """Completed AC runs should best-effort terminate live runtime handles."""
+    async def test_atomic_ac_does_not_reterminate_handle_after_verified_close(self) -> None:
+        """Verified execution closure supersedes the streamed resume handle."""
         terminate_calls = 0
 
         async def _terminate(_handle: RuntimeHandle) -> bool:
@@ -8748,7 +8746,7 @@ class TestParallelACExecutor:
         )
 
         assert result.success is True
-        assert terminate_calls == 1
+        assert terminate_calls == 0
 
     @pytest.mark.asyncio
     async def test_atomic_ac_observes_profile_typed_evidence_without_changing_success(self) -> None:

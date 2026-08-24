@@ -14,6 +14,7 @@ The dormant default (no router) MUST be byte-identical to today's behavior:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,6 +50,7 @@ from ouroboros.orchestrator.profile_loader import (
     VerifierCapability,
 )
 from ouroboros.orchestrator.runner import OrchestratorError, OrchestratorRunner
+from ouroboros.orchestrator.runtime_execution import RuntimeExecution, RuntimeExecutionController
 
 
 @pytest.fixture(autouse=True)
@@ -95,7 +97,38 @@ def _capturing_event_store() -> tuple[AsyncMock, list]:
     return store, events
 
 
-class _EnforcedModelRuntime:
+class _OwnedRuntimeDouble:
+    """Give routing doubles the production pre-effect ownership contract."""
+
+    def acquire_execution(self, **kwargs: Any) -> RuntimeExecution:
+        controller = RuntimeExecutionController(self.runtime_backend)
+
+        async def stream() -> AsyncIterator[AgentMessage]:
+            completed = False
+            provider_stream = self.execute_task(**kwargs)
+            try:
+                async for message in provider_stream:
+                    yield message
+                completed = True
+            finally:
+                close = getattr(provider_stream, "aclose", None)
+                if close is not None:
+                    await close()
+                if completed:
+                    controller.mark_reaped()
+
+        async def force_provider() -> bool:
+            return True
+
+        controller.bind_process(force_provider)
+        return RuntimeExecution(
+            backend=self.runtime_backend,
+            stream=stream(),
+            controller=controller,
+        )
+
+
+class _EnforcedModelRuntime(_OwnedRuntimeDouble):
     """A runtime that declares NATIVE model override and captures the model kwarg."""
 
     _runtime_handle_backend = "claude"
@@ -140,7 +173,7 @@ class _EnforcedModelRuntime:
         )
 
 
-class _NoModelKwargRuntime:
+class _NoModelKwargRuntime(_OwnedRuntimeDouble):
     """A runtime with no capability declaration and no ``model`` kwarg (the default)."""
 
     _runtime_handle_backend = "opencode"

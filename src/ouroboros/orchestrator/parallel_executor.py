@@ -9407,6 +9407,12 @@ Respond with either ATOMIC or the structured JSON object only.
             raise
 
         except Exception as e:
+            if (
+                isinstance(e, ProviderStreamCloseTimeout)
+                and dispatch_state.attempt_budget_exhaustion is not None
+            ):
+                clear_cached_runtime_handle = True
+                return await attempt_terminalizer.attempt_budget(active_dispatch_id)
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
             await _seal_dispatch(
@@ -9497,10 +9503,11 @@ Respond with either ATOMIC or the structured JSON object only.
                     request_authority_digest=request_authority_digest,
                 )
                 if clear_cached_runtime_handle:
-                    await self._terminate_runtime_handle(
-                        dispatch_state.runtime_handle,
-                        runtime_scope_id=runtime_identity.session_scope_id,
-                    )
+                    if not dispatch_state.provider_closed:
+                        await self._terminate_runtime_handle(
+                            dispatch_state.runtime_handle,
+                            runtime_scope_id=runtime_identity.session_scope_id,
+                        )
                     self._forget_ac_runtime_handle(
                         ac_index,
                         execution_context_id=execution_context_id,

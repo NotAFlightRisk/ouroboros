@@ -48,11 +48,28 @@ async def stream_owned_claude_client(
     owned_process: Any | None = None
     connect_task = asyncio.create_task(client.connect())
 
-    async def force_owned_client() -> bool:
+    async def settle_connect_task() -> bool:
         if not connect_task.done():
             connect_task.cancel()
-        with suppress(asyncio.CancelledError, Exception):
-            await connect_task
+            done, _ = await asyncio.wait((connect_task,), timeout=0.1)
+            if not done:
+                close = getattr(connect_task.get_coro(), "close", None)
+                if not callable(close):
+                    return False
+                with suppress(BaseException):
+                    close()
+                connect_task.cancel()
+                done, _ = await asyncio.wait((connect_task,), timeout=0.1)
+                if not done:
+                    return False
+        if not connect_task.cancelled():
+            with suppress(BaseException):
+                connect_task.exception()
+        return True
+
+    async def force_owned_client() -> bool:
+        if not await settle_connect_task():
+            return False
         transport = getattr(client, "_transport", None)
         process = getattr(transport, "_process", None)
         if process is None:
@@ -114,9 +131,12 @@ async def stream_owned_claude_client(
                 )
             yield agent_message
     finally:
+        connect_settled = await settle_connect_task()
         await client.disconnect()
-        if controller is not None:
-            if owned_process is not None and getattr(owned_process, "returncode", None) is None:
-                owned_process.kill()
-                await owned_process.wait()
+        process_reaped = True
+        if owned_process is not None and getattr(owned_process, "returncode", None) is None:
+            owned_process.kill()
+            await owned_process.wait()
+            process_reaped = getattr(owned_process, "returncode", None) is not None
+        if controller is not None and connect_settled and process_reaped:
             controller.mark_reaped()
