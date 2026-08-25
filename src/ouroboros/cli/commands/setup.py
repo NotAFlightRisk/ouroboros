@@ -46,6 +46,7 @@ from ouroboros.cli.commands.claude_setup import (
 from ouroboros.cli.commands.claude_setup import (
     setup_claude_sdk as _setup_claude_sdk,
 )
+from ouroboros.cli.commands.gjc_bridge import gjc_ooo_bridge_source_text
 from ouroboros.cli.commands.pi_bridge import pi_ooo_bridge_source_text
 from ouroboros.cli.commands.setup_atomic_restore import restore_hermes, restore_hermes_receipt
 from ouroboros.cli.commands.setup_completion import print_setup_completion
@@ -3637,8 +3638,6 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
 
 
 _PI_OOO_BRIDGE_FILENAME = "ouroboros-ooo-bridge.ts"
-_GJC_OOO_BRIDGE_SUBDIR = "ouroboros-ooo-bridge"
-_GJC_OOO_BRIDGE_FILENAME = "index.ts"
 
 
 def _detect_pi_bridge_dispatch_entry() -> tuple[str, list[str]]:
@@ -3698,121 +3697,107 @@ def _install_pi_ooo_bridge() -> bool:
     return True
 
 
-def _detect_gjc_bridge_dispatch_entry() -> tuple[str, list[str]]:
-    """Return the launcher a managed GJC bridge should use for this install."""
-    if _is_source_tree_ouroboros_build():
-        return sys.executable, ["-m", "ouroboros"]
-    try:
-        version = importlib_metadata.version("ouroboros-ai")
-    except importlib_metadata.PackageNotFoundError:
-        return sys.executable, ["-m", "ouroboros"]
-    if ".dev" in version:
-        return sys.executable, ["-m", "ouroboros"]
-    return shutil.which("ouroboros") or "ouroboros", []
-
-
-def _gjc_bridge_source_text() -> str | None:
-    """Return the packaged managed GJC bridge extension source."""
-    from importlib import resources
-
-    try:
-        source = (
-            resources.files("ouroboros.gjc_bridge")
-            .joinpath(_GJC_OOO_BRIDGE_FILENAME)
-            .read_text(encoding="utf-8")
-        )
-    except (FileNotFoundError, ModuleNotFoundError, OSError):
-        dev = Path(__file__).resolve().parents[2] / "gjc_bridge" / _GJC_OOO_BRIDGE_FILENAME
-        try:
-            source = dev.read_text(encoding="utf-8") if dev.exists() else None
-        except OSError:
-            return None
-    if source is None:
-        return None
-    command, args = _detect_gjc_bridge_dispatch_entry()
-    return source.replace(
-        'const DEFAULT_COMMAND = "ouroboros";',
-        f"const DEFAULT_COMMAND = {json.dumps(command)};",
-    ).replace(
-        "const DEFAULT_ARGS: string[] = [];",
-        f"const DEFAULT_ARGS: string[] = {json.dumps(args)};",
-    )
-
-
-def _install_gjc_ooo_bridge() -> bool:
-    """Install the managed GJC extension that routes interactive ``ooo`` input."""
-    import hashlib
-
+def _install_gjc_skills() -> bool:
+    """Project packaged Ouroboros skills into GJC's native user registry."""
+    from ouroboros.gjc import install_gjc_skills
     from ouroboros.runtime_instruction_artifacts import gjc_agent_dir
 
-    dest = gjc_agent_dir() / "extensions" / _GJC_OOO_BRIDGE_SUBDIR / _GJC_OOO_BRIDGE_FILENAME
-    content = _gjc_bridge_source_text()
-    if content is None:
-        print_warning("Could not locate packaged GJC ooo bridge source.")
-        return False
-
-    new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    existing_hash: str | None = None
-    if dest.exists():
-        try:
-            existing_hash = hashlib.sha256(dest.read_bytes()).hexdigest()
-        except OSError:
-            existing_hash = None
-
-    if existing_hash == new_hash:
-        print_info(f"GJC ooo bridge already up to date: {dest}")
-        return True
-
     try:
-        _atomic_write_text(dest, content)
-    except OSError as exc:
-        print_warning(f"Could not install GJC ooo bridge at {dest}: {exc}")
+        result = install_gjc_skills(agent_dir=gjc_agent_dir(), prune=True)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        print_warning(f"Could not install GJC Ouroboros skills: {exc}")
         return False
-
-    print_success(
-        f"{'Updated' if existing_hash is not None else 'Installed'} GJC ooo bridge: {dest}"
-    )
-    print_info("Restart GJC or run /reload in an existing GJC session to load the bridge.")
+    print_success(f"Installed {len(result.skill_paths)} Ouroboros skills → {result.target_root}")
     return True
 
 
-def _setup_gjc(gjc_path: str) -> None:
-    """Configure Ouroboros for the GJC CLI runtime."""
-    from ouroboros.config.loader import create_default_config, ensure_config_dir
+def _gjc_mcp_bridge_config_path() -> Path:
+    from ouroboros.cli.gjc_setup import gjc_mcp_bridge_config_path
 
-    config_dir = ensure_config_dir()
-    config_path = config_dir / "config.yaml"
+    return gjc_mcp_bridge_config_path()
 
-    if config_path.exists():
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
 
-    if not isinstance(config_dict, dict):
-        print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting GJC setup.")
-        return
+def _install_gjc_mcp_bridge_config() -> bool:
+    from ouroboros.cli.gjc_setup import install_gjc_mcp_bridge_config
 
-    orch = config_dict.get("orchestrator")
-    if not isinstance(orch, dict):
-        orch = {}
-        config_dict["orchestrator"] = orch
-    orch["runtime_backend"] = "gjc"
-    orch["gjc_cli_path"] = gjc_path
+    return install_gjc_mcp_bridge_config(_atomic_write_text)
 
-    llm = config_dict.get("llm")
-    if not isinstance(llm, dict):
-        llm = {}
-        config_dict["llm"] = llm
-    llm["backend"] = "gjc"
 
-    with config_path.open("w", encoding="utf-8") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+def _is_setup_managed_gjc_mcp_bridge_config(path: Path) -> bool:
+    from ouroboros.cli.gjc_setup import is_setup_managed_gjc_mcp_bridge_config
 
-    print_success(f"Configured GJC runtime (CLI: {gjc_path})")
-    print_info(f"Config saved to: {config_path}")
-    _install_runtime_instruction_artifact("gjc")
-    _install_gjc_ooo_bridge()
+    return is_setup_managed_gjc_mcp_bridge_config(path)
+
+
+def _is_setup_managed_gjc_mcp_entry(entry: object) -> bool:
+    from ouroboros.cli.gjc_setup import is_setup_managed_gjc_mcp_entry
+
+    return is_setup_managed_gjc_mcp_entry(entry)
+
+
+def _register_gjc_mcp_server(
+    gjc_path: str,
+    *,
+    detected: dict[str, object] | None = None,
+    registration_state: dict[str, bool] | None = None,
+) -> bool:
+    from ouroboros.cli.gjc_setup import register_gjc_mcp_server
+
+    return register_gjc_mcp_server(
+        gjc_path,
+        detect_mcp_entry=_detect_mcp_entry,
+        run_command=subprocess.run,
+        detected=detected,
+        registration_state=registration_state,
+    )
+
+
+def _remove_legacy_gjc_bridge() -> bool:
+    from ouroboros.cli.gjc_setup import remove_legacy_gjc_bridge
+
+    return remove_legacy_gjc_bridge()
+
+
+def _install_gjc_runtime_artifacts(
+    gjc_path: str,
+    *,
+    registration_state: dict[str, bool] | None = None,
+) -> bool:
+    from ouroboros.cli.commands.setup_gjc_activation import install_gjc_runtime_artifacts
+    from ouroboros.cli.gjc_setup import gjc_mcp_bridge_config_path
+    from ouroboros.runtime_instruction_artifacts import gjc_agent_dir, gjc_instruction_path
+
+    command, args = _detect_pi_bridge_dispatch_entry()
+    return install_gjc_runtime_artifacts(
+        gjc_path,
+        registration_state=registration_state,
+        bridge_source=gjc_ooo_bridge_source_text(command, args),
+        agent_dir=gjc_agent_dir(),
+        instruction_path=gjc_instruction_path(),
+        bridge_config_path=gjc_mcp_bridge_config_path(),
+        atomic_write_text=_atomic_write_text,
+        snapshot_path=_snapshot_path,
+        restore_path_snapshot=_restore_path_snapshot,
+        install_bridge_config=_install_gjc_mcp_bridge_config,
+        install_skills=_install_gjc_skills,
+        install_instruction=lambda: _install_runtime_instruction_artifact("gjc"),
+        register_server=_register_gjc_mcp_server,
+        remove_legacy_bridge=_remove_legacy_gjc_bridge,
+        warn=print_warning,
+    )
+
+
+def _setup_gjc(gjc_path: str) -> bool:
+    """Configure GJC through the ownership-safe runtime transaction."""
+    from ouroboros.cli.gjc_setup import setup_gjc_runtime
+
+    return setup_gjc_runtime(
+        gjc_path,
+        install_runtime_artifacts=_install_gjc_runtime_artifacts,
+        atomic_write_text=_atomic_write_text,
+        snapshot_path=_snapshot_path,
+        restore_path_snapshot=_restore_path_snapshot,
+    )
 
 
 def _setup_gemini(gemini_path: str) -> None:
@@ -5042,7 +5027,8 @@ def setup(
                 "Install it, set OUROBOROS_GJC_CLI_PATH, or configure orchestrator.gjc_cli_path."
             )
             raise typer.Exit(1)
-        _setup_gjc(gjc_path)
+        if not _setup_gjc(gjc_path):
+            raise typer.Exit(1)
     elif selected in ("goose", "goose_cli"):
         goose_path = available.get("goose")
         if not goose_path:

@@ -7,17 +7,22 @@ from pathlib import Path
 import tomllib
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
+from ouroboros.cli.commands.gjc_bridge import gjc_ooo_bridge_source_text
+import ouroboros.cli.commands.setup as setup_cmd
 from ouroboros.cli.commands.uninstall import (
     _remove_claude_mcp,
     _remove_claude_md_block,
     _remove_codex_artifacts,
     _remove_codex_mcp,
     _remove_data_dir,
+    _remove_gjc_artifacts,
     _remove_opencode_bridge_plugin,
     app,
 )
+from ouroboros.gjc import install_gjc_skills
 
 runner = CliRunner()
 
@@ -478,6 +483,199 @@ class TestRemoveCodexArtifacts:
         assert not (skills_dir / "ouroboros-interview").exists()
         assert not (skills_dir / "ouroboros-run").exists()
         assert (skills_dir / "other").exists()
+
+
+# ── _remove_gjc_artifacts ────────────────────────────────────────
+
+
+class TestRemoveGjcArtifacts:
+    def test_removes_managed_skills_and_preserves_other_skills(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        source = tmp_path / "source" / "interview"
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text(
+            "---\nname: interview\ndescription: managed\n---\n",
+            encoding="utf-8",
+        )
+        managed = install_gjc_skills(agent_dir=agent_dir, skills_dir=source.parent).skill_paths[0]
+        other = agent_dir / "skills" / "my-skill"
+        other.mkdir()
+        with (
+            patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+            patch("ouroboros.config.get_gjc_cli_path", return_value=None),
+            patch("ouroboros.cli.commands.uninstall.shutil.which", return_value=None),
+        ):
+            assert _remove_gjc_artifacts(dry_run=False)
+
+        assert not managed.exists()
+        assert other.exists()
+
+    def test_preserves_user_managed_mcp(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        mcp_path = agent_dir / "mcp.json"
+        mcp_path.parent.mkdir(parents=True)
+        custom = {"type": "stdio", "command": "docker", "args": ["run"]}
+        mcp_path.write_text(
+            json.dumps({"mcpServers": {"ouroboros": custom}}),
+            encoding="utf-8",
+        )
+
+        with patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}):
+            assert not _remove_gjc_artifacts(dry_run=False)
+
+        assert json.loads(mcp_path.read_text(encoding="utf-8"))["mcpServers"]["ouroboros"] == custom
+
+    def test_removes_managed_routing_guide(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        with (
+            patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+            patch("ouroboros.config.get_gjc_cli_path", return_value=None),
+            patch("ouroboros.cli.commands.uninstall.shutil.which", return_value=None),
+        ):
+            from ouroboros.runtime_instruction_artifacts import install_gjc_instruction_artifact
+
+            guide = install_gjc_instruction_artifact().path
+            assert _remove_gjc_artifacts(dry_run=False)
+
+        assert not guide.exists()
+
+    def test_removes_managed_mcp_without_current_launcher(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        mcp_path = agent_dir / "mcp.json"
+        mcp_path.parent.mkdir(parents=True)
+        bridge_path = agent_dir / "ouroboros" / "mcp-bridge.yaml"
+        bridge_path.parent.mkdir(parents=True)
+        bridge_path.write_text(
+            "# Managed by ouroboros setup --runtime gjc\nmcp_servers: []\n",
+            encoding="utf-8",
+        )
+        managed = {
+            "type": "stdio",
+            "command": "uvx",
+            "args": [
+                "--isolated",
+                "--python",
+                ">=3.12",
+                "--from",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+                "--runtime",
+                "gjc",
+            ],
+            "env": {"OUROBOROS_MCP_CONFIG": str(bridge_path)},
+            "sharing": "per-session",
+            "timeout": 30000,
+        }
+        sibling = {"type": "stdio", "command": "other", "args": []}
+        mcp_path.write_text(
+            json.dumps({"mcpServers": {"ouroboros": managed, "other": sibling}}),
+            encoding="utf-8",
+        )
+
+        with patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}):
+            assert _remove_gjc_artifacts(dry_run=False)
+
+        payload = json.loads(mcp_path.read_text(encoding="utf-8"))
+        assert payload["mcpServers"] == {"other": sibling}
+        assert not bridge_path.exists()
+
+    def test_preserves_symlinked_mcp_config(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        external = tmp_path / "operator-mcp.json"
+        agent_dir.mkdir()
+        mcp_path = agent_dir / "mcp.json"
+        external.write_text('{"mcpServers": {"ouroboros": {}}}\n', encoding="utf-8")
+        try:
+            mcp_path.symlink_to(external)
+        except OSError:
+            pytest.skip("symlinks are not supported on this platform")
+
+        from ouroboros.cli.gjc_setup import remove_persisted_gjc_mcp_server
+
+        before = external.read_text(encoding="utf-8")
+        assert not remove_persisted_gjc_mcp_server(mcp_path)
+        assert external.read_text(encoding="utf-8") == before
+
+    def test_persistent_cleanup_rejects_changed_generation(self, tmp_path: Path) -> None:
+        from ouroboros.cli import gjc_setup
+
+        mcp_path = tmp_path / "mcp.json"
+        original = '{"mcpServers": {"ouroboros": {}}}\n'
+        operator = '{"mcpServers": {"operator": {"command": "keep"}}}\n'
+        mcp_path.write_text(operator, encoding="utf-8")
+
+        with pytest.raises(OSError, match="changed concurrently"):
+            gjc_setup._atomic_replace_json(mcp_path, {"mcpServers": {}}, original)
+
+        assert mcp_path.read_text(encoding="utf-8") == operator
+
+    def test_disabled_setup_shaped_mcp_is_operator_owned(self, tmp_path: Path) -> None:
+        from ouroboros.cli.gjc_setup import persisted_gjc_mcp_entry
+
+        mcp_path = tmp_path / "mcp.json"
+        mcp_path.write_text(
+            json.dumps(
+                {
+                    "disabledServers": ["ouroboros"],
+                    "mcpServers": {"ouroboros": {"command": "uvx"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        assert persisted_gjc_mcp_entry(mcp_path) is None
+
+    def test_removes_managed_compatibility_bridge(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        bridge = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text(
+            gjc_ooo_bridge_source_text("ouroboros", []),
+            encoding="utf-8",
+        )
+        with (
+            patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+            patch("ouroboros.config.get_gjc_cli_path", return_value=None),
+            patch("ouroboros.cli.commands.uninstall.shutil.which", return_value=None),
+        ):
+            assert _remove_gjc_artifacts(dry_run=False)
+
+        assert not bridge.exists()
+
+    def test_preserves_modified_compatibility_bridge(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        bridge = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text(
+            gjc_ooo_bridge_source_text("ouroboros", []).replace(
+                "6 * 60 * 60 * 1000", "30 * 1000", 1
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}):
+            from ouroboros.cli.gjc_setup import remove_legacy_gjc_bridge
+
+            assert remove_legacy_gjc_bridge()
+
+        assert bridge.exists()
+        assert "30 * 1000" in bridge.read_text(encoding="utf-8")
+
+    def test_preserves_custom_routing_guide(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agent"
+        guide = agent_dir / "rules" / "ouroboros-skill-capability-guide.md"
+        guide.parent.mkdir(parents=True)
+        guide.write_text("my routing rules\n", encoding="utf-8")
+        with (
+            patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+            patch("ouroboros.config.get_gjc_cli_path", return_value=None),
+            patch("ouroboros.cli.commands.uninstall.shutil.which", return_value=None),
+        ):
+            assert not _remove_gjc_artifacts(dry_run=False)
+
+        assert guide.read_text(encoding="utf-8") == "my routing rules\n"
 
 
 # ── _remove_claude_md_block ──────────────────────────────────────

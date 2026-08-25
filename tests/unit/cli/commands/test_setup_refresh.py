@@ -1,13 +1,14 @@
 """Unit tests for `ouroboros setup refresh`.
 
-Refresh must rewrite only artifacts a previous setup already installed, and
-must never touch MCP registrations, runtime selection, or config.yaml — so an
-install.sh upgrade cannot resurrect a deliberately removed integration (e.g.
-OpenCode subprocess mode) or silently rewire a runtime the user never set up.
+Refresh rewrites only integrations a previous setup already installed. It does
+not select a runtime or rewrite config.yaml; GJC is the exception at its atomic
+route boundary, where refreshing an installed projection revalidates or repairs
+the MCP registration before retiring a compatibility bridge.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ from typer.testing import CliRunner
 
 from ouroboros.cli.commands.setup import app
 from ouroboros.codex import CodexArtifactInstallResult
+from ouroboros.gjc import install_gjc_skills
 from ouroboros.hermes.artifacts import HERMES_SKILL_CATEGORY, HERMES_SKILL_NAME
 from ouroboros.runtime_instruction_artifacts import (
     _SECTION_END,
@@ -162,6 +164,159 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
 
         assert result.exit_code == 0
         assert bridge.read_text(encoding="utf-8") != "// stale bridge\n"
+
+    def test_refreshes_existing_gjc_projection_and_repairs_mcp(self, tmp_path: Path) -> None:
+        source = tmp_path / "source"
+        source_skill = source / "interview"
+        source_skill.mkdir(parents=True)
+        (source_skill / "SKILL.md").write_text(
+            "---\nname: interview\ndescription: stale\n---\n",
+            encoding="utf-8",
+        )
+        agent_dir = tmp_path / ".gjc" / "agent"
+        skill = install_gjc_skills(agent_dir=agent_dir, skills_dir=source).skill_paths[0]
+        with (
+            patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/bin/gjc"),
+            patch(
+                "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
+                return_value=True,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_gjc_mcp_server", return_value=True
+            ) as register_mcp,
+        ):
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 0
+        assert "gjc" in result.output
+        assert "explicitly invokes `ooo interview`" in (skill / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        register_mcp.assert_called_once()
+
+    def test_user_owned_namespaced_skill_does_not_trigger_gjc_refresh(self, tmp_path: Path) -> None:
+        skill = tmp_path / ".gjc" / "agent" / "skills" / "ouroboros-custom"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: ouroboros-custom\ndescription: user-owned\n---\n",
+            encoding="utf-8",
+        )
+
+        with patch("ouroboros.cli.commands.setup._install_gjc_runtime_artifacts") as install:
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 0
+        assert "No installed runtime artifacts found to refresh." in result.output
+        install.assert_not_called()
+
+    def test_refreshes_from_persistent_gjc_mcp_state_only(self, tmp_path: Path) -> None:
+        agent_dir = tmp_path / ".gjc" / "agent"
+        bridge_config = agent_dir / "ouroboros" / "mcp-bridge.yaml"
+        bridge_config.parent.mkdir(parents=True)
+        bridge_config.write_text(
+            "# Managed by ouroboros setup --runtime gjc\nmcp_servers: []\n",
+            encoding="utf-8",
+        )
+        mcp_path = agent_dir / "mcp.json"
+        mcp_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "ouroboros": {
+                            "type": "stdio",
+                            "command": "uvx",
+                            "args": [
+                                "--isolated",
+                                "--python",
+                                ">=3.12",
+                                "--from",
+                                "ouroboros-ai[mcp]",
+                                "ouroboros",
+                                "mcp",
+                                "serve",
+                                "--runtime",
+                                "gjc",
+                            ],
+                            "env": {"OUROBOROS_MCP_CONFIG": str(bridge_config)},
+                            "sharing": "per-session",
+                            "timeout": 30000,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/bin/gjc"),
+            patch(
+                "ouroboros.cli.commands.setup._install_gjc_runtime_artifacts",
+                return_value=True,
+            ) as install,
+        ):
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 0
+        install.assert_called_once_with("/opt/bin/gjc")
+        assert "Refreshed runtime artifacts: gjc" in result.output
+
+    def test_legacy_gjc_bridge_registers_mcp_before_removal(self, tmp_path: Path) -> None:
+        bridge = tmp_path / ".gjc" / "agent" / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text("legacy bridge", encoding="utf-8")
+        calls: list[str] = []
+
+        with (
+            patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/bin/gjc"),
+            patch(
+                "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
+                return_value=True,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._install_gjc_mcp_bridge_config",
+                side_effect=lambda: calls.append("bridge-config") or True,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._install_gjc_skills",
+                side_effect=lambda: calls.append("skills") or True,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._install_runtime_instruction_artifact",
+                side_effect=lambda runtime: calls.append(f"guide:{runtime}") or True,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_gjc_mcp_server",
+                side_effect=lambda *_args, **_kwargs: calls.append("mcp") or True,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._remove_legacy_gjc_bridge",
+                side_effect=lambda: calls.append("remove-legacy") or True,
+            ),
+        ):
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 0
+        assert calls.index("mcp") < calls.index("remove-legacy")
+
+    def test_legacy_gjc_bridge_survives_failed_mcp_registration(self, tmp_path: Path) -> None:
+        bridge = tmp_path / ".gjc" / "agent" / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text("legacy bridge", encoding="utf-8")
+
+        with (
+            patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/bin/gjc"),
+            patch(
+                "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
+                return_value=True,
+            ),
+            patch("ouroboros.cli.commands.setup._register_gjc_mcp_server", return_value=False),
+            patch("ouroboros.cli.commands.setup._remove_legacy_gjc_bridge") as remove_legacy,
+        ):
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 1
+        assert bridge.read_text(encoding="utf-8") == "legacy bridge"
+        remove_legacy.assert_not_called()
 
     def test_codex_refreshes_when_codex_dir_exists(self, tmp_path: Path) -> None:
         codex_dir = tmp_path / ".codex"

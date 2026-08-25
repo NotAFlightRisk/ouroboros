@@ -90,19 +90,37 @@ def refresh_runtime_artifacts() -> None:
 
     gjc_expected = False
     gjc_succeeded = True
-    gjc_bridge = (
-        gjc_agent_dir()
-        / "extensions"
-        / setup._GJC_OOO_BRIDGE_SUBDIR
-        / setup._GJC_OOO_BRIDGE_FILENAME
+    gjc_root = gjc_agent_dir()
+    from ouroboros.gjc import has_setup_owned_gjc_skills
+
+    gjc_bridge = gjc_root / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+    has_projected_skill = has_setup_owned_gjc_skills(agent_dir=gjc_root)
+    from ouroboros.cli.gjc_setup import (
+        gjc_mcp_bridge_config_path,
+        is_setup_managed_gjc_mcp_bridge_config,
+        is_setup_managed_gjc_mcp_entry,
+        persisted_gjc_mcp_entry,
     )
-    if gjc_bridge.exists():
-        gjc_expected = True
-        gjc_succeeded = setup._install_gjc_ooo_bridge() and gjc_succeeded
-    if gjc_instruction_path().exists():
-        gjc_expected = True
-        gjc_succeeded = setup._install_runtime_instruction_artifact("gjc") and gjc_succeeded
+
+    bridge_config = gjc_mcp_bridge_config_path()
+    has_managed_bridge_config = is_setup_managed_gjc_mcp_bridge_config(bridge_config)
+    has_managed_registration = is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry())
+    gjc_expected = (
+        gjc_bridge.exists()
+        or has_projected_skill
+        or gjc_instruction_path().exists()
+        or has_managed_bridge_config
+        or has_managed_registration
+    )
     if gjc_expected:
+        from ouroboros.config import get_gjc_cli_path
+
+        gjc_path = get_gjc_cli_path() or shutil.which("gjc")
+        if gjc_path is None:
+            setup.print_warning("Could not refresh the installed GJC route: GJC CLI was not found.")
+            gjc_succeeded = False
+        else:
+            gjc_succeeded = setup._install_gjc_runtime_artifacts(gjc_path)
         (refreshed if gjc_succeeded else failed).append("gjc")
 
     if refreshed:

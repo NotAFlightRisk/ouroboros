@@ -2,7 +2,8 @@
 
 from pathlib import Path
 
-from ouroboros.backends.capabilities import render_backend_skill_capability_guide
+import pytest
+
 from ouroboros.runtime_instruction_artifacts import (
     COPILOT_AGENTS_FILENAME,
     COPILOT_INSTRUCTIONS_DIRNAME,
@@ -67,6 +68,18 @@ def test_gjc_agent_dir_resolves_config_dir_name_under_home(tmp_path: Path) -> No
     )
 
 
+def test_gjc_agent_dir_rejects_config_dir_escape(tmp_path: Path) -> None:
+    assert gjc_agent_dir(home=tmp_path, environ={"GJC_CONFIG_DIR": "../outside"}) == (
+        tmp_path / ".gjc" / "agent"
+    )
+
+
+def test_gjc_agent_dir_rejects_backslash_config_dir_escape(tmp_path: Path) -> None:
+    assert gjc_agent_dir(home=tmp_path, environ={"GJC_CONFIG_DIR": "..\\outside"}) == (
+        tmp_path / ".gjc" / "agent"
+    )
+
+
 def test_gjc_agent_dir_falls_back_to_pi_config_dir_name(tmp_path: Path) -> None:
     assert gjc_agent_dir(home=tmp_path, environ={"PI_CONFIG_DIR": "custom-pi"}) == (
         tmp_path / "custom-pi" / "agent"
@@ -86,7 +99,7 @@ def test_gjc_agent_dir_respects_explicit_agent_dir(tmp_path: Path) -> None:
     )
 
 
-def test_gjc_installs_rules_guide_exact_renderer_output_and_idempotent(tmp_path: Path) -> None:
+def test_gjc_installs_always_apply_command_routes_and_capability_guide(tmp_path: Path) -> None:
     env = {"GJC_CODING_AGENT_DIR": str(tmp_path / "agent")}
 
     first = install_gjc_instruction_artifact(environ=env)
@@ -95,7 +108,39 @@ def test_gjc_installs_rules_guide_exact_renderer_output_and_idempotent(tmp_path:
     assert first.backend == "gjc"
     assert first.path == second.path == gjc_instruction_path(environ=env)
     assert first.path == tmp_path / "agent" / "rules" / GUIDE_FILENAME
-    assert first.path.read_text(encoding="utf-8") == render_backend_skill_capability_guide("gjc")
+    content = first.path.read_text(encoding="utf-8")
+    assert content.startswith("---\nalwaysApply: true\n")
+    assert (
+        "`ooo interview [arguments]` → invoke `/skill:ouroboros-interview [arguments]`" in content
+    )
+    assert "Bare `ooo` → invoke `/skill:ouroboros-ooo`" in content
+    assert "route to GJC's bundled `deep-interview`" in content
+    assert "## Ouroboros Skill Capability Guide: Gjc" in content
+    assert first.path.read_text(encoding="utf-8") == second.path.read_text(encoding="utf-8")
+
+
+def test_gjc_preserves_operator_owned_routing_guide(tmp_path: Path) -> None:
+    env = {"GJC_CODING_AGENT_DIR": str(tmp_path / "agent")}
+    path = gjc_instruction_path(environ=env)
+    path.parent.mkdir(parents=True)
+    path.write_text("operator routing rules\n", encoding="utf-8")
+
+    with pytest.raises(OSError, match="preserved user-managed GJC instruction guide"):
+        install_gjc_instruction_artifact(environ=env)
+
+    assert path.read_text(encoding="utf-8") == "operator routing rules\n"
+
+
+def test_gjc_rejects_modified_setup_owned_routing_guide(tmp_path: Path) -> None:
+    env = {"GJC_CODING_AGENT_DIR": str(tmp_path / "agent")}
+    path = install_gjc_instruction_artifact(environ=env).path
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("Bare `ooo`", "Modified `ooo`", 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(OSError, match="preserved user-managed GJC instruction guide"):
+        install_gjc_instruction_artifact(environ=env)
 
 
 def test_marked_section_refresh_is_idempotent(tmp_path: Path) -> None:

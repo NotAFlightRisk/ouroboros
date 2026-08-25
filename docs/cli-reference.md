@@ -267,11 +267,10 @@ ouroboros setup [OPTIONS]
 For Pi, setup also installs `~/.pi/agent/extensions/ouroboros-ooo-bridge.ts`.
 Restart Pi or run `/reload` and interactive Pi/roach-pi sessions can dispatch
 `ooo ...` commands into Ouroboros through the shared skill router.
-For GJC, setup installs the GJC-side `ooo` bridge extension into
-`<agent-dir>/extensions` and a renderer-generated skill capability guide into
-`<agent-dir>/rules/ouroboros-skill-capability-guide.md`. Interactive GJC
-sessions can dispatch `ooo ...` commands into Ouroboros after the extension is
-loaded.
+For GJC, setup installs namespaced `ouroboros-*` skills, an always-applied exact
+`ooo` routing rule, and an isolated Ouroboros MCP registration into the active
+`<agent-dir>` profile. No executable GJC extension is installed. Restart GJC to
+load the projected command surface.
 
 **Examples:**
 
@@ -316,7 +315,7 @@ ouroboros setup --non-interactive
 - For Kiro CLI: installs the runtime skill capability guide into `~/.kiro/steering/ouroboros-skill-capability-guide.md`
 - For Copilot CLI: installs the runtime skill capability guide into `~/.copilot/ouroboros-instructions/AGENTS.md` and configures Ouroboros-launched Copilot child sessions to read it via `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
 - For GJC: sets `orchestrator.gjc_cli_path` and `llm.backend: gjc` in `~/.ouroboros/config.yaml`
-- For GJC: installs the `ooo` bridge extension into `<agent-dir>/extensions` and the renderer-generated skill capability guide into `<agent-dir>/rules/ouroboros-skill-capability-guide.md`
+- For GJC: capability-checks the installed `gjc mcp` contract. Hosts with conventional standalone MCP autoload receive namespaced skills under `<agent-dir>/skills`, an always-applied routing guide under `<agent-dir>/rules`, and the isolated server through `gjc mcp add`; storage-only hosts receive a setup-owned compatibility input bridge instead. Refresh revalidates the complete route, and uninstall removes only exact setup-owned generations.
 - For Zcode: sets `orchestrator.runtime_backend: zcode` and `orchestrator.zcode_cli_path` while leaving the completion-only `llm.backend` unchanged
 
 Claude runtime activation publishes a newly needed `credentials.yaml` before
