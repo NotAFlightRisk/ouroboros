@@ -110,6 +110,7 @@ _BACKEND_ALIASES = {
     "opencode_cli": "opencode",
     "antigravity_cli": "antigravity",
     "grok_cli": "grok",
+    "zcode_cli": "zcode",
 }
 
 # Backends with Ouroboros-known governance. Only the native Claude adapter is

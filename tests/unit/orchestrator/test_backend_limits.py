@@ -50,6 +50,9 @@ class TestResolveBackendLimits:
     def test_anthropic_alias_resolves_to_claude(self) -> None:
         assert resolve_backend_limits("anthropic").max_concurrency is None
 
+    def test_zcode_cli_handle_resolves_to_zcode(self) -> None:
+        assert resolve_backend_limits("zcode_cli").backend == "zcode"
+
     @pytest.mark.parametrize(
         "backend",
         ["hermes_cli", "hermes", "codex_cli", "gemini_cli", "opencode", "goose", "pi", "copilot"],
